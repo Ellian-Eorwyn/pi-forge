@@ -102,6 +102,24 @@ const sharedCharacters = launchPromptCharacters - visibleEntries.reduce((sum, en
 const sharedTokens = Math.ceil(sharedCharacters / 4);
 const allFilesTokens = entries.reduce((sum, entry) => sum + entry.fileTokens, 0);
 
+// AGENTS.md is fed at launch inside buildSystemPrompt's <project_context> wrapper
+// (see packages/coding-agent/src/core/system-prompt.ts). Replicate the wrapper exactly
+// so the count matches what the model actually processes. The path is kept repository-
+// relative for a stable, machine-independent report.
+const agentsPath = join(repositoryRoot, "forge", "AGENTS.md");
+const agentsRepoPath = "forge/AGENTS.md";
+const agentsRaw = existsSync(agentsPath) ? readFileSync(agentsPath, "utf8") : "";
+const projectContextBlock = agentsRaw
+	? `\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n<project_instructions path="${agentsRepoPath}">\n${agentsRaw}\n</project_instructions>\n\n</project_context>\n`
+	: "";
+const agentsCharacters = projectContextBlock.length;
+const agentsTokens = estimateTokens(projectContextBlock);
+
+// Everything the forge profile feeds at launch: managed instructions + the skills menu.
+const totalLaunchTokens = Math.ceil((agentsCharacters + launchPromptCharacters) / 4);
+// Worst case: the launch menu stays in context and every SKILL.md is also fully read.
+const maxAllLoadedTokens = totalLaunchTokens + allFilesTokens;
+
 const lines = [
 	"# Forge Skills Context Report",
 	"",
@@ -111,11 +129,17 @@ const lines = [
 	"",
 	`- Available skills: ${entries.length}`,
 	`- Model-visible skills at launch: ${visibleEntries.length}`,
-	`- Estimated skill-related launch tokens: ${launchPromptTokens}`,
-	`- Estimated shared skills-wrapper tokens: ${sharedTokens}`,
-	`- Estimated tokens if every complete \`SKILL.md\` were later read: ${allFilesTokens}`,
+	`- Managed instructions (\`AGENTS.md\` with its \`<project_context>\` wrapper): ${agentsTokens} tokens`,
+	`- Skills menu (metadata for all skills): ${launchPromptTokens} tokens`,
+	`- **Total forge launch context (always processed): ${totalLaunchTokens} tokens**`,
+	`- **Maximum if every \`SKILL.md\` body is also loaded at once: ${maxAllLoadedTokens} tokens**`,
 	"",
-	"The launch total covers only Pi's generated skills section. It excludes `AGENTS.md`, tool definitions, the rest of the system prompt, conversation history, and any skill body loaded later.",
+	"Of the skills menu above, the shared wrapper (instructions and XML envelope, independent of skill count) is ~" +
+		`${sharedTokens} tokens; the rest scales with the number of skills.`,
+	"",
+	"This counts everything the forge profile itself feeds at launch: the managed `AGENTS.md` instructions and the skills menu (name, description, and location for every model-visible skill). The maximum adds every complete `SKILL.md` on top of the launch menu — the ceiling if every skill is triggered and read in one session.",
+	"",
+	"Still excluded, because they are owned by the Pi harness rather than this profile and vary by machine and tool selection: Pi's base system prompt, the tool JSON schemas, conversation history, and any non-skill files the model reads on demand.",
 	"",
 	"## Skills",
 	"",
@@ -133,11 +157,12 @@ lines.push(
 	"",
 	"## Counting Method",
 	"",
-	"- Launch metadata is the exact XML entry produced by Pi's `formatSkillsForPrompt`, including the skill name, description, and normalized repository-relative location.",
-	"- The total launch estimate is calculated from the complete generated skills section, including shared instructions and XML wrapper. Per-skill rounded estimates therefore may not sum exactly to the total.",
+	"- The skills menu is the exact text produced by Pi's `formatSkillsForPrompt` (name, description, and location per model-visible skill, plus shared instructions and XML envelope).",
+	"- The `AGENTS.md` figure replicates Pi's `<project_context>` wrapper from `buildSystemPrompt` (`packages/coding-agent/src/core/system-prompt.ts`) around the current `forge/AGENTS.md`.",
+	"- Total forge launch context = `AGENTS.md` (wrapped) + skills menu. The maximum adds every complete `SKILL.md` (frontmatter + body) on top, the ceiling when all skills are read in one session.",
 	"- Token estimates use Pi's conservative `ceil(characters / 4)` heuristic. Provider tokenizers produce different exact counts.",
-	"- Repository-relative locations keep this report stable. Installed absolute paths can change the real launch count slightly.",
-	"- On-demand body tokens exclude YAML frontmatter. Complete file tokens include it and approximate reading the entire file through the read tool.",
+	"- Repository-relative locations keep this report stable across machines. Installed absolute paths can change the real launch count slightly.",
+	"- On-demand body tokens exclude YAML frontmatter; complete file tokens include it and approximate reading the entire file through the read tool.",
 	"",
 	"Regenerate after adding a skill or changing a skill name, description, location, body, or launch visibility:",
 	"",

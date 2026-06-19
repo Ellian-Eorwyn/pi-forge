@@ -4,13 +4,18 @@
 
 ## Launch Context Summary
 
-- Available skills: 5
-- Model-visible skills at launch: 5
-- Estimated skill-related launch tokens: 787
-- Estimated shared skills-wrapper tokens: 92
-- Estimated tokens if every complete `SKILL.md` were later read: 5131
+- Available skills: 9
+- Model-visible skills at launch: 9
+- Managed instructions (`AGENTS.md` with its `<project_context>` wrapper): 415 tokens
+- Skills menu (metadata for all skills): 1522 tokens
+- **Total forge launch context (always processed): 1936 tokens**
+- **Maximum if every `SKILL.md` body is also loaded at once: 10665 tokens**
 
-The launch total covers only Pi's generated skills section. It excludes `AGENTS.md`, tool definitions, the rest of the system prompt, conversation history, and any skill body loaded later.
+Of the skills menu above, the shared wrapper (instructions and XML envelope, independent of skill count) is ~92 tokens; the rest scales with the number of skills.
+
+This counts everything the forge profile itself feeds at launch: the managed `AGENTS.md` instructions and the skills menu (name, description, and location for every model-visible skill). The maximum adds every complete `SKILL.md` on top of the launch menu — the ceiling if every skill is triggered and read in one session.
+
+Still excluded, because they are owned by the Pi harness rather than this profile and vary by machine and tool selection: Pi's base system prompt, the tool JSON schemas, conversation history, and any non-skill files the model reads on demand.
 
 ## Skills
 
@@ -18,17 +23,22 @@ The launch total covers only Pi's generated skills section. It excludes `AGENTS.
 |---|---|---:|---:|---:|---|
 | [`coding`](forge/skills/coding/SKILL.md) | Inspect repos and ship small reviewable changes | 160 | 750 | 886 | Model-visible |
 | [`document-ingest`](forge/skills/document-ingest/SKILL.md) | Normalize documents with provenance | 128 | 683 | 785 | Model-visible |
+| [`file-conversion`](forge/skills/file-conversion/SKILL.md) | Convert files between formats, preserving originals | 169 | 571 | 714 | Model-visible |
+| [`literature-extraction`](forge/skills/literature-extraction/SKILL.md) | Extract structured evidence from research documents | 180 | 900 | 1052 | Model-visible |
+| [`personal-admin`](forge/skills/personal-admin/SKILL.md) | Summarize personal documents into action plans | 206 | 768 | 948 | Model-visible |
+| [`report-output`](forge/skills/report-output/SKILL.md) | Assemble polished deliverables from processed outputs | 181 | 729 | 884 | Model-visible |
 | [`spreadsheet-analysis`](forge/skills/spreadsheet-analysis/SKILL.md) | Analyze and enrich tabular datasets | 127 | 1231 | 1330 | Model-visible |
 | [`transcript-cleanup`](forge/skills/transcript-cleanup/SKILL.md) | Clean and structure raw transcripts | 144 | 1077 | 1193 | Model-visible |
 | [`web-collection`](forge/skills/web-collection/SKILL.md) | Archive and organize web sources | 138 | 825 | 937 | Model-visible |
 
 ## Counting Method
 
-- Launch metadata is the exact XML entry produced by Pi's `formatSkillsForPrompt`, including the skill name, description, and normalized repository-relative location.
-- The total launch estimate is calculated from the complete generated skills section, including shared instructions and XML wrapper. Per-skill rounded estimates therefore may not sum exactly to the total.
+- The skills menu is the exact text produced by Pi's `formatSkillsForPrompt` (name, description, and location per model-visible skill, plus shared instructions and XML envelope).
+- The `AGENTS.md` figure replicates Pi's `<project_context>` wrapper from `buildSystemPrompt` (`packages/coding-agent/src/core/system-prompt.ts`) around the current `forge/AGENTS.md`.
+- Total forge launch context = `AGENTS.md` (wrapped) + skills menu. The maximum adds every complete `SKILL.md` (frontmatter + body) on top, the ceiling when all skills are read in one session.
 - Token estimates use Pi's conservative `ceil(characters / 4)` heuristic. Provider tokenizers produce different exact counts.
-- Repository-relative locations keep this report stable. Installed absolute paths can change the real launch count slightly.
-- On-demand body tokens exclude YAML frontmatter. Complete file tokens include it and approximate reading the entire file through the read tool.
+- Repository-relative locations keep this report stable across machines. Installed absolute paths can change the real launch count slightly.
+- On-demand body tokens exclude YAML frontmatter; complete file tokens include it and approximate reading the entire file through the read tool.
 
 Regenerate after adding a skill or changing a skill name, description, location, body, or launch visibility:
 

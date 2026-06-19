@@ -1,0 +1,4 @@
+interface:
+  display_name: "Literature Extraction"
+  short_description: "Extract structured evidence from research documents"
+  default_prompt: "Use $literature-extraction to extract structured claims, methods, findings, and evidence from these documents."

@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE_PATH" ]]; do
+	SOURCE_PATH_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
+	SOURCE_PATH="$(readlink "$SOURCE_PATH")"
+	if [[ "$SOURCE_PATH" != /* ]]; then
+		SOURCE_PATH="$SOURCE_PATH_DIR/$SOURCE_PATH"
+	fi
+done
+SOURCE_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
 RESOURCES_ONLY=false
 
 usage() {

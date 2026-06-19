@@ -12,6 +12,7 @@ if (!agentDirectoryArgument || !profileDirectoryArgument) {
 const agentDirectory = resolve(agentDirectoryArgument);
 const profileDirectory = resolve(profileDirectoryArgument);
 const settingsPath = join(agentDirectory, "settings.json");
+const modelsPath = join(agentDirectory, "models.json");
 const profilePathMarker = join(agentDirectory, ".pi-forge-profile-path");
 const sourceAgentsPath = join(profileDirectory, "AGENTS.md");
 const installedAgentsPath = join(agentDirectory, "AGENTS.md");
@@ -46,7 +47,47 @@ const retainedPackages = packages.filter((entry) => {
 
 const profileInstructions = readFileSync(sourceAgentsPath, "utf8");
 settings.packages = [profileDirectory, ...retainedPackages];
+settings.defaultProvider = "forge-local";
+settings.defaultModel = "code";
+
+let models = {};
+try {
+	models = JSON.parse(readFileSync(modelsPath, "utf8"));
+} catch (error) {
+	if (error?.code !== "ENOENT") {
+		throw new Error(`Cannot read ${modelsPath}: ${error.message}`);
+	}
+}
+if (models === null || Array.isArray(models) || typeof models !== "object") {
+	throw new Error(`${modelsPath} must contain a JSON object`);
+}
+if (models.providers !== undefined && (models.providers === null || Array.isArray(models.providers) || typeof models.providers !== "object")) {
+	throw new Error(`${modelsPath} providers must contain a JSON object`);
+}
+models.providers = {
+	...(models.providers ?? {}),
+	"forge-local": {
+		baseUrl: "http://llms:8008/v1",
+		api: "openai-completions",
+		apiKey: "local",
+		compat: {
+			supportsDeveloperRole: false,
+			supportsReasoningEffort: false,
+			maxTokensField: "max_tokens",
+		},
+		models: [
+			{
+				id: "code",
+				name: "Code (Local)",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			},
+		],
+	},
+};
 writeFileSync(settingsPath, `${JSON.stringify(settings, undefined, "\t")}\n`, { mode: 0o600 });
+writeFileSync(modelsPath, `${JSON.stringify(models, undefined, "\t")}\n`, { mode: 0o600 });
 writeFileSync(installedAgentsPath, profileInstructions, { mode: 0o600 });
 chmodSync(installedAgentsPath, 0o600);
 writeFileSync(profilePathMarker, `${profileDirectory}\n`, { mode: 0o600 });

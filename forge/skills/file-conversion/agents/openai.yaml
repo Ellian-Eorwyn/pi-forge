@@ -1,0 +1,4 @@
+interface:
+  display_name: "File Conversion"
+  short_description: "Convert files between formats, preserving originals"
+  default_prompt: "Use $file-conversion to convert these files to the requested format with originals preserved."

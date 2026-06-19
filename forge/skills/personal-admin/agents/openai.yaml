@@ -1,0 +1,4 @@
+interface:
+  display_name: "Personal Admin"
+  short_description: "Summarize personal documents into action plans"
+  default_prompt: "Use $personal-admin to summarize these documents and extract deadlines, actions, and contacts into a clear plan."

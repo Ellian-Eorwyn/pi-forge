@@ -1,0 +1,4 @@
+interface:
+  display_name: "Report Output"
+  short_description: "Assemble polished deliverables from processed outputs"
+  default_prompt: "Use $report-output to turn these processed outputs into a polished report and supporting deliverables."
