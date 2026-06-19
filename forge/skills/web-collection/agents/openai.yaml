@@ -1,0 +1,4 @@
+interface:
+  display_name: "Web Collection"
+  short_description: "Archive and organize web sources"
+  default_prompt: "Use $web-collection to download and archive these web sources into preserved files with a provenance manifest."

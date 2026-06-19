@@ -1,0 +1,4 @@
+interface:
+  display_name: "Spreadsheet Analysis"
+  short_description: "Analyze and enrich tabular datasets"
+  default_prompt: "Use $spreadsheet-analysis to inspect, transform, or enrich this spreadsheet safely."

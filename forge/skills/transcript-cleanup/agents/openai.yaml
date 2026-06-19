@@ -1,0 +1,4 @@
+interface:
+  display_name: "Transcript Cleanup"
+  short_description: "Clean and structure raw transcripts"
+  default_prompt: "Use $transcript-cleanup to clean this transcript with the appropriate faithful or structured workflow."

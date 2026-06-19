@@ -1,0 +1,24 @@
+{
+	"name": "pi-forge-profile",
+	"private": true,
+	"keywords": [
+		"pi-package"
+	],
+	"dependencies": {
+		"playwright": "1.61.0"
+	},
+	"pi": {
+		"extensions": [
+		"extensions"
+		],
+		"skills": [
+		"skills"
+		],
+		"prompts": [
+		"prompts"
+		],
+		"themes": [
+		"themes"
+		]
+	}
+}

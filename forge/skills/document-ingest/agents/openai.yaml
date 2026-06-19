@@ -1,0 +1,4 @@
+interface:
+  display_name: "Document Ingest"
+  short_description: "Normalize documents with provenance"
+  default_prompt: "Use $document-ingest to ingest these documents into normalized Markdown and evidence-backed metadata."

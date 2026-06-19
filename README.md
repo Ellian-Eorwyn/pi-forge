@@ -12,6 +12,15 @@
 
 # Pi Agent Harness
 
+## pi-forge
+
+pi-forge is a research and document-processing-focused fork of pi. Its `forge`
+profile, custom skills, and tools live in `forge/` and are installed alongside
+an isolated CLI without replacing an existing pi installation.
+
+See [pi-forge installation](docs/pi-forge-installation.md) for one-command
+installation, updates, paths, and profile layout.
+
 This is the home of the Pi agent harness project including our self extensible coding agent.
 
 * **[@earendil-works/pi-coding-agent](packages/coding-agent)**: Interactive coding agent CLI

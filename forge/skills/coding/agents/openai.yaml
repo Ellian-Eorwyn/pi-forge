@@ -1,0 +1,4 @@
+interface:
+  display_name: "Coding"
+  short_description: "Inspect repos and ship small reviewable changes"
+  default_prompt: "Use $coding to inspect this repository and make a small, tested, reviewable change."
