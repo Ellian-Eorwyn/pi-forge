@@ -7,9 +7,9 @@
 - Available skills: 9
 - Model-visible skills at launch: 9
 - Managed instructions (`AGENTS.md` with its `<project_context>` wrapper): 415 tokens
-- Skills menu (metadata for all skills): 1522 tokens
-- **Total forge launch context (always processed): 1936 tokens**
-- **Maximum if every `SKILL.md` body is also loaded at once: 10887 tokens**
+- Skills menu (metadata for all skills): 1534 tokens
+- **Total forge launch context (always processed): 1948 tokens**
+- **Maximum if every `SKILL.md` body is also loaded at once: 11383 tokens**
 
 Of the skills menu above, the shared wrapper (instructions and XML envelope, independent of skill count) is ~92 tokens; the rest scales with the number of skills.
 
@@ -23,7 +23,7 @@ Still excluded, because they are owned by the Pi harness rather than this profil
 |---|---|---:|---:|---:|---|
 | [`coding`](forge/skills/coding/SKILL.md) | Inspect repos and ship small reviewable changes | 160 | 750 | 886 | Model-visible |
 | [`document-ingest`](forge/skills/document-ingest/SKILL.md) | Normalize documents with provenance | 128 | 905 | 1007 | Model-visible |
-| [`file-conversion`](forge/skills/file-conversion/SKILL.md) | Convert files between formats, preserving originals | 169 | 571 | 714 | Model-visible |
+| [`file-conversion`](forge/skills/file-conversion/SKILL.md) | Convert files, including Markdown and EPUB | 181 | 1043 | 1198 | Model-visible |
 | [`literature-extraction`](forge/skills/literature-extraction/SKILL.md) | Extract structured evidence from research documents | 180 | 900 | 1052 | Model-visible |
 | [`personal-admin`](forge/skills/personal-admin/SKILL.md) | Summarize personal documents into action plans | 206 | 768 | 948 | Model-visible |
 | [`report-output`](forge/skills/report-output/SKILL.md) | Assemble polished deliverables from processed outputs | 181 | 729 | 884 | Model-visible |

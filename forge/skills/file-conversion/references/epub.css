@@ -1,0 +1,72 @@
+body {
+	font-family: serif;
+	line-height: 1.35;
+	margin: 0 0.5em;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+	break-after: avoid;
+	hyphens: none;
+	line-height: 1.2;
+}
+
+p,
+li,
+td,
+th {
+	hyphens: auto;
+	overflow-wrap: anywhere;
+}
+
+ol,
+ul {
+	padding-left: 1.25em;
+}
+
+li > ol,
+li > ul {
+	margin-block: 0.2em;
+}
+
+img,
+svg {
+	height: auto;
+	max-width: 100%;
+}
+
+table {
+	border-collapse: collapse;
+	font-size: 0.9em;
+	table-layout: auto;
+	width: 100%;
+}
+
+td,
+th {
+	border: 0.06em solid currentcolor;
+	padding: 0.2em;
+	text-align: start;
+	vertical-align: top;
+}
+
+pre,
+code {
+	font-family: monospace;
+}
+
+pre {
+	font-size: 0.85em;
+	overflow-wrap: anywhere;
+	white-space: pre-wrap;
+}
+
+blockquote {
+	border-inline-start: 0.2em solid currentcolor;
+	margin-inline: 0.5em 0;
+	padding-inline-start: 0.75em;
+}
