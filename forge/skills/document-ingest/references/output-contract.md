@@ -14,8 +14,10 @@ working/
   extracted.md
   chunks/
   reviewed-chunks/ # model-reviewed chunks, only when splitting was required
+  vision-pages/    # page-by-page model transcripts, only when vision ran
 derived/
   ocr.pdf        # only when OCR ran
+  vision-pages/  # unresolved PDF pages rendered as page-NNNN.png
 ```
 
 `working/extracted.md` and `working/chunks/` contain deterministic intermediate
@@ -41,8 +43,8 @@ Keep `schemaVersion` equal to `1`. Preserve these top-level objects:
 - `documentId`: `sha256:<full source hash>`.
 - `source`: absolute path, basename, extension, format, byte size, modification
   time, and SHA-256.
-- `extraction`: status, method, tool versions, warnings, chunk details, and OCR
-  details.
+- `extraction`: status, method, tool versions, warnings, chunk details, OCR
+  quality comparisons, and vision fallback details.
 - `fields`: `title`, `author`, `date`, and `source` evidence objects.
 - `structure`: detected headings, tables, citations, footnotes, and appendices.
 - `review`: whether model normalization is complete and any review notes.
@@ -71,7 +73,8 @@ entries with:
 - `markdownStartLine` and `markdownEndLine`, or null for an empty source page.
 - `sourceLocator`, using a PDF page number or the best available document,
   heading, or block locator.
-- `method`: `page-extraction`, `document-conversion`, or `model-alignment`.
+- `method`: `page-extraction`, `document-conversion`, `model-alignment`, or
+  `vision-transcription`.
 - `confidence`: `high`, `medium`, or `low`.
 
 Update line ranges after model normalization. Do not claim page-level precision
@@ -93,8 +96,19 @@ Retain these sections:
 ```
 
 Separate deterministic extraction facts from model review notes. State whether
-OCR ran, why it ran, which pages remained low-text, and whether the derived PDF
-was retained.
+OCR ran, why it ran, which pages remained suspicious, which pages selected OCR
+output, whether vision ran, and whether derived files were retained.
+
+## Vision Fallback
+
+When automatic or forced OCR still leaves suspicious pages, preparation renders
+those pages at 180 DPI under `derived/vision-pages/`. Read and transcribe one
+page at a time. Store each transcript at the matching
+`working/vision-pages/page-NNNN.md`, replace only that page's damaged text in
+`document.md`, and add a `vision-transcription` source-map entry. Set
+`vision.used` only after every candidate page is represented in
+`vision.completedPages`. If the current model cannot read images, retain the
+best local extraction and record `vision.unavailableReason`.
 
 ## Manifest
 

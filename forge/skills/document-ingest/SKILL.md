@@ -25,25 +25,35 @@ changing source files.
 
    Preparation is recursive for folders, skips hidden paths and symlinks,
    defaults to automatic OCR, and defaults to 150,000-character chunks. Use
-   `--ocr never` or `--chunk-chars <positive-integer>` only when requested.
+   `--ocr force` to rebuild every PDF text layer, `--ocr never` to disable local
+   OCR, or `--chunk-chars <positive-integer>` only when requested. Automatic OCR
+   retries pages whose text is sparse or garbled and keeps the better extraction.
 3. Read [references/output-contract.md](references/output-contract.md). Review
    every prepared document sequentially. Never review several documents in one
    model pass.
-4. For one chunk, review the complete `document.md` in one pass. For several
+4. If `metadata.json` reports `extraction.vision.required`, read each image in
+   `derived/vision-pages/` separately and transcribe it faithfully to the
+   matching `working/vision-pages/page-NNNN.md`. Replace the damaged page text
+   in `document.md`, add `vision-transcription` page mappings to
+   `source_map.json`, and record the completed pages and `vision.used: true`.
+   If the active model cannot read images, leave the best local extraction in
+   place and record a specific `vision.unavailableReason`; do not claim review
+   completion without disclosing the limitation.
+5. For one chunk, review the complete `document.md` in one pass. For several
    chunks, read `working/chunks/*.md` in order without overlap, write reviewed
    versions under `working/reviewed-chunks/`, concatenate them exactly into
    `document.md`, then perform a final seam and metadata review. Do not omit,
    summarize, deduplicate, or reorder source content.
-5. Improve only structure supported by the source: headings, paragraphs,
+6. Improve only structure supported by the source: headings, paragraphs,
    lists, tables, citations, footnotes, and appendices. Keep uncertain or
    damaged text visible and record the problem in `extraction_report.md`.
-6. Enrich `metadata.json` only with evidence-backed values. Every title,
+7. Enrich `metadata.json` only with evidence-backed values. Every title,
    author, date, or source value must include its origin, confidence, and a
    locator. Leave unsupported values null.
-7. Update `source_map.json`, `extraction_report.md`, and the run-level
+8. Update `source_map.json`, `extraction_report.md`, and the run-level
    `manifest.csv` after review. Keep generated interpretation out of
    `document.md`.
-8. Validate the completed run:
+9. Validate the completed run:
 
    ```bash
    node <skill-directory>/scripts/document-ingest.mjs validate <run-directory>
@@ -56,6 +66,8 @@ changing source files.
 
 - Never overwrite an input or existing output directory.
 - Keep automatically generated OCR PDFs under `derived/ocr.pdf`.
+- Keep rendered vision inputs under `derived/vision-pages/` and page transcripts
+  under `working/vision-pages/`; process one page at a time.
 - Continue batch preparation after individual failures and preserve each
   failure in `manifest.csv`.
 - Treat missing tools, encrypted or corrupt files, unresolved low-text pages,

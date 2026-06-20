@@ -16,6 +16,9 @@ import { basename, dirname, extname, join, resolve, sep } from "node:path";
 
 const DEFAULT_CHUNK_CHARACTERS = 150_000;
 const LOW_TEXT_CHARACTERS = 40;
+const MINIMUM_ALPHANUMERIC_RATIO = 0.2;
+const MAXIMUM_PUNCTUATION_RATIO = 0.55;
+const MAXIMUM_DOT_RUN_RATIO = 0.2;
 const SUPPORTED_EXTENSIONS = new Set([".pdf", ".docx", ".txt", ".md", ".markdown", ".html", ".htm", ".rtf"]);
 const MANIFEST_COLUMNS = [
 	"document_id",
@@ -57,6 +60,7 @@ function inspectTools() {
 		pdftotext: toolInfo("pdftotext", ["-v"]),
 		pdfinfo: toolInfo("pdfinfo", ["-v"]),
 		pdfimages: toolInfo("pdfimages", ["-v"]),
+		pdftoppm: toolInfo("pdftoppm", ["-v"]),
 		ocrmypdf: toolInfo("ocrmypdf"),
 		tesseract: toolInfo("tesseract"),
 	};
@@ -68,11 +72,12 @@ function printDoctor(asJson) {
 		pandocDocuments: tools.pandoc.available,
 		pdfText: tools.pdftotext.available && tools.pdfinfo.available,
 		pdfImageDetection: tools.pdfimages.available,
+		pdfPageRendering: tools.pdftoppm.available,
 		pdfOcr: tools.ocrmypdf.available && tools.tesseract.available,
 	};
 	const remediation = [];
 	if (!tools.pandoc.available) remediation.push("Install Pandoc (macOS: brew install pandoc; Debian/Ubuntu: apt install pandoc).");
-	if (!capabilities.pdfText || !capabilities.pdfImageDetection) {
+	if (!capabilities.pdfText || !capabilities.pdfImageDetection || !capabilities.pdfPageRendering) {
 		remediation.push("Install Poppler (macOS: brew install poppler; Debian/Ubuntu: apt install poppler-utils).");
 	}
 	if (!capabilities.pdfOcr) {
@@ -152,18 +157,50 @@ function countContentCharacters(value) {
 	return (value.match(/[\p{L}\p{N}]/gu) ?? []).length;
 }
 
+function textQuality(value) {
+	const nonWhitespace = (value.match(/\S/g) ?? []).length;
+	const alphanumeric = countContentCharacters(value);
+	const wordLikeTokens = (value.match(/\p{L}{3,}/gu) ?? []).length;
+	const punctuation = (value.match(/[.!?,;:$%#&*()]/g) ?? []).length;
+	const dotRunCharacters = (value.match(/\.{3,}/g) ?? []).reduce((total, run) => total + run.length, 0);
+	const alphanumericRatio = nonWhitespace === 0 ? 0 : alphanumeric / nonWhitespace;
+	const punctuationRatio = nonWhitespace === 0 ? 0 : punctuation / nonWhitespace;
+	const dotRunRatio = nonWhitespace === 0 ? 0 : dotRunCharacters / nonWhitespace;
+	const reasons = [];
+	if (alphanumeric < LOW_TEXT_CHARACTERS) reasons.push("low-text");
+	if (nonWhitespace > 100 && alphanumericRatio < MINIMUM_ALPHANUMERIC_RATIO) reasons.push("low-alphanumeric-ratio");
+	if (nonWhitespace > 100 && punctuationRatio > MAXIMUM_PUNCTUATION_RATIO) reasons.push("punctuation-heavy");
+	if (nonWhitespace > 100 && dotRunRatio > MAXIMUM_DOT_RUN_RATIO) reasons.push("dot-run-heavy");
+	if (alphanumeric >= LOW_TEXT_CHARACTERS && wordLikeTokens < 3) reasons.push("insufficient-word-like-text");
+	const score =
+		Math.min(1, alphanumericRatio / 0.7) * 0.55 +
+		Math.min(1, wordLikeTokens / 20) * 0.25 +
+		Math.max(0, 1 - punctuationRatio / MAXIMUM_PUNCTUATION_RATIO) * 0.1 +
+		Math.max(0, 1 - dotRunRatio / MAXIMUM_DOT_RUN_RATIO) * 0.1;
+	return {
+		nonWhitespace,
+		alphanumeric,
+		wordLikeTokens,
+		alphanumericRatio: Number(alphanumericRatio.toFixed(4)),
+		punctuationRatio: Number(punctuationRatio.toFixed(4)),
+		dotRunRatio: Number(dotRunRatio.toFixed(4)),
+		score: Number(score.toFixed(4)),
+		suspicious: reasons.length > 0,
+		reasons,
+	};
+}
+
 function textWarnings(value) {
 	const warnings = [];
 	const replacementCharacters = (value.match(/\uFFFD/g) ?? []).length;
 	const controlCharacters = (value.match(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g) ?? []).length;
-	const nonWhitespace = (value.match(/\S/g) ?? []).length;
-	const alphanumeric = countContentCharacters(value);
+	const quality = textQuality(value);
 	if (replacementCharacters > 0) warnings.push(`Found ${replacementCharacters} Unicode replacement characters; encoding may be damaged.`);
 	if (controlCharacters > 0) warnings.push(`Found ${controlCharacters} unexpected control characters.`);
-	if (nonWhitespace > 100 && alphanumeric / nonWhitespace < 0.05) {
+	if (quality.nonWhitespace > 100 && quality.alphanumericRatio < MINIMUM_ALPHANUMERIC_RATIO) {
 		warnings.push("Extracted text has an unusually low proportion of letters and numbers; review for garbled output.");
 	}
-	if (nonWhitespace === 0) warnings.push("No readable text was extracted.");
+	if (quality.nonWhitespace === 0) warnings.push("No readable text was extracted.");
 	return warnings;
 }
 
@@ -239,6 +276,36 @@ function pdfImagePages(filePath) {
 	return { pages, available: true, warning: null };
 }
 
+function renderVisionPages(filePath, documentDirectory, pages, tools) {
+	if (pages.length === 0) return { renderedPages: [], warnings: [] };
+	if (!tools.pdftoppm.available) {
+		return {
+			renderedPages: [],
+			warnings: ["pdftoppm is unavailable; unresolved PDF pages could not be rendered for vision fallback."],
+		};
+	}
+	const directory = join(documentDirectory, "derived", "vision-pages");
+	mkdirSync(directory, { recursive: true });
+	const renderedPages = [];
+	const warnings = [];
+	for (const page of pages) {
+		const name = `page-${String(page).padStart(4, "0")}`;
+		const outputPrefix = join(directory, name);
+		const result = run("pdftoppm", ["-f", String(page), "-l", String(page), "-singlefile", "-png", "-r", "180", filePath, outputPrefix]);
+		const outputPath = `${outputPrefix}.png`;
+		if (result.error || result.status !== 0 || !existsSync(outputPath)) {
+			warnings.push(`Could not render PDF page ${page} for vision fallback: ${result.stderr.trim() || result.error?.message || `exit status ${result.status}`}`);
+			continue;
+		}
+		renderedPages.push({
+			page,
+			path: `derived/vision-pages/${name}.png`,
+			sha256: sha256(readFileSync(outputPath)),
+		});
+	}
+	return { renderedPages, warnings };
+}
+
 function joinPdfPages(pages) {
 	let markdown = "";
 	const entries = [];
@@ -270,54 +337,72 @@ function extractPdf(filePath, documentDirectory, ocrMode, tools) {
 	if (!Number.isInteger(pageCount) || pageCount < 1) throw new Error("pdfinfo did not report a valid page count");
 	const warnings = [];
 	let pageExtraction = extractPdfPages(filePath, pageCount);
-	let pages = pageExtraction.pages;
+	const originalPages = pageExtraction.pages;
+	let pages = originalPages;
 	warnings.push(...pageExtraction.warnings);
-	const beforeCounts = pages.map(countContentCharacters);
+	const beforeQuality = pages.map(textQuality);
 	const images = pdfImagePages(filePath);
 	if (images.warning) warnings.push(images.warning);
-	const candidatePages = beforeCounts
-		.map((count, index) => ({ count, page: index + 1 }))
-		.filter(({ count, page }) => count < LOW_TEXT_CHARACTERS && images.pages.has(page))
+	const detectedCandidatePages = beforeQuality
+		.map((quality, index) => ({ quality, page: index + 1 }))
+		.filter(({ quality, page }) => quality.suspicious && (quality.reasons.some((reason) => reason !== "low-text") || images.pages.has(page)))
 		.map(({ page }) => page);
+	const candidatePages = ocrMode === "force" ? pages.map((_, index) => index + 1) : detectedCandidatePages;
 	let ocrUsed = false;
 	let ocrAttempted = false;
 	let ocrError = null;
 	let ocrSha256 = null;
-	let afterCounts = beforeCounts;
-	let remainingLowTextPages = candidatePages;
-	if (ocrMode === "auto" && candidatePages.length > 0) {
+	let ocrCommandMode = null;
+	let selectedPages = [];
+	let afterQuality = beforeQuality;
+	let unresolvedPages = detectedCandidatePages;
+	if (ocrMode === "force" || (ocrMode === "auto" && candidatePages.length > 0)) {
 		ocrAttempted = true;
 		if (!tools.ocrmypdf.available || !tools.tesseract.available) {
-			ocrError = "OCRmyPDF and Tesseract are required for automatic OCR but one or both are unavailable.";
+			ocrError = "OCRmyPDF and Tesseract are required for PDF OCR but one or both are unavailable.";
 			warnings.push(ocrError);
 		} else {
 			const derivedDirectory = join(documentDirectory, "derived");
 			mkdirSync(derivedDirectory, { recursive: true });
 			const ocrPath = join(derivedDirectory, "ocr.pdf");
-			const result = run("ocrmypdf", ["--skip-text", "--rotate-pages", "--deskew", "--quiet", filePath, ocrPath]);
+			const hasGarbledText = candidatePages.some((page) => beforeQuality[page - 1].reasons.some((reason) => reason !== "low-text"));
+			ocrCommandMode = ocrMode === "force" || hasGarbledText ? "force" : "skip-text";
+			const textModeArgument = ocrCommandMode === "force" ? "--force-ocr" : "--skip-text";
+			const result = run("ocrmypdf", [textModeArgument, "--rotate-pages", "--deskew", "--quiet", filePath, ocrPath]);
 			if (result.error || result.status !== 0) {
 				ocrError = `OCRmyPDF failed: ${result.stderr.trim() || result.error?.message || `exit status ${result.status}`}`;
 				warnings.push(ocrError);
 				rmSync(ocrPath, { force: true });
 			} else {
-				ocrUsed = true;
 				ocrSha256 = sha256(readFileSync(ocrPath));
 				pageExtraction = extractPdfPages(ocrPath, pageCount);
-				pages = pageExtraction.pages;
+				const ocrPages = pageExtraction.pages;
 				warnings.push(...pageExtraction.warnings);
-				afterCounts = pages.map(countContentCharacters);
-				remainingLowTextPages = candidatePages.filter((page) => afterCounts[page - 1] < LOW_TEXT_CHARACTERS);
-				if (remainingLowTextPages.length > 0) {
-					warnings.push(`OCR left low-text image pages unresolved: ${remainingLowTextPages.join(", ")}.`);
+				afterQuality = ocrPages.map(textQuality);
+				selectedPages = candidatePages.filter((page) => {
+					const before = beforeQuality[page - 1];
+					const after = afterQuality[page - 1];
+					return after.score > before.score || (before.suspicious && !after.suspicious);
+				});
+				pages = originalPages.map((page, index) => (selectedPages.includes(index + 1) ? ocrPages[index] : page));
+				ocrUsed = selectedPages.length > 0;
+				unresolvedPages = detectedCandidatePages.filter((page) => textQuality(pages[page - 1]).suspicious);
+				if (unresolvedPages.length > 0) {
+					warnings.push(`OCR left suspicious pages unresolved: ${unresolvedPages.join(", ")}.`);
 				}
 			}
 		}
 	}
 	if (ocrMode === "never" && candidatePages.length > 0) {
-		warnings.push(`Possible scanned pages were not OCRed because OCR was disabled: ${candidatePages.join(", ")}.`);
+		warnings.push(`Suspicious PDF pages were not OCRed because OCR was disabled: ${candidatePages.join(", ")}.`);
 	}
-	if (!images.available && beforeCounts.every((count) => count < LOW_TEXT_CHARACTERS)) {
+	if (!images.available && beforeQuality.every((quality) => quality.alphanumeric < LOW_TEXT_CHARACTERS)) {
 		warnings.push("The PDF contains very little text, but image-backed page detection was unavailable.");
+	}
+	const visionRendering = renderVisionPages(filePath, documentDirectory, unresolvedPages, tools);
+	warnings.push(...visionRendering.warnings);
+	if (visionRendering.renderedPages.length > 0) {
+		warnings.push(`Vision fallback is required for unresolved pages: ${visionRendering.renderedPages.map(({ page }) => page).join(", ")}.`);
 	}
 	const joined = joinPdfPages(pages);
 	warnings.push(...textWarnings(joined.markdown));
@@ -326,7 +411,7 @@ function extractPdf(filePath, documentDirectory, ocrMode, tools) {
 	}
 	return {
 		markdown: joined.markdown,
-		method: ocrUsed ? "ocrmypdf+pdftotext-layout" : "pdftotext-layout",
+		method: ocrUsed ? (selectedPages.length === pageCount ? "ocrmypdf+pdftotext-layout" : "pdftotext-layout+ocr-fallback") : "pdftotext-layout",
 		pageCount,
 		warnings,
 		embedded: {
@@ -340,14 +425,25 @@ function extractPdf(filePath, documentDirectory, ocrMode, tools) {
 			mode: ocrMode,
 			attempted: ocrAttempted,
 			used: ocrUsed,
-			reason: candidatePages.length > 0 ? "image-backed pages below low-text threshold" : null,
+			reason: candidatePages.length > 0 ? (ocrMode === "force" ? "forced by user" : "suspicious page text quality") : null,
+			commandMode: ocrCommandMode,
 			candidatePages,
-			beforeContentCharacters: beforeCounts,
-			afterContentCharacters: afterCounts,
-			remainingLowTextPages,
-			derivedPath: ocrUsed ? "derived/ocr.pdf" : null,
+			selectedPages,
+			beforeQuality,
+			afterQuality,
+			unresolvedPages,
+			derivedPath: ocrSha256 ? "derived/ocr.pdf" : null,
 			derivedSha256: ocrSha256,
 			error: ocrError,
+		},
+		vision: {
+			mode: "auto",
+			required: visionRendering.renderedPages.length > 0,
+			candidatePages: unresolvedPages,
+			renderedPages: visionRendering.renderedPages,
+			completedPages: [],
+			used: false,
+			unavailableReason: null,
 		},
 	};
 }
@@ -473,6 +569,7 @@ function collectInputs(inputPath) {
 
 function extractionReport(source, extraction, status) {
 	const ocr = extraction.ocr;
+	const vision = extraction.vision;
 	const warnings = extraction.warnings.length > 0 ? extraction.warnings.map((warning) => `- ${warning}`).join("\n") : "- None.";
 	return `# Extraction Report
 
@@ -499,8 +596,14 @@ ${Object.entries(extraction.toolVersions).map(([name, version]) => `- ${name}: $
 - OCR attempted: ${ocr.attempted}
 - OCR used: ${ocr.used}
 - OCR candidate pages: ${ocr.candidatePages.join(", ") || "None"}
-- Remaining low-text pages: ${ocr.remainingLowTextPages.join(", ") || "None"}
+- OCR selected pages: ${ocr.selectedPages?.join(", ") || "None"}
+- OCR command mode: ${ocr.commandMode ?? "Not run"}
+- Remaining suspicious pages: ${ocr.unresolvedPages?.join(", ") || "None"}
 - Derived PDF retained: ${ocr.derivedPath ?? "No"}
+- Vision fallback required: ${vision?.required ?? false}
+- Vision candidate pages: ${vision?.candidatePages?.join(", ") || "None"}
+- Vision rendered pages: ${vision?.renderedPages?.map(({ page }) => page).join(", ") || "None"}
+- Vision used: ${vision?.used ?? false}
 
 ## Structure and Encoding
 
@@ -581,6 +684,15 @@ function prepareDocument(filePath, runDirectory, options, tools, usedDirectories
 		chunkCharacters: options.chunkCharacters,
 		chunks: chunks.map((chunk, index) => ({ path: `working/chunks/chunk-${String(index + 1).padStart(4, "0")}.md`, characters: unicodeLength(chunk) })),
 		ocr: extracted.ocr,
+		vision: extracted.vision ?? {
+			mode: "not-applicable",
+			required: false,
+			candidatePages: [],
+			renderedPages: [],
+			completedPages: [],
+			used: false,
+			unavailableReason: null,
+		},
 	};
 	const metadata = {
 		schemaVersion: 1,
@@ -633,12 +745,12 @@ function parsePrepareArguments(args) {
 	for (let index = 1; index < args.length; index += 1) {
 		const argument = args[index];
 		if (argument === "--output") output = resolve(args[++index] ?? fail("--output requires a path"));
-		else if (argument === "--ocr") ocr = args[++index] ?? fail("--ocr requires auto or never");
+		else if (argument === "--ocr") ocr = args[++index] ?? fail("--ocr requires auto, force, or never");
 		else if (argument === "--chunk-chars") chunkCharacters = Number.parseInt(args[++index] ?? "", 10);
 		else fail(`unknown prepare option: ${argument}`);
 	}
 	if (!output) fail("prepare requires --output <new-directory>");
-	if (!new Set(["auto", "never"]).has(ocr)) fail("--ocr must be auto or never");
+	if (!new Set(["auto", "force", "never"]).has(ocr)) fail("--ocr must be auto, force, or never");
 	if (!Number.isInteger(chunkCharacters) || chunkCharacters < 1) fail("--chunk-chars must be a positive integer");
 	return { input, output, ocr, chunkCharacters };
 }
@@ -814,7 +926,7 @@ function validateRun(runDirectory) {
 		}
 		const document = readFileSync(join(documentDirectory, "document.md"), "utf8");
 		const extractedPath = join(documentDirectory, "working/extracted.md");
-		if (existsSync(extractedPath)) {
+		if (existsSync(extractedPath) && metadata.extraction?.vision?.used !== true) {
 			const coverage = contentCoverage(readFileSync(extractedPath, "utf8"), document);
 			if (coverage < 0.98) errors.push(`${row.output_directory} preserves only ${(coverage * 100).toFixed(2)}% of extracted word tokens`);
 			else if (coverage < 0.995) warnings.push(`${row.output_directory} content coverage is ${(coverage * 100).toFixed(2)}%`);
@@ -826,7 +938,7 @@ function validateRun(runDirectory) {
 				errors.push(`${row.output_directory}/source_map.json entry ${index + 1} has invalid line ranges`);
 			}
 			if (!entry.sourceLocator || typeof entry.sourceLocator !== "object") errors.push(`${row.output_directory}/source_map.json entry ${index + 1} lacks a source locator`);
-			if (!["page-extraction", "document-conversion", "model-alignment"].includes(entry.method)) errors.push(`${row.output_directory}/source_map.json entry ${index + 1} has an invalid method`);
+			if (!["page-extraction", "document-conversion", "model-alignment", "vision-transcription"].includes(entry.method)) errors.push(`${row.output_directory}/source_map.json entry ${index + 1} has an invalid method`);
 			if (!["high", "medium", "low"].includes(entry.confidence)) errors.push(`${row.output_directory}/source_map.json entry ${index + 1} has an invalid confidence`);
 		}
 		const chunkMetadata = metadata.extraction?.chunks;
@@ -862,6 +974,37 @@ function validateRun(runDirectory) {
 			if (!existsSync(ocrPath)) errors.push(`${row.output_directory}/derived/ocr.pdf is missing`);
 			else if (sha256(readFileSync(ocrPath)) !== metadata.extraction.ocr.derivedSha256) errors.push(`${row.output_directory}/derived/ocr.pdf hash does not match metadata`);
 		}
+		const vision = metadata.extraction?.vision;
+		if (vision?.required) {
+			for (const rendered of vision.renderedPages ?? []) {
+				const imagePath = resolve(documentDirectory, rendered.path ?? "");
+				if (!imagePath.startsWith(`${resolve(documentDirectory, "derived", "vision-pages")}${sep}`) || !existsSync(imagePath)) {
+					errors.push(`${row.output_directory} vision image for page ${rendered.page} is missing or outside derived/vision-pages`);
+				} else if (sha256(readFileSync(imagePath)) !== rendered.sha256) {
+					errors.push(`${row.output_directory} vision image for page ${rendered.page} has changed`);
+				}
+			}
+			if (vision.used) {
+				const expectedPages = [...(vision.candidatePages ?? [])].sort((left, right) => left - right);
+				const completedPages = [...(vision.completedPages ?? [])].sort((left, right) => left - right);
+				if (expectedPages.join(",") !== completedPages.join(",")) {
+					errors.push(`${row.output_directory} vision fallback does not cover every candidate page`);
+				}
+				for (const page of completedPages) {
+					const transcriptPath = join(documentDirectory, "working", "vision-pages", `page-${String(page).padStart(4, "0")}.md`);
+					if (!existsSync(transcriptPath) || readFileSync(transcriptPath, "utf8").trim() === "") {
+						errors.push(`${row.output_directory} vision transcript for page ${page} is missing or empty`);
+					} else if (!document.includes(readFileSync(transcriptPath, "utf8").trim())) {
+						errors.push(`${row.output_directory} document.md does not contain the vision transcript for page ${page}`);
+					}
+					if (!(sourceMap.entries ?? []).some((entry) => entry.method === "vision-transcription" && entry.sourceLocator?.page === page)) {
+						errors.push(`${row.output_directory}/source_map.json lacks a vision mapping for page ${page}`);
+					}
+				}
+			} else if (metadata.review?.completed && !vision.unavailableReason) {
+				errors.push(`${row.output_directory} completed review without using required vision fallback or recording why it was unavailable`);
+			}
+		}
 		if (String(metadata.extraction?.ocr?.used ?? false) !== row.ocr_used) errors.push(`${row.output_directory} OCR state does not match manifest.csv`);
 		if (String(metadata.extraction?.pageCount ?? "") !== row.page_count) errors.push(`${row.output_directory} page count does not match manifest.csv`);
 		if ((metadata.extraction?.method ?? "") !== row.extraction_method) errors.push(`${row.output_directory} extraction method does not match manifest.csv`);
@@ -885,7 +1028,7 @@ function validateRun(runDirectory) {
 function usage() {
 	process.stdout.write(`Usage:
   document-ingest.mjs doctor [--json]
-  document-ingest.mjs prepare <input> --output <new-directory> [--ocr auto|never] [--chunk-chars N]
+  document-ingest.mjs prepare <input> --output <new-directory> [--ocr auto|force|never] [--chunk-chars N]
   document-ingest.mjs validate <run-directory>
 `);
 }

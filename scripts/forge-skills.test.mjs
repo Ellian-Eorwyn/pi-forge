@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
 	chmodSync,
 	copyFileSync,
+	existsSync,
 	mkdtempSync,
 	mkdirSync,
 	readFileSync,
@@ -54,6 +55,21 @@ function runFailure(command, args, expectedText) {
 	});
 	assert.notEqual(result.status, 0, `${command} ${args.join(" ")} unexpectedly succeeded`);
 	assert.match(`${result.stdout}\n${result.stderr}`, expectedText);
+	return result;
+}
+
+function runWithEnvironment(command, args, extraEnvironment, expectedStatus = 0) {
+	const result = spawnSync(command, args, {
+		cwd: repositoryRoot,
+		encoding: "utf8",
+		env: { ...environment, ...extraEnvironment },
+		maxBuffer: 64 * 1024 * 1024,
+	});
+	assert.equal(
+		result.status,
+		expectedStatus,
+		`${command} ${args.join(" ")} exited ${result.status}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+	);
 	return result;
 }
 
@@ -337,6 +353,141 @@ test("document ingest, coding, and web collection expose review and safety bound
 			"# Collection Report\n\n## Status\n\n## Run Summary\n\n## Sources\n\n## Captures\n\n## Duplicates\n\n## Failures and Blocks\n\n## Search\n\n## Review\n",
 		);
 		assert.equal(jsonOutput(run("node", [script("web-collection", "web-collection.mjs"), "validate", webRun])).valid, true);
+	});
+});
+
+test("document ingest retries garbled PDF text with forced OCR and prepares vision fallback", () => {
+	withWorkspace((workspace) => {
+		const source = join(workspace, "garbled.pdf");
+		const runDirectory = join(workspace, "ingest");
+		const fakeBin = join(workspace, "fake-bin");
+		const ocrLog = join(workspace, "ocr-args.txt");
+		mkdirSync(fakeBin);
+		writeFileSync(source, "%PDF-1.4\nsynthetic regression fixture\n");
+		const commands = {
+			pdfinfo: `#!/usr/bin/env bash
+if [[ "$1" == "-v" ]]; then echo "pdfinfo fake"; exit 0; fi
+printf 'Pages: 2\\nTitle: Synthetic PDF\\n'
+`,
+			pdfimages: `#!/usr/bin/env bash
+if [[ "$1" == "-v" ]]; then echo "pdfimages fake"; exit 0; fi
+printf '   1     0 image\\n   2     1 image\\n'
+`,
+			pdftotext: `#!/usr/bin/env bash
+if [[ "$1" == "-v" ]]; then echo "pdftotext fake"; exit 0; fi
+input="\${@: -2:1}"
+if [[ "$input" == */ocr.pdf ]]; then
+	printf 'Health Care Summary claim details and readable words recovered by local optical character recognition.\\f......................................................................................................................................'
+else
+	printf '......................................................................................................................................\\f......................................................................................................................................'
+fi
+`,
+			ocrmypdf: `#!/usr/bin/env bash
+if [[ "$1" == "--version" ]]; then echo "ocrmypdf fake"; exit 0; fi
+printf '%s\\n' "$@" > "$OCR_LOG"
+arguments=("$@")
+cp "\${arguments[\${#arguments[@]}-2]}" "\${arguments[\${#arguments[@]}-1]}"
+`,
+			tesseract: "#!/usr/bin/env bash\necho 'tesseract fake'\n",
+			pdftoppm: `#!/usr/bin/env bash
+if [[ "$1" == "-v" ]]; then echo "pdftoppm fake"; exit 0; fi
+printf 'synthetic png bytes' > "\${@: -1}.png"
+`,
+		};
+		for (const [name, body] of Object.entries(commands)) {
+			writeFileSync(join(fakeBin, name), body);
+			chmodSync(join(fakeBin, name), 0o755);
+		}
+
+		const prepared = jsonOutput(
+			runWithEnvironment(
+				"node",
+				[script("document-ingest", "document-ingest.mjs"), "prepare", source, "--output", runDirectory],
+				{ OCR_LOG: ocrLog, PATH: `${fakeBin}:${process.env.PATH}` },
+			),
+		);
+		assert.equal(prepared.counts.needs_review, 1);
+		const documentDirectoryName = readFileSync(join(runDirectory, "manifest.csv"), "utf8").split("\n")[1].split(",")[5];
+		const documentDirectory = join(runDirectory, documentDirectoryName);
+		const metadata = JSON.parse(readFileSync(join(documentDirectory, "metadata.json"), "utf8"));
+		assert.equal(metadata.extraction.ocr.commandMode, "force");
+		assert.deepEqual(metadata.extraction.ocr.candidatePages, [1, 2]);
+		assert.deepEqual(metadata.extraction.ocr.selectedPages, [1]);
+		assert.deepEqual(metadata.extraction.ocr.unresolvedPages, [2]);
+		assert.equal(metadata.extraction.ocr.beforeQuality[0].suspicious, true);
+		assert.equal(metadata.extraction.ocr.afterQuality[0].suspicious, false);
+		assert.equal(metadata.extraction.vision.required, true);
+		assert.deepEqual(metadata.extraction.vision.candidatePages, [2]);
+		assert.match(readFileSync(ocrLog, "utf8"), /--force-ocr/);
+		assert.equal(existsSync(join(documentDirectory, "derived", "vision-pages", "page-0002.png")), true);
+		assert.match(readFileSync(join(documentDirectory, "document.md"), "utf8"), /Health Care Summary/);
+
+		const transcript = "# Page 2\n\nReadable vision transcription for the unresolved page.\n";
+		mkdirSync(join(documentDirectory, "working", "vision-pages"));
+		writeFileSync(join(documentDirectory, "working", "vision-pages", "page-0002.md"), transcript);
+		writeFileSync(join(documentDirectory, "document.md"), `${readFileSync(join(documentDirectory, "document.md"), "utf8")}\n${transcript}`);
+		metadata.extraction.vision.used = true;
+		metadata.extraction.vision.completedPages = [2];
+		metadata.review.completed = true;
+		writeFileSync(join(documentDirectory, "metadata.json"), `${JSON.stringify(metadata, null, 2)}\n`);
+		const sourceMapPath = join(documentDirectory, "source_map.json");
+		const sourceMap = JSON.parse(readFileSync(sourceMapPath, "utf8"));
+		sourceMap.entries.push({
+			markdownStartLine: readFileSync(join(documentDirectory, "document.md"), "utf8").split("\n").length - 3,
+			markdownEndLine: readFileSync(join(documentDirectory, "document.md"), "utf8").split("\n").length - 1,
+			sourceLocator: { type: "pdf-page", page: 2 },
+			method: "vision-transcription",
+			confidence: "medium",
+		});
+		writeFileSync(sourceMapPath, `${JSON.stringify(sourceMap, null, 2)}\n`);
+		const reportPath = join(documentDirectory, "extraction_report.md");
+		writeFileSync(reportPath, readFileSync(reportPath, "utf8").replace("model normalization pending", "model normalization complete"));
+		assert.equal(
+			jsonOutput(
+				runWithEnvironment("node", [script("document-ingest", "document-ingest.mjs"), "validate", runDirectory], {
+					PATH: `${fakeBin}:${process.env.PATH}`,
+				}),
+			).valid,
+			true,
+		);
+
+		const localOnlyRun = join(workspace, "local-only");
+		jsonOutput(
+			runWithEnvironment(
+				"node",
+				[
+					script("document-ingest", "document-ingest.mjs"),
+					"prepare",
+					source,
+					"--output",
+					localOnlyRun,
+					"--ocr",
+					"force",
+				],
+				{ OCR_LOG: ocrLog, PATH: `${fakeBin}:${process.env.PATH}` },
+			),
+		);
+		const localOnlyDirectoryName = readFileSync(join(localOnlyRun, "manifest.csv"), "utf8").split("\n")[1].split(",")[5];
+		const localOnlyDirectory = join(localOnlyRun, localOnlyDirectoryName);
+		const localOnlyMetadataPath = join(localOnlyDirectory, "metadata.json");
+		const localOnlyMetadata = JSON.parse(readFileSync(localOnlyMetadataPath, "utf8"));
+		assert.equal(localOnlyMetadata.extraction.ocr.reason, "forced by user");
+		localOnlyMetadata.extraction.vision.unavailableReason = "Current model does not support images.";
+		localOnlyMetadata.review.completed = true;
+		writeFileSync(localOnlyMetadataPath, `${JSON.stringify(localOnlyMetadata, null, 2)}\n`);
+		const localOnlyReportPath = join(localOnlyDirectory, "extraction_report.md");
+		writeFileSync(
+			localOnlyReportPath,
+			readFileSync(localOnlyReportPath, "utf8").replace("model normalization pending", "model normalization complete; vision unavailable"),
+		);
+		assert.equal(
+			jsonOutput(
+				runWithEnvironment("node", [script("document-ingest", "document-ingest.mjs"), "validate", localOnlyRun], {
+					PATH: `${fakeBin}:${process.env.PATH}`,
+				}),
+			).valid,
+			true,
+		);
 	});
 });
 
