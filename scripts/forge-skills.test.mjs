@@ -400,3 +400,41 @@ test("profile configuration installs local service defaults without dropping use
 		assert.equal(models.providers["forge-local"].compat.supportsDeveloperRole, false);
 	});
 });
+
+test("piped installer ignores the caller's checkout and uses the configured repository", () => {
+	withWorkspace((workspace) => {
+		const fakeBin = join(workspace, "bin");
+		const installDirectory = join(workspace, "install");
+		const gitLog = join(workspace, "git-args.txt");
+		mkdirSync(fakeBin);
+		writeFileSync(
+			join(fakeBin, "git"),
+			"#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$INSTALLER_GIT_LOG\"\nexit 23\n",
+		);
+		chmodSync(join(fakeBin, "git"), 0o755);
+
+		const result = spawnSync("bash", [], {
+			cwd: repositoryRoot,
+			encoding: "utf8",
+			env: {
+				...environment,
+				HOME: workspace,
+				INSTALLER_GIT_LOG: gitLog,
+				PATH: `${fakeBin}:${process.env.PATH}`,
+				PI_FORGE_INSTALL_DIR: installDirectory,
+				PI_FORGE_REPOSITORY: "https://example.invalid/pi-forge.git",
+			},
+			input: readFileSync(join(repositoryRoot, "install.sh"), "utf8"),
+		});
+		assert.equal(result.status, 23);
+		assert.doesNotMatch(result.stderr, /BASH_SOURCE/);
+		assert.equal(
+			readFileSync(gitLog, "utf8"),
+			`clone\nhttps://example.invalid/pi-forge.git\n${join(installDirectory, "repository")}\n`,
+		);
+
+		const packageJson = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8"));
+		assert.equal(typeof packageJson.scripts["build:install"], "string");
+		assert.match(readFileSync(join(repositoryRoot, "scripts", "pi-forge-install.sh"), "utf8"), /run build:install/);
+	});
+});

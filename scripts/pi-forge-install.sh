@@ -90,7 +90,10 @@ if [[ "$NEEDS_INSTALL" == true ]]; then
 fi
 
 if [[ "$NEEDS_BUILD" == true ]]; then
-	npm --prefix "$SOURCE_DIR" run build
+	# Installation builds consume the committed generated model registries. The
+	# normal development/release build refreshes them from upstream APIs, which
+	# would dirty an installed Git checkout and make pi-forge-update refuse it.
+	npm --prefix "$SOURCE_DIR" run build:install
 	if [[ -d "$SOURCE_DIR/.git" ]]; then
 		git -C "$SOURCE_DIR" rev-parse HEAD >"$BUILD_REVISION_FILE"
 	fi

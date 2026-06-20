@@ -14,6 +14,7 @@
 	"scripts": {
 		"clean": "npm run clean --workspaces",
 		"build": "cd packages/tui && npm run build && cd ../ai && npm run build && cd ../agent && npm run build && cd ../coding-agent && npm run build",
+		"build:install": "cd packages/tui && npm run build && cd ../ai && tsgo -p tsconfig.build.json && cd ../agent && npm run build && cd ../coding-agent && npm run build",
 		"check": "biome check --write --error-on-warnings . && npm run check:pinned-deps && npm run check:ts-imports && npm run check:shrinkwrap && npm run check:forge-skills && npm run test:forge-skills && tsgo --noEmit && npm run check:browser-smoke",
 		"check:browser-smoke": "node scripts/check-browser-smoke.mjs",
 		"check:forge-skills": "tsx scripts/generate-forge-skill-report.ts --check",
