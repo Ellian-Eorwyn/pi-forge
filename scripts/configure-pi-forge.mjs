@@ -3,6 +3,11 @@
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
+// Local model limits for the forge-local "code" model. Kept here so every
+// install and `pi-forge-update` writes the same context and output budgets.
+const CONTEXT_WINDOW = 262144;
+const MAX_OUTPUT_TOKENS = 32768;
+
 const [agentDirectoryArgument, profileDirectoryArgument] = process.argv.slice(2);
 if (!agentDirectoryArgument || !profileDirectoryArgument) {
 	console.error("Usage: configure-pi-forge.mjs <agent-directory> <profile-directory>");
@@ -82,6 +87,8 @@ models.providers = {
 				reasoning: false,
 				input: ["text"],
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: CONTEXT_WINDOW,
+				maxTokens: MAX_OUTPUT_TOKENS,
 			},
 		],
 	},
