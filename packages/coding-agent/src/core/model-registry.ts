@@ -602,8 +602,8 @@ export class ModelRegistry {
 					thinkingLevelMap: modelDef.thinkingLevelMap,
 					input: (modelDef.input ?? ["text"]) as ("text" | "image")[],
 					cost: modelDef.cost ?? defaultCost,
-					contextWindow: modelDef.contextWindow ?? 128000,
-					maxTokens: modelDef.maxTokens ?? 16384,
+					contextWindow: modelDef.contextWindow ?? 262144,
+					maxTokens: modelDef.maxTokens ?? 32768,
 					headers: undefined,
 					compat,
 				} as Model<Api>);

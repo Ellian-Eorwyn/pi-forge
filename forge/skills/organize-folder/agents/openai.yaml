@@ -1,4 +1,4 @@
 interface:
   display_name: "Organize Folder"
   short_description: "Sort a messy folder via a reviewable manifest"
-  default_prompt: "Use $organize-folder to organize this folder into categories. Scan it, propose a manifest I can edit, and only move files after I agree."
+  default_prompt: "Use $organize-folder to organize this folder. Scan it, read the profile to design a layout that fits it, propose a manifest I can edit, and only move files after I agree."

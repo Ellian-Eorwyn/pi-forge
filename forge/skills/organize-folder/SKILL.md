@@ -20,7 +20,7 @@ are relocated, never deleted, and every move is reversible.
 
 2. Confirm the target folder with the user. Create a new run directory under
    `forge-output/organize-folder/<folder-name>/`; if it exists, use a numbered
-   suffix. Scan the folder into a reviewable manifest:
+   suffix. Scan the folder into a reviewable manifest and profile:
 
    ```bash
    python3 <skill-directory>/scripts/organize-folder.py scan <target-folder> \
@@ -29,22 +29,29 @@ are relocated, never deleted, and every move is reversible.
 
    The scan is recursive, skips hidden paths and symlinks, refuses system paths
    and project roots, and leaves repositories, dependency trees, and bundles
-   untouched (recorded in `skipped.md`). It writes `manifest.csv` and `scan.json`
-   and routes exact-content duplicates to `_duplicates/`. Use
+   untouched (recorded in `skipped.md`). It writes `manifest.csv`, `scan.json`,
+   `profile.md`/`profile.json`, and `review_queue.md`, and routes exact-content
+   duplicates to `_duplicates/`. For speed it fingerprints every file and only
+   computes a full SHA-256 for files whose size collides with another (the only
+   exact-duplicate candidates); pass `--full-hash` to hash every file. Use
    `--confidence-threshold <0-1>` only when the user wants a stricter or looser
    review bar than the `0.75` default.
 
-3. Read [references/organize-contract.md](references/organize-contract.md).
-   Review `manifest.csv`. For every row whose `confidence` is below the threshold
-   (flagged in `note`), open the file's content before trusting its category.
-   Correct `category` and `proposed_destination` as needed, and design a
-   destination layout that fits this specific folder rather than forcing the
-   default categories. Edit only `category`, `proposed_destination`, `status`,
-   and `note`; never change `sha256` or other provenance columns.
+3. Read [references/organize-contract.md](references/organize-contract.md), then
+   read `profile.md` to understand what the folder holds: its folders, category
+   and extension distributions, filename clusters, date clusters, and sample
+   content peeks. Use it to design a destination layout that fits this specific
+   folder rather than forcing the default categories.
 
-4. Present the proposed plan to the user: the destination layout, how many files
-   move, duplicates routed to `_duplicates/`, and anything skipped as protected.
-   Tell the user they can edit `manifest.csv` directly to change categories,
+4. Open the files listed in `review_queue.md` (low confidence, unknown type, or
+   generic names) before trusting their category; high-confidence files rarely
+   need per-file inspection. In `manifest.csv`, correct `category` and
+   `proposed_destination`, editing by cluster where possible rather than row by
+   row. Edit only `category`, `proposed_destination`, `status`, and `note`;
+   never change `sha256`, `fingerprint`, or other provenance columns. Present the
+   resulting plan to the user: the destination layout, how many files move,
+   duplicates routed to `_duplicates/`, and anything skipped as protected. Tell
+   the user they can edit `manifest.csv` directly to change categories,
    destinations, or set a file's `status` to `keep` to leave it in place.
 
 5. After the user edits the manifest, validate it and produce a plan report:
@@ -84,8 +91,10 @@ are relocated, never deleted, and every move is reversible.
   `_duplicates/`. Never delete a file in any command.
 - Keep destinations inside the target folder. Reject absolute paths, `..`
   escapes, and destinations that pass through protected directories.
-- Re-verify each source hash before moving; record a file whose content changed
-  as `failed` and continue the batch rather than moving stale content.
+- Re-verify each source against its strongest recorded hash (full `sha256` when
+  present, otherwise the `fingerprint`) before moving; record a file whose
+  content changed as `failed` and continue the batch rather than moving stale
+  content.
 - Do not edit `manifest.csv` provenance columns; the integrity check refuses a
-  manifest whose `sha256` values were altered.
+  manifest whose `sha256` or `fingerprint` values were altered.
 - Do not install packages; the script uses only the Python standard library.

@@ -10,6 +10,9 @@ never deleted. Every move is reversible.
 <run-dir>/
   scan.json            # target, settings, and immutable per-file provenance
   manifest.csv         # user-editable plan: category, destination, status
+  profile.json         # structured folder summary (distributions, clusters)
+  profile.md           # model-facing folder summary read before designing layout
+  review_queue.md      # files to open before trusting their category
   skipped.md           # protected and skipped paths, with reasons
   plan_report.md       # written by `plan`: summary, validation, planned moves
   move_log.jsonl       # written by `apply`: append-only record of every move
@@ -28,11 +31,16 @@ fixed; `plan` and `apply` reject a reordered header.
 | Column | Editable | Meaning |
 |---|---|---|
 | `relative_source_path` | No | Path of the file relative to the target. |
-| `sha256` | No | Content hash from the scan. Checked for tampering and re-verified before each move. |
+| `parent_folder` | No | Folder containing the file, relative to the target (empty at the root). |
+| `filename` | No | The file's name. |
+| `sha256` | No | Full content hash; present for same-size duplicate candidates (and all files under `--full-hash`). Checked for tampering and re-verified before each move. |
+| `fingerprint` | No | Cheap size-plus-edge hash present for every file. Used for integrity when no full `sha256` is recorded. |
 | `size_bytes` | No | File size at scan time. |
 | `modified` | No | Modification time at scan time (UTC). |
 | `extension` | No | Lowercased file extension. |
 | `detected_type` | No | MIME type guessed from the name, or `unknown`. |
+| `peek` | No | Short content signal: text head, image dimensions, or archive listing. Empty when none applies. |
+| `name_cluster` | No | Label grouping similar filenames (for example `camera`, `screenshots`, `invoice`, `generic`). |
 | `category` | Yes | Deterministic category; the model may correct it. |
 | `confidence` | No | 0-1 score for the deterministic category. |
 | `is_duplicate` | No | `true` if another file has identical content. |
@@ -42,8 +50,8 @@ fixed; `plan` and `apply` reject a reordered header.
 | `note` | Yes | Free text; the scan flags low-confidence rows here. |
 
 The user and model change only `category`, `proposed_destination`, `status`,
-and `note`. Editing an immutable column (especially `sha256`) is rejected by
-`plan` so accidental edits cannot silence the safety checks.
+and `note`. Editing an immutable column (especially `sha256` or `fingerprint`)
+is rejected by `plan` so accidental edits cannot silence the safety checks.
 
 ## Categories
 
@@ -60,9 +68,35 @@ fixed taxonomy.
 - No extension and no MIME guess scores `0.3`.
 
 Rows below the confidence threshold (default `0.75`, set with
-`--confidence-threshold`) carry a review note. The agent should open the content
-of each low-confidence file before finalizing its category and destination,
-rather than trusting the deterministic guess.
+`--confidence-threshold`) carry a review note. `review_queue.md` lists exactly
+the files that need inspection (low confidence, unknown type, generic name, or
+uncategorized), capped to keep review bounded. The agent should open those files
+before finalizing their category and destination rather than trusting the
+deterministic guess; high-confidence files rarely need per-file inspection.
+
+## Profile
+
+`scan` writes `profile.json` and `profile.md` summarizing the whole folder:
+per-folder counts and sizes, category and extension distributions, filename
+clusters with examples, modified-year clusters, the largest files, a duplicate
+summary, and a handful of representative content peeks. The agent reads
+`profile.md` first to understand what the folder is for and to design a
+destination layout that fits it, instead of crawling every file. Regenerate it
+from an existing run with `profile <run-directory>`.
+
+## Hashing and Integrity
+
+For speed, `scan` computes a cheap `fingerprint` (file size plus a hash of the
+head and tail blocks) for every file, and a full `sha256` only for files whose
+size collides with another file. Two files with identical content always share a
+size, so this detects every exact duplicate without reading unique-size files
+end to end. `--full-hash` computes a full `sha256` for every file when maximum
+integrity is preferred over speed.
+
+`plan` and `apply` verify both `sha256` and `fingerprint` against `scan.json`,
+and `apply` re-checks each source before moving it using the strongest hash
+recorded for that file: the full `sha256` when present, otherwise the
+`fingerprint`.
 
 ## Statuses
 

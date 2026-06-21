@@ -6,23 +6,38 @@ import hashlib
 import json
 import mimetypes
 import os
+import re
 import shutil
 import sys
+import tarfile
+import zipfile
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
 
-SCAN_SCHEMA_VERSION = 1
+SCAN_SCHEMA_VERSION = 2
 DEFAULT_CONFIDENCE_THRESHOLD = 0.75
+
+# Bytes hashed from the head and tail of a file for the fast fingerprint. Files
+# at or below twice this size are hashed in full instead.
+FINGERPRINT_EDGE_BYTES = 65536
+
+# Cap the targeted-sampling list so review stays cheap on large folders.
+REVIEW_QUEUE_LIMIT = 150
 
 MANIFEST_FIELDS = [
     "relative_source_path",
+    "parent_folder",
+    "filename",
     "sha256",
+    "fingerprint",
     "size_bytes",
     "modified",
     "extension",
     "detected_type",
+    "peek",
+    "name_cluster",
     "category",
     "confidence",
     "is_duplicate",
@@ -73,6 +88,29 @@ _register("code", [".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".c", ".cc", ".
 _register("data", [".json", ".yaml", ".yml", ".xml", ".toml", ".ini", ".cfg", ".plist", ".parquet", ".ndjson", ".jsonl"])
 _register("fonts", [".ttf", ".otf", ".woff", ".woff2", ".eot"])
 _register("applications", [".dmg", ".pkg", ".exe", ".msi", ".deb", ".rpm", ".appimage"])
+
+# Categories whose default destinations are grouped by year so dated media does
+# not pile into one flat folder.
+MEDIA_CATEGORIES = {"images", "videos", "audio"}
+
+# Extensions whose content can be safely peeked as UTF-8 text.
+TEXT_PEEK_EXTENSIONS = {
+    ".txt", ".md", ".markdown", ".tex", ".log", ".csv", ".tsv", ".json", ".jsonl",
+    ".ndjson", ".yaml", ".yml", ".xml", ".toml", ".ini", ".cfg", ".plist",
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".c", ".cc", ".cpp", ".h",
+    ".hpp", ".go", ".rs", ".rb", ".php", ".sh", ".bash", ".zsh", ".html", ".htm",
+    ".css", ".scss", ".sql", ".swift", ".kt", ".lua", ".pl", ".r",
+}
+
+# Filename stems that carry no meaning on their own and should be flagged for
+# review rather than trusted for clustering.
+GENERIC_STEMS = {
+    "untitled", "document", "new", "copy", "image", "photo", "file", "download",
+    "img", "picture", "final", "draft", "temp", "tmp", "output",
+}
+
+# Leading tokens that mark bulk camera or device exports.
+CAMERA_PREFIXES = ("img", "dsc", "dscn", "pxl", "vid", "mov", "gopr", "dcim", "p10", "p_")
 
 # Directories that must never be traversed or moved. Moving their contents
 # breaks repositories, dependency trees, virtual environments, and macOS bundles.
@@ -155,6 +193,145 @@ def sha256(path):
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def fingerprint(path, size):
+    """Cheap content fingerprint: size plus a hash of the head and tail blocks.
+    Small files are hashed whole. Two files with identical content always share
+    a size, so this is enough to detect change without reading large files end
+    to end."""
+    digest = hashlib.sha256()
+    digest.update(str(size).encode("ascii"))
+    with path.open("rb") as handle:
+        if size <= 2 * FINGERPRINT_EDGE_BYTES:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        else:
+            digest.update(handle.read(FINGERPRINT_EDGE_BYTES))
+            handle.seek(-FINGERPRINT_EDGE_BYTES, os.SEEK_END)
+            digest.update(handle.read(FINGERPRINT_EDGE_BYTES))
+    return "fp:" + digest.hexdigest()
+
+
+def integrity_changed(path, sha256_value, fingerprint_value):
+    """Return True if the file no longer matches the strongest hash recorded for
+    it at scan time. Full sha256 is preferred; otherwise the fingerprint is used."""
+    if sha256_value:
+        return sha256(path) != sha256_value
+    size = path.stat().st_size
+    return fingerprint(path, size) != fingerprint_value
+
+
+def image_dimensions(path):
+    """Best-effort width/height from common image headers, standard library
+    only. Returns None when the format is unsupported or the header is short."""
+    with path.open("rb") as handle:
+        header = handle.read(26)
+    if len(header) < 24:
+        return None
+    png_signature = bytes([137, 80, 78, 71, 13, 10, 26, 10])
+    if header[:8] == png_signature:
+        return int.from_bytes(header[16:20], "big"), int.from_bytes(header[20:24], "big")
+    if header[:6] in (b"GIF87a", b"GIF89a"):
+        return int.from_bytes(header[6:8], "little"), int.from_bytes(header[8:10], "little")
+    if header[:2] == b"BM":
+        return int.from_bytes(header[18:22], "little"), int.from_bytes(header[22:26], "little")
+    if header[:2] == bytes([255, 216]):
+        return jpeg_dimensions(path)
+    return None
+
+
+def jpeg_dimensions(path):
+    """Scan JPEG segment markers for the start-of-frame that carries the size."""
+    with path.open("rb") as handle:
+        handle.read(2)
+        while True:
+            byte = handle.read(1)
+            if not byte:
+                return None
+            if byte != bytes([255]):
+                continue
+            marker = handle.read(1)
+            while marker == bytes([255]):
+                marker = handle.read(1)
+            if not marker:
+                return None
+            code = marker[0]
+            if 0xC0 <= code <= 0xCF and code not in (0xC4, 0xC8, 0xCC):
+                handle.read(3)
+                height = int.from_bytes(handle.read(2), "big")
+                width = int.from_bytes(handle.read(2), "big")
+                return width, height
+            length = int.from_bytes(handle.read(2), "big")
+            if length < 2:
+                return None
+            handle.seek(length - 2, os.SEEK_CUR)
+
+
+def text_peek(path, max_chars=160, max_lines=4):
+    lines = []
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for _ in range(max_lines):
+            line = handle.readline()
+            if not line:
+                break
+            stripped = line.strip()
+            if stripped:
+                lines.append(stripped)
+    collapsed = " ".join(" ".join(lines).split())
+    return collapsed[:max_chars]
+
+
+def archive_peek(path, extension):
+    if extension == ".zip" and zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as archive:
+            names = archive.namelist()
+        sample = ", ".join(names[:5])
+        return f"{len(names)} entries: {sample}" if names else "empty archive"
+    if tarfile.is_tarfile(path):
+        with tarfile.open(path) as archive:
+            names = archive.getnames()
+        sample = ", ".join(names[:5])
+        return f"{len(names)} entries: {sample}" if names else "empty archive"
+    return ""
+
+
+def make_peek(path, category, extension):
+    """Light, std-lib content signal. Always best-effort: any failure yields an
+    empty peek rather than aborting the scan."""
+    try:
+        if extension in TEXT_PEEK_EXTENSIONS:
+            return text_peek(path)
+        if category == "archives":
+            return archive_peek(path, extension)
+        if category == "images":
+            dims = image_dimensions(path)
+            return f"{dims[0]}x{dims[1]}" if dims else ""
+    except (OSError, ValueError, zipfile.BadZipFile, tarfile.TarError):
+        return ""
+    return ""
+
+
+def name_cluster(filename):
+    """Group similar filenames under a short label so the model can reason about
+    and route them in bulk."""
+    stem = Path(filename).stem.lower()
+    if not stem:
+        return "other"
+    if "screenshot" in stem or "screen shot" in stem or "screen_shot" in stem:
+        return "screenshots"
+    if "scan" in stem:
+        return "scans"
+    if stem.startswith(CAMERA_PREFIXES) and any(char.isdigit() for char in stem):
+        return "camera"
+    base = re.sub(r"[\s_\-]*(\(?\d+\)?|v\d+|copy|final|draft|rev\d*)$", "", stem).strip(" _-")
+    token = re.match(r"[a-z]+", base)
+    if token:
+        word = token.group(0)
+        if word in GENERIC_STEMS or len(word) < 2:
+            return "generic"
+        return word
+    return "generic"
 
 
 def require_new_directory(raw_path):
@@ -286,6 +463,36 @@ def unique_destination(folder, filename, used):
     return candidate
 
 
+def default_destination(record, used):
+    """Pre-fill a sensible destination so the model adjusts by cluster rather
+    than typing every path. Media is grouped by year; screenshots and scans get
+    their own subfolders; everything else lands under its category folder."""
+    folder = CATEGORY_FOLDERS[record["category"]]
+    cluster = record["name_cluster"]
+    if cluster == "screenshots":
+        folder = f"{folder}/Screenshots"
+    elif cluster == "scans":
+        folder = f"{folder}/Scans"
+    elif record["category"] in MEDIA_CATEGORIES:
+        year = record["modified"][:4]
+        if year.isdigit():
+            folder = f"{folder}/{year}"
+    return unique_destination(folder, record["filename"], used)
+
+
+def needs_review(record, threshold):
+    reasons = []
+    if record["confidence"] < threshold:
+        reasons.append("low confidence")
+    if record["detected_type"] == "unknown":
+        reasons.append("unknown type")
+    if record["name_cluster"] == "generic":
+        reasons.append("generic name")
+    if record["category"] == "other":
+        reasons.append("uncategorized")
+    return reasons
+
+
 def command_doctor(args):
     info = {
         "pythonVersion": sys.version.split()[0],
@@ -301,6 +508,8 @@ def command_doctor(args):
     print(f"- Python: {info['pythonVersion']} ({info['platform']})")
     print(f"- Dependencies: {info['dependencies']}")
     print(f"- Default confidence threshold: {DEFAULT_CONFIDENCE_THRESHOLD}")
+    print("- Scan writes manifest.csv, profile.md, profile.json, review_queue.md, and skipped.md.")
+    print("- Fingerprints every file and fully hashes only same-size duplicate candidates (use --full-hash to hash all).")
     print("- Refuses filesystem roots, the home directory, system trees, and project roots.")
     print("- Skips hidden paths, symlinks, repositories, dependency trees, and bundles.")
 
@@ -314,7 +523,6 @@ def command_scan(args):
 
     records = []
     skipped = []
-    by_hash = defaultdict(list)
 
     for root, directories, files in os.walk(target, topdown=True, followlinks=False):
         root_path = Path(root)
@@ -344,30 +552,55 @@ def command_scan(args):
                 continue
             try:
                 stat = file_path.stat()
-                digest = sha256(file_path)
             except OSError as error:
                 skipped.append({"path": relative, "reason": f"unreadable file: {error}"})
                 continue
             category, confidence = classify(file_path)
-            record = {
+            parent = str(file_path.parent.relative_to(target))
+            records.append({
                 "relative_source_path": relative,
-                "sha256": digest,
+                "parent_folder": "" if parent == "." else parent,
+                "filename": name,
                 "size_bytes": stat.st_size,
                 "modified": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
                 "extension": file_path.suffix.lower(),
                 "detected_type": detected_type(file_path),
                 "category": category,
                 "confidence": round(confidence, 2),
-                "filename": name,
-            }
-            records.append(record)
-            by_hash[digest].append(record)
+                "name_cluster": name_cluster(name),
+            })
 
     records.sort(key=lambda item: item["relative_source_path"].lower())
 
+    # Fingerprint every file cheaply; reserve full sha256 for files whose size
+    # collides with another (the only exact-duplicate candidates) unless the
+    # user asked for full hashing of everything.
+    size_counts = Counter(record["size_bytes"] for record in records)
+    hashed = []
+    for record in records:
+        file_path = target / record["relative_source_path"]
+        try:
+            record["fingerprint"] = fingerprint(file_path, record["size_bytes"])
+            if args.full_hash or size_counts[record["size_bytes"]] > 1:
+                record["sha256"] = sha256(file_path)
+            else:
+                record["sha256"] = ""
+        except OSError as error:
+            skipped.append({"path": record["relative_source_path"], "reason": f"unreadable file: {error}"})
+            continue
+        record["peek"] = make_peek(file_path, record["category"], record["extension"])
+        hashed.append(record)
+    records = hashed
+
+    by_hash = defaultdict(list)
+    for record in records:
+        if record["sha256"]:
+            by_hash[record["sha256"]].append(record)
+
     used_destinations = set()
     for record in records:
-        group = by_hash[record["sha256"]]
+        digest = record["sha256"]
+        group = by_hash[digest] if digest else [record]
         if len(group) > 1:
             primary = min(group, key=lambda item: item["relative_source_path"].lower())
             is_duplicate = record is not primary
@@ -384,25 +617,35 @@ def command_scan(args):
             record["is_duplicate"] = "false"
             record["duplicate_of"] = ""
             record["status"] = "pending"
-            folder = CATEGORY_FOLDERS[record["category"]]
-            record["proposed_destination"] = unique_destination(folder, record["filename"], used_destinations)
+            record["proposed_destination"] = default_destination(record, used_destinations)
             record["note"] = "" if record["confidence"] >= threshold else "low confidence: review file content before moving"
 
     write_manifest(run_directory / "manifest.csv", records)
+
+    review = []
+    for record in records:
+        if record["is_duplicate"] == "true":
+            continue
+        reasons = needs_review(record, threshold)
+        if reasons:
+            review.append((record, reasons))
 
     scan = {
         "schemaVersion": SCAN_SCHEMA_VERSION,
         "target": str(target),
         "scannedAt": utc_now(),
         "confidenceThreshold": threshold,
+        "fullHash": bool(args.full_hash),
         "fileCount": len(records),
         "duplicateCount": sum(1 for record in records if record["is_duplicate"] == "true"),
         "lowConfidenceCount": sum(1 for record in records if record["confidence"] < threshold),
+        "reviewCount": len(review),
         "skippedCount": len(skipped),
         "duplicatesFolder": DUPLICATES_FOLDER,
         "files": {
             record["relative_source_path"]: {
                 "sha256": record["sha256"],
+                "fingerprint": record["fingerprint"],
                 "size_bytes": record["size_bytes"],
                 "is_duplicate": record["is_duplicate"] == "true",
                 "duplicate_of": record["duplicate_of"],
@@ -412,15 +655,22 @@ def command_scan(args):
     }
     (run_directory / "scan.json").write_text(json.dumps(scan, indent=2), encoding="utf-8")
     write_skipped_report(run_directory / "skipped.md", target, skipped)
+    write_review_queue(run_directory / "review_queue.md", target, review)
+    profile = build_profile(target, records)
+    (run_directory / "profile.json").write_text(json.dumps(profile, indent=2), encoding="utf-8")
+    (run_directory / "profile.md").write_text(profile_markdown(profile), encoding="utf-8")
 
     print(
         json.dumps(
             {
                 "runDirectory": str(run_directory),
                 "manifest": str(run_directory / "manifest.csv"),
+                "profile": str(run_directory / "profile.md"),
+                "reviewQueue": str(run_directory / "review_queue.md"),
                 "fileCount": scan["fileCount"],
                 "duplicateCount": scan["duplicateCount"],
                 "lowConfidenceCount": scan["lowConfidenceCount"],
+                "reviewCount": scan["reviewCount"],
                 "skippedCount": scan["skippedCount"],
             },
             indent=2,
@@ -457,6 +707,165 @@ def write_skipped_report(path, target, skipped):
             lines.append(f"| `{path_cell}` | {reason_cell} |")
     lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def human_size(num_bytes):
+    value = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            if unit == "B":
+                return f"{int(value)} B"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} TB"
+
+
+def write_review_queue(path, target, review):
+    lines = [
+        "# Review Queue",
+        "",
+        f"Target: `{target}`",
+        "",
+        "These files could not be categorized confidently from metadata alone. "
+        "Open them to confirm what they are before finalizing their category and "
+        "destination in `manifest.csv`. Files not listed here were classified with "
+        "high confidence and usually need no per-file inspection.",
+        "",
+    ]
+    if not review:
+        lines.append("None. Every file was classified with high confidence.")
+        lines.append("")
+        path.write_text("\n".join(lines), encoding="utf-8")
+        return
+    if len(review) > REVIEW_QUEUE_LIMIT:
+        lines.append(
+            f"Showing the first {REVIEW_QUEUE_LIMIT} of {len(review)} files needing review."
+        )
+        lines.append("")
+        review = review[:REVIEW_QUEUE_LIMIT]
+    lines.extend(["| Path | Size | Category | Why | Peek |", "|---|---|---|---|---|"])
+    for record, reasons in review:
+        path_cell = record["relative_source_path"].replace("|", "\\|")
+        peek_cell = (record.get("peek") or "").replace("|", "\\|")
+        lines.append(
+            f"| `{path_cell}` | {human_size(record['size_bytes'])} | "
+            f"{record['category']} | {', '.join(reasons)} | {peek_cell} |"
+        )
+    lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def build_profile(target, rows):
+    """Summarize the scanned folder into a compact, deterministic profile the
+    model reads instead of crawling every file. Accepts records from `scan` or
+    rows loaded from `manifest.csv`."""
+    folders = Counter()
+    folder_bytes = Counter()
+    extensions = Counter()
+    extension_bytes = Counter()
+    categories = Counter()
+    category_bytes = Counter()
+    clusters = Counter()
+    cluster_samples = defaultdict(list)
+    years = Counter()
+    peeks = []
+    largest = []
+    total_bytes = 0
+    duplicate_files = 0
+    duplicate_bytes = 0
+
+    for row in rows:
+        size = int(row.get("size_bytes") or 0)
+        total_bytes += size
+        parent = row.get("parent_folder") or "(root)"
+        folders[parent] += 1
+        folder_bytes[parent] += size
+        extension = row.get("extension") or "(none)"
+        extensions[extension] += 1
+        extension_bytes[extension] += size
+        category = row.get("category") or "other"
+        categories[category] += 1
+        category_bytes[category] += size
+        cluster = row.get("name_cluster") or "other"
+        clusters[cluster] += 1
+        if len(cluster_samples[cluster]) < 3:
+            cluster_samples[cluster].append(row.get("filename") or row.get("relative_source_path"))
+        modified = row.get("modified") or ""
+        year = modified[:4] if modified[:4].isdigit() else "unknown"
+        years[year] += 1
+        if str(row.get("is_duplicate")).lower() == "true":
+            duplicate_files += 1
+            duplicate_bytes += size
+        peek = (row.get("peek") or "").strip()
+        if peek and len(peeks) < 12:
+            peeks.append({"path": row.get("relative_source_path"), "peek": peek})
+        largest.append((size, row.get("relative_source_path")))
+
+    largest.sort(reverse=True)
+    return {
+        "target": str(target),
+        "generatedAt": utc_now(),
+        "fileCount": len(rows),
+        "totalBytes": total_bytes,
+        "folders": [{"path": p, "count": c, "bytes": folder_bytes[p]} for p, c in folders.most_common()],
+        "extensions": [{"extension": e, "count": c, "bytes": extension_bytes[e]} for e, c in extensions.most_common()],
+        "categories": [{"category": c, "count": n, "bytes": category_bytes[c]} for c, n in categories.most_common()],
+        "nameClusters": [{"cluster": cl, "count": n, "samples": cluster_samples[cl]} for cl, n in clusters.most_common()],
+        "dateClusters": [{"year": y, "count": n} for y, n in sorted(years.items())],
+        "duplicates": {"files": duplicate_files, "bytes": duplicate_bytes},
+        "largestFiles": [{"path": p, "bytes": b} for b, p in largest[:10]],
+        "samplePeeks": peeks,
+    }
+
+
+def profile_markdown(profile):
+    lines = [
+        "# Folder Profile",
+        "",
+        f"Target: `{profile['target']}`",
+        f"Generated: {profile['generatedAt']}",
+        "",
+        f"- Files: {profile['fileCount']}",
+        f"- Total size: {human_size(profile['totalBytes'])}",
+        f"- Duplicate files: {profile['duplicates']['files']} ({human_size(profile['duplicates']['bytes'])})",
+        "",
+        "Use this profile to understand what the folder holds and design a layout "
+        "that fits it. Adjust destinations in `manifest.csv` by cluster rather than "
+        "row by row, and open the files in `review_queue.md` before trusting their "
+        "category.",
+        "",
+        "## Folders",
+        "",
+        "| Folder | Files | Size |",
+        "|---|---:|---:|",
+    ]
+    for entry in profile["folders"][:25]:
+        label = entry["path"].replace("|", "\\|")
+        lines.append(f"| `{label}` | {entry['count']} | {human_size(entry['bytes'])} |")
+    lines.extend(["", "## Categories", "", "| Category | Files | Size |", "|---|---:|---:|"])
+    for entry in profile["categories"]:
+        lines.append(f"| {entry['category']} | {entry['count']} | {human_size(entry['bytes'])} |")
+    lines.extend(["", "## Extensions", "", "| Extension | Files | Size |", "|---|---:|---:|"])
+    for entry in profile["extensions"][:25]:
+        lines.append(f"| {entry['extension']} | {entry['count']} | {human_size(entry['bytes'])} |")
+    lines.extend(["", "## Name clusters", "", "| Cluster | Files | Examples |", "|---|---:|---|"])
+    for entry in profile["nameClusters"][:25]:
+        samples = ", ".join((s or "") for s in entry["samples"]).replace("|", "\\|")
+        lines.append(f"| {entry['cluster']} | {entry['count']} | {samples} |")
+    lines.extend(["", "## Years (modified)", "", "| Year | Files |", "|---|---:|"])
+    for entry in profile["dateClusters"]:
+        lines.append(f"| {entry['year']} | {entry['count']} |")
+    lines.extend(["", "## Largest files", "", "| Path | Size |", "|---|---:|"])
+    for entry in profile["largestFiles"]:
+        label = entry["path"].replace("|", "\\|")
+        lines.append(f"| `{label}` | {human_size(entry['bytes'])} |")
+    if profile["samplePeeks"]:
+        lines.extend(["", "## Sample content peeks", ""])
+        for entry in profile["samplePeeks"]:
+            label = entry["path"].replace("`", "'")
+            lines.append(f"- `{label}`: {entry['peek']}")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def load_scan(run_directory):
@@ -499,6 +908,9 @@ def validate_manifest(scan, rows):
             continue
         if row.get("sha256") != files[relative]["sha256"]:
             errors.append(f"row {index}: sha256 for '{relative}' was edited; restore the scanned value")
+            continue
+        if row.get("fingerprint") != files[relative].get("fingerprint", ""):
+            errors.append(f"row {index}: fingerprint for '{relative}' was edited; restore the scanned value")
             continue
         status = (row.get("status") or "").strip()
         if status not in PLAN_STATUSES:
@@ -667,7 +1079,7 @@ def command_apply(args):
                 row["note"] = "source file missing at apply time"
                 failed += 1
                 continue
-            if sha256(source) != row["sha256"]:
+            if integrity_changed(source, row["sha256"], row["fingerprint"]):
                 final_status[relative] = "failed"
                 final_path[relative] = relative
                 row["note"] = "source changed since scan; not moved"
@@ -766,6 +1178,25 @@ def command_undo(args):
         raise SystemExit(1)
 
 
+def command_profile(args):
+    run_directory = require_run_directory(args.run_directory)
+    scan = load_scan(run_directory)
+    rows = load_manifest(run_directory)
+    profile = build_profile(Path(scan["target"]), rows)
+    (run_directory / "profile.json").write_text(json.dumps(profile, indent=2), encoding="utf-8")
+    (run_directory / "profile.md").write_text(profile_markdown(profile), encoding="utf-8")
+    print(
+        json.dumps(
+            {
+                "profile": str(run_directory / "profile.md"),
+                "fileCount": profile["fileCount"],
+                "totalBytes": profile["totalBytes"],
+            },
+            indent=2,
+        )
+    )
+
+
 def parser():
     root = argparse.ArgumentParser(description="Non-destructively organize a folder through a reviewable manifest.")
     subparsers = root.add_subparsers(dest="command", required=True)
@@ -774,11 +1205,20 @@ def parser():
     doctor.add_argument("--json", action="store_true")
     doctor.set_defaults(handler=command_doctor)
 
-    scan = subparsers.add_parser("scan", help="Scan a folder into a reviewable manifest.")
+    scan = subparsers.add_parser("scan", help="Scan a folder into a reviewable manifest and profile.")
     scan.add_argument("target")
     scan.add_argument("--output", required=True)
     scan.add_argument("--confidence-threshold", type=float, default=DEFAULT_CONFIDENCE_THRESHOLD)
+    scan.add_argument(
+        "--full-hash",
+        action="store_true",
+        help="Compute a full SHA-256 for every file instead of only same-size duplicate candidates.",
+    )
     scan.set_defaults(handler=command_scan)
+
+    profile = subparsers.add_parser("profile", help="Regenerate profile.md and profile.json from an existing run.")
+    profile.add_argument("run_directory")
+    profile.set_defaults(handler=command_profile)
 
     plan = subparsers.add_parser("plan", help="Validate the edited manifest and write a plan report.")
     plan.add_argument("run_directory")
