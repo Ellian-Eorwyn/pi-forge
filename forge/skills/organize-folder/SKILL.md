@@ -40,14 +40,24 @@ are relocated, never deleted, and every move is reversible.
 3. Read [references/organize-contract.md](references/organize-contract.md), then
    read `profile.md` to understand what the folder holds: its folders, category
    and extension distributions, filename clusters, date clusters, and sample
-   content peeks. Use it to design a destination layout that fits this specific
-   folder rather than forcing the default categories.
+   content peeks. Use these signals to design a destination layout that fits this
+   specific folder rather than forcing the default categories. Aim for a flat
+   tier of meaningful top-level categories with subfolders only where a real
+   sub-grouping exists, nesting no more than 2–3 levels deep. Build on any
+   structure the profile's folders and name clusters already imply rather than
+   inventing a parallel one; prefer the fewest categories that still organize the
+   contents cleanly; and split a category into subfolders only as its file count
+   grows large enough that a flat folder would be hard to scan — and only along a
+   distinction that is itself a real category. See the "Designing the Layout"
+   section of the contract for the full principles and a worked example.
 
 4. Open the files listed in `review_queue.md` (low confidence, unknown type, or
    generic names) before trusting their category; high-confidence files rarely
    need per-file inspection. In `manifest.csv`, correct `category` and
-   `proposed_destination`, editing by cluster where possible rather than row by
-   row. Edit only `category`, `proposed_destination`, `status`, and `note`;
+   `proposed_destination` to realize the layout you designed in step 3, editing
+   by cluster where possible — a whole name cluster or source folder at once —
+   rather than row by row. Edit only `category`, `proposed_destination`,
+   `status`, and `note`;
    never change `sha256`, `fingerprint`, or other provenance columns. Present the
    resulting plan to the user: the destination layout, how many files move,
    duplicates routed to `_duplicates/`, and anything skipped as protected. Tell

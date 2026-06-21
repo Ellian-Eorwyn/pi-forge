@@ -61,6 +61,44 @@ Deterministic categories map to destination folders at the target root:
 override any category and destination; categories are a starting point, not a
 fixed taxonomy.
 
+## Designing the Layout
+
+The deterministic categories above are only a fallback for a folder with no
+discernible theme. For most folders the model designs a layout that fits the
+folder's actual contents, read from `profile.md`. Apply these principles:
+
+1. **Build on existing structure when there is evidence of it.** If the
+   profile's **Folders** and **Name clusters** already imply a scheme — even a
+   partial or inconsistent one — extend and regularize that scheme rather than
+   inventing a parallel one. Design a layout from scratch only when the folder
+   has no usable structure.
+2. **Top-level categories, then subcategories as needed.** Choose a flat tier of
+   meaningful top-level folders, and add subfolders beneath one only where a
+   real sub-grouping exists. Derive both tiers from the contents' own dimensions
+   (topic, document type, then optionally date) rather than from generic
+   file-type buckets when the folder is domain-specific.
+3. **Keep nesting shallow.** Use **at most 2–3 levels of folders beneath the
+   target**. Deeper trees are harder to browse than they are worth.
+4. **Use the fewest categories that still organize effectively.** Prefer the
+   smallest set of top-level folders that cleanly covers the contents. Don't
+   create a folder for a one-off distinction; merge thin categories upward into
+   a broader one (or into `Other`).
+5. **Scale folder count to file count.** The more files a category holds, the
+   more a person benefits from splitting it into subfolders so no single folder
+   forces them to scan dozens or hundreds of files at once — but split only
+   along a distinction that is itself a meaningful category, never arbitrarily.
+   A category with few files stays a single folder.
+
+**Worked example.** A folder of sewing material — clothing patterns, sewing
+machine manuals, and reusable template files — has no single right answer in the
+generic categories. A good layout gives it top-level `Patterns`, `Manuals`, and
+`Templates`. Because `Patterns` holds far more files than the others, it splits
+by garment type into `Patterns/Bottoms`, `Patterns/Tops`, `Patterns/Bags`, and
+`Patterns/Hats` — garment type being a real sub-category — rather than staying
+one flat `Patterns` folder or exploding into a separate top-level folder per
+garment type. `Manuals` and `Templates` each stay a single folder until they
+grow enough to warrant their own subdivisions.
+
 ## Confidence and Review
 
 - Known extensions score `0.95`.
