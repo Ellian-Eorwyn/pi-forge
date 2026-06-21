@@ -53,6 +53,31 @@ changes, the current built CLI remains active and the next normal update builds
 the accumulated core changes. It rejects an update when no CLI build exists.
 Local tracked changes also stop updates rather than being overwritten.
 
+## Uninstall
+
+```bash
+./uninstall.sh
+```
+
+This removes the `pi-forge`, `pi-forge-mcp`, and `pi-forge-update` launchers from
+the bin directory and the managed checkout under `~/.local/share/pi-forge` when a
+remote install created one. A launcher is removed only when it still points at a
+pi-forge script, and a development checkout is never deleted — including one you
+installed from directly.
+
+Agent state in `~/.pi-forge/agent` (credentials, sessions, settings) is preserved
+by default so a later reinstall reuses your login. To remove it too:
+
+```bash
+./uninstall.sh --purge-state
+```
+
+Preview without changing anything with `--dry-run`, and skip the confirmation
+prompt with `--yes`. The `--bin-dir`, `--agent-dir`, and `--install-dir` options
+(and the matching `PI_FORGE_*` variables) target a non-default layout. If you
+installed from a development checkout, uninstalling leaves that checkout in place;
+run `git clean -xdf` there to drop the build artifacts and `node_modules`.
+
 ## Profile layout
 
 Add pi-forge-owned resources under:
