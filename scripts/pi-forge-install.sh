@@ -103,10 +103,12 @@ elif [[ ! -f "$SOURCE_DIR/packages/coding-agent/dist/cli.js" ]]; then
 fi
 node "$SOURCE_DIR/scripts/configure-pi-forge.mjs" "$AGENT_DIR" "$SOURCE_DIR/forge"
 ln -sfn "$SOURCE_DIR/scripts/pi-forge-run.sh" "$BIN_DIR/pi-forge"
+ln -sfn "$SOURCE_DIR/scripts/pi-forge-mcp-run.sh" "$BIN_DIR/pi-forge-mcp"
 ln -sfn "$SOURCE_DIR/update.sh" "$BIN_DIR/pi-forge-update"
 
 echo "pi-forge is installed."
 echo "  CLI: $BIN_DIR/pi-forge"
+echo "  MCP: $BIN_DIR/pi-forge-mcp"
 echo "  Updater: $BIN_DIR/pi-forge-update"
 echo "  State: $AGENT_DIR"
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
