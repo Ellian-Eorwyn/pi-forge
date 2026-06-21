@@ -1,0 +1,66 @@
+/* Theme: terminal — monospace, high-contrast, sharp zine aesthetic. */
+:root {
+	--bg: #f5f5f0;
+	--surface: #e7e7df;
+	--surface-2: #ffffff;
+	--fg: #1a1a17;
+	--muted: #5a5a52;
+	--accent: #15803d;
+	--accent-2: #ca8a04;
+	--accent-contrast: #ffffff;
+	--accent-gradient: linear-gradient(135deg, #15803d, #ca8a04);
+	--border: #cfcfc4;
+	--link: #15803d;
+	--ring: #15803d;
+	--shadow-sm: 0 1px 2px rgba(20, 22, 28, 0.07);
+	--shadow-md: 0 6px 18px rgba(20, 22, 28, 0.10);
+	--shadow-lg: 0 22px 48px rgba(20, 22, 28, 0.16);
+	--hero-overlay: rgba(0,0,0,0.6);
+	--font-body: ui-monospace, "SFMono-Regular", "Menlo", "Consolas", monospace;
+	--font-head: ui-monospace, "SFMono-Regular", "Menlo", "Consolas", monospace;
+	--font-display: ui-monospace, "SFMono-Regular", "Menlo", "Consolas", monospace;
+	--heading-weight: 700;
+	--heading-tracking: 0;
+	--measure: 72rem;
+	--radius: 0px;
+}
+
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme="light"]) {
+		--bg: #0a0e0a;
+		--surface: #0f140f;
+		--surface-2: #151b14;
+		--fg: #e6f0e6;
+		--muted: #8aa88a;
+		--accent: #4ade80;
+		--accent-2: #facc15;
+		--accent-contrast: #0a0e0a;
+		--accent-gradient: linear-gradient(135deg, #4ade80, #facc15);
+		--border: #1f2a1f;
+		--link: #86efac;
+		--ring: #4ade80;
+		--shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.40);
+		--shadow-md: 0 6px 18px rgba(0, 0, 0, 0.45);
+		--shadow-lg: 0 20px 48px rgba(0, 0, 0, 0.55);
+		--hero-overlay: rgba(0,0,0,0.7);
+	}
+}
+
+:root[data-theme="dark"] {
+	--bg: #0a0e0a;
+	--surface: #0f140f;
+	--surface-2: #151b14;
+	--fg: #e6f0e6;
+	--muted: #8aa88a;
+	--accent: #4ade80;
+	--accent-2: #facc15;
+	--accent-contrast: #0a0e0a;
+	--accent-gradient: linear-gradient(135deg, #4ade80, #facc15);
+	--border: #1f2a1f;
+	--link: #86efac;
+	--ring: #4ade80;
+	--shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.40);
+	--shadow-md: 0 6px 18px rgba(0, 0, 0, 0.45);
+	--shadow-lg: 0 20px 48px rgba(0, 0, 0, 0.55);
+	--hero-overlay: rgba(0,0,0,0.7);
+}

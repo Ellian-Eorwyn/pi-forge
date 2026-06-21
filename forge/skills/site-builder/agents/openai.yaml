@@ -1,0 +1,4 @@
+interface:
+  display_name: "Site Builder"
+  short_description: "Build a static website from a content folder"
+  default_prompt: "Use $site-builder to turn this folder into a beautiful, self-contained static website."

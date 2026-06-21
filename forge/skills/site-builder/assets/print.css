@@ -1,0 +1,52 @@
+/* Site Builder — print stylesheet. */
+@media print {
+	.site-header,
+	.toc,
+	.nav-toggle,
+	.theme-toggle,
+	.site-search,
+	.skip-link,
+	.breadcrumbs {
+		display: none !important;
+	}
+
+	body {
+		background: #fff;
+		color: #000;
+		font-size: 12pt;
+	}
+
+	.layout {
+		display: block;
+		max-width: none;
+		padding: 0;
+	}
+
+	.prose {
+		max-width: none;
+	}
+
+	a {
+		color: #000;
+		text-decoration: underline;
+	}
+
+	.prose a[href^="http"]::after {
+		content: " (" attr(href) ")";
+		font-size: 0.85em;
+		word-break: break-all;
+	}
+
+	pre,
+	blockquote,
+	img,
+	table {
+		break-inside: avoid;
+	}
+
+	h1,
+	h2,
+	h3 {
+		break-after: avoid;
+	}
+}

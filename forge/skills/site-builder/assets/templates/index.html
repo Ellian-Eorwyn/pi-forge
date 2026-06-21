@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="{{lang}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{title}} · {{siteTitle}}</title>
+<meta name="description" content="{{description}}">
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23888'/%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="site-header">
+  <div class="header-inner">
+    <a class="site-title" href="index.html">{{siteTitle}}</a>
+    <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">
+      <span class="visually-hidden">Toggle navigation</span><span aria-hidden="true">☰</span>
+    </button>
+    <nav id="site-nav" class="site-nav" aria-label="Primary">
+{{nav}}
+    </nav>
+    <button class="theme-toggle" type="button" title="Toggle dark mode">
+      <span class="visually-hidden">Toggle dark mode</span><span aria-hidden="true">◐</span>
+    </button>
+  </div>
+  <form class="site-search" role="search" autocomplete="off">
+    <label class="visually-hidden" for="search-input">Search this site</label>
+    <input id="search-input" type="search" placeholder="Search…">
+    <ul id="search-results" class="search-results" hidden></ul>
+  </form>
+</header>
+{{hero}}
+<div class="layout">
+  <main id="main" class="content">
+    <article class="prose">
+{{content}}
+    </article>
+  </main>
+  <aside class="toc" aria-label="On this page">
+{{toc}}
+  </aside>
+</div>
+<footer class="site-footer">{{footer}}</footer>
+<script src="search.js" defer></script>
+<script src="app.js" defer></script>
+</body>
+</html>

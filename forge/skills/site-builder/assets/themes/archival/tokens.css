@@ -1,0 +1,66 @@
+/* Theme: archival — muted, restrained, collection/library feel. */
+:root {
+	--bg: #f5f3ee;
+	--surface: #eae6dd;
+	--surface-2: #fdfcf9;
+	--fg: #2c2a26;
+	--muted: #6f6a60;
+	--accent: #4a5d52;
+	--accent-2: #7d8a5c;
+	--accent-contrast: #ffffff;
+	--accent-gradient: linear-gradient(135deg, #4a5d52, #7d8a5c);
+	--border: #d8d2c5;
+	--link: #50615a;
+	--ring: #4a5d52;
+	--shadow-sm: 0 1px 2px rgba(20, 22, 28, 0.07);
+	--shadow-md: 0 6px 18px rgba(20, 22, 28, 0.10);
+	--shadow-lg: 0 22px 48px rgba(20, 22, 28, 0.16);
+	--hero-overlay: rgba(20,22,18,0.5);
+	--font-body: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+	--font-head: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+	--font-display: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+	--heading-weight: 600;
+	--heading-tracking: 0;
+	--measure: 70rem;
+	--radius: 4px;
+}
+
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme="light"]) {
+		--bg: #1c1b18;
+		--surface: #26241f;
+		--surface-2: #302d27;
+		--fg: #e3ddd0;
+		--muted: #9c9484;
+		--accent: #8fae9e;
+		--accent-2: #b6c08a;
+		--accent-contrast: #1c1b18;
+		--accent-gradient: linear-gradient(135deg, #8fae9e, #b6c08a);
+		--border: #34322b;
+		--link: #a7c4b6;
+		--ring: #8fae9e;
+		--shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.40);
+		--shadow-md: 0 6px 18px rgba(0, 0, 0, 0.45);
+		--shadow-lg: 0 20px 48px rgba(0, 0, 0, 0.55);
+		--hero-overlay: rgba(20,22,18,0.6);
+	}
+}
+
+:root[data-theme="dark"] {
+	--bg: #1c1b18;
+	--surface: #26241f;
+	--surface-2: #302d27;
+	--fg: #e3ddd0;
+	--muted: #9c9484;
+	--accent: #8fae9e;
+	--accent-2: #b6c08a;
+	--accent-contrast: #1c1b18;
+	--accent-gradient: linear-gradient(135deg, #8fae9e, #b6c08a);
+	--border: #34322b;
+	--link: #a7c4b6;
+	--ring: #8fae9e;
+	--shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.40);
+	--shadow-md: 0 6px 18px rgba(0, 0, 0, 0.45);
+	--shadow-lg: 0 20px 48px rgba(0, 0, 0, 0.55);
+	--hero-overlay: rgba(20,22,18,0.6);
+}
