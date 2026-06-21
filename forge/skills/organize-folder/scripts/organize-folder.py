@@ -1,0 +1,803 @@
+#!/usr/bin/env python3
+
+import argparse
+import csv
+import hashlib
+import json
+import mimetypes
+import os
+import shutil
+import sys
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+SCAN_SCHEMA_VERSION = 1
+DEFAULT_CONFIDENCE_THRESHOLD = 0.75
+
+MANIFEST_FIELDS = [
+    "relative_source_path",
+    "sha256",
+    "size_bytes",
+    "modified",
+    "extension",
+    "detected_type",
+    "category",
+    "confidence",
+    "is_duplicate",
+    "duplicate_of",
+    "proposed_destination",
+    "status",
+    "note",
+]
+
+# Editable statuses the user or model may set in manifest.csv before apply.
+MOVE_STATUSES = {"pending", "duplicate"}
+KEEP_STATUSES = {"keep"}
+PLAN_STATUSES = MOVE_STATUSES | KEEP_STATUSES
+
+DUPLICATES_FOLDER = "_duplicates"
+
+CATEGORY_FOLDERS = {
+    "images": "Images",
+    "videos": "Videos",
+    "audio": "Audio",
+    "documents": "Documents",
+    "spreadsheets": "Spreadsheets",
+    "presentations": "Presentations",
+    "archives": "Archives",
+    "code": "Code",
+    "data": "Data",
+    "fonts": "Fonts",
+    "applications": "Applications",
+    "other": "Other",
+}
+
+EXTENSION_CATEGORY = {}
+
+
+def _register(category, extensions):
+    for extension in extensions:
+        EXTENSION_CATEGORY[extension] = category
+
+
+_register("images", [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic", ".heif", ".svg", ".ico", ".raw", ".cr2", ".nef", ".arw", ".dng"])
+_register("videos", [".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".wmv", ".flv", ".mpg", ".mpeg", ".3gp"])
+_register("audio", [".mp3", ".wav", ".flac", ".aac", ".m4a", ".ogg", ".oga", ".aiff", ".aif", ".wma", ".opus"])
+_register("documents", [".pdf", ".doc", ".docx", ".odt", ".rtf", ".txt", ".md", ".markdown", ".tex", ".pages", ".epub", ".mobi", ".azw3"])
+_register("spreadsheets", [".csv", ".tsv", ".xls", ".xlsx", ".xlsm", ".ods", ".numbers"])
+_register("presentations", [".ppt", ".pptx", ".odp", ".key"])
+_register("archives", [".zip", ".tar", ".gz", ".tgz", ".rar", ".7z", ".bz2", ".xz", ".zst"])
+_register("code", [".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".c", ".cc", ".cpp", ".h", ".hpp", ".go", ".rs", ".rb", ".php", ".sh", ".bash", ".zsh", ".html", ".htm", ".css", ".scss", ".sql", ".swift", ".kt", ".lua", ".pl", ".r"])
+_register("data", [".json", ".yaml", ".yml", ".xml", ".toml", ".ini", ".cfg", ".plist", ".parquet", ".ndjson", ".jsonl"])
+_register("fonts", [".ttf", ".otf", ".woff", ".woff2", ".eot"])
+_register("applications", [".dmg", ".pkg", ".exe", ".msi", ".deb", ".rpm", ".appimage"])
+
+# Directories that must never be traversed or moved. Moving their contents
+# breaks repositories, dependency trees, virtual environments, and macOS bundles.
+PROTECTED_DIR_NAMES = {
+    ".git",
+    ".svn",
+    ".hg",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "site-packages",
+    ".tox",
+    ".gradle",
+    ".idea",
+    ".vscode",
+    "DerivedData",
+}
+
+PROTECTED_DIR_SUFFIXES = (
+    ".app",
+    ".bundle",
+    ".framework",
+    ".xcodeproj",
+    ".xcworkspace",
+    ".photoslibrary",
+    ".musiclibrary",
+    ".tvlibrary",
+    ".lproj",
+    ".plugin",
+)
+
+# Markers whose presence in a directory indicates a project or repository root
+# whose layout would break if files were moved.
+PROJECT_MARKERS = (
+    ".git",
+    "package.json",
+    "pyproject.toml",
+    "Cargo.toml",
+    "go.mod",
+    "Gemfile",
+    "pom.xml",
+    "build.gradle",
+    "CMakeLists.txt",
+    "pyvenv.cfg",
+)
+
+# Absolute system trees that must never be organized.
+SYSTEM_TREES = (
+    "/System",
+    "/Library",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/etc",
+    "/opt",
+    "/Applications",
+    "/cores",
+    "/dev",
+    "/proc",
+    "/boot",
+    "/Windows",
+    "/Program Files",
+    "/Program Files (x86)",
+)
+
+
+def fail(message, exit_code=1):
+    print(f"Error: {message}", file=sys.stderr)
+    raise SystemExit(exit_code)
+
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def require_new_directory(raw_path):
+    path = Path(raw_path).expanduser().resolve()
+    if path.exists():
+        fail(f"output already exists: {path}")
+    path.mkdir(parents=True)
+    return path
+
+
+def require_run_directory(raw_path):
+    path = Path(raw_path).expanduser().resolve()
+    if not path.is_dir():
+        fail(f"run directory does not exist: {path}")
+    if not (path / "scan.json").is_file():
+        fail(f"scan.json is missing: {path}")
+    return path
+
+
+def is_project_root(path):
+    for marker in PROJECT_MARKERS:
+        if (path / marker).exists():
+            return marker
+    for child in path.iterdir() if path.is_dir() else []:
+        if child.name.endswith(".xcodeproj"):
+            return child.name
+    return None
+
+
+def require_target(raw_path):
+    path = Path(raw_path).expanduser().resolve()
+    if not path.exists():
+        fail(f"target does not exist: {path}")
+    if not path.is_dir():
+        fail(f"target is not a directory: {path}")
+    if path == Path(path.anchor):
+        fail(f"refusing to organize a filesystem root: {path}")
+    if path == Path.home():
+        fail(f"refusing to organize the home directory: {path}")
+    for tree in SYSTEM_TREES:
+        tree_path = Path(tree)
+        if path == tree_path or tree_path in path.parents:
+            fail(f"refusing to organize a system path: {path} (under {tree})")
+    marker = is_project_root(path)
+    if marker is not None:
+        fail(
+            f"refusing to organize a project or repository root: {path} "
+            f"(found '{marker}'). Moving files here would break the project. "
+            "Choose a specific content subfolder instead."
+        )
+    return path
+
+
+def protected_dir_reason(path):
+    name = path.name
+    if name.startswith("."):
+        return "hidden directory"
+    if name in PROTECTED_DIR_NAMES:
+        return f"protected directory name '{name}'"
+    for suffix in PROTECTED_DIR_SUFFIXES:
+        if name.endswith(suffix):
+            return f"bundle or package directory ('{suffix}')"
+    marker = is_project_root(path)
+    if marker is not None:
+        return f"nested project root (found '{marker}')"
+    return None
+
+
+def classify(path):
+    extension = path.suffix.lower()
+    if extension in EXTENSION_CATEGORY:
+        return EXTENSION_CATEGORY[extension], 0.95
+    mime, _ = mimetypes.guess_type(path.name)
+    if mime:
+        top = mime.split("/", 1)[0]
+        if top == "image":
+            return "images", 0.6
+        if top == "video":
+            return "videos", 0.6
+        if top == "audio":
+            return "audio", 0.6
+        if top == "text":
+            return "documents", 0.6
+        if mime == "application/pdf":
+            return "documents", 0.6
+        return "other", 0.5
+    return "other", 0.3
+
+
+def detected_type(path):
+    mime, _ = mimetypes.guess_type(path.name)
+    return mime or "unknown"
+
+
+def normalize_destination(target, raw_destination):
+    """Resolve a manifest destination relative to the target and confirm it
+    stays inside the target without escaping via absolute or parent paths."""
+    candidate = Path(raw_destination)
+    if candidate.is_absolute():
+        return None, "destination must be relative to the target folder"
+    resolved = (target / candidate).resolve()
+    if resolved != target and target not in resolved.parents:
+        return None, "destination escapes the target folder"
+    if resolved == target:
+        return None, "destination must include a file name"
+    return resolved, None
+
+
+def destination_in_protected(target, resolved):
+    relative = resolved.relative_to(target)
+    for part in relative.parts[:-1]:
+        if part in PROTECTED_DIR_NAMES or part.startswith("."):
+            return f"destination passes through protected directory '{part}'"
+        for suffix in PROTECTED_DIR_SUFFIXES:
+            if part.endswith(suffix):
+                return f"destination passes through bundle directory '{part}'"
+    return None
+
+
+def unique_destination(folder, filename, used):
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix
+    candidate = f"{folder}/{filename}"
+    counter = 2
+    while candidate.lower() in used:
+        candidate = f"{folder}/{stem} ({counter}){suffix}"
+        counter += 1
+    used.add(candidate.lower())
+    return candidate
+
+
+def command_doctor(args):
+    info = {
+        "pythonVersion": sys.version.split()[0],
+        "platform": sys.platform,
+        "dependencies": "Python standard library only.",
+        "defaultConfidenceThreshold": DEFAULT_CONFIDENCE_THRESHOLD,
+        "categories": sorted(set(CATEGORY_FOLDERS) - {"other"}) + ["other"],
+    }
+    if args.json:
+        print(json.dumps(info, indent=2))
+        return
+    print("organize-folder doctor")
+    print(f"- Python: {info['pythonVersion']} ({info['platform']})")
+    print(f"- Dependencies: {info['dependencies']}")
+    print(f"- Default confidence threshold: {DEFAULT_CONFIDENCE_THRESHOLD}")
+    print("- Refuses filesystem roots, the home directory, system trees, and project roots.")
+    print("- Skips hidden paths, symlinks, repositories, dependency trees, and bundles.")
+
+
+def command_scan(args):
+    target = require_target(args.target)
+    run_directory = require_new_directory(args.output)
+    threshold = args.confidence_threshold
+    if not 0.0 <= threshold <= 1.0:
+        fail("--confidence-threshold must be between 0 and 1")
+
+    records = []
+    skipped = []
+    by_hash = defaultdict(list)
+
+    for root, directories, files in os.walk(target, topdown=True, followlinks=False):
+        root_path = Path(root)
+        kept_directories = []
+        for name in sorted(directories):
+            directory = root_path / name
+            if directory.is_symlink():
+                skipped.append({"path": str(directory.relative_to(target)), "reason": "symlinked directory"})
+                continue
+            if directory.resolve() == run_directory:
+                continue
+            reason = protected_dir_reason(directory)
+            if reason is not None:
+                skipped.append({"path": str(directory.relative_to(target)), "reason": reason})
+                continue
+            kept_directories.append(name)
+        directories[:] = kept_directories
+
+        for name in sorted(files):
+            file_path = root_path / name
+            relative = str(file_path.relative_to(target))
+            if file_path.is_symlink():
+                skipped.append({"path": relative, "reason": "symlinked file"})
+                continue
+            if name.startswith("."):
+                skipped.append({"path": relative, "reason": "hidden file"})
+                continue
+            try:
+                stat = file_path.stat()
+                digest = sha256(file_path)
+            except OSError as error:
+                skipped.append({"path": relative, "reason": f"unreadable file: {error}"})
+                continue
+            category, confidence = classify(file_path)
+            record = {
+                "relative_source_path": relative,
+                "sha256": digest,
+                "size_bytes": stat.st_size,
+                "modified": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+                "extension": file_path.suffix.lower(),
+                "detected_type": detected_type(file_path),
+                "category": category,
+                "confidence": round(confidence, 2),
+                "filename": name,
+            }
+            records.append(record)
+            by_hash[digest].append(record)
+
+    records.sort(key=lambda item: item["relative_source_path"].lower())
+
+    used_destinations = set()
+    for record in records:
+        group = by_hash[record["sha256"]]
+        if len(group) > 1:
+            primary = min(group, key=lambda item: item["relative_source_path"].lower())
+            is_duplicate = record is not primary
+        else:
+            primary = record
+            is_duplicate = False
+        if is_duplicate:
+            record["is_duplicate"] = "true"
+            record["duplicate_of"] = primary["relative_source_path"]
+            record["status"] = "duplicate"
+            record["proposed_destination"] = f"{DUPLICATES_FOLDER}/{record['relative_source_path']}"
+            record["note"] = ""
+        else:
+            record["is_duplicate"] = "false"
+            record["duplicate_of"] = ""
+            record["status"] = "pending"
+            folder = CATEGORY_FOLDERS[record["category"]]
+            record["proposed_destination"] = unique_destination(folder, record["filename"], used_destinations)
+            record["note"] = "" if record["confidence"] >= threshold else "low confidence: review file content before moving"
+
+    write_manifest(run_directory / "manifest.csv", records)
+
+    scan = {
+        "schemaVersion": SCAN_SCHEMA_VERSION,
+        "target": str(target),
+        "scannedAt": utc_now(),
+        "confidenceThreshold": threshold,
+        "fileCount": len(records),
+        "duplicateCount": sum(1 for record in records if record["is_duplicate"] == "true"),
+        "lowConfidenceCount": sum(1 for record in records if record["confidence"] < threshold),
+        "skippedCount": len(skipped),
+        "duplicatesFolder": DUPLICATES_FOLDER,
+        "files": {
+            record["relative_source_path"]: {
+                "sha256": record["sha256"],
+                "size_bytes": record["size_bytes"],
+                "is_duplicate": record["is_duplicate"] == "true",
+                "duplicate_of": record["duplicate_of"],
+            }
+            for record in records
+        },
+    }
+    (run_directory / "scan.json").write_text(json.dumps(scan, indent=2), encoding="utf-8")
+    write_skipped_report(run_directory / "skipped.md", target, skipped)
+
+    print(
+        json.dumps(
+            {
+                "runDirectory": str(run_directory),
+                "manifest": str(run_directory / "manifest.csv"),
+                "fileCount": scan["fileCount"],
+                "duplicateCount": scan["duplicateCount"],
+                "lowConfidenceCount": scan["lowConfidenceCount"],
+                "skippedCount": scan["skippedCount"],
+            },
+            indent=2,
+        )
+    )
+
+
+def write_manifest(path, records):
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=MANIFEST_FIELDS)
+        writer.writeheader()
+        for record in records:
+            writer.writerow({field: record.get(field, "") for field in MANIFEST_FIELDS})
+
+
+def write_skipped_report(path, target, skipped):
+    lines = [
+        "# Skipped and Protected Paths",
+        "",
+        f"Target: `{target}`",
+        "",
+        "These paths were left untouched during the scan and will never be moved. "
+        "Hidden paths, symlinks, repositories, dependency trees, virtual environments, "
+        "and application bundles are protected so reorganizing cannot break how they function.",
+        "",
+    ]
+    if not skipped:
+        lines.append("None.")
+    else:
+        lines.extend(["| Path | Reason |", "|---|---|"])
+        for item in skipped:
+            path_cell = item["path"].replace("|", "\\|")
+            reason_cell = item["reason"].replace("|", "\\|")
+            lines.append(f"| `{path_cell}` | {reason_cell} |")
+    lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def load_scan(run_directory):
+    return json.loads((run_directory / "scan.json").read_text(encoding="utf-8"))
+
+
+def load_manifest(run_directory):
+    manifest_path = run_directory / "manifest.csv"
+    if not manifest_path.is_file():
+        fail(f"manifest.csv is missing: {manifest_path}")
+    with manifest_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames != MANIFEST_FIELDS:
+            fail("manifest.csv header was changed; restore the original column order")
+        return list(reader)
+
+
+def validate_manifest(scan, rows):
+    """Return (movable, errors, warnings). movable is a list of
+    (row, resolved_destination) for rows that will move."""
+    target = Path(scan["target"])
+    files = scan["files"]
+    errors = []
+    warnings = []
+    movable = []
+    seen_paths = set()
+    used_destinations = {}
+
+    for index, row in enumerate(rows, start=2):
+        relative = row.get("relative_source_path", "")
+        if not relative:
+            errors.append(f"row {index}: empty relative_source_path")
+            continue
+        if relative in seen_paths:
+            errors.append(f"row {index}: duplicate manifest entry for '{relative}'")
+            continue
+        seen_paths.add(relative)
+        if relative not in files:
+            errors.append(f"row {index}: '{relative}' was not part of the scan")
+            continue
+        if row.get("sha256") != files[relative]["sha256"]:
+            errors.append(f"row {index}: sha256 for '{relative}' was edited; restore the scanned value")
+            continue
+        status = (row.get("status") or "").strip()
+        if status not in PLAN_STATUSES:
+            errors.append(f"row {index}: invalid status '{status}' (use {', '.join(sorted(PLAN_STATUSES))})")
+            continue
+        if status in KEEP_STATUSES:
+            continue
+        destination = (row.get("proposed_destination") or "").strip()
+        if not destination:
+            errors.append(f"row {index}: '{relative}' is '{status}' but has no proposed_destination")
+            continue
+        resolved, problem = normalize_destination(target, destination)
+        if problem is not None:
+            errors.append(f"row {index}: {problem} ('{destination}')")
+            continue
+        protected = destination_in_protected(target, resolved)
+        if protected is not None:
+            errors.append(f"row {index}: {protected}")
+            continue
+        key = str(resolved).lower() if sys.platform == "darwin" else str(resolved)
+        if key in used_destinations:
+            errors.append(f"row {index}: destination '{destination}' collides with '{used_destinations[key]}'")
+            continue
+        used_destinations[key] = relative
+        movable.append((row, resolved))
+
+    move_targets = {str(resolved) for _, resolved in movable}
+    for row, resolved in movable:
+        source = target / row["relative_source_path"]
+        if resolved.exists() and str(resolved) not in move_targets:
+            warnings.append(f"destination already exists and is not itself being moved: '{row['proposed_destination']}'")
+        if resolved == source:
+            warnings.append(f"'{row['relative_source_path']}' already at its destination; it will be left in place")
+    return movable, errors, warnings
+
+
+def command_plan(args):
+    run_directory = require_run_directory(args.run_directory)
+    scan = load_scan(run_directory)
+    rows = load_manifest(run_directory)
+    movable, errors, warnings = validate_manifest(scan, rows)
+
+    categories = Counter()
+    duplicates = 0
+    keep = 0
+    for row in rows:
+        status = (row.get("status") or "").strip()
+        if status == "duplicate":
+            duplicates += 1
+        elif status in KEEP_STATUSES:
+            keep += 1
+        categories[row.get("category") or "other"] += 1
+
+    report = build_plan_report(scan, rows, movable, errors, warnings, categories, duplicates, keep)
+    (run_directory / "plan_report.md").write_text(report, encoding="utf-8")
+
+    result = {
+        "valid": not errors,
+        "filesToMove": len(movable),
+        "duplicates": duplicates,
+        "keep": keep,
+        "errors": errors,
+        "warnings": warnings,
+        "report": str(run_directory / "plan_report.md"),
+    }
+    print(json.dumps(result, indent=2))
+    if errors:
+        raise SystemExit(1)
+
+
+def build_plan_report(scan, rows, movable, errors, warnings, categories, duplicates, keep):
+    lines = [
+        "# Organization Plan",
+        "",
+        f"Target: `{scan['target']}`",
+        f"Generated: {utc_now()}",
+        "",
+        "## Summary",
+        "",
+        f"- Files in manifest: {len(rows)}",
+        f"- Files to move: {len(movable)}",
+        f"- Duplicates routed to `{scan.get('duplicatesFolder', DUPLICATES_FOLDER)}/`: {duplicates}",
+        f"- Files kept in place: {keep}",
+        f"- Protected or skipped at scan time: {scan.get('skippedCount', 0)} (see `skipped.md`)",
+        "",
+        "## Files by category",
+        "",
+        "| Category | Count |",
+        "|---|---:|",
+    ]
+    for category, count in sorted(categories.items()):
+        lines.append(f"| {category} | {count} |")
+    lines.extend(["", "## Validation", ""])
+    if errors:
+        lines.append("Errors must be resolved in `manifest.csv` before applying:")
+        lines.append("")
+        for error in errors:
+            lines.append(f"- {error}")
+    else:
+        lines.append("No errors. The manifest is ready to apply.")
+    if warnings:
+        lines.extend(["", "Warnings:", ""])
+        for warning in warnings:
+            lines.append(f"- {warning}")
+    lines.extend(["", "## Planned moves", ""])
+    if movable:
+        lines.extend(["| From | To |", "|---|---|"])
+        for row, _ in movable:
+            source = row["relative_source_path"].replace("|", "\\|")
+            destination = row["proposed_destination"].replace("|", "\\|")
+            lines.append(f"| `{source}` | `{destination}` |")
+    else:
+        lines.append("No moves planned.")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def load_move_log(run_directory):
+    log_path = run_directory / "move_log.jsonl"
+    entries = []
+    if log_path.is_file():
+        for line in log_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                entries.append(json.loads(line))
+    return entries
+
+
+def command_apply(args):
+    run_directory = require_run_directory(args.run_directory)
+    scan = load_scan(run_directory)
+    rows = load_manifest(run_directory)
+    movable, errors, warnings = validate_manifest(scan, rows)
+    if errors:
+        for error in errors:
+            print(f"Error: {error}", file=sys.stderr)
+        fail("manifest has validation errors; run 'plan' and fix them before applying")
+
+    target = Path(scan["target"])
+    log_path = run_directory / "move_log.jsonl"
+    already_moved = {entry["source"] for entry in load_move_log(run_directory)}
+
+    moved = 0
+    failed = 0
+    skipped = 0
+    final_status = {}
+    final_path = {}
+
+    with log_path.open("a", encoding="utf-8") as log_handle:
+        for row, resolved in movable:
+            relative = row["relative_source_path"]
+            source = target / relative
+            if str(source) in already_moved:
+                final_status[relative] = "moved"
+                final_path[relative] = str(resolved.relative_to(target))
+                skipped += 1
+                continue
+            if not source.exists() and resolved.exists():
+                final_status[relative] = "moved"
+                final_path[relative] = str(resolved.relative_to(target))
+                skipped += 1
+                continue
+            if not source.is_file():
+                final_status[relative] = "failed"
+                final_path[relative] = relative
+                row["note"] = "source file missing at apply time"
+                failed += 1
+                continue
+            if sha256(source) != row["sha256"]:
+                final_status[relative] = "failed"
+                final_path[relative] = relative
+                row["note"] = "source changed since scan; not moved"
+                failed += 1
+                continue
+            if resolved.exists():
+                final_status[relative] = "failed"
+                final_path[relative] = relative
+                row["note"] = "destination already exists; not moved"
+                failed += 1
+                continue
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(resolved))
+            log_handle.write(
+                json.dumps(
+                    {
+                        "source": str(source),
+                        "destination": str(resolved),
+                        "sha256": row["sha256"],
+                        "movedAt": utc_now(),
+                    }
+                )
+                + "\n"
+            )
+            log_handle.flush()
+            final_status[relative] = "moved"
+            final_path[relative] = str(resolved.relative_to(target))
+            moved += 1
+
+    write_final_manifest(run_directory / "final_manifest.csv", rows, final_status, final_path)
+
+    print(
+        json.dumps(
+            {
+                "moved": moved,
+                "alreadyMoved": skipped,
+                "failed": failed,
+                "kept": sum(1 for row in rows if (row.get("status") or "").strip() in KEEP_STATUSES),
+                "moveLog": str(log_path),
+                "finalManifest": str(run_directory / "final_manifest.csv"),
+            },
+            indent=2,
+        )
+    )
+    if failed:
+        raise SystemExit(1)
+
+
+def write_final_manifest(path, rows, final_status, final_path):
+    fields = MANIFEST_FIELDS + ["final_status", "final_path"]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for row in rows:
+            relative = row.get("relative_source_path", "")
+            output = {field: row.get(field, "") for field in MANIFEST_FIELDS}
+            status = (row.get("status") or "").strip()
+            output["final_status"] = final_status.get(relative, "kept" if status in KEEP_STATUSES else "")
+            output["final_path"] = final_path.get(relative, relative)
+            writer.writerow(output)
+
+
+def command_undo(args):
+    run_directory = require_run_directory(args.run_directory)
+    entries = load_move_log(run_directory)
+    if not entries:
+        print(json.dumps({"reversed": 0, "skipped": 0, "failed": 0, "note": "no moves to undo"}, indent=2))
+        return
+
+    reversed_count = 0
+    skipped = 0
+    failed = 0
+    undo_log = run_directory / "undo_log.jsonl"
+    with undo_log.open("a", encoding="utf-8") as handle:
+        for entry in reversed(entries):
+            source = Path(entry["source"])
+            destination = Path(entry["destination"])
+            if source.exists() and not destination.exists():
+                skipped += 1
+                continue
+            if not destination.exists():
+                failed += 1
+                handle.write(json.dumps({"destination": str(destination), "result": "missing"}) + "\n")
+                continue
+            if source.exists():
+                failed += 1
+                handle.write(json.dumps({"source": str(source), "result": "source path occupied"}) + "\n")
+                continue
+            source.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(destination), str(source))
+            handle.write(json.dumps({"source": str(source), "destination": str(destination), "result": "reversed", "undoneAt": utc_now()}) + "\n")
+            reversed_count += 1
+
+    print(json.dumps({"reversed": reversed_count, "alreadyInPlace": skipped, "failed": failed, "undoLog": str(undo_log)}, indent=2))
+    if failed:
+        raise SystemExit(1)
+
+
+def parser():
+    root = argparse.ArgumentParser(description="Non-destructively organize a folder through a reviewable manifest.")
+    subparsers = root.add_subparsers(dest="command", required=True)
+
+    doctor = subparsers.add_parser("doctor", help="Report capabilities and safeguards.")
+    doctor.add_argument("--json", action="store_true")
+    doctor.set_defaults(handler=command_doctor)
+
+    scan = subparsers.add_parser("scan", help="Scan a folder into a reviewable manifest.")
+    scan.add_argument("target")
+    scan.add_argument("--output", required=True)
+    scan.add_argument("--confidence-threshold", type=float, default=DEFAULT_CONFIDENCE_THRESHOLD)
+    scan.set_defaults(handler=command_scan)
+
+    plan = subparsers.add_parser("plan", help="Validate the edited manifest and write a plan report.")
+    plan.add_argument("run_directory")
+    plan.set_defaults(handler=command_plan)
+
+    apply_command = subparsers.add_parser("apply", help="Move files according to the validated manifest.")
+    apply_command.add_argument("run_directory")
+    apply_command.set_defaults(handler=command_apply)
+
+    undo = subparsers.add_parser("undo", help="Reverse moves recorded in move_log.jsonl.")
+    undo.add_argument("run_directory")
+    undo.set_defaults(handler=command_undo)
+    return root
+
+
+def main():
+    args = parser().parse_args()
+    args.handler(args)
+
+
+if __name__ == "__main__":
+    main()
