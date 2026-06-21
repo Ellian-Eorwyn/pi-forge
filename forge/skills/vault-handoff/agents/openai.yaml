@@ -1,0 +1,2 @@
+interface:
+  short_description: Send completed text artifacts to pi-vault review

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the pi-forge profile's restricted pi-vault MCP handoff extension and pending-review skill.
+
 ### Fixed
 
 - Fixed bash commands through legacy WSL `bash.exe` to pass scripts over stdin so shell variables expand in the target bash ([#5893](https://github.com/earendil-works/pi/issues/5893)).
