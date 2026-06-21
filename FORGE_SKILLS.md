@@ -4,12 +4,12 @@
 
 ## Launch Context Summary
 
-- Available skills: 9
-- Model-visible skills at launch: 9
+- Available skills: 11
+- Model-visible skills at launch: 11
 - Managed instructions (`AGENTS.md` with its `<project_context>` wrapper): 415 tokens
-- Skills menu (metadata for all skills): 1534 tokens
-- **Total forge launch context (always processed): 1948 tokens**
-- **Maximum if every `SKILL.md` body is also loaded at once: 11383 tokens**
+- Skills menu (metadata for all skills): 1908 tokens
+- **Total forge launch context (always processed): 2322 tokens**
+- **Maximum if every `SKILL.md` body is also loaded at once: 14825 tokens**
 
 Of the skills menu above, the shared wrapper (instructions and XML envelope, independent of skill count) is ~92 tokens; the rest scales with the number of skills.
 
@@ -27,8 +27,10 @@ Still excluded, because they are owned by the Pi harness rather than this profil
 | [`literature-extraction`](forge/skills/literature-extraction/SKILL.md) | Extract structured evidence from research documents | 180 | 900 | 1052 | Model-visible |
 | [`personal-admin`](forge/skills/personal-admin/SKILL.md) | Summarize personal documents into action plans | 206 | 768 | 948 | Model-visible |
 | [`report-output`](forge/skills/report-output/SKILL.md) | Assemble polished deliverables from processed outputs | 181 | 729 | 884 | Model-visible |
+| [`site-builder`](forge/skills/site-builder/SKILL.md) | Build a static website from a content folder | 190 | 1320 | 1484 | Model-visible |
 | [`spreadsheet-analysis`](forge/skills/spreadsheet-analysis/SKILL.md) | Analyze and enrich tabular datasets | 127 | 1231 | 1330 | Model-visible |
-| [`transcript-cleanup`](forge/skills/transcript-cleanup/SKILL.md) | Clean and structure raw transcripts | 144 | 1077 | 1193 | Model-visible |
+| [`transcript-cleanup`](forge/skills/transcript-cleanup/SKILL.md) | Clean and structure raw transcripts | 144 | 1127 | 1244 | Model-visible |
+| [`transcription`](forge/skills/transcription/SKILL.md) | Transcribe audio or video, then correct and clean it | 185 | 1374 | 1533 | Model-visible |
 | [`web-collection`](forge/skills/web-collection/SKILL.md) | Archive and organize web sources | 138 | 825 | 937 | Model-visible |
 
 ## Counting Method

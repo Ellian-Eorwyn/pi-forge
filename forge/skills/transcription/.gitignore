@@ -1,0 +1,10 @@
+# Python build artifacts from running scripts/transcription.py
+__pycache__/
+*.py[cod]
+
+# The managed venvs and the downloaded model live under ~/.pi-forge/transcription
+# (outside the repo) and are never committed. Listed here only as a reminder in
+# case PI_FORGE_HOME is ever pointed inside a checkout.
+venv-mlx/
+venv-nemo/
+models/

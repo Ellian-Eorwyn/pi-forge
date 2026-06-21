@@ -1,0 +1,4 @@
+# Apple Silicon backend: parakeet-mlx (MLX). Installed into the managed venv by
+# `transcription.py setup --backend mlx`. parakeet-mlx pulls in mlx, numpy,
+# huggingface_hub, and audio decoding deps.
+parakeet-mlx==0.5.2

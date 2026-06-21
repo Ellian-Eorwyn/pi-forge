@@ -1,0 +1,6 @@
+# Linux / NVIDIA backend: NVIDIA NeMo ASR. Installed into the managed venv by
+# `transcription.py setup --backend nemo` on the target machine. The full NeMo
+# dependency tree (including a CUDA-enabled PyTorch build) resolves at install
+# time for the host's platform and GPU; pin the exact resolved set with
+# `pip freeze` once installed there if byte-for-byte reproducibility is needed.
+nemo_toolkit[asr]>=2.0.0

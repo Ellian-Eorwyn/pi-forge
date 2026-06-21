@@ -1,0 +1,4 @@
+interface:
+  display_name: "Transcription"
+  short_description: "Transcribe audio or video, then correct and clean it"
+  default_prompt: "Use $transcription to transcribe this recording with Parakeet, apply the user correction dictionary, and route it into transcript cleanup."

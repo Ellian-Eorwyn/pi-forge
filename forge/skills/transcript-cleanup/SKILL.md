@@ -10,6 +10,9 @@ interpretation, and uncertainty visible.
 
 ## Workflow
 
+0. If the source is an audio or video recording rather than text, first run it
+   through the `transcription` skill (`$transcription`) to produce a corrected
+   transcript, then clean that output here.
 1. Identify the input, output track, requested mode, desired fidelity, and
    whether the user wants the original embedded.
 2. For a file, preserve the source and record its absolute path and SHA-256.
