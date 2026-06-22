@@ -27,7 +27,7 @@ run directory must not pre-exist.
 | `epub` | `.epub` | `md` | Pandoc plus deterministic cleanup |
 | `md`   | `.md`, `.markdown` | `docx`, `epub`, `html`, `txt` | Pandoc |
 | `html` | `.html`, `.htm` | `md`, `txt` | Pandoc |
-| `pdf`  | `.pdf` | `txt`, `md` | `pdftotext -layout` |
+| `pdf`  | `.pdf` | `txt`, `md` | `pdftotext -layout` (txt); PyMuPDF (md, structured) |
 | `csv`  | `.csv`, `.tsv` | `xlsx` | openpyxl |
 | `xlsx` | `.xlsx` | `csv` | openpyxl |
 | `txt`  | `.txt` | `txt` (cleanup) | in-process |
@@ -72,6 +72,27 @@ Every reverse conversion warns that CSS, typography, pagination, and reading-
 system behavior were lost. Fixed layout, scripts, audio, and video receive
 specific warnings. DRM and unsupported encryption fail conversion.
 
+## PDF to Markdown
+
+PDF to Markdown uses PyMuPDF to reconstruct structure heuristically; it requires
+PyMuPDF (`pip install pymupdf`). PDF to txt stays on Poppler `pdftotext -layout`
+and is unaffected.
+
+Chapter headings are detected by font size relative to the modal body size and
+emitted as level-one headings, so the result drives the Markdown-to-EPUB chapter
+split. Superscript reference markers are detected by raised baseline and smaller
+size and rewritten as Pandoc footnotes (`[^cN-M]`, with per-chapter-unique ids).
+Footnote bodies found in the bottom region of each page are collected and emitted
+under a level-two `Endnotes` heading at the end of their chapter, so Pandoc
+relocates them as linked endnotes per chapter file in the EPUB.
+
+When no headings are detected, the document becomes a single chapter titled from
+the source filename, with a warning. Content before the first heading is placed
+under a synthesized title. Markers without a matching note are left inline;
+notes without a matching marker are appended to `Endnotes` unlinked. Both cases
+warn. Detection is best-effort and every run discloses that structure is
+heuristic.
+
 ## Managed EPUBCheck
 
 `install-epubcheck` installs official EPUBCheck 5.3.0 under
@@ -111,9 +132,11 @@ Never claim complex formatting survived when it did not. Record warnings for:
 
 - DOCX/HTML structural loss (styles, footnotes, complex layout) and
   **extracted media** (location under `converted/media/<stem>/`).
-- PDF Markdown being unstructured extracted text (no reconstructed headings or
-  tables), and low-text output that suggests a scanned PDF — route those to
-  `document-ingest` for OCR.
+- PDF Markdown structure being reconstructed heuristically: chapter headings and
+  footnote/marker detection may be incomplete or misattributed, tables and
+  figures are not reconstructed, and multi-column layouts risk wrong reading
+  order. Low-text output that suggests a scanned PDF is routed to
+  `document-ingest` for OCR. (PDF to txt remains plain `pdftotext` output.)
 - CSV→XLSX writing values as text without type inference.
 - XLSX→CSV exporting last-computed values and dropping formulas, macros, charts,
   and styling; multi-sheet workbooks splitting into one CSV per sheet.

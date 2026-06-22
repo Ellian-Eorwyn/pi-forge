@@ -1,6 +1,6 @@
 ---
 name: file-conversion
-description: Convert files between formats while preserving originals. Use to transform DOCX, Markdown, EPUB, PDF, HTML, CSV, TSV, XLSX, and text files — including Markdown to reflowable EPUB 3 with chapter navigation, a table of contents, metadata, and an optional cover, and EPUB back to clean Markdown with extracted media — for single files or whole folders, with conversion logs and manifests, traceable output filenames, and explicit warnings for lossy conversions, dropped or extracted media, and unstructured PDF text. This is the general-purpose converter for the forge profile.
+description: Convert files between formats while preserving originals. Use to transform DOCX, Markdown, EPUB, PDF, HTML, CSV, TSV, XLSX, and text files — including Markdown to reflowable EPUB 3 with chapter navigation, a table of contents, metadata, and an optional cover, EPUB back to clean Markdown with extracted media, and PDF to structured Markdown with heuristic chapter headings and footnotes collected as per-chapter endnotes — for single files or whole folders, with conversion logs and manifests, traceable output filenames, and explicit warnings for lossy conversions, dropped or extracted media, and heuristically reconstructed PDF structure. This is the general-purpose converter for the forge profile.
 ---
 
 # File Conversion
@@ -17,8 +17,9 @@ disclose lossy conversions. This is the profile's general-purpose converter.
    python3 <skill-directory>/scripts/file-conversion.py doctor
    ```
 
-   Pandoc handles DOCX/Markdown/HTML/EPUB; `pdftotext` (Poppler) handles
-   PDF; `openpyxl` handles CSV↔XLSX. EPUBCheck is optional and provides a
+   Pandoc handles DOCX/Markdown/HTML/EPUB; PyMuPDF (`pip install pymupdf`)
+   handles structured PDF→Markdown while `pdftotext` (Poppler) handles PDF→txt
+   and is the OCR-routing fallback; `openpyxl` handles CSV↔XLSX. EPUBCheck is optional and provides a
    stronger EPUB conformance check when installed. If Java is available but
    EPUBCheck is missing, install the pinned managed copy explicitly:
 
@@ -81,7 +82,10 @@ disclose lossy conversions. This is the profile's general-purpose converter.
 - Preserve originals. Never modify a source; all outputs go under `converted/`.
 - Keep output filenames traceable to their sources via the manifest.
 - Never claim complex formatting survived when it did not. Flag formatting loss,
-  dropped or extracted media, missing tables, and unstructured PDF text.
+  dropped or extracted media, and missing tables. PDF→Markdown reconstructs
+  chapter headings and footnotes (collected as per-chapter `## Endnotes`)
+  heuristically; disclose that headings, markers, and notes may be incomplete or
+  misattributed. PDF→txt stays plain `pdftotext` text.
 - EPUB output is reflowable EPUB 3. Keep semantic tables and review warnings for
   wide tables, spanning cells, missing image alt text, remote resources, and raw
   HTML. Kindle Oasis delivery uses Send to Kindle rather than direct USB EPUB.

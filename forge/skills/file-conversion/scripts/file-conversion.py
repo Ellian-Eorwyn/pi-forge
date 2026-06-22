@@ -26,6 +26,20 @@ from xml.etree import ElementTree
 
 LOW_TEXT_CHARACTERS = 40
 
+# Heuristic thresholds for structured PDF -> Markdown extraction (PyMuPDF).
+# These are deliberately conservative starting points; PDF layout varies widely,
+# so detection is best-effort and every run discloses that it is heuristic.
+PDF_HEADING_SIZE_RATIO = 1.35  # line size >= body_size * ratio => chapter-heading candidate
+PDF_HEADING_MAX_WORDS = 12  # headings are short lines
+PDF_HEADING_TOP_FRACTION = 0.33  # headings are likelier in the top third of a page
+PDF_FOOTNOTE_SIZE_RATIO = 0.85  # line size <= body_size * ratio => small/footnote text
+PDF_FOOTNOTE_BOTTOM_FRACTION = 0.62  # footnote region sits in the lower part of a page
+PDF_SUPERSCRIPT_SIZE_RATIO = 0.80  # marker glyph is smaller than body text
+PDF_SUPERSCRIPT_RISE_RATIO = 0.20  # marker baseline raised >= ratio * body_size
+PDF_PARAGRAPH_GAP_RATIO = 0.60  # inter-line gap > ratio * line height => new paragraph
+PDF_MULTICOLUMN_GAP_RATIO = 0.15  # horizontal gap > ratio * page width => column boundary
+PDF_RUNNING_HEAD_PAGE_FRACTION = 0.5  # a top/bottom line on > this fraction of pages is chrome
+
 MANIFEST_COLUMNS = [
     "source_path",
     "source_sha256",
@@ -94,6 +108,22 @@ def sha256(path):
 
 def openpyxl_available():
     return importlib.util.find_spec("openpyxl") is not None
+
+
+def pymupdf_available():
+    return importlib.util.find_spec("fitz") is not None
+
+
+def pymupdf_version():
+    if not pymupdf_available():
+        return None
+    import fitz
+
+    version = getattr(fitz, "__version__", None)
+    if version:
+        return version
+    bind = getattr(fitz, "VersionBind", None)
+    return bind or "available"
 
 
 def tool_version(command, args):
@@ -819,6 +849,334 @@ def run_pdftotext(source, output, target):
     return warnings
 
 
+def pdf_norm_chrome(text):
+    # Normalize a line for running-head/footer detection: drop digits so page
+    # numbers cluster, lowercase, and collapse whitespace.
+    stripped = re.sub(r"\d+", "", text)
+    return re.sub(r"\s+", " ", stripped).strip().lower()
+
+
+def pdf_collect_lines(doc):
+    # Flatten the document into an ordered list of line records carrying the
+    # geometry and spans needed for heuristic classification, plus the modal
+    # body font size (character-weighted so prose dominates over headings).
+    lines = []
+    size_counter = Counter()
+    for page_index, page in enumerate(doc):
+        page_dict = page.get_text("dict", sort=True)
+        page_height = page_dict.get("height") or page.rect.height or 1.0
+        page_width = page_dict.get("width") or page.rect.width or 1.0
+        page_lines = []
+        for block in page_dict.get("blocks", []):
+            if block.get("type") != 0:
+                continue
+            block_number = block.get("number", 0)
+            for line in block.get("lines", []):
+                spans = [span for span in line.get("spans", []) if span.get("text", "")]
+                if not spans:
+                    continue
+                text = "".join(span["text"] for span in spans)
+                if not text.strip():
+                    continue
+                bbox = line.get("bbox", (0, 0, 0, 0))
+                max_size = max(round(span["size"], 1) for span in spans)
+                dominant = max(spans, key=lambda span: len(span["text"].strip()))
+                for span in spans:
+                    size_counter[round(span["size"])] += len(span["text"].strip())
+                page_lines.append(
+                    {
+                        "page": page_index,
+                        "page_height": page_height,
+                        "page_width": page_width,
+                        "block": (page_index, block_number),
+                        "x0": bbox[0],
+                        "x1": bbox[2],
+                        "top": bbox[1],
+                        "bottom": bbox[3],
+                        "height": max(bbox[3] - bbox[1], 1.0),
+                        "max_size": max_size,
+                        "base_y": dominant.get("origin", (0, bbox[3]))[1],
+                        "text": text,
+                        "spans": spans,
+                        "is_page_top": False,
+                        "is_page_bottom": False,
+                    }
+                )
+        if page_lines:
+            ordered = sorted(page_lines, key=lambda rec: (rec["top"], rec["x0"]))
+            ordered[0]["is_page_top"] = True
+            ordered[-1]["is_page_bottom"] = True
+            lines.extend(page_lines)
+    body_size = float(size_counter.most_common(1)[0][0]) if size_counter else 0.0
+    return lines, body_size
+
+
+def pdf_running_heads(lines, page_count):
+    if page_count < 3:
+        return set()
+    counter = Counter()
+    for line in lines:
+        if line["is_page_top"] or line["is_page_bottom"]:
+            key = pdf_norm_chrome(line["text"])
+            if key:
+                counter[key] += 1
+    threshold = page_count * PDF_RUNNING_HEAD_PAGE_FRACTION
+    return {key for key, count in counter.items() if count > threshold}
+
+
+def pdf_is_page_number(text):
+    return re.fullmatch(r"[\divxlcdmIVXLCDM.\s\-–—]+", text.strip()) is not None
+
+
+def pdf_body_line_text(line, body_size, markers):
+    # Rebuild the visible text of a body line, replacing superscript reference
+    # markers with sentinels (\x00M{idx}\x00) resolved after note matching.
+    base_y = line["base_y"]
+    parts = []
+    for span in line["spans"]:
+        stripped = span["text"].strip()
+        raised = base_y - span.get("origin", (0, base_y))[1]
+        if (
+            re.fullmatch(r"\d{1,3}", stripped)
+            and span["size"] <= body_size * PDF_SUPERSCRIPT_SIZE_RATIO
+            and raised >= PDF_SUPERSCRIPT_RISE_RATIO * body_size
+        ):
+            idx = len(markers)
+            markers.append(int(stripped))
+            parts.append(f"\x00M{idx}\x00")
+        else:
+            parts.append(span["text"])
+    return "".join(parts)
+
+
+def pdf_paragraphs(body_lines, body_size, markers):
+    paragraphs = []
+    current = ""
+    prev = None
+    for line in body_lines:
+        text = pdf_body_line_text(line, body_size, markers).strip()
+        if not text:
+            prev = line
+            continue
+        if prev is None:
+            new_para = True
+        elif line["page"] != prev["page"]:
+            # Paragraphs spanning a page break are split; joining across pages
+            # would merge unrelated text given running heads are already dropped.
+            new_para = True
+        else:
+            # Block boundaries are unreliable (many PDFs emit one block per
+            # visual line), so paragraph breaks are detected by vertical gap.
+            gap = line["top"] - prev["bottom"]
+            new_para = gap > PDF_PARAGRAPH_GAP_RATIO * line["height"]
+        if new_para:
+            if current.strip():
+                paragraphs.append(current.strip())
+            current = text
+        elif current.endswith("-") and len(current) >= 2 and current[-2].isalpha() and text[:1].islower():
+            current = current[:-1] + text
+        else:
+            current = f"{current} {text}"
+        prev = line
+    if current.strip():
+        paragraphs.append(current.strip())
+    return paragraphs
+
+
+def pdf_match_notes(markers, footnotes, chapter_index):
+    # Match in-text markers to footnote bodies by printed number (FIFO per
+    # number to tolerate per-page numbering restarts). Returns the inline
+    # replacement per marker index, ordered (id, text) definitions, and counts.
+    from collections import deque
+
+    positions = {}
+    for index, (number, _body) in enumerate(footnotes):
+        positions.setdefault(number, deque()).append(index)
+    consumed = [False] * len(footnotes)
+    replacements = {}
+    definitions = []
+    sequence = 0
+    unmatched_markers = 0
+    for marker_index, number in enumerate(markers):
+        queue = positions.get(number)
+        if queue:
+            note_index = queue.popleft()
+            consumed[note_index] = True
+            sequence += 1
+            footnote_id = f"c{chapter_index}-{sequence}"
+            replacements[marker_index] = f"[^{footnote_id}]"
+            definitions.append((footnote_id, footnotes[note_index][1]))
+        else:
+            replacements[marker_index] = str(number)
+            unmatched_markers += 1
+    orphans = 0
+    for index, (_number, body) in enumerate(footnotes):
+        if not consumed[index]:
+            sequence += 1
+            definitions.append((f"c{chapter_index}-{sequence}", body))
+            orphans += 1
+    return replacements, definitions, unmatched_markers, orphans
+
+
+def pdf_render_chapter(chapter, chapter_index, body_size, stats):
+    heading = chapter["heading"] or stats["default_title"]
+    markers = []
+    paragraphs = pdf_paragraphs(chapter["body_lines"], body_size, markers)
+    replacements, definitions, unmatched, orphans = pdf_match_notes(markers, chapter["footnotes"], chapter_index)
+    stats["unmatched_markers"] += unmatched
+    stats["orphan_notes"] += orphans
+    body = "\n\n".join(paragraphs)
+    for marker_index, replacement in replacements.items():
+        body = body.replace(f"\x00M{marker_index}\x00", replacement)
+    out = [f"# {heading}", ""]
+    if body:
+        out.append(body)
+        out.append("")
+    if definitions:
+        out.append("## Endnotes")
+        out.append("")
+        for footnote_id, note_text in definitions:
+            clean = re.sub(r"\s+", " ", note_text).strip()
+            out.append(f"[^{footnote_id}]: {clean}")
+        out.append("")
+    return "\n".join(out).rstrip("\n")
+
+
+def run_pdf_to_markdown_structured(source, output):
+    if importlib.util.find_spec("fitz") is None:
+        raise RuntimeError(
+            "PyMuPDF (fitz) is required for PDF->Markdown (pip install pymupdf); PDF->txt still works via pdftotext"
+        )
+    import fitz
+
+    try:
+        doc = fitz.open(source)
+    except Exception as error:  # fitz raises library-specific errors on malformed input
+        raise RuntimeError(f"PDF could not be opened: {error}")
+    try:
+        if doc.is_encrypted and doc.authenticate("") == 0:
+            raise RuntimeError("PDF is encrypted or password-protected and cannot be converted")
+        page_count = doc.page_count
+        lines, body_size = pdf_collect_lines(doc)
+    finally:
+        doc.close()
+
+    warnings = [
+        "PDF Markdown structure (headings, footnotes) is reconstructed heuristically and may be incomplete or misattributed.",
+        "Tables, figures, and complex layout are not reconstructed.",
+    ]
+
+    if body_size <= 0 or not lines:
+        text = ""
+        output.write_text(text, encoding="utf-8")
+        warnings.append("Very little text was extracted; the PDF may be scanned. Use document-ingest for OCR.")
+        warnings.extend(text_warnings(text))
+        return warnings
+
+    drop_chrome = pdf_running_heads(lines, page_count)
+
+    chapters = []
+    current = None
+    headings_detected = 0
+    leading_synthesized = False
+    open_footnote = None  # (page, chapter id) tracking for continuation lines
+    open_footnote_page = None
+
+    def ensure_chapter():
+        nonlocal current, leading_synthesized
+        if current is None:
+            current = {"heading": None, "body_lines": [], "footnotes": []}
+            chapters.append(current)
+            leading_synthesized = True
+        return current
+
+    for line in lines:
+        text = line["text"].strip()
+        if not text:
+            continue
+        # Drop running heads/footers and standalone page numbers.
+        if (line["is_page_top"] or line["is_page_bottom"]) and pdf_norm_chrome(text) in drop_chrome:
+            continue
+        if (line["is_page_top"] or line["is_page_bottom"]) and pdf_is_page_number(text):
+            continue
+
+        top_fraction = line["top"] / line["page_height"]
+        is_heading = (
+            line["max_size"] >= body_size * PDF_HEADING_SIZE_RATIO
+            and len(text.split()) <= PDF_HEADING_MAX_WORDS
+            and not pdf_is_page_number(text)
+        )
+        in_footnote_region = (
+            top_fraction >= PDF_FOOTNOTE_BOTTOM_FRACTION and line["max_size"] <= body_size * PDF_FOOTNOTE_SIZE_RATIO
+        )
+
+        if is_heading:
+            current = {"heading": text, "body_lines": [], "footnotes": []}
+            chapters.append(current)
+            headings_detected += 1
+            open_footnote = None
+            open_footnote_page = None
+            continue
+
+        if in_footnote_region:
+            chapter = ensure_chapter()
+            match = re.match(r"^\s*(\d{1,3})[.)\]\s]\s*(.*)$", text)
+            if match:
+                chapter["footnotes"].append((int(match.group(1)), match.group(2).strip()))
+                open_footnote = len(chapter["footnotes"]) - 1
+                open_footnote_page = line["page"]
+                continue
+            if open_footnote is not None and open_footnote_page == line["page"] and chapter["footnotes"]:
+                number, body = chapter["footnotes"][open_footnote]
+                chapter["footnotes"][open_footnote] = (number, f"{body} {text}".strip())
+                continue
+            # Small bottom text with no number and no open note: treat as body.
+
+        ensure_chapter()["body_lines"].append(line)
+
+    if not chapters:
+        text = ""
+        output.write_text(text, encoding="utf-8")
+        warnings.append("Very little text was extracted; the PDF may be scanned. Use document-ingest for OCR.")
+        warnings.extend(text_warnings(text))
+        return warnings
+
+    stats = {"default_title": safe_stem(source), "unmatched_markers": 0, "orphan_notes": 0}
+    rendered = [pdf_render_chapter(chapter, index + 1, body_size, stats) for index, chapter in enumerate(chapters)]
+    text = "\n\n".join(part for part in rendered if part)
+    text = text + "\n" if text else ""
+    output.write_text(text, encoding="utf-8")
+
+    if headings_detected == 0:
+        warnings.append("No chapter headings were detected; the document was emitted as a single synthesized chapter.")
+    elif leading_synthesized:
+        warnings.append("Content before the first detected heading was placed under a synthesized chapter title.")
+    if stats["unmatched_markers"]:
+        warnings.append(
+            f"{stats['unmatched_markers']} footnote markers had no matching footnote text and were left inline."
+        )
+    if stats["orphan_notes"]:
+        warnings.append(
+            f"{stats['orphan_notes']} footnotes had no in-text marker and were appended to Endnotes unlinked."
+        )
+    if pdf_has_columns(lines):
+        warnings.append("Multiple text columns were detected; the reading order may be incorrect.")
+    if len(re.findall(r"[^\W_]", text, flags=re.UNICODE)) < LOW_TEXT_CHARACTERS:
+        warnings.append("Very little text was extracted; the PDF may be scanned. Use document-ingest for OCR.")
+    warnings.extend(text_warnings(text))
+    return warnings
+
+
+def pdf_has_columns(lines):
+    body_lines = [line for line in lines if not line["is_page_top"] and not line["is_page_bottom"]]
+    if len(body_lines) < 10:
+        return False
+    left = sum(1 for line in body_lines if line["x1"] < line["page_width"] * 0.5)
+    right = sum(1 for line in body_lines if line["x0"] > line["page_width"] * 0.55)
+    total = len(body_lines)
+    return left > total * 0.2 and right > total * 0.2
+
+
 def csv_rows(path):
     delimiter = "\t" if path.suffix.lower() == ".tsv" else ","
     try:
@@ -921,7 +1279,10 @@ def convert_one(source, target, converted_dir, used_names, options=None):
             output, warnings = run_xlsx_to_csv(source, converted_dir, stem)
         elif group == "pdf":
             output = unique_output(converted_dir, stem, TARGET_EXTENSION[target], used_names)
-            warnings = run_pdftotext(source, output, target)
+            if target == "md":
+                warnings = run_pdf_to_markdown_structured(source, output)
+            else:
+                warnings = run_pdftotext(source, output, target)
         elif group == "txt":
             output = unique_output(converted_dir, stem, "txt", used_names)
             warnings = run_txt_cleanup(source, output)
@@ -951,6 +1312,7 @@ def command_doctor(args):
         openpyxl_ver = openpyxl.__version__
     pandoc = pandoc_version()
     pdftotext = pdftotext_version()
+    pymupdf = pymupdf_version()
     java = java_version()
     epubcheck = resolve_epubcheck()
     managed_jar = managed_epubcheck_jar()
@@ -961,6 +1323,8 @@ def command_doctor(args):
         "pandocVersion": pandoc,
         "pdftotext": pdftotext is not None,
         "pdftotextVersion": pdftotext,
+        "pymupdf": pymupdf is not None,
+        "pymupdfVersion": pymupdf,
         "java": java is not None,
         "javaVersion": java,
         "epubcheck": epubcheck is not None,
@@ -976,7 +1340,9 @@ def command_doctor(args):
     if pandoc is None:
         result["remediation"].append("Install Pandoc for DOCX/Markdown/HTML conversions (macOS: brew install pandoc; Debian/Ubuntu: apt install pandoc).")
     if pdftotext is None:
-        result["remediation"].append("Install Poppler for PDF conversion (macOS: brew install poppler; Debian/Ubuntu: apt install poppler-utils).")
+        result["remediation"].append("Install Poppler for PDF->txt conversion (macOS: brew install poppler; Debian/Ubuntu: apt install poppler-utils).")
+    if pymupdf is None:
+        result["remediation"].append("Install PyMuPDF for structured PDF->Markdown (pip install pymupdf); PDF->txt still works with Poppler.")
     if not xlsx:
         result["remediation"].append("Install openpyxl for CSV<->XLSX conversion in the active Python 3 environment.")
     if java is None:
@@ -992,7 +1358,8 @@ def command_doctor(args):
         return
     print(f"Python: {result['python']}")
     print(f"Pandoc (DOCX/MD/HTML/EPUB): {pandoc or 'unavailable'}")
-    print(f"pdftotext (PDF): {pdftotext or 'unavailable'}")
+    print(f"pdftotext (PDF->txt): {pdftotext or 'unavailable'}")
+    print(f"PyMuPDF (PDF->Markdown structure): {pymupdf or 'unavailable'}")
     print(f"Java (managed EPUBCheck runtime): {java or 'unavailable'}")
     print(f"EPUBCheck (optional EPUB conformance): {epubcheck['version'] if epubcheck else 'unavailable'}")
     if epubcheck:
