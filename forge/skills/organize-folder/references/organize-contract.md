@@ -13,6 +13,7 @@ never deleted. Every move is reversible.
   profile.json         # structured folder summary (distributions, clusters)
   profile.md           # model-facing folder summary read before designing layout
   review_queue.md      # files to open before trusting their category
+  near_duplicates.md   # advisory content near-duplicate candidates (embeddings)
   skipped.md           # protected and skipped paths, with reasons
   plan_report.md       # written by `plan`: summary, validation, planned moves
   move_log.jsonl       # written by `apply`: append-only record of every move
@@ -41,10 +42,13 @@ fixed; `plan` and `apply` reject a reordered header.
 | `detected_type` | No | MIME type guessed from the name, or `unknown`. |
 | `peek` | No | Short content signal: text head, image dimensions, or archive listing. Empty when none applies. |
 | `name_cluster` | No | Label grouping similar filenames (for example `camera`, `screenshots`, `invoice`, `generic`). |
+| `content_cluster` | No | Label (`c1`, `c2`, ...) grouping files with similar content from embeddings. Empty when embeddings were off, the file had no embeddable text, or it did not cluster with another file. |
 | `category` | Yes | Deterministic category; the model may correct it. |
 | `confidence` | No | 0-1 score for the deterministic category. |
-| `is_duplicate` | No | `true` if another file has identical content. |
-| `duplicate_of` | No | The primary copy this file duplicates. |
+| `is_duplicate` | No | `true` if another file has byte-identical content (exact SHA-256 match). |
+| `duplicate_of` | No | The primary copy this file exactly duplicates. |
+| `near_duplicate_of` | No | The primary copy this file is a content near-duplicate of (similar but not byte-identical). Advisory only; never auto-routed. Empty when none. |
+| `content_similarity` | No | Cosine similarity (0-1) to the `near_duplicate_of` file. Empty when none. |
 | `proposed_destination` | Yes | Destination path relative to the target. |
 | `status` | Yes | `pending`, `duplicate`, or `keep`. |
 | `note` | Yes | Free text; the scan flags low-confidence rows here. |
@@ -116,11 +120,41 @@ deterministic guess; high-confidence files rarely need per-file inspection.
 
 `scan` writes `profile.json` and `profile.md` summarizing the whole folder:
 per-folder counts and sizes, category and extension distributions, filename
-clusters with examples, modified-year clusters, the largest files, a duplicate
+clusters with examples, content clusters with examples (when embeddings ran),
+modified-year clusters, the largest files, a duplicate and near-duplicate
 summary, and a handful of representative content peeks. The agent reads
 `profile.md` first to understand what the folder is for and to design a
 destination layout that fits it, instead of crawling every file. Regenerate it
 from an existing run with `profile <run-directory>`.
+
+## Content Similarity and Near-Duplicates
+
+`scan` extracts a short text sample from each text-bearing file (the text
+extensions it can read as UTF-8, plus PDFs when `pdftotext` is installed) and
+embeds it through the shared forge embeddings endpoint
+(`FORGE_EMBEDDINGS_URL`, default `http://llms:8005/v1/embeddings`, model
+`FORGE_EMBEDDINGS_MODEL`, default `Qwen3-Embedding-0.6B`). It uses the vectors
+for two advisory signals:
+
+- **Content clusters** (`content_cluster`): files grouped by similarity at or
+  above `--cluster-threshold` (default `0.80`), regardless of filename. Use them
+  to keep related documents together when designing the layout.
+- **Near-duplicate candidates** (`near_duplicate_of`, `content_similarity`):
+  files similar at or above `--near-duplicate-threshold` (default `0.95`) that
+  are not byte-identical — reformatted exports, drafts, versions, lightly edited
+  copies. These are listed in `near_duplicates.md`.
+
+Near-duplicates are **advisory only**. Unlike exact SHA-256 duplicates they are
+never set to `status=duplicate` or routed to `_duplicates/` automatically,
+because they are not provably identical. The model and user review them and
+decide; the scan only annotates and reports.
+
+Embeddings are best-effort and degrade cleanly. When the endpoint is
+unreachable, `--no-embeddings` is passed, or a file has no embeddable text, the
+similarity fields stay empty and the run behaves exactly as a metadata-only
+scan. `scan.json` records an `embeddings` block (`enabled`, `reason`, model,
+thresholds, counts), and exact-duplicate files are excluded from the
+near-duplicate pass since they are already handled.
 
 ## Hashing and Integrity
 

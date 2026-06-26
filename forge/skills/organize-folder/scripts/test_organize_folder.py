@@ -10,22 +10,74 @@ from this directory, or:
 
 import csv
 import json
+import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from collections import Counter
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parent / "organize-folder.py"
 
 
-def run(*args):
+def run(*args, env=None):
+    merged = None
+    if env is not None:
+        merged = {**os.environ, **env}
     result = subprocess.run(
         [sys.executable, str(SCRIPT), *args],
         capture_output=True,
         text=True,
+        env=merged,
     )
     return result
+
+
+def _char_frequency_vector(text):
+    counts = Counter(char for char in text.lower() if char.isalpha())
+    return [float(counts.get(chr(ord("a") + index), 0)) for index in range(26)]
+
+
+class _StubEmbeddingsHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        inputs = payload.get("input", [])
+        data = [
+            {"index": index, "embedding": _char_frequency_vector(text)}
+            for index, text in enumerate(inputs)
+        ]
+        body = json.dumps({"object": "list", "data": data, "model": "stub"}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        return
+
+
+class StubEmbeddingsServer:
+    """A deterministic local /v1/embeddings endpoint for offline tests. It returns
+    a 26-dimensional letter-frequency vector per input, so near-identical text
+    yields near-identical vectors."""
+
+    def __enter__(self):
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _StubEmbeddingsHandler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        host, port = self.server.server_address
+        self.url = f"http://{host}:{port}/v1/embeddings"
+        return self
+
+    def __exit__(self, *exc):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join()
 
 
 def read_manifest(run_dir, name="manifest.csv"):
@@ -55,8 +107,13 @@ class OrganizeFolderTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def scan(self, *extra):
-        result = run("scan", str(self.target), "--output", str(self.run_dir), *extra)
+    def scan(self, *extra, env=None):
+        # Default to offline so the base tests stay hermetic; embedding tests opt
+        # in explicitly via the stub server.
+        args = ["scan", str(self.target), "--output", str(self.run_dir)]
+        if "--no-embeddings" not in extra and env is None:
+            args.append("--no-embeddings")
+        result = run(*args, *extra, env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
@@ -64,7 +121,7 @@ class OrganizeFolderTest(unittest.TestCase):
         summary = self.scan()
         self.assertEqual(summary["fileCount"], 6)
         self.assertEqual(summary["duplicateCount"], 1)
-        for name in ("manifest.csv", "scan.json", "profile.md", "profile.json", "review_queue.md", "skipped.md"):
+        for name in ("manifest.csv", "scan.json", "profile.md", "profile.json", "review_queue.md", "skipped.md", "near_duplicates.md"):
             self.assertTrue((self.run_dir / name).is_file(), name)
         rows = read_manifest(self.run_dir)
         self.assertEqual(rows["sub/notes_copy.txt"]["is_duplicate"], "true")
@@ -119,6 +176,57 @@ class OrganizeFolderTest(unittest.TestCase):
         plan = run("plan", str(self.run_dir))
         self.assertNotEqual(plan.returncode, 0)
         self.assertIn("fingerprint", plan.stdout + plan.stderr)
+
+    def test_embeddings_disabled_leaves_similarity_empty(self):
+        self.scan()
+        rows = read_manifest(self.run_dir)
+        for row in rows.values():
+            self.assertEqual(row["content_cluster"], "")
+            self.assertEqual(row["near_duplicate_of"], "")
+            self.assertEqual(row["content_similarity"], "")
+        scan = json.loads((self.run_dir / "scan.json").read_text(encoding="utf-8"))
+        self.assertFalse(scan["embeddings"]["enabled"])
+        self.assertIn("disabled", scan["embeddings"]["reason"])
+        report = (self.run_dir / "near_duplicates.md").read_text(encoding="utf-8")
+        self.assertIn("not computed", report)
+
+    def test_embeddings_detect_near_duplicate(self):
+        body = "the quick brown fox jumps over the lazy dog while the cat watches nearby"
+        (self.target / "doc_a.txt").write_text(body + "\n", encoding="utf-8")
+        (self.target / "doc_b.txt").write_text(body + " today as well\n", encoding="utf-8")
+        with StubEmbeddingsServer() as stub:
+            summary = self.scan(
+                "--near-duplicate-threshold", "0.9",
+                "--cluster-threshold", "0.7",
+                env={"FORGE_EMBEDDINGS_URL": stub.url, "FORGE_EMBEDDINGS_MODEL": "stub"},
+            )
+        self.assertGreaterEqual(summary["nearDuplicateCount"], 1)
+        self.assertTrue(summary["embeddings"]["enabled"])
+        rows = read_manifest(self.run_dir)
+        # doc_a sorts before doc_b, so doc_b points at doc_a.
+        self.assertEqual(rows["doc_b.txt"]["near_duplicate_of"], "doc_a.txt")
+        self.assertNotEqual(rows["doc_b.txt"]["content_similarity"], "")
+        self.assertNotEqual(rows["doc_a.txt"]["content_cluster"], "")
+        self.assertEqual(rows["doc_a.txt"]["content_cluster"], rows["doc_b.txt"]["content_cluster"])
+        self.assertIn("near-duplicate", rows["doc_b.txt"]["note"])
+        scan = json.loads((self.run_dir / "scan.json").read_text(encoding="utf-8"))
+        self.assertTrue(scan["embeddings"]["enabled"])
+        self.assertEqual(scan["embeddings"]["nearDuplicateCount"], summary["nearDuplicateCount"])
+        report = (self.run_dir / "near_duplicates.md").read_text(encoding="utf-8")
+        self.assertIn("doc_b.txt", report)
+
+    def test_embeddings_exact_duplicates_excluded(self):
+        # The exact-duplicate pair in the fixture must not also appear as a
+        # near-duplicate; exact duplicates are handled by SHA-256.
+        with StubEmbeddingsServer() as stub:
+            self.scan(
+                "--near-duplicate-threshold", "0.9",
+                env={"FORGE_EMBEDDINGS_URL": stub.url, "FORGE_EMBEDDINGS_MODEL": "stub"},
+            )
+        rows = read_manifest(self.run_dir)
+        self.assertEqual(rows["sub/notes_copy.txt"]["is_duplicate"], "true")
+        self.assertEqual(rows["sub/notes_copy.txt"]["near_duplicate_of"], "")
+        self.assertEqual(rows["sub/notes.txt"]["near_duplicate_of"], "")
 
 
 if __name__ == "__main__":

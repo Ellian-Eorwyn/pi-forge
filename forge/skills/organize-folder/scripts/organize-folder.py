@@ -8,6 +8,7 @@ import mimetypes
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import zipfile
@@ -15,8 +16,13 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Shared forge embeddings client lives at forge/lib; this script is at
+# forge/skills/organize-folder/scripts/organize-folder.py.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
+import forge_embeddings
 
-SCAN_SCHEMA_VERSION = 2
+
+SCAN_SCHEMA_VERSION = 3
 DEFAULT_CONFIDENCE_THRESHOLD = 0.75
 
 # Bytes hashed from the head and tail of a file for the fast fingerprint. Files
@@ -25,6 +31,22 @@ FINGERPRINT_EDGE_BYTES = 65536
 
 # Cap the targeted-sampling list so review stays cheap on large folders.
 REVIEW_QUEUE_LIMIT = 150
+
+# Embedding-based content similarity. Files whose extracted text is more similar
+# than the near-duplicate threshold are flagged as near-duplicate candidates
+# (reformatted copies, drafts, versions) that exact-hash duplicate detection
+# cannot see. The looser cluster threshold groups related documents to inform
+# the destination layout. Near-duplicates are advisory only; they are never
+# auto-routed to _duplicates the way exact SHA-256 duplicates are.
+DEFAULT_NEAR_DUPLICATE_THRESHOLD = 0.95
+DEFAULT_CONTENT_CLUSTER_THRESHOLD = 0.80
+
+# Maximum characters of extracted text embedded per file. Enough to separate
+# documents by content without sending whole files over the wire.
+CONTENT_SAMPLE_CHARS = 4000
+
+# Cap the near-duplicate report so review stays bounded on large folders.
+NEAR_DUPLICATE_REPORT_LIMIT = 200
 
 MANIFEST_FIELDS = [
     "relative_source_path",
@@ -38,10 +60,13 @@ MANIFEST_FIELDS = [
     "detected_type",
     "peek",
     "name_cluster",
+    "content_cluster",
     "category",
     "confidence",
     "is_duplicate",
     "duplicate_of",
+    "near_duplicate_of",
+    "content_similarity",
     "proposed_destination",
     "status",
     "note",
@@ -334,6 +359,129 @@ def name_cluster(filename):
     return "generic"
 
 
+def text_content_sample(path, max_chars=CONTENT_SAMPLE_CHARS):
+    """Read up to max_chars of a text file for embedding. Best-effort: any read
+    failure yields an empty sample rather than aborting the scan."""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read(max_chars)
+    except OSError:
+        return ""
+    return " ".join(text.split())
+
+
+def pdf_content_sample(path, max_chars=CONTENT_SAMPLE_CHARS):
+    """Best-effort PDF text via pdftotext when it is installed. Returns an empty
+    sample when the tool is missing or extraction fails, so PDFs simply get no
+    content vector rather than failing the scan."""
+    if shutil.which("pdftotext") is None:
+        return ""
+    try:
+        completed = subprocess.run(
+            ["pdftotext", "-q", "-l", "5", str(path), "-"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if completed.returncode != 0:
+        return ""
+    return " ".join(completed.stdout.split())[:max_chars]
+
+
+def content_sample(path, extension):
+    if extension in TEXT_PEEK_EXTENSIONS:
+        return text_content_sample(path)
+    if extension == ".pdf":
+        return pdf_content_sample(path)
+    return ""
+
+
+def compute_content_similarity(records, target, args):
+    """Embed text-bearing files and annotate records with content clusters and
+    near-duplicate candidates. Mutates records in place and returns
+    (info, near_pairs). Always degrades cleanly: when embeddings are disabled or
+    the endpoint is unreachable, records keep their empty similarity fields and
+    info records why.
+
+    Exact SHA-256 duplicates are excluded from this pass: they are already
+    handled, and near-duplicate detection is about finding files that are similar
+    but not byte-identical."""
+    url = forge_embeddings.endpoint_url(getattr(args, "embeddings_url", None))
+    info = {
+        "enabled": False,
+        "reason": None,
+        "url": url,
+        "model": forge_embeddings.model_name(),
+        "nearDuplicateThreshold": args.near_duplicate_threshold,
+        "clusterThreshold": args.cluster_threshold,
+        "embeddedCount": 0,
+        "nearDuplicateCount": 0,
+        "contentClusterCount": 0,
+    }
+    if args.no_embeddings:
+        info["reason"] = "disabled with --no-embeddings"
+        return info, []
+
+    pool = [record for record in records if record.get("is_duplicate") != "true"]
+    samples = []
+    sampled = []
+    for record in pool:
+        sample = content_sample(target / record["relative_source_path"], record["extension"])
+        if sample:
+            samples.append(sample)
+            sampled.append(record)
+    if not sampled:
+        info["reason"] = "no text-bearing files to embed"
+        return info, []
+
+    result = forge_embeddings.embed_texts(samples, url=url)
+    if not result["ok"]:
+        info["reason"] = f"embeddings endpoint unavailable: {result['reason']}"
+        return info, []
+
+    info["enabled"] = True
+    info["model"] = result["model"]
+    info["embeddedCount"] = len(sampled)
+    vectors = [forge_embeddings.normalize(vector) for vector in result["vectors"]]
+
+    clusters = forge_embeddings.cluster_components(vectors, args.cluster_threshold)
+    cluster_index = 0
+    for component in sorted(clusters, key=lambda part: min(part)):
+        if len(component) < 2:
+            continue
+        cluster_index += 1
+        label = f"c{cluster_index}"
+        for position in component:
+            sampled[position]["content_cluster"] = label
+    info["contentClusterCount"] = cluster_index
+
+    near_components = forge_embeddings.cluster_components(vectors, args.near_duplicate_threshold)
+    near_pairs = []
+    near_duplicate_count = 0
+    for component in sorted(near_components, key=lambda part: min(part)):
+        if len(component) < 2:
+            continue
+        primary_position = min(component, key=lambda position: sampled[position]["relative_source_path"].lower())
+        primary = sampled[primary_position]
+        for position in component:
+            if position == primary_position:
+                continue
+            record = sampled[position]
+            similarity = forge_embeddings.cosine(vectors[position], vectors[primary_position])
+            record["near_duplicate_of"] = primary["relative_source_path"]
+            record["content_similarity"] = f"{similarity:.3f}"
+            existing_note = record.get("note") or ""
+            note = "near-duplicate of " + primary["relative_source_path"] + "; review before moving"
+            record["note"] = f"{existing_note}; {note}" if existing_note else note
+            near_pairs.append((record["relative_source_path"], primary["relative_source_path"], similarity))
+            near_duplicate_count += 1
+    near_pairs.sort(key=lambda item: item[2], reverse=True)
+    info["nearDuplicateCount"] = near_duplicate_count
+    return info, near_pairs
+
+
 def require_new_directory(raw_path):
     path = Path(raw_path).expanduser().resolve()
     if path.exists():
@@ -494,12 +642,14 @@ def needs_review(record, threshold):
 
 
 def command_doctor(args):
+    embeddings = forge_embeddings.embeddings_doctor()
     info = {
         "pythonVersion": sys.version.split()[0],
         "platform": sys.platform,
         "dependencies": "Python standard library only.",
         "defaultConfidenceThreshold": DEFAULT_CONFIDENCE_THRESHOLD,
         "categories": sorted(set(CATEGORY_FOLDERS) - {"other"}) + ["other"],
+        "embeddings": embeddings,
     }
     if args.json:
         print(json.dumps(info, indent=2))
@@ -508,8 +658,11 @@ def command_doctor(args):
     print(f"- Python: {info['pythonVersion']} ({info['platform']})")
     print(f"- Dependencies: {info['dependencies']}")
     print(f"- Default confidence threshold: {DEFAULT_CONFIDENCE_THRESHOLD}")
-    print("- Scan writes manifest.csv, profile.md, profile.json, review_queue.md, and skipped.md.")
+    print("- Scan writes manifest.csv, profile.md, profile.json, review_queue.md, skipped.md, and near_duplicates.md.")
     print("- Fingerprints every file and fully hashes only same-size duplicate candidates (use --full-hash to hash all).")
+    reach = "reachable" if embeddings["reachable"] else "unreachable"
+    print(f"- Embeddings ({embeddings['url']}): {reach} - {embeddings['detail']}.")
+    print("  Used for content clusters and near-duplicate candidates; the scan degrades cleanly when unreachable.")
     print("- Refuses filesystem roots, the home directory, system trees, and project roots.")
     print("- Skips hidden paths, symlinks, repositories, dependency trees, and bundles.")
 
@@ -520,6 +673,10 @@ def command_scan(args):
     threshold = args.confidence_threshold
     if not 0.0 <= threshold <= 1.0:
         fail("--confidence-threshold must be between 0 and 1")
+    if not -1.0 <= args.near_duplicate_threshold <= 1.0:
+        fail("--near-duplicate-threshold must be between -1 and 1")
+    if not -1.0 <= args.cluster_threshold <= 1.0:
+        fail("--cluster-threshold must be between -1 and 1")
 
     records = []
     skipped = []
@@ -620,7 +777,10 @@ def command_scan(args):
             record["proposed_destination"] = default_destination(record, used_destinations)
             record["note"] = "" if record["confidence"] >= threshold else "low confidence: review file content before moving"
 
+    embeddings_info, near_pairs = compute_content_similarity(records, target, args)
+
     write_manifest(run_directory / "manifest.csv", records)
+    write_near_duplicates_report(run_directory / "near_duplicates.md", target, near_pairs, embeddings_info)
 
     review = []
     for record in records:
@@ -638,10 +798,12 @@ def command_scan(args):
         "fullHash": bool(args.full_hash),
         "fileCount": len(records),
         "duplicateCount": sum(1 for record in records if record["is_duplicate"] == "true"),
+        "nearDuplicateCount": embeddings_info["nearDuplicateCount"],
         "lowConfidenceCount": sum(1 for record in records if record["confidence"] < threshold),
         "reviewCount": len(review),
         "skippedCount": len(skipped),
         "duplicatesFolder": DUPLICATES_FOLDER,
+        "embeddings": embeddings_info,
         "files": {
             record["relative_source_path"]: {
                 "sha256": record["sha256"],
@@ -667,11 +829,14 @@ def command_scan(args):
                 "manifest": str(run_directory / "manifest.csv"),
                 "profile": str(run_directory / "profile.md"),
                 "reviewQueue": str(run_directory / "review_queue.md"),
+                "nearDuplicates": str(run_directory / "near_duplicates.md"),
                 "fileCount": scan["fileCount"],
                 "duplicateCount": scan["duplicateCount"],
+                "nearDuplicateCount": scan["nearDuplicateCount"],
                 "lowConfidenceCount": scan["lowConfidenceCount"],
                 "reviewCount": scan["reviewCount"],
                 "skippedCount": scan["skippedCount"],
+                "embeddings": {"enabled": embeddings_info["enabled"], "reason": embeddings_info["reason"]},
             },
             indent=2,
         )
@@ -755,6 +920,51 @@ def write_review_queue(path, target, review):
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def write_near_duplicates_report(path, target, near_pairs, embeddings_info):
+    lines = [
+        "# Near-Duplicate Candidates",
+        "",
+        f"Target: `{target}`",
+        "",
+        "These files are highly similar in content but are not byte-identical, so "
+        "exact-hash duplicate detection does not catch them: reformatted exports, "
+        "drafts, versions, or lightly edited copies. They are advisory only and are "
+        "never routed to `_duplicates/` automatically. Review each pair and decide "
+        "whether to keep, relocate, or set one to `duplicate` in `manifest.csv`.",
+        "",
+    ]
+    if not embeddings_info["enabled"]:
+        lines.append(f"Content similarity was not computed: {embeddings_info['reason']}.")
+        lines.append("")
+        path.write_text("\n".join(lines), encoding="utf-8")
+        return
+    lines.append(
+        f"Embedded {embeddings_info['embeddedCount']} text-bearing files with "
+        f"`{embeddings_info['model']}` at a near-duplicate threshold of "
+        f"{embeddings_info['nearDuplicateThreshold']}."
+    )
+    lines.append("")
+    if not near_pairs:
+        lines.append("No near-duplicate candidates found.")
+        lines.append("")
+        path.write_text("\n".join(lines), encoding="utf-8")
+        return
+    if len(near_pairs) > NEAR_DUPLICATE_REPORT_LIMIT:
+        lines.append(
+            f"Showing the {NEAR_DUPLICATE_REPORT_LIMIT} most similar of "
+            f"{len(near_pairs)} candidate pairs."
+        )
+        lines.append("")
+        near_pairs = near_pairs[:NEAR_DUPLICATE_REPORT_LIMIT]
+    lines.extend(["| File | Near-duplicate of | Similarity |", "|---|---|---:|"])
+    for source, primary, similarity in near_pairs:
+        source_cell = source.replace("|", "\\|")
+        primary_cell = primary.replace("|", "\\|")
+        lines.append(f"| `{source_cell}` | `{primary_cell}` | {similarity:.3f} |")
+    lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def build_profile(target, rows):
     """Summarize the scanned folder into a compact, deterministic profile the
     model reads instead of crawling every file. Accepts records from `scan` or
@@ -767,12 +977,15 @@ def build_profile(target, rows):
     category_bytes = Counter()
     clusters = Counter()
     cluster_samples = defaultdict(list)
+    content_clusters = Counter()
+    content_cluster_samples = defaultdict(list)
     years = Counter()
     peeks = []
     largest = []
     total_bytes = 0
     duplicate_files = 0
     duplicate_bytes = 0
+    near_duplicate_files = 0
 
     for row in rows:
         size = int(row.get("size_bytes") or 0)
@@ -790,6 +1003,15 @@ def build_profile(target, rows):
         clusters[cluster] += 1
         if len(cluster_samples[cluster]) < 3:
             cluster_samples[cluster].append(row.get("filename") or row.get("relative_source_path"))
+        content_cluster = (row.get("content_cluster") or "").strip()
+        if content_cluster:
+            content_clusters[content_cluster] += 1
+            if len(content_cluster_samples[content_cluster]) < 4:
+                content_cluster_samples[content_cluster].append(
+                    row.get("relative_source_path") or row.get("filename")
+                )
+        if (row.get("near_duplicate_of") or "").strip():
+            near_duplicate_files += 1
         modified = row.get("modified") or ""
         year = modified[:4] if modified[:4].isdigit() else "unknown"
         years[year] += 1
@@ -811,8 +1033,13 @@ def build_profile(target, rows):
         "extensions": [{"extension": e, "count": c, "bytes": extension_bytes[e]} for e, c in extensions.most_common()],
         "categories": [{"category": c, "count": n, "bytes": category_bytes[c]} for c, n in categories.most_common()],
         "nameClusters": [{"cluster": cl, "count": n, "samples": cluster_samples[cl]} for cl, n in clusters.most_common()],
+        "contentClusters": [
+            {"cluster": cl, "count": n, "samples": content_cluster_samples[cl]}
+            for cl, n in content_clusters.most_common()
+        ],
         "dateClusters": [{"year": y, "count": n} for y, n in sorted(years.items())],
         "duplicates": {"files": duplicate_files, "bytes": duplicate_bytes},
+        "nearDuplicates": {"files": near_duplicate_files},
         "largestFiles": [{"path": p, "bytes": b} for b, p in largest[:10]],
         "samplePeeks": peeks,
     }
@@ -828,6 +1055,7 @@ def profile_markdown(profile):
         f"- Files: {profile['fileCount']}",
         f"- Total size: {human_size(profile['totalBytes'])}",
         f"- Duplicate files: {profile['duplicates']['files']} ({human_size(profile['duplicates']['bytes'])})",
+        f"- Near-duplicate candidates: {profile.get('nearDuplicates', {}).get('files', 0)} (see `near_duplicates.md`)",
         "",
         "Use this profile to understand what the folder holds and design a layout "
         "that fits it. Adjust destinations in `manifest.csv` by cluster rather than "
@@ -852,6 +1080,23 @@ def profile_markdown(profile):
     for entry in profile["nameClusters"][:25]:
         samples = ", ".join((s or "") for s in entry["samples"]).replace("|", "\\|")
         lines.append(f"| {entry['cluster']} | {entry['count']} | {samples} |")
+    content_clusters = profile.get("contentClusters") or []
+    if content_clusters:
+        lines.extend(
+            [
+                "",
+                "## Content clusters",
+                "",
+                "Groups of files with similar content (from embeddings), independent of "
+                "filename. Use them to place related documents together.",
+                "",
+                "| Cluster | Files | Examples |",
+                "|---|---:|---|",
+            ]
+        )
+        for entry in content_clusters[:25]:
+            samples = ", ".join((s or "") for s in entry["samples"]).replace("|", "\\|")
+            lines.append(f"| {entry['cluster']} | {entry['count']} | {samples} |")
     lines.extend(["", "## Years (modified)", "", "| Year | Files |", "|---|---:|"])
     for entry in profile["dateClusters"]:
         lines.append(f"| {entry['year']} | {entry['count']} |")
@@ -1213,6 +1458,27 @@ def parser():
         "--full-hash",
         action="store_true",
         help="Compute a full SHA-256 for every file instead of only same-size duplicate candidates.",
+    )
+    scan.add_argument(
+        "--no-embeddings",
+        action="store_true",
+        help="Skip content embeddings (no content clusters or near-duplicate candidates).",
+    )
+    scan.add_argument(
+        "--embeddings-url",
+        help="Override the embeddings endpoint (default FORGE_EMBEDDINGS_URL or http://llms:8005/v1/embeddings).",
+    )
+    scan.add_argument(
+        "--near-duplicate-threshold",
+        type=float,
+        default=DEFAULT_NEAR_DUPLICATE_THRESHOLD,
+        help="Cosine similarity at or above which two files are flagged as near-duplicate candidates.",
+    )
+    scan.add_argument(
+        "--cluster-threshold",
+        type=float,
+        default=DEFAULT_CONTENT_CLUSTER_THRESHOLD,
+        help="Cosine similarity at or above which files are grouped into a content cluster.",
     )
     scan.set_defaults(handler=command_scan)
 

@@ -26,6 +26,8 @@ established.
   evidence_table.csv
   evidence_table.xlsx        # only when openpyxl is available
   methods_matrix.csv
+  claim_clusters.csv         # advisory; only when embeddings ran and >=2 claims/findings
+  claim_clusters.md          # advisory worksheet; same condition
   literature_summary.md      # model-authored
   claims_matrix.md           # model-authored
   research_gaps.md           # model-authored
@@ -99,6 +101,32 @@ content column is the `;`-joined `text` values of one item type:
 ```text
 document_id,source_title,methods,data_sources,populations,variables,technologies,policies,limitations,research_gaps
 ```
+
+## Cross-Document Claim Clusters
+
+When the embeddings endpoint (`FORGE_EMBEDDINGS_URL`, default
+`http://llms:8005/v1/embeddings`) is reachable and at least two `claim` or
+`finding` items exist, `build` embeds those items and groups semantically similar
+ones across documents into `claim_clusters.csv` and the `claim_clusters.md`
+worksheet. This raises recall when authoring `claims_matrix.md` and
+`literature_summary.md` on larger corpora, where reading the whole evidence table
+for every cross-source link is unreliable.
+
+This worksheet is advisory and is not a deliverable:
+
+- It groups related claims; it never reconciles, merges, or decides
+  contradictions. The model judges each group against the evidence and records
+  genuine agreement and disagreement, attributing every claim to its document and
+  locator.
+- The `negation_hint` column and the "possible contradiction" flag are a crude
+  lexical signal (presence of a negation cue) to prompt review, not a polarity
+  determination. Do not treat the flag as a conclusion.
+- It degrades cleanly: when embeddings are unavailable, `--no-claim-clusters` is
+  passed, or fewer than two claims/findings exist, `build` skips the worksheet
+  and records the reason in its JSON output. The run is still valid; `validate`
+  does not require the worksheet.
+- `report-output` can ingest `claim_clusters.md` and `claim_clusters.csv` from the
+  run directory like any other input when assembling synthesis.
 
 ## Markdown Deliverables
 

@@ -184,6 +184,73 @@ server.listen(0, "127.0.0.1", () => {
 	});
 }
 
+function startEmbeddingsFixture(workspace) {
+	const serverPath = join(workspace, "embeddings-server.mjs");
+	writeFileSync(
+		serverPath,
+		`import { createServer } from "node:http";
+
+function vector(text) {
+	const counts = new Array(26).fill(0);
+	for (const character of text.toLowerCase()) {
+		const code = character.charCodeAt(0) - 97;
+		if (code >= 0 && code < 26) counts[code] += 1;
+	}
+	return counts;
+}
+
+const server = createServer((request, response) => {
+	let body = "";
+	request.setEncoding("utf8");
+	request.on("data", (chunk) => {
+		body += chunk;
+	});
+	request.on("end", () => {
+		const payload = body ? JSON.parse(body) : {};
+		const inputs = Array.isArray(payload.input) ? payload.input : [];
+		const data = inputs.map((text, index) => ({ index, embedding: vector(String(text)) }));
+		response.writeHead(200, { "Content-Type": "application/json" });
+		response.end(JSON.stringify({ object: "list", data, model: "stub" }));
+	});
+});
+
+server.listen(0, "127.0.0.1", () => {
+	const address = server.address();
+	if (!address || typeof address !== "object") process.exit(1);
+	process.stdout.write(String(address.port) + "\\n");
+});
+`,
+	);
+	const child = spawn(process.execPath, [serverPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+	return new Promise((resolveServer, rejectServer) => {
+		let stdout = "";
+		let stderr = "";
+		child.stdout.setEncoding("utf8");
+		child.stderr.setEncoding("utf8");
+		child.stderr.on("data", (chunk) => {
+			stderr += chunk;
+		});
+		child.stdout.on("data", (chunk) => {
+			stdout += chunk;
+			const line = stdout.split(/\r?\n/).find((value) => value.trim());
+			if (!line) return;
+			resolveServer({
+				url: `http://127.0.0.1:${line.trim()}/v1/embeddings`,
+				close: () =>
+					new Promise((resolveClose, rejectClose) => {
+						child.once("exit", () => resolveClose());
+						child.once("error", rejectClose);
+						child.kill();
+					}),
+			});
+		});
+		child.once("error", rejectServer);
+		child.once("exit", (code) => {
+			if (!stdout.trim()) rejectServer(new Error(`embeddings fixture exited before startup with code ${code}: ${stderr}`));
+		});
+	});
+}
+
 test("transcript cleanup and file conversion preserve their source", () => {
 	withWorkspace((workspace) => {
 		const source = join(workspace, "transcript.txt");
@@ -762,7 +829,7 @@ test("literature extraction rejects scaffolds and accepts authored deliverables"
 			"--extraction-file",
 			extractionPath,
 		]);
-		run(python, [script("literature-extraction", "literature-extraction.py"), "build", runDirectory]);
+		run(python, [script("literature-extraction", "literature-extraction.py"), "build", runDirectory, "--no-claim-clusters"]);
 		runFailure(
 			python,
 			[script("literature-extraction", "literature-extraction.py"), "validate", runDirectory],
@@ -785,6 +852,82 @@ test("literature extraction rejects scaffolds and accepts authored deliverables"
 			[script("literature-extraction", "literature-extraction.py"), "validate", runDirectory],
 			/source file hash differs/,
 		);
+	});
+});
+
+test("literature extraction clusters claims across documents", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const sources = join(workspace, "sources");
+		mkdirSync(sources);
+		// The stub embeds letter frequencies, so adding "does not" keeps the claims
+		// near-identical (high similarity) while flipping the negation hint.
+		const claims = {
+			"a.md": "The treatment improves patient outcomes significantly.",
+			"b.md": "The treatment does not improve patient outcomes significantly.",
+		};
+		writeFileSync(join(sources, "a.md"), `# A\n\n${claims["a.md"]}\n`);
+		writeFileSync(join(sources, "b.md"), `# B\n\n${claims["b.md"]}\n`);
+		const server = await startEmbeddingsFixture(workspace);
+		try {
+			const runDirectory = join(workspace, "literature");
+			run(python, [script("literature-extraction", "literature-extraction.py"), "init", sources, "--output", runDirectory]);
+			for (let index = 0; index < 2; index += 1) {
+				const pending = jsonOutput(
+					run(python, [script("literature-extraction", "literature-extraction.py"), "next", runDirectory]),
+				);
+				const stem = pending.sourcePath.split("/").pop();
+				const items = [
+					{
+						item_type: "claim",
+						text: claims[stem],
+						evidence_quote: null,
+						locator: "para 1",
+						interpretation: "explicit",
+						confidence: "high",
+						notes: null,
+					},
+				];
+				const extractionPath = join(workspace, `items-${pending.documentId}.json`);
+				writeFileSync(extractionPath, JSON.stringify(items));
+				run(python, [
+					script("literature-extraction", "literature-extraction.py"),
+					"record",
+					runDirectory,
+					"--doc-id",
+					pending.documentId,
+					"--extraction-file",
+					extractionPath,
+				]);
+			}
+			const built = jsonOutput(
+				runWithEnvironment(
+					python,
+					[
+						script("literature-extraction", "literature-extraction.py"),
+						"build",
+						runDirectory,
+						"--claim-cluster-threshold",
+						"0.8",
+					],
+					{ FORGE_EMBEDDINGS_URL: server.url, FORGE_EMBEDDINGS_MODEL: "stub" },
+				),
+			);
+			assert.equal(built.claimClusters.enabled, true);
+			assert.equal(built.claimClusters.itemCount, 2);
+			assert.equal(built.claimClusters.crossDocumentGroups, 1);
+			assert.equal(built.claimClusters.possibleContradictions, 1);
+			const worksheet = readFileSync(join(runDirectory, "claim_clusters.md"), "utf8");
+			assert.match(worksheet, /possible contradiction/);
+			assert.match(readFileSync(join(runDirectory, "claim_clusters.csv"), "utf8"), /negation_hint/);
+			// The optional worksheet does not block validation.
+			authorFiles(runDirectory, ["literature_summary.md", "claims_matrix.md", "research_gaps.md", "citation_notes.md"]);
+			assert.equal(
+				jsonOutput(run(python, [script("literature-extraction", "literature-extraction.py"), "validate", runDirectory])).valid,
+				true,
+			);
+		} finally {
+			await server.close();
+		}
 	});
 });
 
@@ -881,6 +1024,84 @@ test("spreadsheet inspection and row enrichment are reproducible", () => {
 			[script("spreadsheet-analysis", "spreadsheet-analysis.py"), "row-finalize", rowRun],
 			/output already exists/,
 		);
+	});
+});
+
+test("spreadsheet cluster groups similar rows for review", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const source = join(workspace, "people.csv");
+		// The stub embeds letter frequencies, so reordered names share a vector
+		// (a realistic fuzzy-linkage case) while distinct names do not.
+		writeFileSync(
+			source,
+			"name,city\nJohn Smith,Boston\nSmith John,Boston\nJane Doe,Reno\nDoe Jane,Reno\nBob,Austin\n",
+		);
+		const sourceHash = sha256(source);
+		const server = await startEmbeddingsFixture(workspace);
+		try {
+			const runDirectory = join(workspace, "cluster");
+			const result = jsonOutput(
+				runWithEnvironment(
+					python,
+					[
+						script("spreadsheet-analysis", "spreadsheet-analysis.py"),
+						"cluster",
+						source,
+						"--output",
+						runDirectory,
+						"--columns",
+						"name",
+						"--threshold",
+						"0.95",
+					],
+					{ FORGE_EMBEDDINGS_URL: server.url, FORGE_EMBEDDINGS_MODEL: "stub" },
+				),
+			);
+			assert.equal(result.groupedRows, 5);
+			assert.equal(result.multiRowGroupCount, 2);
+			const clusters = readFileSync(join(runDirectory, "clusters.csv"), "utf8");
+			assert.match(clusters, /cluster_id,group_size,is_representative,source_row,similarity_to_representative,key_text/);
+			const groups = readFileSync(join(runDirectory, "cluster_groups.md"), "utf8");
+			assert.match(groups, /Multi-row groups: 2/);
+			assert.match(groups, /John Smith/);
+			const run = JSON.parse(readFileSync(join(runDirectory, "cluster_run.json"), "utf8"));
+			assert.equal(run.source.sha256, sourceHash);
+			assert.equal(run.columns[0], "name");
+			assert.equal(sha256(source), sourceHash);
+			runFailure(
+				python,
+				[
+					script("spreadsheet-analysis", "spreadsheet-analysis.py"),
+					"cluster",
+					source,
+					"--output",
+					runDirectory,
+					"--columns",
+					"name",
+				],
+				/output already exists/,
+			);
+		} finally {
+			await server.close();
+		}
+
+		const missingEndpoint = join(workspace, "cluster-missing");
+		runFailure(
+			python,
+			[
+				script("spreadsheet-analysis", "spreadsheet-analysis.py"),
+				"cluster",
+				source,
+				"--output",
+				missingEndpoint,
+				"--columns",
+				"name",
+				"--embeddings-url",
+				"http://127.0.0.1:1/v1/embeddings",
+			],
+			/embeddings endpoint unavailable/,
+		);
+		assert.equal(existsSync(missingEndpoint), false);
 	});
 });
 

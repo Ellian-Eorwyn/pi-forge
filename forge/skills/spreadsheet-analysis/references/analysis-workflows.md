@@ -30,6 +30,26 @@ software used.
 - Save reusable code or an operation specification in `working/`; do not rely
   on an unrecorded series of interactive edits.
 
+## Fuzzy Grouping and Record Linkage
+
+Exact-key dedup and declared-key merges (above) only match identical values. When
+records differ in formatting, spelling, or word order, or when a free-text column
+needs topical grouping, use the `cluster` command. It embeds the combined text of
+the chosen columns and groups rows by cosine similarity into reviewable candidate
+groups (`clusters.csv`, `cluster_groups.md`, `cluster_run.json`).
+
+Treat the output as candidates, never as confirmed matches:
+
+- For deduplication, use a high threshold, review each multi-row group, and then
+  remove or merge through the normal stated-survivor-rule path, exporting removed
+  rows for review. Do not collapse a group automatically.
+- For categorization, use a lower threshold and assign a category per group,
+  recording the mapping; the new column is the artifact, not a silent rewrite.
+- Keep exact-key dedup and merges authoritative; fuzzy grouping only surfaces
+  candidates those exact rules cannot see.
+- The embeddings endpoint is required for this command and the run records the
+  source SHA-256; the source is never modified.
+
 ## Summaries, Tables, and Charts
 
 Use frequency tables for categorical fields and bounded descriptive statistics

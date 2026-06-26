@@ -58,10 +58,21 @@ overclaiming or blending source content with synthesis.
    python3 <skill-directory>/scripts/literature-extraction.py build <run-directory>
    ```
 
+   When the embeddings endpoint (`FORGE_EMBEDDINGS_URL`, default
+   `http://llms:8005/v1/embeddings`) is reachable and at least two claims or
+   findings exist, `build` also writes `claim_clusters.csv` and the advisory
+   `claim_clusters.md` worksheet grouping similar claims across documents and
+   flagging possible contradictions for review. It degrades cleanly when the
+   endpoint is unavailable; pass `--no-claim-clusters` to skip it or
+   `--claim-cluster-threshold` to tune grouping.
+
    Then author `literature_summary.md`, `claims_matrix.md`, `research_gaps.md`,
-   and `citation_notes.md` from the evidence table, keeping verbatim quotes and
-   extracted facts separate from generated synthesis. Re-running `build`
-   refreshes the tables without overwriting authored Markdown.
+   and `citation_notes.md` from the evidence table, using `claim_clusters.md`
+   when present to find cross-source agreement and disagreement with better
+   recall. Keep verbatim quotes and extracted facts separate from generated
+   synthesis, and judge every flagged contradiction against the evidence rather
+   than trusting the lexical hint. Re-running `build` refreshes the tables and
+   worksheet without overwriting authored Markdown.
 6. Validate the completed run and report outcomes:
 
    ```bash

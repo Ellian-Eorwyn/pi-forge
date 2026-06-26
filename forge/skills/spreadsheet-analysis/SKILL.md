@@ -1,6 +1,6 @@
 ---
 name: spreadsheet-analysis
-description: Inspect, profile, clean, transform, summarize, compare, chart, and enrich CSV, TSV, and XLSX tabular data. Use for spreadsheet quality reviews, missing values, duplicates, unusual values, filtering, merging, reshaping, pivot or frequency tables, cleaned exports, and resumable model-generated output processed one row at a time into a new column.
+description: Inspect, profile, clean, transform, summarize, compare, chart, and enrich CSV, TSV, and XLSX tabular data. Use for spreadsheet quality reviews, missing values, duplicates, unusual values, filtering, merging, reshaping, pivot or frequency tables, cleaned exports, embedding-based fuzzy duplicate detection and semantic record linkage or categorization of a text column into reviewable candidate groups, and resumable model-generated output processed one row at a time into a new column.
 ---
 
 # Spreadsheet Analysis
@@ -37,6 +37,36 @@ Analyze tabular data reproducibly while preserving every source file.
    `transform_log.md`.
 6. Validate row-enrichment runs with the helper and report processed, skipped,
    failed, and review-needed rows. Never conceal incomplete coverage.
+
+## Fuzzy Grouping and Record Linkage
+
+Use the `cluster` command when exact key matching is not enough: detecting
+near-duplicate records that differ in formatting or wording (entity resolution,
+e.g. "Acme Inc" vs "Acme Incorporated"), or grouping a free-text column into
+topical categories at scale. It embeds the combined text of one or more columns
+through the shared forge embeddings endpoint (`FORGE_EMBEDDINGS_URL`, default
+`http://llms:8005/v1/embeddings`) and groups rows by cosine similarity. Unlike
+exact deduplication this finds matches that differ in spelling or order, and
+unlike the one-row-at-a-time loop it categorizes in a single embedding pass.
+
+```bash
+python3 <skill-directory>/scripts/spreadsheet-analysis.py cluster <input> \
+  --output <new-run-directory> \
+  --columns "Company" ["City"] \
+  --sheet <sheet-name> \
+  --threshold 0.85
+```
+
+Raise `--threshold` (around `0.92` or higher) for tight duplicate detection;
+lower it (around `0.6`-`0.75`) for broader topical grouping. The run writes
+`clusters.csv` (every grouped row with its cluster id, representative, and
+similarity), `cluster_groups.md` (multi-row groups for review), and
+`cluster_run.json` (provenance and config). The endpoint is required for this
+command; it fails with remediation when unreachable. The results are advisory
+candidate groups only: nothing is merged, deduplicated, or modified. Review the
+groups, then act through the normal cleaning steps (a stated survivor rule for
+dedup, or a new column for categories) so every change stays explicit and
+reversible.
 
 ## One-Row-at-a-Time Enrichment
 

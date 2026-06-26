@@ -6,12 +6,50 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
+# Shared forge embeddings client lives at forge/lib; this script is at
+# forge/skills/literature-extraction/scripts/literature-extraction.py.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
+import forge_embeddings
+
 
 RUN_SCHEMA_VERSION = 1
+
+# Cross-document claim clustering groups semantically similar claims and findings
+# across sources so the model can author agreement/disagreement synthesis with
+# better recall. The worksheet is advisory: it never reconciles, merges, or
+# decides contradictions; the model judges each group against the evidence.
+CLAIM_CLUSTER_ITEM_TYPES = ("claim", "finding")
+DEFAULT_CLAIM_CLUSTER_THRESHOLD = 0.80
+# Cap embedding input per claim so one oversized item cannot exceed the endpoint
+# payload or token limits and fail the whole batch. The full text is still kept
+# for the worksheet; only the embedded sample is truncated.
+CLAIM_CLUSTER_TEXT_CHARS = 2000
+
+# Crude lexical negation cues. Used only to hint at possible polarity differences
+# within a cluster for the model to examine; never treated as a contradiction
+# determination.
+NEGATION_CUES = (
+    "not",
+    "no",
+    "never",
+    "without",
+    "cannot",
+    "n't",
+    "fails to",
+    "failed to",
+    "lack",
+    "absence of",
+    "insignificant",
+    "no significant",
+    "no effect",
+    "did not",
+    "does not",
+)
 SOURCE_EXTENSIONS = {".md", ".markdown", ".txt"}
 ITEM_TYPES = [
     "claim",
@@ -106,7 +144,9 @@ MARKDOWN_DELIVERABLES = {
         PLACEHOLDER,
         "",
         "<!-- One row per claim. Cite the source document and locator. Mark whether",
-        "each source states the claim explicitly, it is inferred, or it is unclear. -->",
+        "each source states the claim explicitly, it is inferred, or it is unclear.",
+        "When build produced claim_clusters.md, use it to group related claims across",
+        "sources and to examine flagged possible contradictions; judge each yourself. -->",
         "",
         "| Claim | Source(s) | Locator | Interpretation | Supporting / Contradicting |",
         "|---|---|---|---|---|",
@@ -290,11 +330,13 @@ def command_doctor(args):
         import openpyxl
 
         version = openpyxl.__version__
+    embeddings = forge_embeddings.embeddings_doctor()
     result = {
         "python": sys.version.split()[0],
         "markdownText": True,
         "xlsx": available,
         "openpyxlVersion": version,
+        "embeddings": embeddings,
         "remediation": None if available else "Install openpyxl for the active Python 3 environment to export XLSX.",
         "note": "Convert PDF, DOCX, HTML, and RTF sources with document-ingest first; this skill consumes document.md, .md, and .txt.",
     }
@@ -304,6 +346,9 @@ def command_doctor(args):
     print(f"Python: {result['python']}")
     print("Markdown/text sources: available")
     print(f"XLSX export: {'available via openpyxl ' + version if available else 'unavailable (CSV only)'}")
+    reach = "reachable" if embeddings["reachable"] else "unreachable"
+    print(f"Embeddings ({embeddings['url']}): {reach} - {embeddings['detail']}")
+    print("  Used by build for advisory cross-document claim clustering; build degrades cleanly when unreachable.")
     if result["remediation"]:
         print(f"Action: {result['remediation']}")
     print(f"Note: {result['note']}")
@@ -573,6 +618,193 @@ def scaffold_markdown(run_directory):
     return created
 
 
+def detect_negation(text):
+    lowered = text.lower()
+    for cue in NEGATION_CUES:
+        if re.search(r"(?<![a-z])" + re.escape(cue) + r"(?![a-z])", lowered):
+            return True
+    return False
+
+
+def collect_claim_items(run, results_by_id):
+    items = []
+    for document in run["documents"]:
+        result = results_by_id.get(document["documentId"])
+        if not result or result.get("status") != "success":
+            continue
+        for item in result.get("items") or []:
+            if item["item_type"] not in CLAIM_CLUSTER_ITEM_TYPES:
+                continue
+            items.append(
+                {
+                    "document_id": document["documentId"],
+                    "source_title": document["title"] or "",
+                    "item_type": item["item_type"],
+                    "interpretation": item["interpretation"],
+                    "confidence": item["confidence"],
+                    "item_text": item["text"],
+                    "locator": item.get("locator") or "",
+                    "negation_hint": "true" if detect_negation(item["text"]) else "false",
+                }
+            )
+    return items
+
+
+def write_claim_clusters_csv(path, members):
+    fields = [
+        "cluster_id",
+        "cluster_size",
+        "document_count",
+        "is_representative",
+        "similarity_to_representative",
+        "document_id",
+        "source_title",
+        "item_type",
+        "interpretation",
+        "confidence",
+        "negation_hint",
+        "locator",
+        "item_text",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for member in members:
+            writer.writerow(member)
+
+
+def claim_clusters_markdown(members, cross_document_ids, possible_contradiction_ids, threshold, model):
+    by_cluster = {}
+    for member in members:
+        by_cluster.setdefault(member["cluster_id"], []).append(member)
+    lines = [
+        "# Claim Clusters",
+        "",
+        f"- Similarity threshold: {threshold}",
+        f"- Model: `{model}`",
+        f"- Clustered items (claims and findings): {len(members)}",
+        f"- Cross-document groups: {len(cross_document_ids)}",
+        f"- Groups flagged for possible contradiction: {len(possible_contradiction_ids)}",
+        "",
+        "This is an advisory worksheet, not a deliverable. Each group below collects "
+        "claims and findings that are similar in meaning across sources, to help you "
+        "author the claims matrix and summary with better recall. Groups flagged for "
+        "possible contradiction contain a crude lexical negation difference among "
+        "members; treat that only as a prompt to read the evidence and judge for "
+        "yourself. Never reconcile or merge claims automatically; record genuine "
+        "agreement and disagreement from the sources.",
+        "",
+    ]
+    if not cross_document_ids:
+        lines.append("No cross-document groups at this threshold. Claims did not cluster across sources.")
+        lines.append("")
+        return "\n".join(lines)
+    for cluster_id in cross_document_ids:
+        group = by_cluster[cluster_id]
+        flag = " - possible contradiction" if cluster_id in possible_contradiction_ids else ""
+        documents = len({member["document_id"] for member in group})
+        lines.append(f"## Group {cluster_id} ({len(group)} items, {documents} documents{flag})")
+        lines.append("")
+        lines.extend(
+            [
+                "| Document | Type | Interpretation | Negation hint | Locator | Text |",
+                "|---|---|---|---|---|---|",
+            ]
+        )
+        for member in group:
+            text_cell = member["item_text"].replace("|", "\\|").replace("\n", " ")
+            if len(text_cell) > 100:
+                text_cell = text_cell[:97] + "..."
+            title = member["source_title"] or member["document_id"]
+            title_cell = title.replace("|", "\\|")
+            locator_cell = member["locator"].replace("|", "\\|")
+            lines.append(
+                f"| {title_cell} | {member['item_type']} | {member['interpretation']} | "
+                f"{member['negation_hint']} | {locator_cell} | {text_cell} |"
+            )
+        lines.append("")
+    return "\n".join(lines)
+
+
+def remove_claim_cluster_artifacts(run_directory):
+    for name in ("claim_clusters.csv", "claim_clusters.md"):
+        path = run_directory / name
+        if path.exists():
+            path.unlink()
+
+
+def compute_claim_clusters(run_directory, run, results_by_id, args):
+    info = {
+        "enabled": False,
+        "reason": None,
+        "itemCount": 0,
+        "crossDocumentGroups": 0,
+        "possibleContradictions": 0,
+    }
+    if args.no_claim_clusters:
+        info["reason"] = "disabled with --no-claim-clusters"
+        remove_claim_cluster_artifacts(run_directory)
+        return info
+    items = collect_claim_items(run, results_by_id)
+    if len(items) < 2:
+        info["reason"] = "fewer than two claims or findings to cluster"
+        remove_claim_cluster_artifacts(run_directory)
+        return info
+    result = forge_embeddings.embed_texts(
+        [item["item_text"][:CLAIM_CLUSTER_TEXT_CHARS] for item in items], url=args.embeddings_url
+    )
+    if not result["ok"]:
+        info["reason"] = f"embeddings endpoint unavailable: {result['reason']}"
+        remove_claim_cluster_artifacts(run_directory)
+        return info
+    vectors = [forge_embeddings.normalize(vector) for vector in result["vectors"]]
+    components = forge_embeddings.cluster_components(vectors, args.claim_cluster_threshold)
+
+    members = []
+    cross_document_ids = []
+    possible_contradiction_ids = []
+    for cluster_index, component in enumerate(sorted(components, key=lambda part: min(part)), start=1):
+        cluster_id = f"k{cluster_index}"
+        representative_position = min(component)
+        ordered = sorted(component, key=lambda position: (items[position]["document_id"], position))
+        document_ids = {items[position]["document_id"] for position in component}
+        negation_values = {items[position]["negation_hint"] for position in component}
+        if len(document_ids) > 1:
+            cross_document_ids.append(cluster_id)
+            if len(negation_values) > 1:
+                possible_contradiction_ids.append(cluster_id)
+        for position in ordered:
+            similarity = forge_embeddings.cosine(vectors[position], vectors[representative_position])
+            member = dict(items[position])
+            member.update(
+                {
+                    "cluster_id": cluster_id,
+                    "cluster_size": len(component),
+                    "document_count": len(document_ids),
+                    "is_representative": "true" if position == representative_position else "false",
+                    "similarity_to_representative": f"{similarity:.3f}",
+                }
+            )
+            members.append(member)
+    members.sort(key=lambda member: (member["cluster_id"], member["document_id"]))
+    write_claim_clusters_csv(run_directory / "claim_clusters.csv", members)
+    (run_directory / "claim_clusters.md").write_text(
+        claim_clusters_markdown(
+            members, cross_document_ids, possible_contradiction_ids, args.claim_cluster_threshold, result["model"]
+        ),
+        encoding="utf-8",
+    )
+    info.update(
+        {
+            "enabled": True,
+            "itemCount": len(items),
+            "crossDocumentGroups": len(cross_document_ids),
+            "possibleContradictions": len(possible_contradiction_ids),
+        }
+    )
+    return info
+
+
 def command_build(args):
     run_directory = require_run_directory(args.run_directory)
     run = load_run(run_directory)
@@ -580,10 +812,13 @@ def command_build(args):
     pending = next_pending(run, results)
     if pending is not None:
         fail(f"run is incomplete; next pending document is {pending}")
+    if not -1.0 <= args.claim_cluster_threshold <= 1.0:
+        fail("--claim-cluster-threshold must be between -1 and 1")
     verify_hashes(run)
     results_by_id = {result["documentId"]: result for result in results}
     evidence_rows, xlsx_written = write_evidence_table(run_directory, run, results_by_id)
     method_rows = write_methods_matrix(run_directory, run, results_by_id)
+    claim_clusters = compute_claim_clusters(run_directory, run, results_by_id, args)
     created = scaffold_markdown(run_directory)
     write_documents_csv(run_directory, run["documents"], results_by_id)
     counts = Counter(result["status"] for result in results)
@@ -594,6 +829,7 @@ def command_build(args):
                 "methodsRows": method_rows,
                 "xlsx": xlsx_written,
                 "scaffolded": created,
+                "claimClusters": claim_clusters,
                 "success": counts["success"],
                 "needsReview": counts["needs_review"],
                 "skipped": counts["skipped"],
@@ -692,8 +928,23 @@ def parser():
     record.add_argument("--note")
     record.set_defaults(handler=command_record)
 
-    build = subparsers.add_parser("build", help="Assemble evidence and methods tables and scaffold Markdown deliverables.")
+    build = subparsers.add_parser("build", help="Assemble evidence and methods tables, cluster claims across documents, and scaffold Markdown deliverables.")
     build.add_argument("run_directory")
+    build.add_argument(
+        "--no-claim-clusters",
+        action="store_true",
+        help="Skip embedding-based cross-document claim clustering.",
+    )
+    build.add_argument(
+        "--claim-cluster-threshold",
+        type=float,
+        default=DEFAULT_CLAIM_CLUSTER_THRESHOLD,
+        help="Cosine similarity at or above which claims and findings group together.",
+    )
+    build.add_argument(
+        "--embeddings-url",
+        help="Override the embeddings endpoint (default FORGE_EMBEDDINGS_URL or http://llms:8005/v1/embeddings).",
+    )
     build.set_defaults(handler=command_build)
 
     validate = subparsers.add_parser("validate", help="Validate run state, provenance, schema, and built artifacts.")

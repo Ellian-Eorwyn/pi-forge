@@ -30,18 +30,30 @@ are relocated, never deleted, and every move is reversible.
    The scan is recursive, skips hidden paths and symlinks, refuses system paths
    and project roots, and leaves repositories, dependency trees, and bundles
    untouched (recorded in `skipped.md`). It writes `manifest.csv`, `scan.json`,
-   `profile.md`/`profile.json`, and `review_queue.md`, and routes exact-content
-   duplicates to `_duplicates/`. For speed it fingerprints every file and only
-   computes a full SHA-256 for files whose size collides with another (the only
-   exact-duplicate candidates); pass `--full-hash` to hash every file. Use
-   `--confidence-threshold <0-1>` only when the user wants a stricter or looser
-   review bar than the `0.75` default.
+   `profile.md`/`profile.json`, `review_queue.md`, and `near_duplicates.md`, and
+   routes exact-content duplicates to `_duplicates/`. For speed it fingerprints
+   every file and only computes a full SHA-256 for files whose size collides with
+   another (the only exact-duplicate candidates); pass `--full-hash` to hash
+   every file. Use `--confidence-threshold <0-1>` only when the user wants a
+   stricter or looser review bar than the `0.75` default.
+
+   The scan also embeds the text of text-bearing files through the shared forge
+   embeddings endpoint (`FORGE_EMBEDDINGS_URL`, default
+   `http://llms:8005/v1/embeddings`) to add two advisory content signals: a
+   `content_cluster` label grouping similar documents regardless of filename,
+   and `near_duplicate_of`/`content_similarity` for files that are highly similar
+   but not byte-identical (reformatted exports, drafts, versions), listed in
+   `near_duplicates.md`. These are advisory only and are never auto-routed to
+   `_duplicates/`. Embeddings are best-effort: when the endpoint is unreachable
+   the scan still produces a full metadata-only result. Pass `--no-embeddings`
+   to skip them, or tune `--near-duplicate-threshold` / `--cluster-threshold`.
 
 3. Read [references/organize-contract.md](references/organize-contract.md), then
    read `profile.md` to understand what the folder holds: its folders, category
-   and extension distributions, filename clusters, date clusters, and sample
-   content peeks. Use these signals to design a destination layout that fits this
-   specific folder rather than forcing the default categories. Aim for a flat
+   and extension distributions, filename clusters, content clusters, date
+   clusters, and sample content peeks. Use these signals, especially the content
+   clusters, to design a destination layout that fits this specific folder
+   rather than forcing the default categories. Aim for a flat
    tier of meaningful top-level categories with subfolders only where a real
    sub-grouping exists, nesting no more than 2–3 levels deep. Build on any
    structure the profile's folders and name clusters already imply rather than
@@ -53,7 +65,10 @@ are relocated, never deleted, and every move is reversible.
 
 4. Open the files listed in `review_queue.md` (low confidence, unknown type, or
    generic names) before trusting their category; high-confidence files rarely
-   need per-file inspection. In `manifest.csv`, correct `category` and
+   need per-file inspection. Review `near_duplicates.md` and decide what to do
+   with each candidate pair (keep both, relocate, or set one to `duplicate` in
+   `manifest.csv`); never assume a near-duplicate is identical. In
+   `manifest.csv`, correct `category` and
    `proposed_destination` to realize the layout you designed in step 3, editing
    by cluster where possible — a whole name cluster or source folder at once —
    rather than row by row. Edit only `category`, `proposed_destination`,
@@ -99,6 +114,9 @@ are relocated, never deleted, and every move is reversible.
   dependency trees, virtual environments, or application bundles.
 - Detect duplicates by exact SHA-256 content match and move them to
   `_duplicates/`. Never delete a file in any command.
+- Treat embedding-based near-duplicates as advisory candidates only. Never route
+  them to `_duplicates/` automatically or assume they are identical; the user
+  decides after review.
 - Keep destinations inside the target folder. Reject absolute paths, `..`
   escapes, and destinations that pass through protected directories.
 - Re-verify each source against its strongest recorded hash (full `sha256` when

@@ -15,10 +15,24 @@ from copy import copy
 from datetime import date, datetime, time, timezone
 from pathlib import Path
 
+# Shared forge embeddings client lives at forge/lib; this script is at
+# forge/skills/spreadsheet-analysis/scripts/spreadsheet-analysis.py.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
+import forge_embeddings
+
 
 SUPPORTED_EXTENSIONS = {".csv", ".tsv", ".xlsx"}
 RUN_SCHEMA_VERSION = 1
+CLUSTER_SCHEMA_VERSION = 1
 RESULT_STATUSES = {"completed", "failed", "skipped", "needs_review"}
+
+# Default cosine similarity for grouping rows by an embedded column. Raise it
+# (~0.92+) for tight duplicate detection; lower it (~0.6-0.75) for broader
+# topical categorization.
+DEFAULT_CLUSTER_THRESHOLD = 0.85
+
+# Maximum characters of key text embedded per row.
+CLUSTER_KEY_CHARS = 2000
 
 
 def fail(message, exit_code=1):
@@ -368,11 +382,13 @@ def command_doctor(args):
     if available:
         import openpyxl
         version = openpyxl.__version__
+    embeddings = forge_embeddings.embeddings_doctor()
     result = {
         "python": sys.version.split()[0],
         "csvTsv": True,
         "xlsx": available,
         "openpyxlVersion": version,
+        "embeddings": embeddings,
         "remediation": None if available else "Install openpyxl for the active Python 3 environment.",
     }
     if args.json:
@@ -381,6 +397,9 @@ def command_doctor(args):
         print(f"Python: {result['python']}")
         print("CSV/TSV: available")
         print(f"XLSX: {'available via openpyxl ' + version if available else 'unavailable'}")
+        reach = "reachable" if embeddings["reachable"] else "unreachable"
+        print(f"Embeddings ({embeddings['url']}): {reach} - {embeddings['detail']}")
+        print("  Required by the 'cluster' command for fuzzy record linkage and semantic grouping.")
         if result["remediation"]:
             print(f"Action: {result['remediation']}")
 
@@ -828,6 +847,196 @@ def command_validate(args):
         raise SystemExit(1)
 
 
+def cluster_key_text(row, header_indexes, columns):
+    parts = []
+    for column in columns:
+        value = json_value(row[header_indexes[column]])
+        if blank(value):
+            continue
+        parts.append(str(value).strip())
+    return " | ".join(parts)[:CLUSTER_KEY_CHARS]
+
+
+def write_clusters_csv(path, members):
+    fields = [
+        "cluster_id",
+        "group_size",
+        "is_representative",
+        "source_row",
+        "similarity_to_representative",
+        "key_text",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for member in members:
+            writer.writerow(member)
+
+
+def cluster_groups_markdown(run, members, multi_group_ids):
+    by_group = {}
+    for member in members:
+        by_group.setdefault(member["cluster_id"], []).append(member)
+    lines = [
+        "# Candidate Groups",
+        "",
+        f"- Source: `{run['source']['path']}`",
+        f"- Sheet: `{run['sheet']}`",
+        f"- Grouped columns: {', '.join('`' + column + '`' for column in run['columns'])}",
+        f"- Similarity threshold: {run['threshold']}",
+        f"- Model: `{run['model']}`",
+        f"- Rows grouped: {run['groupedRows']}",
+        f"- Rows skipped (blank key): {len(run['blankKeyRows'])}",
+        f"- Multi-row groups: {len(multi_group_ids)}",
+        "",
+        "Each multi-row group is a set of rows whose grouped columns are similar in "
+        "meaning. These are candidates for review, not confirmed matches. Raise the "
+        "threshold for tighter duplicate detection or lower it for broader topical "
+        "grouping. Nothing is merged, deduplicated, or modified; decide what to do "
+        "with each group yourself.",
+        "",
+    ]
+    if not multi_group_ids:
+        lines.append("No multi-row groups at this threshold. Every grouped row is on its own.")
+        lines.append("")
+        return "\n".join(lines)
+    for cluster_id in multi_group_ids:
+        group = by_group[cluster_id]
+        lines.append(f"## Group {cluster_id} ({len(group)} rows)")
+        lines.append("")
+        lines.extend(["| Source row | Representative | Similarity | Key text |", "|---:|---|---:|---|"])
+        for member in group:
+            representative = "yes" if member["is_representative"] == "true" else ""
+            key_cell = member["key_text"].replace("|", "\\|").replace("\n", " ")
+            if len(key_cell) > 80:
+                key_cell = key_cell[:77] + "..."
+            lines.append(
+                f"| {member['source_row']} | {representative} | "
+                f"{member['similarity_to_representative']} | {key_cell} |"
+            )
+        lines.append("")
+    return "\n".join(lines)
+
+
+def command_cluster(args):
+    source = require_source(args.input)
+    if len(set(args.columns)) != len(args.columns):
+        fail("--columns contains duplicates")
+    threshold = args.threshold
+    if not -1.0 <= threshold <= 1.0:
+        fail("--threshold must be between -1 and 1")
+    tables = load_tables(source, requested_sheet=args.sheet, all_xlsx_sheets=False)
+    table = tables[0]
+    rows = table["rows"]
+    width = normalized_width(rows)
+    if not rows or width == 0:
+        fail("the selected table is empty")
+    padded = pad_rows(rows, width)
+    headers = [display_header(value) for value in padded[0]]
+    validate_headers(headers)
+    unknown = [column for column in args.columns if column not in headers]
+    if unknown:
+        fail(f"columns not found: {', '.join(unknown)}")
+    header_indexes = {header: index for index, header in enumerate(headers)}
+
+    grouped_rows = []
+    key_texts = []
+    blank_key_rows = []
+    for row_number in range(2, len(padded) + 1):
+        row = padded[row_number - 1]
+        if all(blank(value) for value in row):
+            continue
+        key = cluster_key_text(row, header_indexes, args.columns)
+        if not key:
+            blank_key_rows.append(row_number)
+            continue
+        grouped_rows.append(row_number)
+        key_texts.append(key)
+    if not grouped_rows:
+        fail("no rows had nonblank values in the selected columns")
+
+    output = require_new_directory(args.output)
+    try:
+        result = forge_embeddings.embed_texts(key_texts, url=args.embeddings_url)
+        if not result["ok"]:
+            fail(
+                "embeddings endpoint unavailable: "
+                f"{result['reason']}. Set FORGE_EMBEDDINGS_URL or pass --embeddings-url; "
+                "the cluster command requires embeddings."
+            )
+        vectors = [forge_embeddings.normalize(vector) for vector in result["vectors"]]
+        components = forge_embeddings.cluster_components(vectors, threshold)
+
+        members = []
+        multi_group_ids = []
+        for cluster_index, component in enumerate(
+            sorted(components, key=lambda part: min(part)), start=1
+        ):
+            cluster_id = f"g{cluster_index}"
+            representative_position = min(component, key=lambda position: grouped_rows[position])
+            if len(component) > 1:
+                multi_group_ids.append(cluster_id)
+            for position in sorted(component, key=lambda position: grouped_rows[position]):
+                similarity = forge_embeddings.cosine(vectors[position], vectors[representative_position])
+                members.append(
+                    {
+                        "cluster_id": cluster_id,
+                        "group_size": len(component),
+                        "is_representative": "true" if position == representative_position else "false",
+                        "source_row": grouped_rows[position],
+                        "similarity_to_representative": f"{similarity:.3f}",
+                        "key_text": key_texts[position],
+                    }
+                )
+
+        run = {
+            "schemaVersion": CLUSTER_SCHEMA_VERSION,
+            "createdAt": utc_now(),
+            "source": {
+                "path": str(source),
+                "format": source.suffix.lower().lstrip("."),
+                "sha256": sha256(source),
+                "sizeBytes": source.stat().st_size,
+            },
+            "sheet": table["name"],
+            "columns": args.columns,
+            "threshold": threshold,
+            "model": result["model"],
+            "dimensions": result["dimensions"],
+            "groupedRows": len(grouped_rows),
+            "blankKeyRows": blank_key_rows,
+            "clusterCount": len(components),
+            "multiRowGroupCount": len(multi_group_ids),
+        }
+        members.sort(key=lambda member: (member["cluster_id"], member["source_row"]))
+        write_clusters_csv(output / "clusters.csv", members)
+        (output / "cluster_groups.md").write_text(
+            cluster_groups_markdown(run, members, multi_group_ids), encoding="utf-8"
+        )
+        (output / "cluster_run.json").write_text(
+            json.dumps(run, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+    except BaseException:
+        try:
+            for child in output.iterdir():
+                child.unlink()
+            output.rmdir()
+        except OSError:
+            pass
+        raise
+    print(
+        json.dumps(
+            {
+                "output": str(output),
+                "groupedRows": len(grouped_rows),
+                "blankKeyRows": len(blank_key_rows),
+                "clusterCount": len(components),
+                "multiRowGroupCount": len(multi_group_ids),
+            }
+        )
+    )
+
+
 def parser():
     root = argparse.ArgumentParser(description="Profile spreadsheets and manage resumable row enrichment.")
     subparsers = root.add_subparsers(dest="command", required=True)
@@ -842,6 +1051,18 @@ def parser():
     inspect.add_argument("--sheet")
     inspect.add_argument("--max-categories", type=int, default=20)
     inspect.set_defaults(handler=command_inspect)
+
+    cluster = subparsers.add_parser(
+        "cluster",
+        help="Group rows by embedding-based similarity of one or more columns for fuzzy record linkage or categorization.",
+    )
+    cluster.add_argument("input")
+    cluster.add_argument("--output", required=True)
+    cluster.add_argument("--columns", nargs="+", required=True, help="One or more column headers whose combined text is embedded.")
+    cluster.add_argument("--sheet")
+    cluster.add_argument("--threshold", type=float, default=DEFAULT_CLUSTER_THRESHOLD)
+    cluster.add_argument("--embeddings-url", help="Override the embeddings endpoint (default FORGE_EMBEDDINGS_URL or http://llms:8005/v1/embeddings).")
+    cluster.set_defaults(handler=command_cluster)
 
     row_init = subparsers.add_parser("row-init", help="Initialize a resumable one-row-at-a-time enrichment run.")
     row_init.add_argument("input")
