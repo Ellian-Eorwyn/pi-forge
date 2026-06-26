@@ -15,11 +15,14 @@ import {
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
 
 const DEFAULT_CHUNK_CHARACTERS = 150_000;
+const DEFAULT_GLMOCR_URL = "http://192.168.4.35:5002/glmocr/parse";
+const DEFAULT_GLMOCR_TIMEOUT_MS = 300_000;
 const LOW_TEXT_CHARACTERS = 40;
 const MINIMUM_ALPHANUMERIC_RATIO = 0.2;
 const MAXIMUM_PUNCTUATION_RATIO = 0.55;
 const MAXIMUM_DOT_RUN_RATIO = 0.2;
-const SUPPORTED_EXTENSIONS = new Set([".pdf", ".docx", ".txt", ".md", ".markdown", ".html", ".htm", ".rtf"]);
+const IMAGE_EXTENSIONS = new Set([".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"]);
+const SUPPORTED_EXTENSIONS = new Set([".pdf", ".docx", ".txt", ".md", ".markdown", ".html", ".htm", ".rtf", ...IMAGE_EXTENSIONS]);
 const MANIFEST_COLUMNS = [
 	"document_id",
 	"source_path",
@@ -55,6 +58,7 @@ function toolInfo(command, args = ["--version"]) {
 }
 
 function inspectTools() {
+	const glmocrUrl = process.env.FORGE_GLMOCR_URL || process.env.FORGE_OCR_URL || process.env.OCR_URL || DEFAULT_GLMOCR_URL;
 	return {
 		pandoc: toolInfo("pandoc"),
 		pdftotext: toolInfo("pdftotext", ["-v"]),
@@ -63,6 +67,7 @@ function inspectTools() {
 		pdftoppm: toolInfo("pdftoppm", ["-v"]),
 		ocrmypdf: toolInfo("ocrmypdf"),
 		tesseract: toolInfo("tesseract"),
+		glmocr: { available: Boolean(glmocrUrl), version: glmocrUrl },
 	};
 }
 
@@ -74,6 +79,7 @@ function printDoctor(asJson) {
 		pdfImageDetection: tools.pdfimages.available,
 		pdfPageRendering: tools.pdftoppm.available,
 		pdfOcr: tools.ocrmypdf.available && tools.tesseract.available,
+		glmocrSdk: tools.glmocr.available,
 	};
 	const remediation = [];
 	if (!tools.pandoc.available) remediation.push("Install Pandoc (macOS: brew install pandoc; Debian/Ubuntu: apt install pandoc).");
@@ -93,6 +99,7 @@ function printDoctor(asJson) {
 	process.stdout.write(`Pandoc document conversion: ${capabilities.pandocDocuments ? "available" : "unavailable"}\n`);
 	process.stdout.write(`PDF text extraction: ${capabilities.pdfText ? "available" : "unavailable"}\n`);
 	process.stdout.write(`Automatic PDF OCR: ${capabilities.pdfOcr ? "available" : "unavailable"}\n`);
+	process.stdout.write(`GLM-OCR SDK endpoint: ${tools.glmocr.version}\n`);
 	for (const item of remediation) process.stdout.write(`Action: ${item}\n`);
 }
 
@@ -119,7 +126,20 @@ function sourceFormat(filePath) {
 	const extension = extname(filePath).toLowerCase();
 	if (extension === ".markdown") return "md";
 	if (extension === ".htm") return "html";
+	if (extension === ".jpeg") return "jpg";
+	if (extension === ".tiff") return "tif";
 	return extension.slice(1);
+}
+
+function mimeType(filePath) {
+	const extension = extname(filePath).toLowerCase();
+	if (extension === ".pdf") return "application/pdf";
+	if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg";
+	if (extension === ".png") return "image/png";
+	if (extension === ".webp") return "image/webp";
+	if (extension === ".tif" || extension === ".tiff") return "image/tiff";
+	if (extension === ".bmp") return "image/bmp";
+	return "application/octet-stream";
 }
 
 function evidence(value, origin = null, confidence = null, locator = null) {
@@ -327,7 +347,131 @@ function joinPdfPages(pages) {
 	return { markdown: ensureFinalNewline(markdown), entries };
 }
 
-function extractPdf(filePath, documentDirectory, ocrMode, tools) {
+function extractGlmocrMarkdown(body) {
+	if (typeof body.markdown_result === "string" && body.markdown_result.trim()) return body.markdown_result;
+	if (typeof body.md_results === "string" && body.md_results.trim()) return body.md_results;
+	if (typeof body.text === "string" && body.text.trim()) return body.text;
+	return "";
+}
+
+function extractGlmocrLayout(body) {
+	if (body.json_result && typeof body.json_result === "object") return body.json_result;
+	if (body.layout_details && typeof body.layout_details === "object") return body.layout_details;
+	return null;
+}
+
+function glmocrPageCount(body, fallback) {
+	const pages = body.data_info?.pages;
+	if (Array.isArray(pages) && pages.length > 0) return pages.length;
+	if (Number.isInteger(body.page_count) && body.page_count > 0) return body.page_count;
+	return fallback;
+}
+
+async function callGlmocr(filePath, options) {
+	const buffer = readFileSync(filePath);
+	const type = mimeType(filePath);
+	const dataUrl = `data:${type};base64,${buffer.toString("base64")}`;
+	const payload = type === "application/pdf" ? { file: dataUrl } : { image_url: dataUrl };
+	if (options.glmocrLayoutVisualization) payload.need_layout_visualization = true;
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), options.glmocrTimeoutMs);
+	try {
+		const response = await fetch(options.glmocrUrl, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(payload),
+			signal: controller.signal,
+		});
+		const text = await response.text();
+		let body = {};
+		try {
+			body = text ? JSON.parse(text) : {};
+		} catch {
+			throw new Error(`GLM-OCR returned non-JSON response with HTTP ${response.status}`);
+		}
+		if (!response.ok || body.error || body.ok === false) {
+			throw new Error(body.error || `GLM-OCR failed with HTTP ${response.status}`);
+		}
+		return body.raw && typeof body.raw === "object" ? { ...body.raw, ...body } : body;
+	} catch (error) {
+		if (error?.name === "AbortError") throw new Error(`GLM-OCR timed out after ${options.glmocrTimeoutMs} ms`);
+		throw error;
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
+function writeGlmocrArtifacts(documentDirectory, body, layout) {
+	const derivedDirectory = join(documentDirectory, "derived");
+	mkdirSync(derivedDirectory, { recursive: true });
+	const rawPath = join(derivedDirectory, "glmocr-response.json");
+	const layoutPath = join(derivedDirectory, "glmocr-layout.json");
+	writeJson(rawPath, body);
+	if (layout) writeJson(layoutPath, layout);
+	return {
+		responsePath: "derived/glmocr-response.json",
+		responseSha256: sha256(readFileSync(rawPath)),
+		layoutPath: layout ? "derived/glmocr-layout.json" : null,
+		layoutSha256: layout ? sha256(readFileSync(layoutPath)) : null,
+	};
+}
+
+async function extractGlmocr(filePath, documentDirectory, options, fallbackPageCount = null) {
+	const body = await callGlmocr(filePath, options);
+	const markdown = ensureFinalNewline(extractGlmocrMarkdown(body).replace(/\r\n/g, "\n").replace(/\r/g, "\n"));
+	if (markdown.trim() === "") throw new Error("GLM-OCR response did not contain markdown_result, md_results, or text");
+	const layout = extractGlmocrLayout(body);
+	const artifacts = writeGlmocrArtifacts(documentDirectory, body, layout);
+	const pageCount = glmocrPageCount(body, fallbackPageCount ?? (IMAGE_EXTENSIONS.has(extname(filePath).toLowerCase()) ? 1 : null));
+	const warnings = textWarnings(markdown);
+	return {
+		markdown,
+		method: "glm-ocr-sdk",
+		pageCount,
+		warnings,
+		embedded: { title: null, author: null, date: null, source: null },
+		sourceMapEntries: [
+			{
+				markdownStartLine: markdown ? 1 : null,
+				markdownEndLine: markdown ? markdown.split("\n").length : null,
+				sourceLocator: { type: IMAGE_EXTENSIONS.has(extname(filePath).toLowerCase()) ? "image" : "document", path: filePath },
+				method: "document-conversion",
+				confidence: "medium",
+			},
+		],
+		ocr: {
+			mode: options.ocr,
+			backend: "glmocr",
+			attempted: true,
+			used: true,
+			reason: "GLM-OCR SDK backend",
+			commandMode: "remote-sdk",
+			candidatePages: pageCount ? Array.from({ length: pageCount }, (_, index) => index + 1) : [],
+			selectedPages: pageCount ? Array.from({ length: pageCount }, (_, index) => index + 1) : [],
+			beforeQuality: [],
+			afterQuality: [textQuality(markdown)],
+			unresolvedPages: [],
+			derivedPath: artifacts.responsePath,
+			derivedSha256: artifacts.responseSha256,
+			layoutPath: artifacts.layoutPath,
+			layoutSha256: artifacts.layoutSha256,
+			error: null,
+			url: options.glmocrUrl,
+		},
+		vision: {
+			mode: "not-applicable",
+			required: false,
+			candidatePages: [],
+			renderedPages: [],
+			completedPages: [],
+			used: false,
+			unavailableReason: null,
+		},
+	};
+}
+
+async function extractPdf(filePath, documentDirectory, options, tools) {
+	const ocrMode = options.ocr;
 	if (!tools.pdfinfo.available) throw new Error("pdfinfo is required for PDF ingestion but was not found on PATH");
 	if (!tools.pdftotext.available) throw new Error("pdftotext is required for PDF ingestion but was not found on PATH");
 	const infoResult = run("pdfinfo", ["-isodates", filePath]);
@@ -358,6 +502,17 @@ function extractPdf(filePath, documentDirectory, ocrMode, tools) {
 	let unresolvedPages = detectedCandidatePages;
 	if (ocrMode === "force" || (ocrMode === "auto" && candidatePages.length > 0)) {
 		ocrAttempted = true;
+		if (options.ocrBackend === "glmocr" || options.ocrBackend === "auto") {
+			try {
+				const remote = await extractGlmocr(filePath, documentDirectory, options, pageCount);
+				remote.warnings.unshift(...warnings);
+				return remote;
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				if (options.ocrBackend === "glmocr") throw new Error(`GLM-OCR SDK failed: ${message}`);
+				warnings.push(`GLM-OCR SDK failed; falling back to local OCR: ${message}`);
+			}
+		}
 		if (!tools.ocrmypdf.available || !tools.tesseract.available) {
 			ocrError = "OCRmyPDF and Tesseract are required for PDF OCR but one or both are unavailable.";
 			warnings.push(ocrError);
@@ -619,7 +774,7 @@ Review every prepared document or chunk against \`working/extracted.md\`. Do not
 `;
 }
 
-function prepareDocument(filePath, runDirectory, options, tools, usedDirectories) {
+async function prepareDocument(filePath, runDirectory, options, tools, usedDirectories) {
 	const sourceBuffer = readFileSync(filePath);
 	const sourceHash = sha256(sourceBuffer);
 	const directoryName = `${safeStem(filePath)}-${sourceHash.slice(0, 12)}`;
@@ -649,7 +804,12 @@ function prepareDocument(filePath, runDirectory, options, tools, usedDirectories
 	const sourceStat = statSync(filePath);
 	const format = sourceFormat(filePath);
 	let extracted;
-	if (format === "pdf") extracted = extractPdf(filePath, documentDirectory, options.ocr, tools);
+	if (format === "pdf") extracted = await extractPdf(filePath, documentDirectory, options, tools);
+	else if (IMAGE_EXTENSIONS.has(extname(filePath).toLowerCase())) {
+		if (options.ocr === "never") throw new Error("image ingestion requires OCR, but OCR was disabled");
+		if (options.ocrBackend === "local") throw new Error("image ingestion requires --ocr-backend glmocr or auto");
+		extracted = await extractGlmocr(filePath, documentDirectory, options, 1);
+	}
 	else if (["docx", "html", "rtf", "md"].includes(format)) extracted = extractPandoc(filePath, documentDirectory, format, tools);
 	else extracted = extractText(filePath);
 	const chunks = splitIntoChunks(extracted.markdown, options.chunkCharacters);
@@ -741,21 +901,38 @@ function parsePrepareArguments(args) {
 	const input = resolve(args[0]);
 	let output = null;
 	let ocr = "auto";
+	let ocrBackend = process.env.FORGE_OCR_BACKEND || "local";
+	let glmocrUrl = process.env.FORGE_GLMOCR_URL || process.env.FORGE_OCR_URL || process.env.OCR_URL || DEFAULT_GLMOCR_URL;
+	let glmocrTimeoutMs = Number.parseInt(process.env.FORGE_GLMOCR_TIMEOUT_MS || process.env.FORGE_OCR_TIMEOUT_MS || String(DEFAULT_GLMOCR_TIMEOUT_MS), 10);
+	let glmocrLayoutVisualization = false;
 	let chunkCharacters = DEFAULT_CHUNK_CHARACTERS;
 	for (let index = 1; index < args.length; index += 1) {
 		const argument = args[index];
 		if (argument === "--output") output = resolve(args[++index] ?? fail("--output requires a path"));
 		else if (argument === "--ocr") ocr = args[++index] ?? fail("--ocr requires auto, force, or never");
+		else if (argument === "--ocr-backend") ocrBackend = args[++index] ?? fail("--ocr-backend requires local, glmocr, or auto");
+		else if (argument === "--glmocr-url") glmocrUrl = args[++index] ?? fail("--glmocr-url requires a URL");
+		else if (argument === "--glmocr-timeout-ms") glmocrTimeoutMs = Number.parseInt(args[++index] ?? "", 10);
+		else if (argument === "--glmocr-layout-visualization") glmocrLayoutVisualization = true;
 		else if (argument === "--chunk-chars") chunkCharacters = Number.parseInt(args[++index] ?? "", 10);
 		else fail(`unknown prepare option: ${argument}`);
 	}
 	if (!output) fail("prepare requires --output <new-directory>");
 	if (!new Set(["auto", "force", "never"]).has(ocr)) fail("--ocr must be auto, force, or never");
+	if (!new Set(["local", "glmocr", "auto"]).has(ocrBackend)) fail("--ocr-backend must be local, glmocr, or auto");
+	if (ocrBackend !== "local") {
+		try {
+			new URL(glmocrUrl);
+		} catch {
+			fail("--glmocr-url must be a valid URL");
+		}
+	}
+	if (!Number.isInteger(glmocrTimeoutMs) || glmocrTimeoutMs < 1) fail("--glmocr-timeout-ms must be a positive integer");
 	if (!Number.isInteger(chunkCharacters) || chunkCharacters < 1) fail("--chunk-chars must be a positive integer");
-	return { input, output, ocr, chunkCharacters };
+	return { input, output, ocr, ocrBackend, glmocrUrl, glmocrTimeoutMs, glmocrLayoutVisualization, chunkCharacters };
 }
 
-function prepare(args) {
+async function prepare(args) {
 	const options = parsePrepareArguments(args);
 	if (!existsSync(options.input)) fail(`input does not exist: ${options.input}`);
 	if (existsSync(options.output)) fail(`output directory already exists: ${options.output}`);
@@ -785,7 +962,7 @@ function prepare(args) {
 	}
 	for (const filePath of inputs.files.sort()) {
 		try {
-			rows.push(prepareDocument(filePath, options.output, options, tools, usedDirectories).row);
+			rows.push((await prepareDocument(filePath, options.output, options, tools, usedDirectories)).row);
 		} catch (error) {
 			let sourceHash = "";
 			try {
@@ -970,9 +1147,20 @@ function validateRun(runDirectory) {
 			}
 		}
 		if (metadata.extraction?.ocr?.used) {
-			const ocrPath = join(documentDirectory, "derived", "ocr.pdf");
-			if (!existsSync(ocrPath)) errors.push(`${row.output_directory}/derived/ocr.pdf is missing`);
-			else if (sha256(readFileSync(ocrPath)) !== metadata.extraction.ocr.derivedSha256) errors.push(`${row.output_directory}/derived/ocr.pdf hash does not match metadata`);
+			if (metadata.extraction.ocr.backend === "glmocr") {
+				const responsePath = join(documentDirectory, metadata.extraction.ocr.derivedPath ?? "");
+				if (!responsePath.startsWith(`${resolve(documentDirectory, "derived")}${sep}`) || !existsSync(responsePath)) errors.push(`${row.output_directory} GLM-OCR response artifact is missing`);
+				else if (sha256(readFileSync(responsePath)) !== metadata.extraction.ocr.derivedSha256) errors.push(`${row.output_directory} GLM-OCR response artifact hash does not match metadata`);
+				if (metadata.extraction.ocr.layoutPath) {
+					const layoutPath = join(documentDirectory, metadata.extraction.ocr.layoutPath);
+					if (!layoutPath.startsWith(`${resolve(documentDirectory, "derived")}${sep}`) || !existsSync(layoutPath)) errors.push(`${row.output_directory} GLM-OCR layout artifact is missing`);
+					else if (sha256(readFileSync(layoutPath)) !== metadata.extraction.ocr.layoutSha256) errors.push(`${row.output_directory} GLM-OCR layout artifact hash does not match metadata`);
+				}
+			} else {
+				const ocrPath = join(documentDirectory, "derived", "ocr.pdf");
+				if (!existsSync(ocrPath)) errors.push(`${row.output_directory}/derived/ocr.pdf is missing`);
+				else if (sha256(readFileSync(ocrPath)) !== metadata.extraction.ocr.derivedSha256) errors.push(`${row.output_directory}/derived/ocr.pdf hash does not match metadata`);
+			}
 		}
 		const vision = metadata.extraction?.vision;
 		if (vision?.required) {
@@ -1028,7 +1216,7 @@ function validateRun(runDirectory) {
 function usage() {
 	process.stdout.write(`Usage:
   document-ingest.mjs doctor [--json]
-  document-ingest.mjs prepare <input> --output <new-directory> [--ocr auto|force|never] [--chunk-chars N]
+  document-ingest.mjs prepare <input> --output <new-directory> [--ocr auto|force|never] [--ocr-backend local|glmocr|auto] [--glmocr-url URL] [--chunk-chars N]
   document-ingest.mjs validate <run-directory>
 `);
 }
@@ -1041,7 +1229,7 @@ if (!command || command === "--help" || command === "-h") {
 if (command === "doctor") {
 	if (args.some((argument) => argument !== "--json")) fail("doctor accepts only --json");
 	printDoctor(args.includes("--json"));
-} else if (command === "prepare") prepare(args);
+} else if (command === "prepare") await prepare(args);
 else if (command === "validate") {
 	if (args.length !== 1) fail("validate requires exactly one run directory");
 	const runDirectory = resolve(args[0]);

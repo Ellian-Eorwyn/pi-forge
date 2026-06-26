@@ -17,6 +17,8 @@ working/
   vision-pages/    # page-by-page model transcripts, only when vision ran
 derived/
   ocr.pdf        # only when OCR ran
+  glmocr-response.json # only when GLM-OCR SDK OCR ran
+  glmocr-layout.json   # only when GLM-OCR SDK returned layout JSON
   vision-pages/  # unresolved PDF pages rendered as page-NNNN.png
 ```
 
@@ -109,6 +111,18 @@ page at a time. Store each transcript at the matching
 `vision.used` only after every candidate page is represented in
 `vision.completedPages`. If the current model cannot read images, retain the
 best local extraction and record `vision.unavailableReason`.
+
+## GLM-OCR SDK Backend
+
+When `--ocr-backend glmocr` is used, send PDFs and image inputs to the
+configured GLM-OCR SDK JSON endpoint as base64 data URLs. Use
+`markdown_result`, then `md_results`, then `text` as the extracted Markdown.
+Retain the full response at `derived/glmocr-response.json`; retain
+`json_result` or `layout_details` at `derived/glmocr-layout.json` when present.
+Set `metadata.extraction.method` to `glm-ocr-sdk`, set
+`metadata.extraction.ocr.backend` to `glmocr`, and include hashes for retained
+derived artifacts. With `--ocr-backend auto`, record a warning if GLM-OCR
+fails and local OCR is used instead.
 
 ## Manifest
 

@@ -24,10 +24,16 @@ changing source files.
    ```
 
    Preparation is recursive for folders, skips hidden paths and symlinks,
-   defaults to automatic OCR, and defaults to 150,000-character chunks. Use
-   `--ocr force` to rebuild every PDF text layer, `--ocr never` to disable local
-   OCR, or `--chunk-chars <positive-integer>` only when requested. Automatic OCR
-   retries pages whose text is sparse or garbled and keeps the better extraction.
+   defaults to automatic OCR, local OCR tooling, and 150,000-character chunks.
+   Use `--ocr force` to rebuild every PDF text layer, `--ocr never` to disable
+   OCR, or `--chunk-chars <positive-integer>` only when requested. Use
+   `--ocr-backend glmocr` to send OCR work to the GLM-OCR SDK backend, or
+   `--ocr-backend auto` to try GLM-OCR first and fall back to local OCR.
+   Configure the endpoint with `--glmocr-url <url>` or `FORGE_GLMOCR_URL`;
+   the default endpoint is `http://192.168.4.35:5002/glmocr/parse`.
+   Automatic local OCR retries pages whose text is sparse or garbled and keeps
+   the better extraction. GLM-OCR returns Markdown plus structured layout JSON
+   for PDFs and image inputs.
 3. Read [references/output-contract.md](references/output-contract.md). Review
    every prepared document sequentially. Never review several documents in one
    model pass.
@@ -66,6 +72,8 @@ changing source files.
 
 - Never overwrite an input or existing output directory.
 - Keep automatically generated OCR PDFs under `derived/ocr.pdf`.
+- Keep GLM-OCR SDK responses under `derived/glmocr-response.json` and layout
+  data under `derived/glmocr-layout.json`.
 - Keep rendered vision inputs under `derived/vision-pages/` and page transcripts
   under `working/vision-pages/`; process one page at a time.
 - Continue batch preparation after individual failures and preserve each

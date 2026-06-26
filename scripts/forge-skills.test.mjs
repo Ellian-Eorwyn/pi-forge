@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 
 const repositoryRoot = resolve(import.meta.dirname, "..");
@@ -112,6 +112,76 @@ function withWorkspace(callback) {
 	} finally {
 		rmSync(workspace, { recursive: true, force: true });
 	}
+}
+
+async function withAsyncWorkspace(callback) {
+	const workspace = mkdtempSync(join(tmpdir(), "pi-forge-skills-"));
+	try {
+		await callback(workspace);
+	} finally {
+		rmSync(workspace, { recursive: true, force: true });
+	}
+}
+
+function startGlmocrFixture(workspace, responseBody) {
+	const requestsPath = join(workspace, "glmocr-requests.jsonl");
+	const serverPath = join(workspace, "glmocr-server.mjs");
+	writeFileSync(
+		serverPath,
+		`import { appendFileSync } from "node:fs";
+import { createServer } from "node:http";
+
+const responseBody = ${JSON.stringify(responseBody)};
+const requestsPath = ${JSON.stringify(requestsPath)};
+const server = createServer((request, response) => {
+	let body = "";
+	request.setEncoding("utf8");
+	request.on("data", (chunk) => {
+		body += chunk;
+	});
+	request.on("end", () => {
+		appendFileSync(requestsPath, JSON.stringify({ method: request.method, url: request.url, body: body ? JSON.parse(body) : {} }) + "\\n");
+		response.writeHead(200, { "Content-Type": "application/json" });
+		response.end(JSON.stringify(responseBody));
+	});
+});
+
+server.listen(0, "127.0.0.1", () => {
+	const address = server.address();
+	if (!address || typeof address !== "object") process.exit(1);
+	process.stdout.write(String(address.port) + "\\n");
+});
+`,
+	);
+	const child = spawn(process.execPath, [serverPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+	return new Promise((resolveServer, rejectServer) => {
+		let stdout = "";
+		let stderr = "";
+		child.stdout.setEncoding("utf8");
+		child.stderr.setEncoding("utf8");
+		child.stderr.on("data", (chunk) => {
+			stderr += chunk;
+		});
+		child.stdout.on("data", (chunk) => {
+			stdout += chunk;
+			const line = stdout.split(/\r?\n/).find((value) => value.trim());
+			if (!line) return;
+			resolveServer({
+				url: `http://127.0.0.1:${line.trim()}/glmocr/parse`,
+				requestsPath,
+				close: () =>
+					new Promise((resolveClose, rejectClose) => {
+						child.once("exit", () => resolveClose());
+						child.once("error", rejectClose);
+						child.kill();
+					}),
+			});
+		});
+		child.once("error", rejectServer);
+		child.once("exit", (code) => {
+			if (!stdout.trim()) rejectServer(new Error(`GLM-OCR fixture exited before startup with code ${code}: ${stderr}`));
+		});
+	});
 }
 
 test("transcript cleanup and file conversion preserve their source", () => {
@@ -1010,6 +1080,64 @@ printf 'synthetic png bytes' > "\${@: -1}.png"
 			).valid,
 			true,
 		);
+	});
+});
+
+test("document ingest sends image OCR to GLM-OCR SDK and preserves structured artifacts", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const server = await startGlmocrFixture(workspace, {
+			markdown_result: "# Invoice\n\n| Item | Total |\n|---|---:|\n| Paper | $12.00 |\n",
+			json_result: { blocks: [{ type: "table", page: 1 }] },
+			layout_details: { ignored: true },
+			data_info: { pages: [{ page_id: 1 }] },
+			usage: { prompt_tokens: 1, completion_tokens: 1 },
+			model: "glm-ocr",
+		});
+		try {
+			const source = join(workspace, "scan.png");
+			writeFileSync(source, Buffer.from("synthetic png fixture"));
+			const runDirectory = join(workspace, "ingest");
+			const prepared = jsonOutput(
+				run("node", [
+					script("document-ingest", "document-ingest.mjs"),
+					"prepare",
+					source,
+					"--output",
+					runDirectory,
+					"--ocr-backend",
+					"glmocr",
+					"--glmocr-url",
+					server.url,
+				]),
+			);
+			assert.equal(prepared.counts.needs_review, 1);
+			const requests = readFileSync(server.requestsPath, "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+			assert.equal(requests.length, 1);
+			assert.match(requests[0].body.image_url, /^data:image\/png;base64,/);
+			const documentDirectoryName = readFileSync(join(runDirectory, "manifest.csv"), "utf8").split("\n")[1].split(",")[5];
+			const documentDirectory = join(runDirectory, documentDirectoryName);
+			const metadataPath = join(documentDirectory, "metadata.json");
+			const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
+			assert.equal(metadata.extraction.method, "glm-ocr-sdk");
+			assert.equal(metadata.extraction.ocr.backend, "glmocr");
+			assert.equal(metadata.extraction.ocr.used, true);
+			assert.equal(metadata.extraction.ocr.layoutPath, "derived/glmocr-layout.json");
+			assert.match(readFileSync(join(documentDirectory, "document.md"), "utf8"), /Paper/);
+			assert.deepEqual(JSON.parse(readFileSync(join(documentDirectory, "derived", "glmocr-layout.json"), "utf8")), {
+				blocks: [{ type: "table", page: 1 }],
+			});
+
+			metadata.review.completed = true;
+			writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
+			const reportPath = join(documentDirectory, "extraction_report.md");
+			writeFileSync(reportPath, readFileSync(reportPath, "utf8").replace("model normalization pending", "model normalization complete"));
+			assert.equal(jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", runDirectory])).valid, true);
+		} finally {
+			await server.close();
+		}
 	});
 });
 
