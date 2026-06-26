@@ -114,15 +114,23 @@ best local extraction and record `vision.unavailableReason`.
 
 ## GLM-OCR SDK Backend
 
-When `--ocr-backend glmocr` is used, send PDFs and image inputs to the
-configured GLM-OCR SDK JSON endpoint as base64 data URLs. Use
-`markdown_result`, then `md_results`, then `text` as the extracted Markdown.
-Retain the full response at `derived/glmocr-response.json`; retain
-`json_result` or `layout_details` at `derived/glmocr-layout.json` when present.
-Set `metadata.extraction.method` to `glm-ocr-sdk`, set
-`metadata.extraction.ocr.backend` to `glmocr`, and include hashes for retained
-derived artifacts. With `--ocr-backend auto`, record a warning if GLM-OCR
-fails and local OCR is used instead.
+The default backend is `auto`. With `auto` or `glmocr`, GLM-OCR is the primary
+extractor for every PDF and image, even when a PDF already has a usable text
+layer, because direct PDF text is unreliable for multi-column pages, charts,
+and tables. Send PDFs and image inputs to the configured GLM-OCR SDK JSON
+endpoint as base64 data URLs. Use `markdown_result`, then `md_results`, then
+`text` as the extracted Markdown. Retain the full response at
+`derived/glmocr-response.json`; retain `json_result` or `layout_details` at
+`derived/glmocr-layout.json` when present. Set `metadata.extraction.method` to
+`glm-ocr-sdk`, set `metadata.extraction.ocr.backend` to `glmocr`, and include
+hashes for retained derived artifacts.
+
+With `--ocr-backend auto`, record a warning and use local OCR if GLM-OCR
+fails; with `--ocr-backend glmocr`, a GLM-OCR failure fails the document. When
+GLM-OCR output is itself low quality, preparation renders the PDF pages under
+`derived/vision-pages/`, sets `extraction.vision.required` true with every page
+as a candidate, and the active model must complete the vision fallback (or
+record `vision.unavailableReason`) before review is marked complete.
 
 ## Manifest
 

@@ -994,7 +994,7 @@ printf 'synthetic png bytes' > "\${@: -1}.png"
 		const prepared = jsonOutput(
 			runWithEnvironment(
 				"node",
-				[script("document-ingest", "document-ingest.mjs"), "prepare", source, "--output", runDirectory],
+				[script("document-ingest", "document-ingest.mjs"), "prepare", source, "--output", runDirectory, "--ocr-backend", "local"],
 				{ OCR_LOG: ocrLog, PATH: `${fakeBin}:${process.env.PATH}` },
 			),
 		);
@@ -1055,6 +1055,8 @@ printf 'synthetic png bytes' > "\${@: -1}.png"
 					localOnlyRun,
 					"--ocr",
 					"force",
+					"--ocr-backend",
+					"local",
 				],
 				{ OCR_LOG: ocrLog, PATH: `${fakeBin}:${process.env.PATH}` },
 			),
@@ -1137,6 +1139,134 @@ test("document ingest sends image OCR to GLM-OCR SDK and preserves structured ar
 			assert.equal(jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", runDirectory])).valid, true);
 		} finally {
 			await server.close();
+		}
+	});
+});
+
+test("document ingest forces GLM-OCR for text PDFs and falls back to vision on low-quality output", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fakeBin = join(workspace, "fake-bin");
+		mkdirSync(fakeBin);
+		const commands = {
+			pdfinfo: `#!/usr/bin/env bash
+if [[ "$1" == "-v" ]]; then echo "pdfinfo fake"; exit 0; fi
+printf 'Pages: 1\\nTitle: Synthetic PDF\\n'
+`,
+			pdftotext: `#!/usr/bin/env bash
+if [[ "$1" == "-v" ]]; then echo "pdftotext fake"; exit 0; fi
+printf 'This readable text layer would have satisfied direct extraction without any optical character recognition.'
+`,
+			pdftoppm: `#!/usr/bin/env bash
+if [[ "$1" == "-v" ]]; then echo "pdftoppm fake"; exit 0; fi
+printf 'synthetic png bytes' > "\${@: -1}.png"
+`,
+		};
+		for (const [name, body] of Object.entries(commands)) {
+			writeFileSync(join(fakeBin, name), body);
+			chmodSync(join(fakeBin, name), 0o755);
+		}
+		const source = join(workspace, "text.pdf");
+		writeFileSync(source, "%PDF-1.4\nsynthetic text-layer fixture\n");
+
+		const cleanServer = await startGlmocrFixture(workspace, {
+			markdown_result: "# Report\n\nThis is a clean, high quality GLM-OCR transcription with plenty of readable words across the whole page.\n",
+			data_info: { pages: [{ page_id: 1 }] },
+		});
+		try {
+			const cleanRun = join(workspace, "clean");
+			const prepared = jsonOutput(
+				runWithEnvironment(
+					"node",
+					[script("document-ingest", "document-ingest.mjs"), "prepare", source, "--output", cleanRun],
+					{ PATH: `${fakeBin}:${process.env.PATH}`, FORGE_GLMOCR_URL: cleanServer.url },
+				),
+			);
+			assert.equal(prepared.counts.needs_review, 1);
+			const requests = readFileSync(cleanServer.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			assert.equal(requests.length, 1);
+			assert.match(requests[0].body.file, /^data:application\/pdf;base64,/);
+			const cleanDirectoryName = readFileSync(join(cleanRun, "manifest.csv"), "utf8").split("\n")[1].split(",")[5];
+			const cleanDirectory = join(cleanRun, cleanDirectoryName);
+			const cleanMetadataPath = join(cleanDirectory, "metadata.json");
+			const cleanMetadata = JSON.parse(readFileSync(cleanMetadataPath, "utf8"));
+			assert.equal(cleanMetadata.extraction.method, "glm-ocr-sdk");
+			assert.equal(cleanMetadata.extraction.ocr.backend, "glmocr");
+			assert.equal(cleanMetadata.extraction.vision.required, false);
+			assert.match(readFileSync(join(cleanDirectory, "document.md"), "utf8"), /clean, high quality GLM-OCR transcription/);
+			cleanMetadata.review.completed = true;
+			writeFileSync(cleanMetadataPath, `${JSON.stringify(cleanMetadata, null, 2)}\n`);
+			const cleanReportPath = join(cleanDirectory, "extraction_report.md");
+			writeFileSync(cleanReportPath, readFileSync(cleanReportPath, "utf8").replace("model normalization pending", "model normalization complete"));
+			assert.equal(jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", cleanRun])).valid, true);
+		} finally {
+			await cleanServer.close();
+		}
+
+		const garbledServer = await startGlmocrFixture(workspace, {
+			markdown_result: "......................................................................................................................................\n",
+			json_result: { blocks: [{ type: "table", page: 1 }] },
+			data_info: { pages: [{ page_id: 1 }] },
+		});
+		try {
+			const garbledRun = join(workspace, "garbled");
+			jsonOutput(
+				runWithEnvironment(
+					"node",
+					[
+						script("document-ingest", "document-ingest.mjs"),
+						"prepare",
+						source,
+						"--output",
+						garbledRun,
+						"--ocr-backend",
+						"auto",
+						"--glmocr-url",
+						garbledServer.url,
+					],
+					{ PATH: `${fakeBin}:${process.env.PATH}` },
+				),
+			);
+			const garbledDirectoryName = readFileSync(join(garbledRun, "manifest.csv"), "utf8").split("\n")[1].split(",")[5];
+			const garbledDirectory = join(garbledRun, garbledDirectoryName);
+			const garbledMetadataPath = join(garbledDirectory, "metadata.json");
+			const garbledMetadata = JSON.parse(readFileSync(garbledMetadataPath, "utf8"));
+			assert.equal(garbledMetadata.extraction.method, "glm-ocr-sdk");
+			assert.equal(garbledMetadata.extraction.vision.required, true);
+			assert.deepEqual(garbledMetadata.extraction.vision.candidatePages, [1]);
+			assert.equal(garbledMetadata.extraction.vision.renderedPages.length, 1);
+			assert.deepEqual(garbledMetadata.extraction.ocr.unresolvedPages, [1]);
+			assert.equal(existsSync(join(garbledDirectory, "derived", "vision-pages", "page-0001.png")), true);
+
+			const transcript = "# Page 1\n\nReadable vision transcription recovered by the active model.\n";
+			mkdirSync(join(garbledDirectory, "working", "vision-pages"));
+			writeFileSync(join(garbledDirectory, "working", "vision-pages", "page-0001.md"), transcript);
+			writeFileSync(join(garbledDirectory, "document.md"), `${readFileSync(join(garbledDirectory, "document.md"), "utf8")}\n${transcript}`);
+			garbledMetadata.extraction.vision.used = true;
+			garbledMetadata.extraction.vision.completedPages = [1];
+			garbledMetadata.review.completed = true;
+			writeFileSync(garbledMetadataPath, `${JSON.stringify(garbledMetadata, null, 2)}\n`);
+			const sourceMapPath = join(garbledDirectory, "source_map.json");
+			const sourceMap = JSON.parse(readFileSync(sourceMapPath, "utf8"));
+			sourceMap.entries.push({
+				markdownStartLine: readFileSync(join(garbledDirectory, "document.md"), "utf8").split("\n").length - 3,
+				markdownEndLine: readFileSync(join(garbledDirectory, "document.md"), "utf8").split("\n").length - 1,
+				sourceLocator: { type: "pdf-page", page: 1 },
+				method: "vision-transcription",
+				confidence: "medium",
+			});
+			writeFileSync(sourceMapPath, `${JSON.stringify(sourceMap, null, 2)}\n`);
+			const reportPath = join(garbledDirectory, "extraction_report.md");
+			writeFileSync(reportPath, readFileSync(reportPath, "utf8").replace("model normalization pending", "model normalization complete"));
+			assert.equal(
+				jsonOutput(
+					runWithEnvironment("node", [script("document-ingest", "document-ingest.mjs"), "validate", garbledRun], {
+						PATH: `${fakeBin}:${process.env.PATH}`,
+					}),
+				).valid,
+				true,
+			);
+		} finally {
+			await garbledServer.close();
 		}
 	});
 });

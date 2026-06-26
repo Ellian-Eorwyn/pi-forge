@@ -24,16 +24,23 @@ changing source files.
    ```
 
    Preparation is recursive for folders, skips hidden paths and symlinks,
-   defaults to automatic OCR, local OCR tooling, and 150,000-character chunks.
-   Use `--ocr force` to rebuild every PDF text layer, `--ocr never` to disable
-   OCR, or `--chunk-chars <positive-integer>` only when requested. Use
-   `--ocr-backend glmocr` to send OCR work to the GLM-OCR SDK backend, or
-   `--ocr-backend auto` to try GLM-OCR first and fall back to local OCR.
-   Configure the endpoint with `--glmocr-url <url>` or `FORGE_GLMOCR_URL`;
-   the default endpoint is `http://192.168.4.35:5002/glmocr/parse`.
-   Automatic local OCR retries pages whose text is sparse or garbled and keeps
-   the better extraction. GLM-OCR returns Markdown plus structured layout JSON
-   for PDFs and image inputs.
+   defaults to automatic OCR, the GLM-OCR backend (`--ocr-backend auto`), and
+   150,000-character chunks. With the default `auto` backend GLM-OCR is the
+   primary extractor for every PDF and image, even when a PDF already has a
+   text layer, because direct PDF text is unreliable for multi-column pages,
+   charts, and tables; preparation silently falls back to local
+   `pdftotext`/`ocrmypdf` only when GLM-OCR is unreachable. Use
+   `--ocr-backend glmocr` to require GLM-OCR and hard-fail when it is
+   unavailable, or `--ocr-backend local` to force the local-only path. Use
+   `--ocr never` to disable OCR (pure `pdftotext`), `--ocr force` to rebuild
+   every PDF text layer, or `--chunk-chars <positive-integer>` only when
+   requested. Configure the endpoint with `--glmocr-url <url>` or
+   `FORGE_GLMOCR_URL`; the default endpoint is
+   `http://llms:5002/glmocr/parse`. When GLM-OCR output is low quality,
+   preparation renders the PDF pages and requires the vision fallback so the
+   active model transcribes them. Local OCR retries pages whose text is sparse
+   or garbled and keeps the better extraction. GLM-OCR returns Markdown plus
+   structured layout JSON for PDFs and image inputs.
 3. Read [references/output-contract.md](references/output-contract.md). Review
    every prepared document sequentially. Never review several documents in one
    model pass.

@@ -15,7 +15,7 @@ import {
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
 
 const DEFAULT_CHUNK_CHARACTERS = 150_000;
-const DEFAULT_GLMOCR_URL = "http://192.168.4.35:5002/glmocr/parse";
+const DEFAULT_GLMOCR_URL = "http://llms:5002/glmocr/parse";
 const DEFAULT_GLMOCR_TIMEOUT_MS = 300_000;
 const LOW_TEXT_CHARACTERS = 40;
 const MINIMUM_ALPHANUMERIC_RATIO = 0.2;
@@ -480,6 +480,37 @@ async function extractPdf(filePath, documentDirectory, options, tools) {
 	const pageCount = Number.parseInt(info.Pages, 10);
 	if (!Number.isInteger(pageCount) || pageCount < 1) throw new Error("pdfinfo did not report a valid page count");
 	const warnings = [];
+	if (options.ocrBackend !== "local" && ocrMode !== "never") {
+		try {
+			const remote = await extractGlmocr(filePath, documentDirectory, options, pageCount);
+			if (textQuality(remote.markdown).suspicious) {
+				const allPages = Array.from({ length: pageCount }, (_, index) => index + 1);
+				const visionRendering = renderVisionPages(filePath, documentDirectory, allPages, tools);
+				remote.warnings.push(...visionRendering.warnings);
+				if (visionRendering.renderedPages.length > 0) {
+					remote.warnings.push(`GLM-OCR output is low quality; vision fallback is required for pages: ${visionRendering.renderedPages.map(({ page }) => page).join(", ")}.`);
+					remote.ocr.unresolvedPages = allPages;
+					remote.vision = {
+						mode: "auto",
+						required: true,
+						candidatePages: allPages,
+						renderedPages: visionRendering.renderedPages,
+						completedPages: [],
+						used: false,
+						unavailableReason: null,
+					};
+				} else {
+					remote.warnings.push("GLM-OCR output is low quality, but pages could not be rendered for the vision fallback.");
+				}
+			}
+			remote.warnings.unshift(...warnings);
+			return remote;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (options.ocrBackend === "glmocr") throw new Error(`GLM-OCR SDK failed: ${message}`);
+			warnings.push(`GLM-OCR SDK failed; falling back to local OCR: ${message}`);
+		}
+	}
 	let pageExtraction = extractPdfPages(filePath, pageCount);
 	const originalPages = pageExtraction.pages;
 	let pages = originalPages;
@@ -502,17 +533,6 @@ async function extractPdf(filePath, documentDirectory, options, tools) {
 	let unresolvedPages = detectedCandidatePages;
 	if (ocrMode === "force" || (ocrMode === "auto" && candidatePages.length > 0)) {
 		ocrAttempted = true;
-		if (options.ocrBackend === "glmocr" || options.ocrBackend === "auto") {
-			try {
-				const remote = await extractGlmocr(filePath, documentDirectory, options, pageCount);
-				remote.warnings.unshift(...warnings);
-				return remote;
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				if (options.ocrBackend === "glmocr") throw new Error(`GLM-OCR SDK failed: ${message}`);
-				warnings.push(`GLM-OCR SDK failed; falling back to local OCR: ${message}`);
-			}
-		}
 		if (!tools.ocrmypdf.available || !tools.tesseract.available) {
 			ocrError = "OCRmyPDF and Tesseract are required for PDF OCR but one or both are unavailable.";
 			warnings.push(ocrError);
@@ -901,7 +921,7 @@ function parsePrepareArguments(args) {
 	const input = resolve(args[0]);
 	let output = null;
 	let ocr = "auto";
-	let ocrBackend = process.env.FORGE_OCR_BACKEND || "local";
+	let ocrBackend = process.env.FORGE_OCR_BACKEND || "auto";
 	let glmocrUrl = process.env.FORGE_GLMOCR_URL || process.env.FORGE_OCR_URL || process.env.OCR_URL || DEFAULT_GLMOCR_URL;
 	let glmocrTimeoutMs = Number.parseInt(process.env.FORGE_GLMOCR_TIMEOUT_MS || process.env.FORGE_OCR_TIMEOUT_MS || String(DEFAULT_GLMOCR_TIMEOUT_MS), 10);
 	let glmocrLayoutVisualization = false;
