@@ -1531,7 +1531,13 @@ test("profile configuration installs local service defaults without dropping use
 		mkdirSync(agentDirectory);
 		writeFileSync(
 			join(agentDirectory, "settings.json"),
-			`${JSON.stringify({ theme: "light", packages: ["/user/package"] })}\n`,
+			`${JSON.stringify({
+				theme: "light",
+				packages: ["/user/package"],
+				compaction: { keepRecentTokens: 12345 },
+				taskModel: { timeoutMs: 45000, customNote: "keep-task-setting" },
+				contextBudget: { verbatimRecentTokens: 23456, customNote: "keep-budget-setting" },
+			})}\n`,
 		);
 		writeFileSync(
 			join(agentDirectory, "models.json"),
@@ -1543,13 +1549,43 @@ test("profile configuration installs local service defaults without dropping use
 		assert.equal(settings.defaultProvider, "forge-local");
 		assert.equal(settings.defaultModel, "code");
 		assert.equal(settings.theme, "light");
+		assert.deepEqual(settings.compaction, { keepRecentTokens: 12345, enabled: true, reserveTokens: 32000 });
+		assert.deepEqual(settings.taskModel, {
+			timeoutMs: 30000,
+			customNote: "keep-task-setting",
+			enabled: true,
+			provider: "forge-task-local",
+			model: "task",
+			baseUrl: "http://llms:8007/v1",
+			contextWindow: 128000,
+			thinkingEnabled: true,
+			maxConcurrency: 1,
+			maxTokens: 2048,
+		});
+		assert.deepEqual(settings.contextBudget, {
+			verbatimRecentTokens: 20000,
+			customNote: "keep-budget-setting",
+			enabled: true,
+			softRatio: 0.65,
+			useTaskModel: true,
+		});
 		assert.deepEqual(settings.packages, [join(repositoryRoot, "forge"), "/user/package"]);
 
 		const models = JSON.parse(readFileSync(join(agentDirectory, "models.json"), "utf8"));
 		assert.equal(models.providers.existing.baseUrl, "https://example.invalid/v1");
 		assert.equal(models.providers["forge-local"].baseUrl, "http://llms:8008/v1");
-		assert.equal(models.providers["forge-local"].models[0].id, "code");
+		const localModel = models.providers["forge-local"].models[0];
+		assert.equal(localModel.id, "code");
+		assert.equal(localModel.contextWindow, 128000);
+		assert.equal(localModel.maxTokens, 32768);
 		assert.equal(models.providers["forge-local"].compat.supportsDeveloperRole, false);
+		assert.equal(models.providers["forge-task-local"].baseUrl, "http://llms:8007/v1");
+		assert.equal(models.providers["forge-task-local"].compat.thinkingFormat, "qwen");
+		const taskModel = models.providers["forge-task-local"].models[0];
+		assert.equal(taskModel.id, "task");
+		assert.equal(taskModel.reasoning, true);
+		assert.equal(taskModel.contextWindow, 128000);
+		assert.equal(taskModel.maxTokens, 2048);
 	});
 });
 

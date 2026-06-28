@@ -5,8 +5,14 @@ import { join, resolve } from "node:path";
 
 // Local model limits for the forge-local "code" model. Kept here so every
 // install and `pi-forge-update` writes the same context and output budgets.
-const CONTEXT_WINDOW = 262144;
+const CONTEXT_WINDOW = 128000;
 const MAX_OUTPUT_TOKENS = 32768;
+const COMPACTION_TRIGGER_RATIO = 0.75;
+const COMPACTION_RESERVE_TOKENS = CONTEXT_WINDOW - Math.floor(CONTEXT_WINDOW * COMPACTION_TRIGGER_RATIO);
+const CONTEXT_BUDGET_SOFT_RATIO = 0.65;
+const CONTEXT_BUDGET_VERBATIM_RECENT_TOKENS = 20000;
+const TASK_MODEL_TIMEOUT_MS = 30000;
+const TASK_MODEL_MAX_TOKENS = 2048;
 
 const [agentDirectoryArgument, profileDirectoryArgument] = process.argv.slice(2);
 if (!agentDirectoryArgument || !profileDirectoryArgument) {
@@ -54,6 +60,42 @@ const profileInstructions = readFileSync(sourceAgentsPath, "utf8");
 settings.packages = [profileDirectory, ...retainedPackages];
 settings.defaultProvider = "forge-local";
 settings.defaultModel = "code";
+const existingCompaction =
+	settings.compaction !== null && typeof settings.compaction === "object" && !Array.isArray(settings.compaction)
+		? settings.compaction
+		: {};
+const existingTaskModel =
+	settings.taskModel !== null && typeof settings.taskModel === "object" && !Array.isArray(settings.taskModel)
+		? settings.taskModel
+		: {};
+const existingContextBudget =
+	settings.contextBudget !== null && typeof settings.contextBudget === "object" && !Array.isArray(settings.contextBudget)
+		? settings.contextBudget
+		: {};
+settings.compaction = {
+	...existingCompaction,
+	enabled: true,
+	reserveTokens: COMPACTION_RESERVE_TOKENS,
+};
+settings.taskModel = {
+	...existingTaskModel,
+	enabled: true,
+	provider: "forge-task-local",
+	model: "task",
+	baseUrl: "http://llms:8007/v1",
+	contextWindow: CONTEXT_WINDOW,
+	thinkingEnabled: true,
+	maxConcurrency: 1,
+	timeoutMs: TASK_MODEL_TIMEOUT_MS,
+	maxTokens: TASK_MODEL_MAX_TOKENS,
+};
+settings.contextBudget = {
+	...existingContextBudget,
+	enabled: true,
+	softRatio: CONTEXT_BUDGET_SOFT_RATIO,
+	useTaskModel: true,
+	verbatimRecentTokens: CONTEXT_BUDGET_VERBATIM_RECENT_TOKENS,
+};
 
 let models = {};
 try {
@@ -89,6 +131,28 @@ models.providers = {
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				contextWindow: CONTEXT_WINDOW,
 				maxTokens: MAX_OUTPUT_TOKENS,
+			},
+		],
+	},
+	"forge-task-local": {
+		baseUrl: "http://llms:8007/v1",
+		api: "openai-completions",
+		apiKey: "local",
+		compat: {
+			supportsDeveloperRole: false,
+			supportsReasoningEffort: false,
+			maxTokensField: "max_tokens",
+			thinkingFormat: "qwen",
+		},
+		models: [
+			{
+				id: "task",
+				name: "Task (Local)",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: CONTEXT_WINDOW,
+				maxTokens: TASK_MODEL_MAX_TOKENS,
 			},
 		],
 	},

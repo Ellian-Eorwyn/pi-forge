@@ -6,6 +6,12 @@ import { resolvePath } from "../utils/paths.ts";
 import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
+import {
+	createTaskContextSummarizer,
+	projectContextForBudget,
+	resolveContextBudgetSettings,
+	resolveTaskModelSettings,
+} from "./context-budget.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { convertToLlm } from "./messages.ts";
@@ -289,6 +295,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	};
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
+	const summarizeWithTaskModel = createTaskContextSummarizer({
+		modelRegistry,
+		getTaskModelSettings: () => resolveTaskModelSettings(settingsManager.getTaskModelSettings()),
+	});
 
 	agent = new Agent({
 		initialState: {
@@ -348,10 +358,25 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			});
 		},
 		sessionId: sessionManager.getSessionId(),
-		transformContext: async (messages) => {
+		transformContext: async (messages, signal) => {
 			const runner = extensionRunnerRef.current;
-			if (!runner) return messages;
-			return runner.emitContext(messages);
+			let transformedMessages = messages;
+			if (runner) {
+				transformedMessages = await runner.emitContext(transformedMessages);
+			}
+			try {
+				return await projectContextForBudget({
+					messages: transformedMessages,
+					model: agent.state.model,
+					systemPrompt: agent.state.systemPrompt,
+					contextBudget: resolveContextBudgetSettings(settingsManager.getContextBudgetSettings()),
+					taskModel: resolveTaskModelSettings(settingsManager.getTaskModelSettings()),
+					summarizeWithTaskModel,
+					signal,
+				});
+			} catch {
+				return transformedMessages;
+			}
 		},
 		steeringMode: settingsManager.getSteeringMode(),
 		followUpMode: settingsManager.getFollowUpMode(),

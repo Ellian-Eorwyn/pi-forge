@@ -13,6 +13,25 @@ export interface CompactionSettings {
 	keepRecentTokens?: number; // default: 20000
 }
 
+export interface TaskModelSettings {
+	enabled?: boolean; // default: false
+	provider?: string; // default: "forge-task-local"
+	model?: string; // default: "task"
+	baseUrl?: string; // default: "http://llms:8007/v1"
+	contextWindow?: number; // default: 128000
+	thinkingEnabled?: boolean; // default: true
+	maxConcurrency?: number; // default: 1
+	timeoutMs?: number; // default: 30000
+	maxTokens?: number; // default: 2048
+}
+
+export interface ContextBudgetSettings {
+	enabled?: boolean; // default: false
+	softRatio?: number; // default: 0.65
+	useTaskModel?: boolean; // default: true
+	verbatimRecentTokens?: number; // default: 20000
+}
+
 export interface BranchSummarySettings {
 	reserveTokens?: number; // default: 16384 (tokens reserved for prompt + LLM response)
 	skipPrompt?: boolean; // default: false - when true, skips "Summarize branch?" prompt and defaults to no summary
@@ -87,6 +106,8 @@ export interface Settings {
 	followUpMode?: "all" | "one-at-a-time";
 	theme?: string;
 	compaction?: CompactionSettings;
+	taskModel?: TaskModelSettings;
+	contextBudget?: ContextBudgetSettings;
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
 	hideThinkingBlock?: boolean;
@@ -778,6 +799,14 @@ export class SettingsManager {
 			reserveTokens: this.getCompactionReserveTokens(),
 			keepRecentTokens: this.getCompactionKeepRecentTokens(),
 		};
+	}
+
+	getTaskModelSettings(): TaskModelSettings {
+		return { ...(this.settings.taskModel ?? {}) };
+	}
+
+	getContextBudgetSettings(): ContextBudgetSettings {
+		return { ...(this.settings.contextBudget ?? {}) };
 	}
 
 	getBranchSummarySettings(): { reserveTokens: number; skipPrompt: boolean } {

@@ -228,12 +228,14 @@ export {
 } from "./core/session-manager.ts";
 export {
 	type CompactionSettings,
+	type ContextBudgetSettings,
 	type DefaultProjectTrust,
 	type ImageSettings,
 	type PackageSource,
 	type RetrySettings,
 	SettingsManager,
 	type SettingsManagerCreateOptions,
+	type TaskModelSettings,
 } from "./core/settings-manager.ts";
 // Skills
 export {
