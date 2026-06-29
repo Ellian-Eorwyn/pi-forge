@@ -150,42 +150,66 @@ ensure_path_profile() {
 	PATH_PROFILE_PATH="$profile_file"
 }
 
-migrate_legacy_default_install() {
+migrate_default_install_home() {
 	[[ -z "${PI_FORGE_HOME:-}" && -z "${PI_FORGE_INSTALL_DIR:-}" ]] || return 0
 	local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
-	local old_home="$data_home/pi-forge"
-	local new_home="$data_home/pi-vault"
-	local old_source="$old_home/repository"
-	[[ -d "$old_source" ]] || return 0
-	[[ "$(canonical_existing "$SOURCE_DIR")" == "$(canonical_existing "$old_source")" ]] || return 0
-	if [[ -e "$new_home" && ! -d "$new_home" ]]; then
-		echo "Cannot migrate pi-forge install: target exists and is not a directory: $new_home" >&2
+	local install_home="$data_home/pi-forge"
+	local mistaken_home="$data_home/pi-vault"
+	local mistaken_source="$mistaken_home/repository"
+	local moved_source=""
+
+	if [[ "$(canonical_existing "$SOURCE_DIR")" == "$(canonical_existing "$mistaken_source")" ]]; then
+		if [[ -e "$install_home" && ! -d "$install_home" ]]; then
+			echo "Cannot migrate pi-forge install: target exists and is not a directory: $install_home" >&2
+			echo "Move it, or set PI_FORGE_HOME to choose a different install home." >&2
+			exit 1
+		fi
+		if [[ -e "$install_home/repository" ]]; then
+			echo "Cannot migrate pi-forge install: target repository already exists: $install_home/repository" >&2
+			echo "Move it, or set PI_FORGE_HOME to choose a different install home." >&2
+			exit 1
+		fi
+		mkdir -p "$install_home"
+		mv "$mistaken_source" "$install_home/repository"
+		SOURCE_DIR="$install_home/repository"
+		moved_source="$mistaken_source"
+	fi
+
+	if [[ "$(canonical_existing "$SOURCE_DIR")" != "$(canonical_existing "$install_home/repository")" ]]; then
+		return 0
+	fi
+	PI_FORGE_HOME="$install_home"
+
+	if [[ -e "$mistaken_home" && ! -d "$mistaken_home" ]]; then
+		echo "Cannot migrate pi-forge install: mistaken install path exists and is not a directory: $mistaken_home" >&2
 		echo "Move it, or set PI_FORGE_HOME to choose a different install home." >&2
 		exit 1
 	fi
-	if [[ -e "$new_home/repository" ]]; then
-		echo "Cannot migrate pi-forge install: target repository already exists: $new_home/repository" >&2
-		echo "Move it, or set PI_FORGE_HOME to choose a different install home." >&2
-		exit 1
+	move_without_overwrite "$mistaken_home/agent" "$install_home/agent"
+	move_without_overwrite "$mistaken_home/transcription" "$install_home/transcription"
+	if [[ -n "$moved_source" ]]; then
+		remove_legacy_launcher "$mistaken_home/bin/pi-forge" "$moved_source"
+		remove_legacy_launcher "$mistaken_home/bin/pi-forge-mcp" "$moved_source"
+		remove_legacy_launcher "$mistaken_home/bin/pi-forge-update" "$moved_source"
+		rmdir "$mistaken_home/bin" 2>/dev/null || true
 	fi
-	mkdir -p "$new_home"
-	mv "$old_source" "$new_home/repository"
-	SOURCE_DIR="$new_home/repository"
-	PI_FORGE_HOME="$new_home"
+	rmdir "$mistaken_home" 2>/dev/null || true
 
 	local old_state="$HOME/.pi-forge"
 	if [[ -d "$old_state" ]]; then
 		for entry in agent transcription; do
-			move_without_overwrite "$old_state/$entry" "$new_home/$entry"
+			move_without_overwrite "$old_state/$entry" "$install_home/$entry"
 		done
 		rmdir "$old_state" 2>/dev/null || true
 	fi
-	rmdir "$old_home" 2>/dev/null || true
 
 	local legacy_bin="$HOME/.local/bin"
-	remove_legacy_launcher "$legacy_bin/pi-forge" "$old_source"
-	remove_legacy_launcher "$legacy_bin/pi-forge-mcp" "$old_source"
-	remove_legacy_launcher "$legacy_bin/pi-forge-update" "$old_source"
+	for old_source in "$moved_source" "$install_home/repository"; do
+		[[ -n "$old_source" ]] || continue
+		remove_legacy_launcher "$legacy_bin/pi-forge" "$old_source"
+		remove_legacy_launcher "$legacy_bin/pi-forge-mcp" "$old_source"
+		remove_legacy_launcher "$legacy_bin/pi-forge-update" "$old_source"
+	done
 }
 
 while (($#)); do
@@ -208,12 +232,12 @@ if [[ -z "$SOURCE_DIR" || ! -f "$SOURCE_DIR/package.json" ]]; then
 fi
 
 SOURCE_DIR="$(cd "$SOURCE_DIR" && pwd)"
-migrate_legacy_default_install
+migrate_default_install_home
 if [[ -z "$PI_FORGE_HOME" ]]; then
 	if [[ "$(basename "$SOURCE_DIR")" == "repository" ]]; then
 		PI_FORGE_HOME="$(cd "$SOURCE_DIR/.." && pwd)"
 	else
-		PI_FORGE_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/pi-vault"
+		PI_FORGE_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/pi-forge"
 	fi
 fi
 BIN_DIR="${BIN_DIR:-$PI_FORGE_HOME/bin}"

@@ -12,6 +12,16 @@ done
 SOURCE_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
 RESOURCES_ONLY=false
 
+if [[ "${EUID:-$(id -u)}" -eq 0 && -n "${SUDO_USER:-}" && "${SUDO_USER:-}" != "root" ]]; then
+	case "$SUDO_USER" in
+		*[!A-Za-z0-9._-]*)
+			echo "Refusing to rerun update for unsafe sudo user: $SUDO_USER" >&2
+			exit 1
+			;;
+	esac
+	exec sudo -H -u "$SUDO_USER" "$SOURCE_PATH" "$@"
+fi
+
 usage() {
 	cat <<'EOF'
 Usage: pi-forge-update [--resources-only]

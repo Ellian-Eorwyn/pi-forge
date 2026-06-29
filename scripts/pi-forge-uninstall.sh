@@ -83,7 +83,7 @@ if [[ -z "$PI_FORGE_HOME" ]]; then
 	if [[ -n "$SOURCE_DIR" && "$(basename "$SOURCE_DIR")" == "repository" ]]; then
 		PI_FORGE_HOME="$(cd "$SOURCE_DIR/.." && pwd)"
 	else
-		PI_FORGE_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/pi-vault"
+		PI_FORGE_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/pi-forge"
 	fi
 fi
 BIN_DIR="${BIN_DIR:-$PI_FORGE_HOME/bin}"

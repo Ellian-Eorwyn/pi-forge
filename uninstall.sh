@@ -14,7 +14,7 @@ fi
 # the standalone uninstaller logic with no source directory. It removes the
 # installed launchers and managed checkout and, with --purge-state, the agent
 # state. It never deletes a development checkout.
-PI_FORGE_HOME="${PI_FORGE_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/pi-vault}"
+PI_FORGE_HOME="${PI_FORGE_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/pi-forge}"
 INSTALL_DIR="${PI_FORGE_INSTALL_DIR:-$PI_FORGE_HOME}"
 SOURCE_DIR="$INSTALL_DIR/repository"
 

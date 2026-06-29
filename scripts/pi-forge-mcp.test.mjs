@@ -330,7 +330,7 @@ function cleanPiForgeEnvironment() {
 
 test("installer exposes a usable MCP launcher", () => {
 	const root = workspace();
-	const piForgeHome = join(root, "pi-vault");
+	const piForgeHome = join(root, ".local", "share", "pi-forge");
 	const source = join(piForgeHome, "repository");
 	makeFakeInstallSource(source);
 	const bin = join(piForgeHome, "bin");
@@ -360,14 +360,18 @@ test("installer exposes a usable MCP launcher", () => {
 	assert.equal(existsSync(join(repositoryRoot, "integrations", "pi-forge-delegation", "SKILL.md")), true);
 });
 
-test("installer migrates the legacy default install into pi-vault home", () => {
+test("installer migrates mistaken pi-vault install into pi-forge home", () => {
 	const root = workspace();
 	const dataHome = join(root, ".local", "share");
-	const oldHome = join(dataHome, "pi-forge");
-	const newHome = join(dataHome, "pi-vault");
-	const source = join(oldHome, "repository");
+	const mistakenHome = join(dataHome, "pi-vault");
+	const newHome = join(dataHome, "pi-forge");
+	const source = join(mistakenHome, "repository");
 	makeFakeInstallSource(source);
 	mkdirSync(newHome);
+	mkdirSync(join(mistakenHome, "bin"));
+	symlinkSync(join(source, "scripts", "pi-forge-run.sh"), join(mistakenHome, "bin", "pi-forge"));
+	symlinkSync(join(source, "scripts", "pi-forge-mcp-run.sh"), join(mistakenHome, "bin", "pi-forge-mcp"));
+	symlinkSync(join(source, "update.sh"), join(mistakenHome, "bin", "pi-forge-update"));
 	const oldAgent = join(root, ".pi-forge", "agent");
 	mkdirSync(oldAgent, { recursive: true });
 	writeFileSync(join(oldAgent, "auth.json"), "{}\n");
@@ -392,7 +396,7 @@ test("installer migrates the legacy default install into pi-vault home", () => {
 	);
 	assert.equal(install.status, 0, install.stderr);
 	assert.equal(existsSync(join(newHome, "repository", "scripts", "pi-forge-install.sh")), true);
-	assert.equal(existsSync(oldHome), false);
+	assert.equal(existsSync(mistakenHome), false);
 	assert.equal(existsSync(join(newHome, "agent", "auth.json")), true);
 	assert.equal(existsSync(join(newHome, "agent", "AGENTS.md")), true);
 	assert.equal(existsSync(join(newHome, "agent", "sessions")), true);
