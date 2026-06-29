@@ -344,7 +344,7 @@ test("installer exposes a usable MCP launcher", () => {
 			source,
 			"--resources-only",
 		],
-		{ encoding: "utf8", env: environment },
+		{ encoding: "utf8", env: { ...environment, HOME: root, SHELL: "/bin/zsh" } },
 	);
 	assert.equal(install.status, 0, install.stderr);
 	const launcher = join(bin, "pi-forge-mcp");
@@ -352,8 +352,9 @@ test("installer exposes a usable MCP launcher", () => {
 	assert.equal(existsSync(launcher), true);
 	assert.equal(existsSync(join(agent, "AGENTS.md")), true);
 	assert.equal(existsSync(join(agent, "sessions")), true);
+	assert.match(readFileSync(join(root, ".zprofile"), "utf8"), new RegExp(piForgeHome.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 	assert.match(install.stdout, new RegExp(`State: ${agent.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
-	const result = spawnSync(launcher, ["--help"], { encoding: "utf8", env: environment });
+	const result = spawnSync(launcher, ["--help"], { encoding: "utf8", env: { ...environment, HOME: root, SHELL: "/bin/zsh" } });
 	assert.equal(result.status, 0, result.stderr);
 	assert.match(result.stdout, /Usage: pi-forge-mcp/);
 	assert.equal(existsSync(join(repositoryRoot, "integrations", "pi-forge-delegation", "SKILL.md")), true);
@@ -366,6 +367,7 @@ test("installer migrates the legacy default install into pi-vault home", () => {
 	const newHome = join(dataHome, "pi-vault");
 	const source = join(oldHome, "repository");
 	makeFakeInstallSource(source);
+	mkdirSync(newHome);
 	const oldAgent = join(root, ".pi-forge", "agent");
 	mkdirSync(oldAgent, { recursive: true });
 	writeFileSync(join(oldAgent, "auth.json"), "{}\n");
@@ -385,7 +387,7 @@ test("installer migrates the legacy default install into pi-vault home", () => {
 		],
 		{
 			encoding: "utf8",
-			env: { ...cleanPiForgeEnvironment(), HOME: root, XDG_DATA_HOME: dataHome },
+			env: { ...cleanPiForgeEnvironment(), HOME: root, XDG_DATA_HOME: dataHome, SHELL: "/bin/zsh" },
 		},
 	);
 	assert.equal(install.status, 0, install.stderr);
@@ -397,6 +399,7 @@ test("installer migrates the legacy default install into pi-vault home", () => {
 	assert.equal(existsSync(join(newHome, "bin", "pi-forge")), true);
 	assert.equal(existsSync(join(newHome, "bin", "pi-forge-mcp")), true);
 	assert.equal(existsSync(join(newHome, "bin", "pi-forge-update")), true);
+	assert.match(readFileSync(join(root, ".zprofile"), "utf8"), new RegExp(newHome.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 	assert.equal(existsSync(join(legacyBin, "pi-forge")), false);
 	assert.equal(existsSync(join(legacyBin, "pi-forge-mcp")), false);
 	assert.equal(existsSync(join(legacyBin, "pi-forge-update")), false);

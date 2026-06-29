@@ -10,6 +10,8 @@ BIN_DIR="${PI_FORGE_BIN_DIR:-}"
 AGENT_DIR="${PI_FORGE_AGENT_DIR:-}"
 NPM_CACHE_DIR="${PI_FORGE_NPM_CACHE:-}"
 PLAYWRIGHT_BROWSERS_DIR="${PI_FORGE_PLAYWRIGHT_BROWSERS:-}"
+PATH_PROFILE_UPDATED=""
+PATH_PROFILE_PATH=""
 
 usage() {
 	cat <<'EOF'
@@ -50,6 +52,104 @@ remove_legacy_launcher() {
 	esac
 }
 
+move_without_overwrite() {
+	local source="$1"
+	local target="$2"
+	if [[ ! -e "$source" ]]; then
+		return 0
+	fi
+	if [[ ! -e "$target" ]]; then
+		mkdir -p "$(dirname "$target")"
+		mv "$source" "$target"
+		return 0
+	fi
+	if [[ -d "$source" && -d "$target" ]]; then
+		local entry
+		for entry in "$source"/* "$source"/.[!.]* "$source"/..?*; do
+			[[ -e "$entry" ]] || continue
+			local name
+			name="$(basename "$entry")"
+			if [[ -e "$target/$name" ]]; then
+				echo "Warning: leaving legacy path in place because target exists: $entry" >&2
+			else
+				mv "$entry" "$target/$name"
+			fi
+		done
+		rmdir "$source" 2>/dev/null || true
+		return 0
+	fi
+	echo "Warning: leaving legacy path in place because target exists: $source" >&2
+}
+
+sudo_user_home() {
+	local user="${SUDO_USER:-}"
+	[[ -n "$user" && "$user" != "root" ]] || return 1
+	case "$user" in
+		*[!A-Za-z0-9._-]*) return 1 ;;
+	esac
+	local home
+	home="$(eval "printf '%s' ~$user" 2>/dev/null || true)"
+	[[ -n "$home" && -d "$home" ]] || return 1
+	printf '%s' "$home"
+}
+
+shell_quote() {
+	local value="$1"
+	printf "'%s'" "${value//\'/\'\\\'\'}"
+}
+
+profile_file_for_home() {
+	local home="$1"
+	local shell_name
+	shell_name="$(basename "${SHELL:-}")"
+	if [[ "$shell_name" == "zsh" || -f "$home/.zprofile" || -f "$home/.zshrc" ]]; then
+		printf '%s' "$home/.zprofile"
+	elif [[ "$shell_name" == "bash" || -f "$home/.bash_profile" || -f "$home/.bashrc" ]]; then
+		printf '%s' "$home/.bash_profile"
+	else
+		printf '%s' "$home/.profile"
+	fi
+}
+
+ensure_path_profile() {
+	local bin_dir="$1"
+	local profile_home="${HOME:-}"
+	local sudo_home
+	if sudo_home="$(sudo_user_home)"; then
+		profile_home="$sudo_home"
+	fi
+	if [[ -z "$profile_home" || ! -d "$profile_home" ]]; then
+		echo "Warning: cannot update PATH automatically; no writable home directory found." >&2
+		return 0
+	fi
+	local candidates=("$profile_home/.zprofile" "$profile_home/.zshrc" "$profile_home/.bash_profile" "$profile_home/.bashrc" "$profile_home/.profile")
+	local candidate
+	for candidate in "${candidates[@]}"; do
+		if [[ -f "$candidate" ]] && grep -Fq "$bin_dir" "$candidate"; then
+			PATH_PROFILE_PATH="$candidate"
+			return 0
+		fi
+	done
+	local profile_file
+	profile_file="$(profile_file_for_home "$profile_home")"
+	mkdir -p "$(dirname "$profile_file")"
+	local quoted_bin
+	quoted_bin="$(shell_quote "$bin_dir")"
+	{
+		printf '\n'
+		printf '# Added by pi-forge. Keep pi-forge launchers on PATH.\n'
+		printf 'case ":$PATH:" in\n'
+		printf '\t*:%s:*) ;;\n' "$bin_dir"
+		printf '\t*) export PATH=%s:$PATH ;;\n' "$quoted_bin"
+		printf 'esac\n'
+	} >>"$profile_file"
+	if [[ -n "${SUDO_USER:-}" && "${SUDO_USER:-}" != "root" ]]; then
+		chown "$SUDO_USER" "$profile_file" 2>/dev/null || true
+	fi
+	PATH_PROFILE_UPDATED="true"
+	PATH_PROFILE_PATH="$profile_file"
+}
+
 migrate_legacy_default_install() {
 	[[ -z "${PI_FORGE_HOME:-}" && -z "${PI_FORGE_INSTALL_DIR:-}" ]] || return 0
 	local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -58,29 +158,29 @@ migrate_legacy_default_install() {
 	local old_source="$old_home/repository"
 	[[ -d "$old_source" ]] || return 0
 	[[ "$(canonical_existing "$SOURCE_DIR")" == "$(canonical_existing "$old_source")" ]] || return 0
-	if [[ -e "$new_home" ]]; then
-		echo "Cannot migrate pi-forge install: target already exists: $new_home" >&2
-		echo "Move or remove it, or set PI_FORGE_HOME to choose a different install home." >&2
+	if [[ -e "$new_home" && ! -d "$new_home" ]]; then
+		echo "Cannot migrate pi-forge install: target exists and is not a directory: $new_home" >&2
+		echo "Move it, or set PI_FORGE_HOME to choose a different install home." >&2
 		exit 1
 	fi
-	mkdir -p "$(dirname "$new_home")"
-	mv "$old_home" "$new_home"
+	if [[ -e "$new_home/repository" ]]; then
+		echo "Cannot migrate pi-forge install: target repository already exists: $new_home/repository" >&2
+		echo "Move it, or set PI_FORGE_HOME to choose a different install home." >&2
+		exit 1
+	fi
+	mkdir -p "$new_home"
+	mv "$old_source" "$new_home/repository"
 	SOURCE_DIR="$new_home/repository"
 	PI_FORGE_HOME="$new_home"
 
 	local old_state="$HOME/.pi-forge"
 	if [[ -d "$old_state" ]]; then
 		for entry in agent transcription; do
-			if [[ -e "$old_state/$entry" ]]; then
-				if [[ -e "$new_home/$entry" ]]; then
-					echo "Warning: leaving legacy state in place because target exists: $old_state/$entry" >&2
-				else
-					mv "$old_state/$entry" "$new_home/$entry"
-				fi
-			fi
+			move_without_overwrite "$old_state/$entry" "$new_home/$entry"
 		done
 		rmdir "$old_state" 2>/dev/null || true
 	fi
+	rmdir "$old_home" 2>/dev/null || true
 
 	local legacy_bin="$HOME/.local/bin"
 	remove_legacy_launcher "$legacy_bin/pi-forge" "$old_source"
@@ -183,6 +283,7 @@ node "$SOURCE_DIR/scripts/configure-pi-forge.mjs" "$AGENT_DIR" "$SOURCE_DIR/forg
 ln -sfn "$SOURCE_DIR/scripts/pi-forge-run.sh" "$BIN_DIR/pi-forge"
 ln -sfn "$SOURCE_DIR/scripts/pi-forge-mcp-run.sh" "$BIN_DIR/pi-forge-mcp"
 ln -sfn "$SOURCE_DIR/update.sh" "$BIN_DIR/pi-forge-update"
+ensure_path_profile "$BIN_DIR"
 
 echo "pi-forge is installed."
 echo "  CLI: $BIN_DIR/pi-forge"
@@ -190,5 +291,9 @@ echo "  MCP: $BIN_DIR/pi-forge-mcp"
 echo "  Updater: $BIN_DIR/pi-forge-update"
 echo "  State: $AGENT_DIR"
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
-	echo "Add $BIN_DIR to PATH before running pi-forge."
+	if [[ "$PATH_PROFILE_UPDATED" == "true" ]]; then
+		echo "Added $BIN_DIR to PATH in $PATH_PROFILE_PATH. Open a new shell before running pi-forge."
+	else
+		echo "Add $BIN_DIR to PATH before running pi-forge."
+	fi
 fi
