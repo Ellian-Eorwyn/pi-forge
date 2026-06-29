@@ -111,13 +111,15 @@ dict apply  <transcript> --output <out> [--project-dictionary <path>] [--no-dict
 ## Managed Environment
 
 `setup` builds a self-contained install under `~/.pi-forge/transcription`
-(honors `$PI_FORGE_HOME`):
+(honors `$PI_FORGE_TRANSCRIPTION_HOME`, then `$PI_FORGE_HOME`). This directory
+is durable local state outside the installed repository checkout, so
+`pi-forge-update` does not remove the venvs, model cache, or dictionary:
 
 ```
 ~/.pi-forge/transcription/
   venv-mlx/         # parakeet-mlx environment (built on Apple Silicon)
   venv-nemo/        # NeMo environment (built on Linux/NVIDIA)
-  models/           # HF_HOME for downloads; the ~2.5 GB Parakeet model lands here
+  models/           # HF_HOME; models/hub is the Hugging Face cache
   dictionary.json   # global correction dictionary
 ```
 
@@ -128,11 +130,14 @@ setup [--backend auto|all|mlx|nemo] [--skip-download]
 Each backend gets its **own** venv — parakeet-mlx cannot install on Linux and
 NeMo cannot install on macOS, so they must never share an environment. `setup`
 creates the backend's venv, installs its pinned requirements, and downloads the
-model into the shared `models/` cache. `--backend all` attempts both and reports
-per-backend status; one backend failing on a platform never disturbs the other.
-`transcribe` re-executes itself under the selected backend's venv so its imports
-resolve regardless of which `python3` invokes it. `doctor` reports each backend's
-venv, install, model-cache, and device status.
+model into the shared `models/hub/` cache. `--backend all` attempts both and
+reports per-backend status; one backend failing on a platform never disturbs the
+other. `transcribe` re-executes itself under the selected backend's venv so its
+imports resolve regardless of which `python3` invokes it. The script exports
+`HF_HOME`, `HF_HUB_CACHE`, `HUGGINGFACE_HUB_CACHE`, and `TRANSFORMERS_CACHE` to
+the managed cache before setup, doctor, and transcribe, and the MLX backend also
+passes the cache path directly to `parakeet_mlx`. `doctor` reports each
+backend's venv, install, model-cache, and device status.
 
 ## Dependencies
 
@@ -144,4 +149,4 @@ venv, install, model-cache, and device status.
   - `requirements/requirements-nemo.txt` → `nemo_toolkit[asr]` + CUDA PyTorch,
     resolved on the Linux/NVIDIA host at install time.
 - The model (~2.5 GB) is never committed; `setup` (or first `transcribe`)
-  downloads it into the managed `models/` cache.
+  downloads it into the managed `models/hub/` cache.

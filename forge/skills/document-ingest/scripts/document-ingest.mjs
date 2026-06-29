@@ -17,6 +17,8 @@ import { basename, dirname, extname, join, resolve, sep } from "node:path";
 const DEFAULT_CHUNK_CHARACTERS = 150_000;
 const DEFAULT_GLMOCR_URL = "http://llms:5002/glmocr/parse";
 const DEFAULT_GLMOCR_TIMEOUT_MS = 300_000;
+const DEFAULT_BASE_CHAT_URL = "http://llms:8008/v1/chat/completions";
+const DEFAULT_BASE_MODEL = "code";
 const LOW_TEXT_CHARACTERS = 40;
 const MINIMUM_ALPHANUMERIC_RATIO = 0.2;
 const MAXIMUM_PUNCTUATION_RATIO = 0.55;
@@ -69,7 +71,7 @@ function inspectTools() {
 		pdftoppm: toolInfo("pdftoppm", ["-v"]),
 		ocrmypdf: toolInfo("ocrmypdf"),
 		tesseract: toolInfo("tesseract"),
-		ffmpeg: toolInfo("ffmpeg"),
+		ffmpeg: toolInfo("ffmpeg", ["-version"]),
 		glmocr: { available: Boolean(glmocrUrl), version: glmocrUrl },
 	};
 }
@@ -731,12 +733,14 @@ function extractMedia(filePath, documentDirectory, tools) {
 }
 
 async function categorizeFolder(inputs) {
+	const baseChatUrl = process.env.FORGE_BASE_CHAT_URL || process.env.FORGE_CHAT_URL || DEFAULT_BASE_CHAT_URL;
+	const baseModel = process.env.FORGE_BASE_MODEL || DEFAULT_BASE_MODEL;
 	try {
-		const response = await fetch("http://llms:8007/v1/chat/completions", {
+		const response = await fetch(baseChatUrl, {
 			method: "POST",
 			headers: { "Content-Type": "application/json", "Authorization": "Bearer local" },
 			body: JSON.stringify({
-				model: "task",
+				model: baseModel,
 				messages: [
 					{
 						role: "system",

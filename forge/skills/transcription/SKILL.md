@@ -17,7 +17,8 @@ The recognition engine is **autoselected by platform**: parakeet-mlx on Apple
 Silicon (fast, native MLX), NVIDIA NeMo elsewhere (CUDA on Linux). Both run the
 Parakeet TDT v3 model locally — no audio leaves the machine. Dependencies and
 the model install into a managed virtual environment under
-`~/.pi-forge/transcription`, so the skill is self-contained.
+`~/.pi-forge/transcription`, outside the installed repository checkout, so
+updates do not remove the local model cache.
 
 ## Workflow
 
@@ -29,9 +30,10 @@ the model install into a managed virtual environment under
    ```
 
    `doctor` reports the autoselected backend, whether the managed venv and model
-   are installed, and remediation. If `ready` is false, run `setup` once to build
-   the environment and download the ~2.5 GB model for this platform (or `--backend
-   all` to prepare both engines for packaging):
+   are installed, the exact managed model cache path, and remediation. If
+   `ready` is false, run `setup` once to build the environment and download the
+   ~2.5 GB model for this platform (or `--backend all` to prepare both engines
+   for packaging):
 
    ```bash
    python3 <skill-directory>/scripts/transcription.py setup   # add --backend all to fetch both

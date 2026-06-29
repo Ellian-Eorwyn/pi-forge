@@ -23,6 +23,7 @@ const python = process.env.PYTHON ?? "python3";
 const placeholder = "<!-- TODO: author this section -->";
 const environment = {
 	...process.env,
+	FORGE_BASE_CHAT_URL: "http://127.0.0.1:1/v1/chat/completions",
 	FORGE_SEARXNG_URL: "",
 	PYTHONDONTWRITEBYTECODE: "1",
 };
@@ -90,6 +91,42 @@ function runAt(directory, command, args, extraEnvironment = {}, expectedStatus =
 
 function jsonOutput(result) {
 	return JSON.parse(result.stdout);
+}
+
+function parseCsvRows(value) {
+	const rows = [];
+	let row = [];
+	let field = "";
+	let quoted = false;
+	for (let index = 0; index < value.length; index += 1) {
+		const character = value[index];
+		if (quoted) {
+			if (character === '"' && value[index + 1] === '"') {
+				field += '"';
+				index += 1;
+			} else if (character === '"') quoted = false;
+			else field += character;
+		} else if (character === '"') quoted = true;
+		else if (character === ",") {
+			row.push(field);
+			field = "";
+		} else if (character === "\n") {
+			row.push(field.replace(/\r$/, ""));
+			rows.push(row);
+			row = [];
+			field = "";
+		} else field += character;
+	}
+	if (field || row.length > 0) {
+		row.push(field);
+		rows.push(row);
+	}
+	return rows;
+}
+
+function firstManifestRow(runDirectory) {
+	const [columns, values] = parseCsvRows(readFileSync(join(runDirectory, "manifest.csv"), "utf8"));
+	return Object.fromEntries(columns.map((column, index) => [column, values[index] ?? ""]));
 }
 
 function sha256(path) {
@@ -247,6 +284,67 @@ server.listen(0, "127.0.0.1", () => {
 		child.once("error", rejectServer);
 		child.once("exit", (code) => {
 			if (!stdout.trim()) rejectServer(new Error(`embeddings fixture exited before startup with code ${code}: ${stderr}`));
+		});
+	});
+}
+
+function startChatFixture(workspace, responseText) {
+	const requestsPath = join(workspace, "chat-requests.jsonl");
+	const serverPath = join(workspace, "chat-server.mjs");
+	writeFileSync(
+		serverPath,
+		`import { appendFileSync } from "node:fs";
+import { createServer } from "node:http";
+
+const requestsPath = ${JSON.stringify(requestsPath)};
+const responseText = ${JSON.stringify(responseText)};
+const server = createServer((request, response) => {
+	let body = "";
+	request.setEncoding("utf8");
+	request.on("data", (chunk) => {
+		body += chunk;
+	});
+	request.on("end", () => {
+		appendFileSync(requestsPath, JSON.stringify({ method: request.method, url: request.url, body: body ? JSON.parse(body) : {} }) + "\\n");
+		response.writeHead(200, { "Content-Type": "application/json" });
+		response.end(JSON.stringify({ choices: [{ message: { content: responseText } }] }));
+	});
+});
+
+server.listen(0, "127.0.0.1", () => {
+	const address = server.address();
+	if (!address || typeof address !== "object") process.exit(1);
+	process.stdout.write(String(address.port) + "\\n");
+});
+`,
+	);
+	const child = spawn(process.execPath, [serverPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+	return new Promise((resolveServer, rejectServer) => {
+		let stdout = "";
+		let stderr = "";
+		child.stdout.setEncoding("utf8");
+		child.stderr.setEncoding("utf8");
+		child.stderr.on("data", (chunk) => {
+			stderr += chunk;
+		});
+		child.stdout.on("data", (chunk) => {
+			stdout += chunk;
+			const line = stdout.split(/\r?\n/).find((value) => value.trim());
+			if (!line) return;
+			resolveServer({
+				url: `http://127.0.0.1:${line.trim()}/v1/chat/completions`,
+				requestsPath,
+				close: () =>
+					new Promise((resolveClose, rejectClose) => {
+						child.once("exit", () => resolveClose());
+						child.once("error", rejectClose);
+						child.kill();
+					}),
+			});
+		});
+		child.once("error", rejectServer);
+		child.once("exit", (code) => {
+			if (!stdout.trim()) rejectServer(new Error(`chat fixture exited before startup with code ${code}: ${stderr}`));
 		});
 	});
 }
@@ -1169,6 +1267,162 @@ test("document ingest, coding, and web collection expose review and safety bound
 	});
 });
 
+test("document ingest detects FFmpeg with its supported version flag", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fakeBin = join(workspace, "fake-bin");
+		mkdirSync(fakeBin);
+		writeFileSync(
+			join(fakeBin, "ffmpeg"),
+			`#!/usr/bin/env bash
+if [[ "$1" == "-version" ]]; then echo "ffmpeg fake 8.1.1"; exit 0; fi
+if [[ "$1" == "--version" ]]; then echo "Unrecognized option '$1'." >&2; exit 1; fi
+output="\${!#}"
+printf 'synthetic audio' > "$output"
+`,
+		);
+		chmodSync(join(fakeBin, "ffmpeg"), 0o755);
+		const doctor = jsonOutput(
+			runWithEnvironment(
+				"node",
+				[script("document-ingest", "document-ingest.mjs"), "doctor", "--json"],
+				{ PATH: `${fakeBin}:${process.env.PATH}` },
+			),
+		);
+		assert.equal(doctor.tools.ffmpeg.available, true);
+		assert.equal(doctor.capabilities.ffmpegMedia, true);
+
+		const source = join(workspace, "clip.mp4");
+		writeFileSync(source, "synthetic video");
+		const runDirectory = join(workspace, "media-ingest");
+		const chatServer = await startChatFixture(workspace, "general");
+		try {
+			const prepared = jsonOutput(
+				runWithEnvironment(
+					"node",
+					[script("document-ingest", "document-ingest.mjs"), "prepare", source, "--output", runDirectory],
+					{ PATH: `${fakeBin}:${process.env.PATH}`, FORGE_BASE_CHAT_URL: chatServer.url },
+				),
+			);
+			assert.equal(prepared.counts.needs_review, 1);
+			const documentDirectoryName = firstManifestRow(runDirectory).output_directory;
+			assert.equal(existsSync(join(runDirectory, documentDirectoryName, "derived", "audio.mp3")), true);
+		} finally {
+			await chatServer.close();
+		}
+	});
+});
+
+test("document ingest categorizes folders with the base model endpoint", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const chatServer = await startChatFixture(workspace, "literature");
+		try {
+			const inputDirectory = join(workspace, "sources");
+			mkdirSync(inputDirectory);
+			writeFileSync(join(inputDirectory, "essay.txt"), "A paper about archival practice and interpretation.\n");
+			const runDirectory = join(workspace, "categorized-ingest");
+			const prepared = jsonOutput(
+				runWithEnvironment(
+					"node",
+					[script("document-ingest", "document-ingest.mjs"), "prepare", inputDirectory, "--output", runDirectory],
+					{ FORGE_BASE_CHAT_URL: chatServer.url },
+				),
+			);
+			assert.equal(prepared.counts.needs_review, 1);
+			const requests = readFileSync(chatServer.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			assert.equal(requests.length, 1);
+			assert.equal(requests[0].url, "/v1/chat/completions");
+			assert.equal(requests[0].body.model, "code");
+			assert.match(requests[0].body.messages[1].content, /essay\.txt/);
+			assert.equal(firstManifestRow(runDirectory).suggested_pipeline, "literature");
+		} finally {
+			await chatServer.close();
+		}
+	});
+});
+
+test("transcription pins model downloads to durable managed cache", () => {
+	withWorkspace((workspace) => {
+		const transcriptionHome = join(workspace, "transcription-home");
+		const probe = join(workspace, "transcription-cache-probe.py");
+		writeFileSync(
+			probe,
+			`import importlib.util
+import json
+import os
+import sys
+
+script_path = sys.argv[1]
+transcription_home = sys.argv[2]
+os.environ["PI_FORGE_TRANSCRIPTION_HOME"] = transcription_home
+spec = importlib.util.spec_from_file_location("transcription_skill", script_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+env = module.model_cache_env()
+module.ensure_model_cache_env()
+keys = ["HF_HOME", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE", "HF_HUB_DISABLE_TELEMETRY"]
+print(json.dumps({
+    "transcription_home": str(module.transcription_home()),
+    "models_dir": str(module.models_dir()),
+    "hub_cache_dir": str(module.hub_cache_dir()),
+    "env": {key: env.get(key) for key in keys},
+    "process_env": {key: os.environ.get(key) for key in keys},
+}))
+`,
+		);
+		const report = jsonOutput(run(python, [probe, script("transcription", "transcription.py"), transcriptionHome]));
+		assert.equal(report.transcription_home, transcriptionHome);
+		assert.equal(report.models_dir, join(transcriptionHome, "models"));
+		assert.equal(report.hub_cache_dir, join(transcriptionHome, "models", "hub"));
+		assert.equal(report.env.HF_HOME, join(transcriptionHome, "models"));
+		assert.equal(report.env.HF_HUB_CACHE, join(transcriptionHome, "models", "hub"));
+		assert.equal(report.env.HUGGINGFACE_HUB_CACHE, join(transcriptionHome, "models", "hub"));
+		assert.equal(report.env.TRANSFORMERS_CACHE, join(transcriptionHome, "models", "hub"));
+		assert.equal(report.env.HF_HUB_DISABLE_TELEMETRY, "1");
+		assert.deepEqual(report.process_env, report.env);
+	});
+});
+
+test("transcription doctor reports the managed model cache", () => {
+	withWorkspace((workspace) => {
+		const transcriptionHome = join(workspace, "transcription-home");
+		const fakeBin = join(workspace, "fake-bin");
+		const cacheMarker = join(
+			transcriptionHome,
+			"models",
+			"hub",
+			"models--mlx-community--parakeet-tdt-0.6b-v3",
+			"snapshots",
+			"cached-revision",
+		);
+		mkdirSync(fakeBin);
+		mkdirSync(cacheMarker, { recursive: true });
+		writeFileSync(join(cacheMarker, "config.json"), "{}\n");
+		writeFileSync(join(cacheMarker, "model.safetensors"), "synthetic weights\n");
+		for (const command of ["ffmpeg", "ffprobe"]) {
+			writeFileSync(
+				join(fakeBin, command),
+				`#!/usr/bin/env bash
+if [[ "$1" == "-version" ]]; then echo "${command} fake"; exit 0; fi
+exit 1
+`,
+			);
+			chmodSync(join(fakeBin, command), 0o755);
+		}
+		const doctor = jsonOutput(
+			runWithEnvironment(
+				python,
+				[script("transcription", "transcription.py"), "doctor", "--backend", "mlx"],
+				{ PATH: `${fakeBin}:${process.env.PATH}`, PI_FORGE_TRANSCRIPTION_HOME: transcriptionHome },
+				1,
+			),
+		);
+		assert.equal(doctor.model_cache, join(transcriptionHome, "models"));
+		assert.equal(doctor.model_cached, true);
+		assert.equal(doctor.backends.mlx.model_cached, true);
+		assert.doesNotMatch(doctor.remediation.join("\n"), /is not cached/);
+	});
+});
+
 test("document ingest retries garbled PDF text with forced OCR and prepares vision fallback", () => {
 	withWorkspace((workspace) => {
 		const source = join(workspace, "garbled.pdf");
@@ -1220,7 +1474,7 @@ printf 'synthetic png bytes' > "\${@: -1}.png"
 			),
 		);
 		assert.equal(prepared.counts.needs_review, 1);
-		const documentDirectoryName = readFileSync(join(runDirectory, "manifest.csv"), "utf8").split("\n")[1].split(",")[5];
+		const documentDirectoryName = firstManifestRow(runDirectory).output_directory;
 		const documentDirectory = join(runDirectory, documentDirectoryName);
 		const metadata = JSON.parse(readFileSync(join(documentDirectory, "metadata.json"), "utf8"));
 		assert.equal(metadata.extraction.ocr.commandMode, "force");
@@ -1282,7 +1536,7 @@ printf 'synthetic png bytes' > "\${@: -1}.png"
 				{ OCR_LOG: ocrLog, PATH: `${fakeBin}:${process.env.PATH}` },
 			),
 		);
-		const localOnlyDirectoryName = readFileSync(join(localOnlyRun, "manifest.csv"), "utf8").split("\n")[1].split(",")[5];
+		const localOnlyDirectoryName = firstManifestRow(localOnlyRun).output_directory;
 		const localOnlyDirectory = join(localOnlyRun, localOnlyDirectoryName);
 		const localOnlyMetadataPath = join(localOnlyDirectory, "metadata.json");
 		const localOnlyMetadata = JSON.parse(readFileSync(localOnlyMetadataPath, "utf8"));
@@ -1340,7 +1594,7 @@ test("document ingest sends image OCR to GLM-OCR SDK and preserves structured ar
 				.map((line) => JSON.parse(line));
 			assert.equal(requests.length, 1);
 			assert.match(requests[0].body.image_url, /^data:image\/png;base64,/);
-			const documentDirectoryName = readFileSync(join(runDirectory, "manifest.csv"), "utf8").split("\n")[1].split(",")[5];
+			const documentDirectoryName = firstManifestRow(runDirectory).output_directory;
 			const documentDirectory = join(runDirectory, documentDirectoryName);
 			const metadataPath = join(documentDirectory, "metadata.json");
 			const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
@@ -1406,7 +1660,7 @@ printf 'synthetic png bytes' > "\${@: -1}.png"
 			const requests = readFileSync(cleanServer.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
 			assert.equal(requests.length, 1);
 			assert.match(requests[0].body.file, /^data:application\/pdf;base64,/);
-			const cleanDirectoryName = readFileSync(join(cleanRun, "manifest.csv"), "utf8").split("\n")[1].split(",")[5];
+			const cleanDirectoryName = firstManifestRow(cleanRun).output_directory;
 			const cleanDirectory = join(cleanRun, cleanDirectoryName);
 			const cleanMetadataPath = join(cleanDirectory, "metadata.json");
 			const cleanMetadata = JSON.parse(readFileSync(cleanMetadataPath, "utf8"));
@@ -1447,7 +1701,7 @@ printf 'synthetic png bytes' > "\${@: -1}.png"
 					{ PATH: `${fakeBin}:${process.env.PATH}` },
 				),
 			);
-			const garbledDirectoryName = readFileSync(join(garbledRun, "manifest.csv"), "utf8").split("\n")[1].split(",")[5];
+			const garbledDirectoryName = firstManifestRow(garbledRun).output_directory;
 			const garbledDirectory = join(garbledRun, garbledDirectoryName);
 			const garbledMetadataPath = join(garbledDirectory, "metadata.json");
 			const garbledMetadata = JSON.parse(readFileSync(garbledMetadataPath, "utf8"));
@@ -1541,7 +1795,12 @@ test("profile configuration installs local service defaults without dropping use
 		);
 		writeFileSync(
 			join(agentDirectory, "models.json"),
-			`${JSON.stringify({ providers: { existing: { baseUrl: "https://example.invalid/v1" } } })}\n`,
+			`${JSON.stringify({
+				providers: {
+					existing: { baseUrl: "https://example.invalid/v1" },
+					"forge-task-local": { baseUrl: "http://old-task.invalid/v1", models: [] },
+				},
+			})}\n`,
 		);
 		run("node", [join(repositoryRoot, "scripts", "configure-pi-forge.mjs"), agentDirectory, join(repositoryRoot, "forge")]);
 
@@ -1549,25 +1808,14 @@ test("profile configuration installs local service defaults without dropping use
 		assert.equal(settings.defaultProvider, "forge-local");
 		assert.equal(settings.defaultModel, "code");
 		assert.equal(settings.theme, "light");
-		assert.deepEqual(settings.compaction, { keepRecentTokens: 12345, enabled: true, reserveTokens: 32000 });
-		assert.deepEqual(settings.taskModel, {
-			timeoutMs: 30000,
-			customNote: "keep-task-setting",
-			enabled: true,
-			provider: "forge-task-local",
-			model: "task",
-			baseUrl: "http://llms:8007/v1",
-			contextWindow: 128000,
-			thinkingEnabled: true,
-			maxConcurrency: 1,
-			maxTokens: 2048,
-		});
+		assert.deepEqual(settings.compaction, { keepRecentTokens: 12345, enabled: true, reserveTokens: 65536 });
+		assert.equal("taskModel" in settings, false);
 		assert.deepEqual(settings.contextBudget, {
 			verbatimRecentTokens: 20000,
 			customNote: "keep-budget-setting",
 			enabled: true,
-			softRatio: 0.65,
-			useTaskModel: true,
+			softRatio: 0.75,
+			useTaskModel: false,
 		});
 		assert.deepEqual(settings.packages, [join(repositoryRoot, "forge"), "/user/package"]);
 
@@ -1576,16 +1824,10 @@ test("profile configuration installs local service defaults without dropping use
 		assert.equal(models.providers["forge-local"].baseUrl, "http://llms:8008/v1");
 		const localModel = models.providers["forge-local"].models[0];
 		assert.equal(localModel.id, "code");
-		assert.equal(localModel.contextWindow, 128000);
+		assert.equal(localModel.contextWindow, 262144);
 		assert.equal(localModel.maxTokens, 32768);
 		assert.equal(models.providers["forge-local"].compat.supportsDeveloperRole, false);
-		assert.equal(models.providers["forge-task-local"].baseUrl, "http://llms:8007/v1");
-		assert.equal(models.providers["forge-task-local"].compat.thinkingFormat, "qwen");
-		const taskModel = models.providers["forge-task-local"].models[0];
-		assert.equal(taskModel.id, "task");
-		assert.equal(taskModel.reasoning, true);
-		assert.equal(taskModel.contextWindow, 128000);
-		assert.equal(taskModel.maxTokens, 2048);
+		assert.equal("forge-task-local" in models.providers, false);
 	});
 });
 

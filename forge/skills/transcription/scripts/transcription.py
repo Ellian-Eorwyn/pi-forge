@@ -8,9 +8,9 @@ The recognition engine is autoselected by platform:
   * Apple Silicon (macOS arm64) -> parakeet-mlx (fast, native MLX)
   * everything else, incl. Linux + NVIDIA -> NeMo (CUDA-accelerated)
 
-Dependencies and models install into a managed environment under
-~/.pi-forge/transcription via `setup`, so the skill is self-contained and
-packageable."""
+Dependencies and models install into a durable managed environment under
+~/.pi-forge/transcription via `setup`, so updates to the repository do not
+remove the local Parakeet model cache."""
 
 import argparse
 import csv
@@ -136,6 +136,9 @@ def pi_forge_home():
 
 
 def transcription_home():
+    override = os.environ.get("PI_FORGE_TRANSCRIPTION_HOME")
+    if override:
+        return Path(override).expanduser()
     return pi_forge_home() / "transcription"
 
 
@@ -154,6 +157,10 @@ def venv_python(backend):
 
 def models_dir():
     return transcription_home() / "models"
+
+
+def hub_cache_dir():
+    return models_dir() / "hub"
 
 
 def requirements_path(backend):
@@ -184,22 +191,53 @@ def find_interpreter():
     return sys.executable
 
 
+def apply_model_cache_env(env=None):
+    """Force model downloads into the durable managed cache."""
+    target = os.environ if env is None else env
+    target["HF_HOME"] = str(models_dir())
+    target["HF_HUB_CACHE"] = str(hub_cache_dir())
+    target["HUGGINGFACE_HUB_CACHE"] = str(hub_cache_dir())
+    target["TRANSFORMERS_CACHE"] = str(hub_cache_dir())
+    target.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+    return target
+
+
 def model_cache_env():
-    """Force model downloads into the managed, packageable cache."""
     env = os.environ.copy()
-    env["HF_HOME"] = str(models_dir())
-    env.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
-    return env
+    return apply_model_cache_env(env)
+
+
+def ensure_model_cache_env():
+    return apply_model_cache_env()
 
 
 def model_cached(backend):
-    marker = "models--" + BACKENDS[backend]["model"].replace("/", "--")
-    hub = models_dir() / "hub"
-    if hub.exists() and (hub / marker).exists():
+    if cached_model_path(backend):
         return True
-    # Fall back to the default HF cache if setup has not relocated it yet.
-    default_hub = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
-    return default_hub.exists() and (default_hub / marker).exists()
+    return False
+
+
+def cached_model_path(backend):
+    marker = "models--" + BACKENDS[backend]["model"].replace("/", "--")
+    snapshots = hub_cache_dir() / marker / "snapshots"
+    if not snapshots.is_dir():
+        return None
+    candidates = sorted(
+        (path for path in snapshots.iterdir() if path.is_dir()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for candidate in candidates:
+        if backend == "mlx":
+            if (candidate / "config.json").is_file() and (candidate / "model.safetensors").is_file():
+                return candidate
+        else:
+            return candidate
+    return None
+
+
+def model_load_path(backend):
+    return cached_model_path(backend) or BACKENDS[backend]["model"]
 
 
 def backend_installed(backend):
@@ -454,7 +492,11 @@ def download_model(python, backend):
     print(f"Downloading model {model} ({MODEL_APPROX_DOWNLOAD}) into {models_dir()}...", file=sys.stderr)
     models_dir().mkdir(parents=True, exist_ok=True)
     if backend == "mlx":
-        code = f"from parakeet_mlx import from_pretrained; from_pretrained('{model}'); print('ok')"
+        code = (
+            "from pathlib import Path; "
+            "from parakeet_mlx import from_pretrained; "
+            f"from_pretrained('{model}', cache_dir=Path({str(hub_cache_dir())!r})); print('ok')"
+        )
     else:
         code = (
             "import nemo.collections.asr as asr; "
@@ -552,8 +594,12 @@ def load_model(backend):
             from parakeet_mlx import from_pretrained
         except Exception as error:
             fail(f"parakeet-mlx is unavailable. Run setup --backend mlx. (import error: {error})")
+        model_path = model_load_path("mlx")
+        if isinstance(model_path, Path):
+            print(f"Loading {BACKENDS['mlx']['model']} from {model_path}...", file=sys.stderr)
+            return from_pretrained(str(model_path), cache_dir=hub_cache_dir())
         print(f"Loading {BACKENDS['mlx']['model']}...", file=sys.stderr)
-        return from_pretrained(BACKENDS["mlx"]["model"])
+        return from_pretrained(model_path, cache_dir=hub_cache_dir())
     try:
         import nemo.collections.asr as nemo_asr
     except Exception as error:
@@ -942,6 +988,7 @@ def parser():
 
 
 def main():
+    ensure_model_cache_env()
     args = parser().parse_args()
     args.handler(args)
 
