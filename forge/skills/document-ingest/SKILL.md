@@ -1,94 +1,59 @@
 ---
 name: document-ingest
-description: Ingest and normalize PDF, DOCX, TXT, Markdown, HTML, and RTF documents into complete Markdown, evidence-backed metadata, extraction reports, manifests, and source maps. Use for single files or folders that need preservation, OCR detection and fallback, provenance, structural cleanup, or preparation for later summarization, extraction, analysis, and conversion.
+description: One-stop-shop folder ingestion pipeline. Ingest, normalize, and process folders of documents, images, audio, and video files. Automatically categorizes folders and routes files to the appropriate specialized skills (transcription, personal-admin, literature-extraction). Uses a hybrid deterministic and LLM-driven orchestration approach.
 ---
 
 # Document Ingest
 
-Create faithful, reviewable document representations without summarizing or
-changing source files.
+Process entire folders of documents and media deterministically, then orchestrate follow-up actions and file organization using the LLM.
 
 ## Workflow
 
-1. Resolve this skill directory from the loaded `SKILL.md` path. Run the
-   capability check when the input formats or local tools are uncertain:
+1. Resolve this skill directory from the loaded `SKILL.md` path. Run the capability check:
 
    ```bash
    node <skill-directory>/scripts/document-ingest.mjs doctor
    ```
 
-2. Choose a new output directory and prepare the input:
+2. Choose a new output directory and prepare the input folder:
 
    ```bash
    node <skill-directory>/scripts/document-ingest.mjs prepare <input> --output <new-directory>
    ```
 
-   Preparation is recursive for folders, skips hidden paths and symlinks,
-   defaults to automatic OCR, the GLM-OCR backend (`--ocr-backend auto`), and
-   150,000-character chunks. With the default `auto` backend GLM-OCR is the
-   primary extractor for every PDF and image, even when a PDF already has a
-   text layer, because direct PDF text is unreliable for multi-column pages,
-   charts, and tables; preparation silently falls back to local
-   `pdftotext`/`ocrmypdf` only when GLM-OCR is unreachable. Use
-   `--ocr-backend glmocr` to require GLM-OCR and hard-fail when it is
-   unavailable, or `--ocr-backend local` to force the local-only path. Use
-   `--ocr never` to disable OCR (pure `pdftotext`), `--ocr force` to rebuild
-   every PDF text layer, or `--chunk-chars <positive-integer>` only when
-   requested. Configure the endpoint with `--glmocr-url <url>` or
-   `FORGE_GLMOCR_URL`; the default endpoint is
-   `http://llms:5002/glmocr/parse`. When GLM-OCR output is low quality,
-   preparation renders the PDF pages and requires the vision fallback so the
-   active model transcribes them. Local OCR retries pages whose text is sparse
-   or garbled and keeps the better extraction. GLM-OCR returns Markdown plus
-   structured layout JSON for PDFs and image inputs.
-3. Read [references/output-contract.md](references/output-contract.md). Review
-   every prepared document sequentially. Never review several documents in one
-   model pass.
-4. If `metadata.json` reports `extraction.vision.required`, read each image in
-   `derived/vision-pages/` separately and transcribe it faithfully to the
-   matching `working/vision-pages/page-NNNN.md`. Replace the damaged page text
-   in `document.md`, add `vision-transcription` page mappings to
-   `source_map.json`, and record the completed pages and `vision.used: true`.
-   If the active model cannot read images, leave the best local extraction in
-   place and record a specific `vision.unavailableReason`; do not claim review
-   completion without disclosing the limitation.
-5. For one chunk, review the complete `document.md` in one pass. For several
-   chunks, read `working/chunks/*.md` in order without overlap, write reviewed
-   versions under `working/reviewed-chunks/`, concatenate them exactly into
-   `document.md`, then perform a final seam and metadata review. Do not omit,
-   summarize, deduplicate, or reorder source content.
-6. Improve only structure supported by the source: headings, paragraphs,
-   lists, tables, citations, footnotes, and appendices. Keep uncertain or
-   damaged text visible and record the problem in `extraction_report.md`.
-7. Enrich `metadata.json` only with evidence-backed values. Every title,
-   author, date, or source value must include its origin, confidence, and a
-   locator. Leave unsupported values null.
-8. Update `source_map.json`, `extraction_report.md`, and the run-level
-   `manifest.csv` after review. Keep generated interpretation out of
-   `document.md`.
-9. Validate the completed run:
+   This deterministic step creates a `manifest.csv` containing all files, automatically extracts audio from videos (via `ffmpeg`), applies OCR to images/PDFs (via `glmocr`), and determines a `suggested_pipeline` (e.g. `personal-admin`, `literature`, `transcription,transcript-cleanup`, `basic-markdown`) based on the folder contents and file formats.
+
+3. Read the `manifest.csv` located in `<new-directory>`. For each file in the manifest with `status` == "needs_review", follow its `suggested_pipeline`:
+
+   **For `basic-markdown`, `personal-admin`, or `literature`**:
+   - Review and clean up the `document.md` structure in the file's output directory. 
+   - Improve headings, paragraphs, lists, and tables supported by the source. Leave uncertain text visible and note it in `extraction_report.md`.
+   - Complete `metadata.json` and mark review as complete.
+   - If the pipeline is `personal-admin` or `literature`, load and execute that specific skill's instructions on the finalized `document.md` to produce the required summary/spreadsheet outputs.
+
+   **For `transcription,transcript-cleanup`**:
+   - Locate the extracted `derived/audio.mp3` in the file's output directory.
+   - Load and execute the `transcription` skill instructions on the audio file to produce a transcript.
+   - Load and execute the `transcript-cleanup` skill instructions to format the raw transcript into a clean, readable Markdown document.
+   - Save the final transcript as `document.md` and mark the item as complete.
+
+4. As you complete each file, update your internal task checklist or the `manifest.csv` to track progress. Ensure every successfully processed file is reviewed.
+
+5. Validate the completed run (this checks the formatting of the document ingest outputs):
 
    ```bash
-   node <skill-directory>/scripts/document-ingest.mjs validate <run-directory>
+   node <skill-directory>/scripts/document-ingest.mjs validate <new-directory>
    ```
 
-   Resolve every validation error before completion. Report warnings that
-   require human inspection.
+6. **Final File Organization**:
+   - Once all files in the manifest have been processed and validated, reorganize the folder.
+   - Create an `Originals/` folder inside `<new-directory>`.
+   - Move all original source files into `Originals/`.
+   - Extract the processed, final Markdown files (and any generated spreadsheets or reports) from their respective `output_directory` subfolders and place them directly in the top level of `<new-directory>`. Give them clean, descriptive names based on their content or original filename.
 
 ## Safety and Failure Handling
 
 - Never overwrite an input or existing output directory.
-- Keep automatically generated OCR PDFs under `derived/ocr.pdf`.
-- Keep GLM-OCR SDK responses under `derived/glmocr-response.json` and layout
-  data under `derived/glmocr-layout.json`.
-- Keep rendered vision inputs under `derived/vision-pages/` and page transcripts
-  under `working/vision-pages/`; process one page at a time.
-- Continue batch preparation after individual failures and preserve each
-  failure in `manifest.csv`.
-- Treat missing tools, encrypted or corrupt files, unresolved low-text pages,
-  invalid encoding, and suspicious content coverage as explicit failures or
-  review warnings.
-- Do not install system packages. Report missing capabilities and the commands
-  that require them.
-- Do not create summaries, analysis, conclusions, or Obsidian-specific
-  frontmatter during ingestion.
+- Do not upload files to external internet APIs unless using a locally configured backend.
+- Keep automatically generated OCR PDFs under `derived/ocr.pdf` and media under `derived/audio.mp3`.
+- Do not install system packages. Report missing capabilities and the commands that require them.

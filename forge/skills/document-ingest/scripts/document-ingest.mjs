@@ -22,13 +22,15 @@ const MINIMUM_ALPHANUMERIC_RATIO = 0.2;
 const MAXIMUM_PUNCTUATION_RATIO = 0.55;
 const MAXIMUM_DOT_RUN_RATIO = 0.2;
 const IMAGE_EXTENSIONS = new Set([".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"]);
-const SUPPORTED_EXTENSIONS = new Set([".pdf", ".docx", ".txt", ".md", ".markdown", ".html", ".htm", ".rtf", ...IMAGE_EXTENSIONS]);
+const AUDIO_VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".mkv", ".webm", ".avi", ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus"]);
+const SUPPORTED_EXTENSIONS = new Set([".pdf", ".docx", ".txt", ".md", ".markdown", ".html", ".htm", ".rtf", ...IMAGE_EXTENSIONS, ...AUDIO_VIDEO_EXTENSIONS]);
 const MANIFEST_COLUMNS = [
 	"document_id",
 	"source_path",
 	"source_sha256",
 	"source_format",
 	"status",
+	"suggested_pipeline",
 	"output_directory",
 	"title",
 	"author",
@@ -67,6 +69,7 @@ function inspectTools() {
 		pdftoppm: toolInfo("pdftoppm", ["-v"]),
 		ocrmypdf: toolInfo("ocrmypdf"),
 		tesseract: toolInfo("tesseract"),
+		ffmpeg: toolInfo("ffmpeg"),
 		glmocr: { available: Boolean(glmocrUrl), version: glmocrUrl },
 	};
 }
@@ -79,10 +82,12 @@ function printDoctor(asJson) {
 		pdfImageDetection: tools.pdfimages.available,
 		pdfPageRendering: tools.pdftoppm.available,
 		pdfOcr: tools.ocrmypdf.available && tools.tesseract.available,
+		ffmpegMedia: tools.ffmpeg.available,
 		glmocrSdk: tools.glmocr.available,
 	};
 	const remediation = [];
 	if (!tools.pandoc.available) remediation.push("Install Pandoc (macOS: brew install pandoc; Debian/Ubuntu: apt install pandoc).");
+	if (!tools.ffmpeg.available) remediation.push("Install FFmpeg (macOS: brew install ffmpeg; Debian/Ubuntu: apt install ffmpeg).");
 	if (!capabilities.pdfText || !capabilities.pdfImageDetection || !capabilities.pdfPageRendering) {
 		remediation.push("Install Poppler (macOS: brew install poppler; Debian/Ubuntu: apt install poppler-utils).");
 	}
@@ -696,6 +701,70 @@ function extractText(filePath) {
 	};
 }
 
+function extractMedia(filePath, documentDirectory, tools) {
+	if (!tools.ffmpeg.available) throw new Error("FFmpeg is required for media ingestion but was not found on PATH");
+	const derivedDirectory = join(documentDirectory, "derived");
+	mkdirSync(derivedDirectory, { recursive: true });
+	const audioPath = join(derivedDirectory, "audio.mp3");
+	const result = run("ffmpeg", ["-i", filePath, "-vn", "-ar", "44100", "-ac", "2", "-b:a", "160k", audioPath]);
+	if (result.error || result.status !== 0 || !existsSync(audioPath)) {
+		throw new Error(`FFmpeg extraction failed: ${result.stderr?.trim() || result.error?.message || "exit status " + result.status}`);
+	}
+	const markdown = `Media file extracted to derived/audio.mp3. Waiting for transcription.\\n`;
+	return {
+		markdown,
+		method: "ffmpeg-audio-extraction",
+		pageCount: null,
+		warnings: [],
+		embedded: { title: null, author: null, date: null, source: null },
+		sourceMapEntries: [
+			{
+				markdownStartLine: 1,
+				markdownEndLine: 1,
+				sourceLocator: { type: "media", path: filePath },
+				method: "document-conversion",
+				confidence: "high",
+			},
+		],
+		ocr: { mode: "not-applicable", attempted: false, used: false, reason: null, candidatePages: [], beforeQuality: [], afterQuality: [], unresolvedPages: [], derivedPath: null, derivedSha256: null, error: null },
+	};
+}
+
+async function categorizeFolder(inputs) {
+	try {
+		const response = await fetch("http://llms:8007/v1/chat/completions", {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "Authorization": "Bearer local" },
+			body: JSON.stringify({
+				model: "task",
+				messages: [
+					{
+						role: "system",
+						content: "You are a folder categorization assistant. Analyze the list of file paths. Reply with exactly one word: 'personal-admin', 'literature', or 'general'."
+					},
+					{
+						role: "user",
+						content: inputs.join("\\n")
+					}
+				],
+				temperature: 0
+			})
+		});
+		if (response.ok) {
+			const body = await response.json();
+			let text = body.choices[0].message.content.trim().toLowerCase();
+			if (text.includes("</think>")) {
+				text = text.split("</think>").pop().trim();
+			}
+			if (text.includes("personal-admin") || text.includes("admin")) return "personal-admin";
+			if (text.includes("literature") || text.includes("academic")) return "literature";
+		}
+	} catch (e) {
+		// Ignore error and return general
+	}
+	return "general";
+}
+
 function writeJson(filePath, value) {
 	writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, { flag: "wx" });
 }
@@ -830,6 +899,7 @@ async function prepareDocument(filePath, runDirectory, options, tools, usedDirec
 		if (options.ocrBackend === "local") throw new Error("image ingestion requires --ocr-backend glmocr or auto");
 		extracted = await extractGlmocr(filePath, documentDirectory, options, 1);
 	}
+	else if (AUDIO_VIDEO_EXTENSIONS.has(extname(filePath).toLowerCase())) extracted = extractMedia(filePath, documentDirectory, tools);
 	else if (["docx", "html", "rtf", "md"].includes(format)) extracted = extractPandoc(filePath, documentDirectory, format, tools);
 	else extracted = extractText(filePath);
 	const chunks = splitIntoChunks(extracted.markdown, options.chunkCharacters);
@@ -903,6 +973,7 @@ async function prepareDocument(filePath, runDirectory, options, tools, usedDirec
 			source_sha256: sourceHash,
 			source_format: format,
 			status: "needs_review",
+			suggested_pipeline: "", // To be populated later
 			output_directory: directoryName,
 			title: metadata.fields.title.value ?? "",
 			author: metadata.fields.author.value ?? "",
@@ -960,6 +1031,7 @@ async function prepare(args) {
 	mkdirSync(options.output);
 	const tools = inspectTools();
 	const inputs = collectInputs(options.input);
+	const folderCategory = await categorizeFolder(inputs.files);
 	const rows = [];
 	const usedDirectories = new Set();
 	for (const skipped of inputs.skipped) {
@@ -969,6 +1041,7 @@ async function prepare(args) {
 			source_sha256: "",
 			source_format: sourceFormat(skipped.path),
 			status: "skipped",
+			suggested_pipeline: "",
 			output_directory: "",
 			title: "",
 			author: "",
@@ -998,6 +1071,7 @@ async function prepare(args) {
 				source_sha256: sourceHash,
 				source_format: sourceFormat(filePath),
 				status: "failed",
+				suggested_pipeline: "",
 				output_directory: "",
 				title: "",
 				author: "",
@@ -1010,6 +1084,18 @@ async function prepare(args) {
 			});
 		}
 	}
+
+	// Set suggested pipelines based on format and category
+	for (const row of rows) {
+		if (row.status !== "needs_review") continue;
+		const format = row.source_format;
+		if (["mp4", "mov", "mkv", "webm", "avi", "mp3", "wav", "m4a", "flac", "ogg", "opus"].includes(format)) {
+			row.suggested_pipeline = "transcription,transcript-cleanup";
+		} else {
+			row.suggested_pipeline = folderCategory === "general" ? "basic-markdown" : folderCategory;
+		}
+	}
+
 	rows.sort((left, right) => left.source_path.localeCompare(right.source_path));
 	writeManifest(options.output, rows);
 	const counts = Object.fromEntries(["success", "needs_review", "failed", "skipped"].map((status) => [status, rows.filter((row) => row.status === status).length]));
