@@ -7,9 +7,10 @@ set -euo pipefail
 # checkout is never deleted, including the one this script lives in.
 
 SOURCE_DIR=""
-BIN_DIR="${PI_FORGE_BIN_DIR:-$HOME/.local/bin}"
-AGENT_DIR="${PI_FORGE_AGENT_DIR:-$HOME/.pi-forge/agent}"
-INSTALL_DIR="${PI_FORGE_INSTALL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/pi-forge}"
+PI_FORGE_HOME="${PI_FORGE_HOME:-}"
+BIN_DIR="${PI_FORGE_BIN_DIR:-}"
+AGENT_DIR="${PI_FORGE_AGENT_DIR:-}"
+INSTALL_DIR="${PI_FORGE_INSTALL_DIR:-}"
 PURGE_STATE=false
 DRY_RUN=false
 ASSUME_YES=false
@@ -27,9 +28,9 @@ Removes the pi-forge launchers and the managed checkout. Agent state is kept
 by default so a later reinstall reuses your credentials and sessions.
 
 Options:
-  --bin-dir <path>       Launcher directory (default: ~/.local/bin)
-  --agent-dir <path>     Agent state directory (default: ~/.pi-forge/agent)
-  --install-dir <path>   Managed checkout root (default: ~/.local/share/pi-forge)
+  --bin-dir <path>       Launcher directory (default: $PI_FORGE_HOME/bin)
+  --agent-dir <path>     Agent state directory (default: $PI_FORGE_HOME/agent)
+  --install-dir <path>   Managed checkout root (default: $PI_FORGE_HOME)
   --purge-state          Also delete the agent state directory (credentials,
                          sessions, settings). Irreversible.
   --dry-run              Print what would be removed without changing anything.
@@ -78,6 +79,16 @@ is_protected_path() {
 if [[ -n "$SOURCE_DIR" ]]; then
 	SOURCE_DIR="$(canonical "$SOURCE_DIR")"
 fi
+if [[ -z "$PI_FORGE_HOME" ]]; then
+	if [[ -n "$SOURCE_DIR" && "$(basename "$SOURCE_DIR")" == "repository" ]]; then
+		PI_FORGE_HOME="$(cd "$SOURCE_DIR/.." && pwd)"
+	else
+		PI_FORGE_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/pi-vault"
+	fi
+fi
+BIN_DIR="${BIN_DIR:-$PI_FORGE_HOME/bin}"
+AGENT_DIR="${AGENT_DIR:-$PI_FORGE_HOME/agent}"
+INSTALL_DIR="${INSTALL_DIR:-$PI_FORGE_HOME}"
 
 PLANNED=()
 WARNINGS=()

@@ -6,8 +6,8 @@ How the `transcription` skill ships and what each target installs at setup time.
 
 | Committed to the repo | Installed at `setup` time (not committed) |
 |---|---|
-| `SKILL.md`, `agents/openai.yaml` | The managed venvs under `~/.pi-forge/transcription/venv-<backend>/` |
-| `scripts/transcription.py` | The Parakeet model (~2.5 GB) under `~/.pi-forge/transcription/models/hub/` |
+| `SKILL.md`, `agents/openai.yaml` | The managed venvs under `${PI_FORGE_HOME:-~/.local/share/pi-vault}/transcription/venv-<backend>/` |
+| `scripts/transcription.py` | The Parakeet model (~2.5 GB) under `${PI_FORGE_HOME:-~/.local/share/pi-vault}/transcription/models/hub/` |
 | `references/*.md` | Backend packages (parakeet-mlx, or NeMo + CUDA PyTorch) |
 | `requirements/requirements-{mlx,nemo}.txt` | |
 
@@ -54,7 +54,7 @@ result as a fully-pinned `requirements-nemo.lock.txt`.
 
 `setup` needs network access once to fetch packages and the model. To pre-stage,
 run `setup` on a connected machine of the same platform, then copy
-`~/.pi-forge/transcription/models/` to the target's matching path (set
+`~/.local/share/pi-vault/transcription/models/` to the target's matching path (set
 `PI_FORGE_TRANSCRIPTION_HOME` if relocating the whole transcription directory,
 or `PI_FORGE_HOME` if relocating all pi-forge state). Backend packages can be
 mirrored with `pip download -r requirements/requirements-<backend>.txt`.

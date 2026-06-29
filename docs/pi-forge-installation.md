@@ -17,16 +17,21 @@ From a new machine:
 curl -fsSL https://raw.githubusercontent.com/Ellian-Eorwyn/pi-forge/main/install.sh | bash
 ```
 
-The default layout is:
+The default install home is `${XDG_DATA_HOME:-~/.local/share}/pi-vault`.
+pi-forge keeps its installed files under that one directory:
 
-- checkout: `~/.local/share/pi-forge/repository` for remote installs
-- commands: `~/.local/bin/pi-forge` and `~/.local/bin/pi-forge-update`
-- credentials, settings, sessions, and other state: `~/.pi-forge/agent`
+- checkout, scripts, and managed skills: `~/.local/share/pi-vault/repository`
+- commands: `~/.local/share/pi-vault/bin/pi-forge`,
+  `~/.local/share/pi-vault/bin/pi-forge-mcp`, and
+  `~/.local/share/pi-vault/bin/pi-forge-update`
+- credentials, settings, copied `AGENTS.md`, sessions, caches, and other state:
+  `~/.local/share/pi-vault/agent`
 
-Set `PI_FORGE_INSTALL_DIR`, `PI_FORGE_BIN_DIR`, or `PI_FORGE_AGENT_DIR` to
-override those locations. `PI_FORGE_NPM_CACHE` overrides the isolated npm cache
-under the agent directory. Add `~/.local/bin` to `PATH` when it is not already
-present.
+Set `PI_FORGE_HOME` to move the whole tree. Set `PI_FORGE_INSTALL_DIR`,
+`PI_FORGE_BIN_DIR`, or `PI_FORGE_AGENT_DIR` only when you intentionally want a
+split layout. `PI_FORGE_NPM_CACHE` overrides the isolated npm cache under the
+agent directory. Add `~/.local/share/pi-vault/bin` to `PATH` when it is not
+already present.
 
 Installing from an existing checkout uses that checkout directly. This is
 useful for development; do not remove or move it while the installation is in
@@ -60,13 +65,13 @@ Local tracked changes also stop updates rather than being overwritten.
 ```
 
 This removes the `pi-forge`, `pi-forge-mcp`, and `pi-forge-update` launchers from
-the bin directory and the managed checkout under `~/.local/share/pi-forge` when a
+the bin directory and the managed checkout under `~/.local/share/pi-vault` when a
 remote install created one. A launcher is removed only when it still points at a
 pi-forge script, and a development checkout is never deleted — including one you
 installed from directly.
 
-Agent state in `~/.pi-forge/agent` (credentials, sessions, settings) is preserved
-by default so a later reinstall reuses your login. To remove it too:
+Agent state in `~/.local/share/pi-vault/agent` (credentials, sessions, settings)
+is preserved by default so a later reinstall reuses your login. To remove it too:
 
 ```bash
 ./uninstall.sh --purge-state

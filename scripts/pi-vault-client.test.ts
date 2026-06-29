@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, test } from "node:test";
@@ -14,6 +14,7 @@ const workspaces: string[] = [];
 
 afterEach(() => {
 	delete process.env.PI_CODING_AGENT_DIR;
+	delete process.env.PI_FORGE_HOME;
 	while (workspaces.length > 0) rmSync(workspaces.pop()!, { recursive: true, force: true });
 });
 
@@ -101,4 +102,23 @@ test("missing configuration is actionable and does not spawn", () => {
 	const root = workspace();
 	process.env.PI_CODING_AGENT_DIR = root;
 	assert.throws(() => loadVaultBridgeConfiguration(), /Cannot read vault bridge configuration/);
+});
+
+test("configuration defaults to the pi-forge home agent directory", () => {
+	const root = workspace();
+	const piForgeHome = join(root, "pi-vault");
+	const server = fakeServer(root);
+	const agent = join(piForgeHome, "agent");
+	const vault = join(root, "vault");
+	const output = join(root, "output");
+	mkdirSync(agent, { recursive: true });
+	mkdirSync(vault);
+	mkdirSync(output);
+	writeFileSync(join(agent, "vault-bridge.json"), JSON.stringify({ command: server.launcher, vaultRoot: vault, readRoots: [output] }));
+	process.env.PI_FORGE_HOME = piForgeHome;
+	assert.deepEqual(loadVaultBridgeConfiguration(), {
+		command: realpathSync(server.launcher),
+		vaultRoot: realpathSync(vault),
+		readRoots: [realpathSync(output)],
+	});
 });

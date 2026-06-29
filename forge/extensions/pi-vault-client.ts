@@ -13,7 +13,8 @@ interface VaultBridgeConfiguration {
 }
 
 function configurationPath(): string {
-	const agentDirectory = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi-forge", "agent");
+	const defaultHome = process.env.PI_FORGE_HOME ?? join(homedir(), ".local", "share", "pi-vault");
+	const agentDirectory = process.env.PI_CODING_AGENT_DIR ?? join(defaultHome, "agent");
 	return join(agentDirectory, "vault-bridge.json");
 }
 

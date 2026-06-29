@@ -5,22 +5,87 @@ SOURCE_DIR=""
 OLD_HEAD=""
 UPDATE=false
 RESOURCES_ONLY=false
-BIN_DIR="${PI_FORGE_BIN_DIR:-$HOME/.local/bin}"
-AGENT_DIR="${PI_FORGE_AGENT_DIR:-$HOME/.pi-forge/agent}"
-NPM_CACHE_DIR="${PI_FORGE_NPM_CACHE:-$AGENT_DIR/npm-cache}"
-PLAYWRIGHT_BROWSERS_DIR="${PI_FORGE_PLAYWRIGHT_BROWSERS:-$AGENT_DIR/playwright-browsers}"
+PI_FORGE_HOME="${PI_FORGE_HOME:-}"
+BIN_DIR="${PI_FORGE_BIN_DIR:-}"
+AGENT_DIR="${PI_FORGE_AGENT_DIR:-}"
+NPM_CACHE_DIR="${PI_FORGE_NPM_CACHE:-}"
+PLAYWRIGHT_BROWSERS_DIR="${PI_FORGE_PLAYWRIGHT_BROWSERS:-}"
 
 usage() {
 	cat <<'EOF'
 Usage: scripts/pi-forge-install.sh --source-dir <path> [options]
 
 Options:
-  --bin-dir <path>       Launcher directory (default: ~/.local/bin)
-  --agent-dir <path>     Isolated pi-forge state directory
+  --bin-dir <path>       Launcher directory (default: $PI_FORGE_HOME/bin)
+  --agent-dir <path>     Isolated pi-forge state directory (default: $PI_FORGE_HOME/agent)
   --update               Update an existing installation
   --old-head <commit>    Previous revision used to detect core changes
   --resources-only       Update the profile without dependencies or a CLI rebuild
 EOF
+}
+
+canonical_existing() {
+	local path="$1"
+	if [[ -e "$path" ]]; then
+		(cd "$path" 2>/dev/null && pwd) || printf '%s' "$path"
+	else
+		printf '%s' "$path"
+	fi
+}
+
+remove_legacy_launcher() {
+	local launcher="$1"
+	local old_source_dir="$2"
+	[[ -L "$launcher" ]] || return 0
+	local target
+	target="$(readlink "$launcher" 2>/dev/null || true)"
+	[[ -n "$target" ]] || return 0
+	if [[ "$target" != /* ]]; then
+		target="$(dirname "$launcher")/$target"
+	fi
+	case "$target" in
+		"$old_source_dir"/scripts/pi-forge-run.sh | "$old_source_dir"/scripts/pi-forge-mcp-run.sh | "$old_source_dir"/update.sh)
+			rm -f "$launcher"
+			;;
+	esac
+}
+
+migrate_legacy_default_install() {
+	[[ -z "${PI_FORGE_HOME:-}" && -z "${PI_FORGE_INSTALL_DIR:-}" ]] || return 0
+	local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+	local old_home="$data_home/pi-forge"
+	local new_home="$data_home/pi-vault"
+	local old_source="$old_home/repository"
+	[[ -d "$old_source" ]] || return 0
+	[[ "$(canonical_existing "$SOURCE_DIR")" == "$(canonical_existing "$old_source")" ]] || return 0
+	if [[ -e "$new_home" ]]; then
+		echo "Cannot migrate pi-forge install: target already exists: $new_home" >&2
+		echo "Move or remove it, or set PI_FORGE_HOME to choose a different install home." >&2
+		exit 1
+	fi
+	mkdir -p "$(dirname "$new_home")"
+	mv "$old_home" "$new_home"
+	SOURCE_DIR="$new_home/repository"
+	PI_FORGE_HOME="$new_home"
+
+	local old_state="$HOME/.pi-forge"
+	if [[ -d "$old_state" ]]; then
+		for entry in agent transcription; do
+			if [[ -e "$old_state/$entry" ]]; then
+				if [[ -e "$new_home/$entry" ]]; then
+					echo "Warning: leaving legacy state in place because target exists: $old_state/$entry" >&2
+				else
+					mv "$old_state/$entry" "$new_home/$entry"
+				fi
+			fi
+		done
+		rmdir "$old_state" 2>/dev/null || true
+	fi
+
+	local legacy_bin="$HOME/.local/bin"
+	remove_legacy_launcher "$legacy_bin/pi-forge" "$old_source"
+	remove_legacy_launcher "$legacy_bin/pi-forge-mcp" "$old_source"
+	remove_legacy_launcher "$legacy_bin/pi-forge-update" "$old_source"
 }
 
 while (($#)); do
@@ -43,6 +108,19 @@ if [[ -z "$SOURCE_DIR" || ! -f "$SOURCE_DIR/package.json" ]]; then
 fi
 
 SOURCE_DIR="$(cd "$SOURCE_DIR" && pwd)"
+migrate_legacy_default_install
+if [[ -z "$PI_FORGE_HOME" ]]; then
+	if [[ "$(basename "$SOURCE_DIR")" == "repository" ]]; then
+		PI_FORGE_HOME="$(cd "$SOURCE_DIR/.." && pwd)"
+	else
+		PI_FORGE_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/pi-vault"
+	fi
+fi
+BIN_DIR="${BIN_DIR:-$PI_FORGE_HOME/bin}"
+AGENT_DIR="${AGENT_DIR:-$PI_FORGE_HOME/agent}"
+NPM_CACHE_DIR="${NPM_CACHE_DIR:-$AGENT_DIR/npm-cache}"
+PLAYWRIGHT_BROWSERS_DIR="${PLAYWRIGHT_BROWSERS_DIR:-$AGENT_DIR/playwright-browsers}"
+
 command -v node >/dev/null 2>&1 || { echo "pi-forge requires Node.js 22.19 or newer." >&2; exit 1; }
 command -v npm >/dev/null 2>&1 || { echo "pi-forge requires npm." >&2; exit 1; }
 

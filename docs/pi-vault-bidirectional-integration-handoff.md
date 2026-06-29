@@ -14,7 +14,7 @@ reverse direction.
 Install or update pi-forge to expose:
 
 ```text
-~/.local/bin/pi-forge-mcp
+~/.local/share/pi-vault/bin/pi-forge-mcp
 ```
 
 The server uses local stdio MCP and requires explicit roots:
@@ -113,7 +113,7 @@ Load configuration from vault-local `.pi-vault/config.yaml`:
 ```yaml
 integrations:
   pi_forge:
-    command: "/Users/you/.local/bin/pi-forge-mcp"
+    command: "/Users/you/.local/share/pi-vault/bin/pi-forge-mcp"
     read_roots:
       - "/Users/you/Documents/Recordings"
       - "/Users/you/Documents/Obsidian/My Vault"
@@ -242,7 +242,7 @@ the already pinned MCP SDK and register one native pi tool:
 Use an explicit JSON configuration file, defaulting to:
 
 ```text
-~/.pi-forge/agent/vault-bridge.json
+${PI_FORGE_HOME:-~/.local/share/pi-vault}/agent/vault-bridge.json
 ```
 
 Schema:

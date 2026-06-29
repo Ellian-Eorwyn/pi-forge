@@ -13,7 +13,7 @@ exact outer configuration key varies by MCP client:
 {
   "mcpServers": {
     "pi-forge": {
-      "command": "/Users/you/.local/bin/pi-forge-mcp",
+      "command": "/Users/you/.local/share/pi-vault/bin/pi-forge-mcp",
       "args": [
         "--read-root",
         "/Users/you/Documents/Obsidian/My Vault",

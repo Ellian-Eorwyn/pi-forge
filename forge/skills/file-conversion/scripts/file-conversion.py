@@ -162,7 +162,7 @@ def java_version():
 def default_tools_directory():
     agent_directory = os.environ.get("PI_CODING_AGENT_DIR") or os.environ.get("PI_FORGE_AGENT_DIR")
     if not agent_directory:
-        agent_directory = str(Path.home() / ".pi-forge" / "agent")
+        agent_directory = str(Path(os.environ.get("PI_FORGE_HOME", Path.home() / ".local" / "share" / "pi-vault")) / "agent")
     return Path(agent_directory).expanduser().resolve() / "tools"
 
 

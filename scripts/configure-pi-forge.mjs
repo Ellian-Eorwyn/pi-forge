@@ -26,6 +26,7 @@ const profilePathMarker = join(agentDirectory, ".pi-forge-profile-path");
 const sourceAgentsPath = join(profileDirectory, "AGENTS.md");
 const installedAgentsPath = join(agentDirectory, "AGENTS.md");
 mkdirSync(agentDirectory, { recursive: true });
+mkdirSync(join(agentDirectory, "sessions"), { recursive: true });
 
 let settings = {};
 try {

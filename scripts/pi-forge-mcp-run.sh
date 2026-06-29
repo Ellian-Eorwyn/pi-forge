@@ -10,6 +10,13 @@ while [[ -L "$SOURCE_PATH" ]]; do
 	fi
 done
 SOURCE_DIR="$(cd -P "$(dirname "$SOURCE_PATH")/.." && pwd)"
-export PI_CODING_AGENT_DIR="${PI_FORGE_AGENT_DIR:-$HOME/.pi-forge/agent}"
+if [[ -z "${PI_FORGE_HOME:-}" ]]; then
+	if [[ "$(basename "$SOURCE_DIR")" == "repository" ]]; then
+		PI_FORGE_HOME="$(cd "$SOURCE_DIR/.." && pwd)"
+	else
+		PI_FORGE_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/pi-vault"
+	fi
+fi
+export PI_CODING_AGENT_DIR="${PI_FORGE_AGENT_DIR:-$PI_FORGE_HOME/agent}"
 
 exec node "$SOURCE_DIR/scripts/pi-forge-mcp-server.mjs" "$@"

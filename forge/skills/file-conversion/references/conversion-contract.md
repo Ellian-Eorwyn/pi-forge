@@ -96,7 +96,7 @@ heuristic.
 ## Managed EPUBCheck
 
 `install-epubcheck` installs official EPUBCheck 5.3.0 under
-`${PI_CODING_AGENT_DIR:-~/.pi-forge/agent}/tools/epubcheck/5.3.0/`. It requires
+`${PI_CODING_AGENT_DIR:-${PI_FORGE_HOME:-~/.local/share/pi-vault}/agent}/tools/epubcheck/5.3.0/`. It requires
 a working system Java runtime, verifies the pinned official archive SHA-256,
 rejects unsafe ZIP paths and symbolic links, verifies the reported version, and
 installs atomically. It does not install Java or system packages.
