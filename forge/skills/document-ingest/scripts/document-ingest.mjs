@@ -63,6 +63,11 @@ const ARTIFACT_MANIFEST_COLUMNS = [
 	"sha256",
 	"created_at",
 ];
+const DOCUMENT_STATUSES = ["success", "needs_review", "failed", "skipped"];
+const EVIDENCE_FIELDS = ["title", "author", "date", "source"];
+const EVIDENCE_ORIGINS = ["embedded-metadata", "document-text", "filename", "user-provided"];
+const EVIDENCE_CONFIDENCES = ["high", "medium", "low"];
+const SOURCE_MAP_METHODS = ["page-extraction", "document-conversion", "model-alignment", "vision-transcription"];
 
 function fail(message, exitCode = 1) {
 	process.stderr.write(`Error: ${message}\n`);
@@ -821,6 +826,10 @@ function writeJson(filePath, value) {
 	writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, { flag: "wx" });
 }
 
+function writeJsonReplacing(filePath, value) {
+	writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+}
+
 function csvValue(value) {
 	const text = value === null || value === undefined ? "" : String(value);
 	return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
@@ -876,6 +885,7 @@ function extractionReport(source, extraction, status) {
 	const ocr = extraction.ocr;
 	const vision = extraction.vision;
 	const warnings = extraction.warnings.length > 0 ? extraction.warnings.map((warning) => `- ${warning}`).join("\n") : "- None.";
+	const reviewState = String(status).includes("complete") ? "complete" : "pending";
 	return `# Extraction Report
 
 ## Status
@@ -912,7 +922,7 @@ ${Object.entries(extraction.toolVersions).map(([name, version]) => `- ${name}: $
 
 ## Structure and Encoding
 
-Deterministic extraction is complete. Model normalization and structural review are pending.
+Deterministic extraction is complete. Model normalization and structural review are ${reviewState}.
 
 ## Warnings
 
@@ -1085,8 +1095,7 @@ function parsePrepareArguments(args) {
 	return { input, output, ocr, ocrBackend, glmocrUrl, glmocrTimeoutMs, glmocrLayoutVisualization, chunkCharacters };
 }
 
-async function prepare(args) {
-	const options = parsePrepareArguments(args);
+async function prepareRun(options) {
 	if (!existsSync(options.input)) fail(`input does not exist: ${options.input}`);
 	if (existsSync(options.output)) fail(`output directory already exists: ${options.output}`);
 	mkdirSync(dirname(options.output), { recursive: true });
@@ -1160,8 +1169,13 @@ async function prepare(args) {
 
 	rows.sort((left, right) => left.source_path.localeCompare(right.source_path));
 	writeManifest(options.output, rows);
-	const counts = Object.fromEntries(["success", "needs_review", "failed", "skipped"].map((status) => [status, rows.filter((row) => row.status === status).length]));
-	process.stdout.write(`${JSON.stringify({ runDirectory: options.output, documents: rows.length, counts }, null, 2)}\n`);
+	const counts = Object.fromEntries(DOCUMENT_STATUSES.map((status) => [status, rows.filter((row) => row.status === status).length]));
+	return { runDirectory: options.output, documents: rows.length, counts };
+}
+
+async function prepare(args) {
+	const summary = await prepareRun(parsePrepareArguments(args));
+	process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
 }
 
 function parseCsv(value) {
@@ -1221,8 +1235,8 @@ function validateEvidence(value, label, errors) {
 		return;
 	}
 	if (typeof value?.value !== "string" || value.value.trim() === "") errors.push(`${label}.value must be a non-empty string or null`);
-	if (!["embedded-metadata", "document-text", "filename", "user-provided"].includes(value?.origin)) errors.push(`${label}.origin is invalid`);
-	if (!["high", "medium", "low"].includes(value?.confidence)) errors.push(`${label}.confidence is invalid`);
+	if (!EVIDENCE_ORIGINS.includes(value?.origin)) errors.push(`${label}.origin is invalid`);
+	if (!EVIDENCE_CONFIDENCES.includes(value?.confidence)) errors.push(`${label}.confidence is invalid`);
 	if (typeof value?.locator !== "string" || value.locator.trim() === "") errors.push(`${label}.locator must be a non-empty string`);
 }
 
@@ -1242,7 +1256,7 @@ function validateFinalOutput(value, label, errors) {
 	}
 }
 
-function validateRun(runDirectory, { emit = true, exitOnError = true } = {}) {
+function validateRun(runDirectory, { emit = true, exitOnError = true, fixHints = false } = {}) {
 	const errors = [];
 	const warnings = [];
 	const manifestPath = join(runDirectory, "manifest.csv");
@@ -1253,7 +1267,7 @@ function validateRun(runDirectory, { emit = true, exitOnError = true } = {}) {
 	for (const values of parsed.filter((row) => row.some((field) => field !== ""))) {
 		if (values.length !== MANIFEST_COLUMNS.length) errors.push(`manifest row has ${values.length} columns instead of ${MANIFEST_COLUMNS.length}`);
 		const row = Object.fromEntries(MANIFEST_COLUMNS.map((column, index) => [column, values[index] ?? ""]));
-		if (!["success", "needs_review", "failed", "skipped"].includes(row.status)) {
+		if (!DOCUMENT_STATUSES.includes(row.status)) {
 			errors.push(`invalid manifest status for ${row.source_path}: ${row.status}`);
 			continue;
 		}
@@ -1300,8 +1314,8 @@ function validateRun(runDirectory, { emit = true, exitOnError = true } = {}) {
 				errors.push(`${row.output_directory}/source_map.json entry ${index + 1} has invalid line ranges`);
 			}
 			if (!entry.sourceLocator || typeof entry.sourceLocator !== "object") errors.push(`${row.output_directory}/source_map.json entry ${index + 1} lacks a source locator`);
-			if (!["page-extraction", "document-conversion", "model-alignment", "vision-transcription"].includes(entry.method)) errors.push(`${row.output_directory}/source_map.json entry ${index + 1} has an invalid method`);
-			if (!["high", "medium", "low"].includes(entry.confidence)) errors.push(`${row.output_directory}/source_map.json entry ${index + 1} has an invalid confidence`);
+			if (!SOURCE_MAP_METHODS.includes(entry.method)) errors.push(`${row.output_directory}/source_map.json entry ${index + 1} has an invalid method`);
+			if (!EVIDENCE_CONFIDENCES.includes(entry.confidence)) errors.push(`${row.output_directory}/source_map.json entry ${index + 1} has an invalid confidence`);
 		}
 		const chunkMetadata = metadata.extraction?.chunks;
 		if (!Array.isArray(chunkMetadata) || chunkMetadata.length < 1) errors.push(`${row.output_directory} has no extraction chunk metadata`);
@@ -1395,6 +1409,7 @@ function validateRun(runDirectory, { emit = true, exitOnError = true } = {}) {
 		if ((metadata.fields.date.value ?? "") !== row.document_date) errors.push(`${row.output_directory} date does not match manifest.csv`);
 	}
 	const result = { valid: errors.length === 0, errors, warnings };
+	if (fixHints) result.issues = errors.map(issueForValidationError);
 	if (emit) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 	if (exitOnError && errors.length > 0) process.exit(1);
 	return result;
@@ -1474,6 +1489,351 @@ function readManifestRows(runDirectory) {
 	return parsed
 		.filter((row) => row.some((field) => field !== ""))
 		.map((values) => Object.fromEntries(MANIFEST_COLUMNS.map((column, index) => [column, values[index] ?? ""])));
+}
+
+function requireRunDirectory(runDirectory) {
+	if (!existsSync(runDirectory) || !lstatSync(runDirectory).isDirectory()) fail(`run directory does not exist: ${runDirectory}`);
+	if (!existsSync(join(runDirectory, "manifest.csv"))) fail(`manifest.csv does not exist in ${runDirectory}`);
+}
+
+function documentDirectoryForRow(runDirectory, row) {
+	const documentDirectory = resolve(runDirectory, row.output_directory);
+	if (!documentDirectory.startsWith(`${resolve(runDirectory)}${sep}`)) fail(`output directory escapes the run directory: ${row.output_directory}`);
+	return documentDirectory;
+}
+
+function loadDocumentMetadata(documentDirectory) {
+	return JSON.parse(readFileSync(join(documentDirectory, "metadata.json"), "utf8"));
+}
+
+function matchingRow(rows, documentId) {
+	const row = rows.find((candidate) => candidate.document_id === documentId);
+	if (!row) fail(`document id not found in manifest.csv: ${documentId}`);
+	if (!row.output_directory) fail(`document has no output directory: ${documentId}`);
+	return row;
+}
+
+function writeUpdatedManifest(runDirectory, rows) {
+	writeManifest(runDirectory, rows);
+}
+
+function updateRowFromMetadata(row, metadata) {
+	row.status = metadata.extraction?.status ?? row.status;
+	row.title = metadata.fields?.title?.value ?? "";
+	row.author = metadata.fields?.author?.value ?? "";
+	row.document_date = metadata.fields?.date?.value ?? "";
+	row.page_count = metadata.extraction?.pageCount ?? "";
+	row.extraction_method = metadata.extraction?.method ?? "";
+	row.ocr_used = String(metadata.extraction?.ocr?.used ?? false);
+	row.warning_count = String(metadata.extraction?.warnings?.length ?? 0);
+	row.error = "";
+}
+
+function conciseStatus(runDirectory) {
+	requireRunDirectory(runDirectory);
+	const rows = readManifestRows(runDirectory);
+	const counts = Object.fromEntries(DOCUMENT_STATUSES.map((status) => [status, rows.filter((row) => row.status === status).length]));
+	const pendingReview = rows
+		.filter((row) => row.status === "needs_review")
+		.map((row) => ({
+			documentId: row.document_id,
+			sourcePath: row.source_path,
+			outputDirectory: row.output_directory,
+			suggestedPipeline: row.suggested_pipeline,
+			nextReviewCommand: `document-ingest.mjs next-review ${runDirectory}`,
+		}));
+	const validation = validateRun(runDirectory, { emit: false, exitOnError: false, fixHints: true });
+	return {
+		runDirectory,
+		counts,
+		pendingReview,
+		valid: validation.valid,
+		errors: validation.errors,
+		warnings: validation.warnings,
+		issues: validation.issues,
+	};
+}
+
+function commandStatus(args) {
+	if (args.length !== 1) fail("status requires exactly one run directory");
+	process.stdout.write(`${JSON.stringify(conciseStatus(resolve(args[0])), null, 2)}\n`);
+}
+
+function reviewPacket(runDirectory, row) {
+	const documentDirectory = documentDirectoryForRow(runDirectory, row);
+	const metadata = loadDocumentMetadata(documentDirectory);
+	const chunks = Array.isArray(metadata.extraction?.chunks)
+		? metadata.extraction.chunks.map((chunk, index) => ({
+				index: index + 1,
+				path: join(documentDirectory, chunk.path),
+				characters: chunk.characters,
+			}))
+		: [];
+	const derivedAudioPath = existsSync(join(documentDirectory, "derived", "audio.mp3")) ? join(documentDirectory, "derived", "audio.mp3") : null;
+	return {
+		reviewPacketVersion: 1,
+		documentId: row.document_id,
+		sourcePath: row.source_path,
+		sourceFormat: row.source_format,
+		outputDirectory: row.output_directory,
+		suggestedPipeline: row.suggested_pipeline,
+		paths: {
+			document: join(documentDirectory, "document.md"),
+			extracted: join(documentDirectory, "working", "extracted.md"),
+			metadata: join(documentDirectory, "metadata.json"),
+			extractionReport: join(documentDirectory, "extraction_report.md"),
+			sourceMap: join(documentDirectory, "source_map.json"),
+			derivedAudio: derivedAudioPath,
+		},
+		chunks,
+		allowedValues: {
+			statuses: DOCUMENT_STATUSES,
+			evidenceOrigins: EVIDENCE_ORIGINS,
+			evidenceConfidences: EVIDENCE_CONFIDENCES,
+			sourceMapMethods: SOURCE_MAP_METHODS,
+		},
+		current: {
+			fields: metadata.fields,
+			finalOutput: metadata.finalOutput,
+			review: metadata.review,
+			extraction: {
+				status: metadata.extraction?.status,
+				method: metadata.extraction?.method,
+				pageCount: metadata.extraction?.pageCount,
+				warnings: metadata.extraction?.warnings ?? [],
+			},
+		},
+		requiredReviewFileShape: {
+			documentId: row.document_id,
+			fields: Object.fromEntries(EVIDENCE_FIELDS.map((field) => [field, { value: null, origin: null, confidence: null, locator: null }])),
+			finalOutput: { filename: null, namingReason: null },
+			reviewNotes: [],
+		},
+		commands: {
+			recordReview: `document-ingest.mjs record-review ${runDirectory} --review-file <review.json>`,
+			recordTranscript: derivedAudioPath ? `document-ingest.mjs record-transcript ${runDirectory} --doc-id ${row.document_id} --transcript <cleaned-transcript.md>` : null,
+			validate: `document-ingest.mjs validate ${runDirectory} --fix-hints --json`,
+		},
+	};
+}
+
+function commandNextReview(args) {
+	if (args.length !== 1) fail("next-review requires exactly one run directory");
+	const runDirectory = resolve(args[0]);
+	requireRunDirectory(runDirectory);
+	const rows = readManifestRows(runDirectory);
+	const row = rows.find((candidate) => candidate.status === "needs_review");
+	if (!row) {
+		process.stdout.write(`${JSON.stringify({ complete: true, runDirectory }, null, 2)}\n`);
+		return;
+	}
+	process.stdout.write(`${JSON.stringify({ complete: false, ...reviewPacket(runDirectory, row) }, null, 2)}\n`);
+}
+
+function parseJsonFile(filePath, label) {
+	try {
+		return JSON.parse(readFileSync(filePath, "utf8"));
+	} catch (error) {
+		fail(`${label} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
+function normalizeEvidenceObject(value, existing, label) {
+	if (value === undefined) return existing;
+	if (value === null) return { value: null, origin: null, confidence: null, locator: null };
+	if (!value || typeof value !== "object" || Array.isArray(value)) fail(`${label} must be an evidence object or null`);
+	const normalized = {
+		value: value.value ?? null,
+		origin: value.origin ?? null,
+		confidence: value.confidence ?? null,
+		locator: value.locator ?? null,
+	};
+	const errors = [];
+	validateEvidence(normalized, label, errors);
+	if (errors.length > 0) fail(errors.join("; "));
+	return normalized;
+}
+
+function normalizeFinalOutput(value, existing) {
+	if (value === undefined) return existing ?? { filename: null, namingReason: null };
+	const normalized = {
+		filename: value?.filename ?? null,
+		namingReason: value?.namingReason ?? null,
+	};
+	const errors = [];
+	validateFinalOutput(normalized, "finalOutput", errors);
+	if (errors.length > 0) fail(errors.join("; "));
+	return normalized;
+}
+
+function updateSourceMapForDocument(documentDirectory, metadata, sourceLocatorType) {
+	const document = readFileSync(join(documentDirectory, "document.md"), "utf8");
+	writeJsonReplacing(join(documentDirectory, "source_map.json"), {
+		schemaVersion: 1,
+		documentId: metadata.documentId,
+		markdownFile: "document.md",
+		entries: [
+			{
+				markdownStartLine: document.trim() ? 1 : null,
+				markdownEndLine: document.trim() ? document.split("\n").length : null,
+				sourceLocator: { type: sourceLocatorType, path: metadata.source?.path ?? null },
+				method: "model-alignment",
+				confidence: "high",
+			},
+		],
+	});
+}
+
+function completeMetadataReview(metadata, payload) {
+	metadata.extraction.status = "success";
+	for (const field of EVIDENCE_FIELDS) {
+		metadata.fields[field] = normalizeEvidenceObject(payload.fields?.[field], metadata.fields?.[field], `fields.${field}`);
+	}
+	metadata.finalOutput = normalizeFinalOutput(payload.finalOutput, metadata.finalOutput);
+	metadata.structure = markdownStructure(payload.documentMarkdown ?? "");
+	metadata.review = {
+		completed: true,
+		notes: Array.isArray(payload.reviewNotes) ? payload.reviewNotes.map(String) : [],
+	};
+	return metadata;
+}
+
+function rewriteReport(documentDirectory, metadata) {
+	writeFileSync(join(documentDirectory, "extraction_report.md"), extractionReport(metadata.source, metadata.extraction, "success — model normalization complete"));
+}
+
+function parseRecordReviewArguments(args) {
+	if (args.length === 0) fail("record-review requires a run directory");
+	const runDirectory = resolve(args[0]);
+	let reviewFile = null;
+	for (let index = 1; index < args.length; index += 1) {
+		const argument = args[index];
+		if (argument === "--review-file") reviewFile = resolve(args[++index] ?? fail("--review-file requires a JSON file"));
+		else fail(`unknown record-review option: ${argument}`);
+	}
+	if (!reviewFile) fail("record-review requires --review-file <json>");
+	return { runDirectory, reviewFile };
+}
+
+function commandRecordReview(args) {
+	const options = parseRecordReviewArguments(args);
+	requireRunDirectory(options.runDirectory);
+	const payload = parseJsonFile(options.reviewFile, "review file");
+	if (!payload.documentId) fail("review file requires documentId");
+	const rows = readManifestRows(options.runDirectory);
+	const row = matchingRow(rows, payload.documentId);
+	const documentDirectory = documentDirectoryForRow(options.runDirectory, row);
+	const metadata = loadDocumentMetadata(documentDirectory);
+	let documentChanged = false;
+	if (typeof payload.documentMarkdown === "string") {
+		writeFileSync(join(documentDirectory, "document.md"), ensureFinalNewline(payload.documentMarkdown));
+		documentChanged = true;
+	} else if (payload.documentMarkdownPath) {
+		writeFileSync(join(documentDirectory, "document.md"), ensureFinalNewline(readFileSync(resolve(payload.documentMarkdownPath), "utf8")));
+		documentChanged = true;
+	}
+	const reviewedDocument = readFileSync(join(documentDirectory, "document.md"), "utf8");
+	completeMetadataReview(metadata, { ...payload, documentMarkdown: reviewedDocument });
+	if (documentChanged) updateSourceMapForDocument(documentDirectory, metadata, "document");
+	writeJsonReplacing(join(documentDirectory, "metadata.json"), metadata);
+	updateRowFromMetadata(row, metadata);
+	writeUpdatedManifest(options.runDirectory, rows);
+	rewriteReport(documentDirectory, metadata);
+	process.stdout.write(`${JSON.stringify({ recorded: payload.documentId, status: row.status, validateCommand: `document-ingest.mjs validate ${options.runDirectory} --fix-hints --json` }, null, 2)}\n`);
+}
+
+function parseRecordTranscriptArguments(args) {
+	if (args.length === 0) fail("record-transcript requires a run directory");
+	const runDirectory = resolve(args[0]);
+	let docId = null;
+	let transcript = null;
+	let title = null;
+	let author = null;
+	let filename = null;
+	let namingReason = null;
+	let note = null;
+	for (let index = 1; index < args.length; index += 1) {
+		const argument = args[index];
+		if (argument === "--doc-id") docId = args[++index] ?? fail("--doc-id requires a document id");
+		else if (argument === "--transcript") transcript = resolve(args[++index] ?? fail("--transcript requires a Markdown file"));
+		else if (argument === "--title") title = args[++index] ?? fail("--title requires text");
+		else if (argument === "--author") author = args[++index] ?? fail("--author requires text");
+		else if (argument === "--filename") filename = args[++index] ?? fail("--filename requires a Markdown filename");
+		else if (argument === "--naming-reason") namingReason = args[++index] ?? fail("--naming-reason requires text");
+		else if (argument === "--note") note = args[++index] ?? fail("--note requires text");
+		else fail(`unknown record-transcript option: ${argument}`);
+	}
+	if (!docId) fail("record-transcript requires --doc-id");
+	if (!transcript) fail("record-transcript requires --transcript <markdown>");
+	return { runDirectory, docId, transcript, title, author, filename, namingReason, note };
+}
+
+function commandRecordTranscript(args) {
+	const options = parseRecordTranscriptArguments(args);
+	requireRunDirectory(options.runDirectory);
+	if (!existsSync(options.transcript) || !lstatSync(options.transcript).isFile()) fail(`transcript does not exist: ${options.transcript}`);
+	const rows = readManifestRows(options.runDirectory);
+	const row = matchingRow(rows, options.docId);
+	if (!row.suggested_pipeline.includes("transcription")) fail(`document is not marked for transcription cleanup: ${options.docId}`);
+	const documentDirectory = documentDirectoryForRow(options.runDirectory, row);
+	const metadata = loadDocumentMetadata(documentDirectory);
+	const transcript = ensureFinalNewline(readFileSync(options.transcript, "utf8"));
+	writeFileSync(join(documentDirectory, "document.md"), transcript);
+	writeFileSync(join(documentDirectory, "working", "extracted.md"), transcript);
+	const chunksDirectory = join(documentDirectory, "working", "chunks");
+	mkdirSync(chunksDirectory, { recursive: true });
+	writeFileSync(join(chunksDirectory, "chunk-0001.md"), transcript);
+	metadata.extraction.status = "success";
+	metadata.extraction.chunks = [{ path: "working/chunks/chunk-0001.md", characters: unicodeLength(transcript) }];
+	if (options.title) metadata.fields.title = evidence(options.title, "user-provided", "high", "record-transcript --title");
+	if (options.author) metadata.fields.author = evidence(options.author, "user-provided", "high", "record-transcript --author");
+	metadata.finalOutput = normalizeFinalOutput(
+		options.filename || options.namingReason ? { filename: options.filename ?? null, namingReason: options.namingReason ?? "Provided with record-transcript." } : metadata.finalOutput,
+		metadata.finalOutput,
+	);
+	metadata.structure = markdownStructure(transcript);
+	metadata.review = { completed: true, notes: [options.note ?? "Transcript cleanup recorded as final document text."] };
+	writeJsonReplacing(join(documentDirectory, "metadata.json"), metadata);
+	updateSourceMapForDocument(documentDirectory, metadata, "media-transcript");
+	updateRowFromMetadata(row, metadata);
+	writeUpdatedManifest(options.runDirectory, rows);
+	rewriteReport(documentDirectory, metadata);
+	process.stdout.write(`${JSON.stringify({ recorded: options.docId, status: row.status, transcript: options.transcript }, null, 2)}\n`);
+}
+
+function issueForValidationError(message) {
+	if (message.includes("invalid manifest status")) {
+		return {
+			code: "invalid_manifest_status",
+			message,
+			allowedValues: DOCUMENT_STATUSES,
+			command: "Use record-review or record-transcript so manifest.csv and metadata.json are updated together.",
+		};
+	}
+	if (message.includes(".origin is invalid")) {
+		return {
+			code: "invalid_evidence_origin",
+			message,
+			allowedValues: EVIDENCE_ORIGINS,
+			command: "Use record-review with a review JSON file that uses the allowed evidence origins.",
+		};
+	}
+	if (message.includes("model review is not marked complete")) {
+		return {
+			code: "review_incomplete",
+			message,
+			expectedValue: true,
+			command: "Run next-review, review the packet, then run record-review.",
+		};
+	}
+	if (message.includes("preserves only") || message.includes("deterministic chunks do not reconstruct")) {
+		return {
+			code: "content_coverage",
+			message,
+			command: "For media transcripts, use record-transcript so document.md, working/extracted.md, and chunk metadata are updated together.",
+		};
+	}
+	return { code: "validation_error", message };
 }
 
 function requireNoDuplicateDestinations(operations) {
@@ -1572,12 +1932,152 @@ function commandFinalize(args) {
 	);
 }
 
+function parseRunArguments(args) {
+	if (args.length === 0) fail("run requires an input path");
+	const prepareArgs = [args[0]];
+	let literature = false;
+	let destination = null;
+	let layout = "auto";
+	for (let index = 1; index < args.length; index += 1) {
+		const argument = args[index];
+		if (argument === "--literature") literature = true;
+		else if (argument === "--destination") destination = resolve(args[++index] ?? fail("--destination requires a folder"));
+		else if (argument === "--layout") layout = args[++index] ?? fail("--layout requires auto, flat, or structured");
+		else {
+			prepareArgs.push(argument);
+			if (["--output", "--ocr", "--ocr-backend", "--glmocr-url", "--glmocr-timeout-ms", "--chunk-chars"].includes(argument)) {
+				prepareArgs.push(args[++index] ?? fail(`${argument} requires a value`));
+			}
+		}
+	}
+	if (!new Set(["auto", "flat", "structured"]).has(layout)) fail("--layout must be auto, flat, or structured");
+	return { prepareOptions: parsePrepareArguments(prepareArgs), literature, destination, layout };
+}
+
+async function commandRun(args) {
+	const options = parseRunArguments(args);
+	let prepared = null;
+	if (!existsSync(options.prepareOptions.output)) {
+		prepared = await prepareRun(options.prepareOptions);
+	}
+	requireRunDirectory(options.prepareOptions.output);
+	const status = conciseStatus(options.prepareOptions.output);
+	const result = {
+		runDirectory: options.prepareOptions.output,
+		prepared,
+		status,
+		nextAction: status.pendingReview.length > 0 ? "review" : status.valid ? "finalize_or_handoff" : "repair_validation_errors",
+	};
+	if (options.destination && status.valid) {
+		const finalized = commandFinalizeReturning({
+			runDirectory: options.prepareOptions.output,
+			destination: options.destination,
+			layout: options.layout,
+		});
+		result.finalized = finalized;
+	}
+	if (options.literature) {
+		const literatureInput = options.destination ?? options.prepareOptions.input;
+		result.literature = {
+			input: literatureInput,
+			command: `literature-extraction.py init ${literatureInput} --output <new-literature-run-directory>`,
+			note: "The literature tool ignores Ingest, Originals, and Generated by default.",
+		};
+	}
+	process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+}
+
+function commandFinalizeReturning(options) {
+	if (!existsSync(options.runDirectory) || !lstatSync(options.runDirectory).isDirectory()) fail(`run directory does not exist: ${options.runDirectory}`);
+	if (!existsSync(options.destination) || !lstatSync(options.destination).isDirectory()) fail(`destination folder does not exist: ${options.destination}`);
+	const expectedRunDirectory = join(options.destination, "Ingest");
+	if (resolve(options.runDirectory) !== resolve(expectedRunDirectory)) {
+		fail(`finalize expects the run directory to be the destination Ingest folder: ${expectedRunDirectory}`);
+	}
+	const validation = validateRun(options.runDirectory, { emit: false, exitOnError: false });
+	if (!validation.valid) fail(`run must validate before finalize: ${validation.errors.join("; ")}`);
+	const layout = options.layout === "auto" ? detectWorkspaceLayout(options.destination) : options.layout;
+	const rows = readManifestRows(options.runDirectory);
+	const completedRows = rows.filter((row) => row.status === "success");
+	const moveOperations = [];
+	const publishOperations = [];
+	const generatedOperations = [];
+	const movableSourcePaths = new Set();
+	for (const row of completedRows) {
+		const sourcePath = resolve(row.source_path);
+		if (!existsSync(sourcePath) || !lstatSync(sourcePath).isFile()) fail(`source file is missing before finalize: ${sourcePath}`);
+		const sourceRelative = relativeSourcePath(options.destination, sourcePath);
+		const originalDestination = join(options.destination, "Originals", sourceRelative);
+		const documentPath = join(options.runDirectory, row.output_directory, "document.md");
+		const metadataPath = join(options.runDirectory, row.output_directory, "metadata.json");
+		if (!existsSync(documentPath)) fail(`final document is missing: ${documentPath}`);
+		const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
+		const markdownDestination = join(options.destination, markdownOutputRelativePath(options.destination, sourcePath, layout, row, metadata));
+		moveOperations.push({ role: "original", documentId: row.document_id, from: sourcePath, to: originalDestination });
+		publishOperations.push({ role: "final_markdown", documentId: row.document_id, from: documentPath, to: markdownDestination });
+		movableSourcePaths.add(sourcePath);
+	}
+	for (const artifactPath of collectGeneratedArtifacts(options.runDirectory)) {
+		const generatedRelative = relative(options.runDirectory, artifactPath);
+		generatedOperations.push({
+			role: "generated_artifact",
+			documentId: "",
+			from: artifactPath,
+			to: join(options.destination, "Generated", generatedRelative),
+		});
+	}
+	requireNoDuplicateDestinations([...moveOperations, ...publishOperations, ...generatedOperations]);
+	for (const operation of [...moveOperations, ...publishOperations, ...generatedOperations]) {
+		if (existsSync(operation.to) && !movableSourcePaths.has(operation.to)) fail(`finalize destination already exists: ${operation.to}`);
+	}
+	const artifactRows = [];
+	const createdAt = new Date().toISOString();
+	for (const operation of moveOperations) {
+		mkdirSync(dirname(operation.to), { recursive: true });
+		renameSync(operation.from, operation.to);
+		artifactRows.push({
+			role: operation.role,
+			document_id: operation.documentId,
+			source_path: operation.from,
+			destination_path: relative(options.destination, operation.to),
+			sha256: sha256(readFileSync(operation.to)),
+			created_at: createdAt,
+		});
+	}
+	for (const operation of [...publishOperations, ...generatedOperations]) {
+		mkdirSync(dirname(operation.to), { recursive: true });
+		copyFileSync(operation.from, operation.to);
+		artifactRows.push({
+			role: operation.role,
+			document_id: operation.documentId,
+			source_path: operation.from,
+			destination_path: relative(options.destination, operation.to),
+			sha256: sha256(readFileSync(operation.to)),
+			created_at: createdAt,
+		});
+	}
+	writeArtifactManifest(options.runDirectory, artifactRows);
+	return {
+		finalized: true,
+		layout,
+		movedOriginals: moveOperations.length,
+		publishedMarkdown: publishOperations.length,
+		generatedArtifacts: generatedOperations.length,
+		artifactManifest: join(options.runDirectory, "artifact_manifest.csv"),
+	};
+}
+
 function usage() {
 	process.stdout.write(`Usage:
   document-ingest.mjs doctor [--json]
   document-ingest.mjs prepare <input> --output <new-directory> [--ocr auto|force|never] [--ocr-backend local|glmocr|auto] [--glmocr-url URL] [--chunk-chars N]
-  document-ingest.mjs validate <run-directory>
+  document-ingest.mjs status <run-directory>
+  document-ingest.mjs next-review <run-directory>
+  document-ingest.mjs record-review <run-directory> --review-file <review.json>
+  document-ingest.mjs record-transcript <run-directory> --doc-id <document-id> --transcript <cleaned.md> [--title TEXT] [--author TEXT] [--filename NAME.md]
+  document-ingest.mjs validate <run-directory> [--fix-hints] [--json]
   document-ingest.mjs finalize <run-directory> --destination <source-folder> [--layout auto|flat|structured]
+  document-ingest.mjs run <input> --output <new-directory> [--literature] [--destination <source-folder>]
 `);
 }
 
@@ -1590,10 +2090,22 @@ if (command === "doctor") {
 	if (args.some((argument) => argument !== "--json")) fail("doctor accepts only --json");
 	printDoctor(args.includes("--json"));
 } else if (command === "prepare") await prepare(args);
+else if (command === "status") commandStatus(args);
+else if (command === "next-review") commandNextReview(args);
+else if (command === "record-review") commandRecordReview(args);
+else if (command === "record-transcript") commandRecordTranscript(args);
 else if (command === "validate") {
-	if (args.length !== 1) fail("validate requires exactly one run directory");
+	if (args.length < 1) fail("validate requires a run directory");
 	const runDirectory = resolve(args[0]);
+	let fixHints = false;
+	for (const argument of args.slice(1)) {
+		if (argument === "--fix-hints") fixHints = true;
+		else if (argument === "--json") {
+			// Validation output is already JSON; accept this for command symmetry.
+		} else fail(`unknown validate option: ${argument}`);
+	}
 	if (!existsSync(runDirectory) || !lstatSync(runDirectory).isDirectory()) fail(`run directory does not exist: ${runDirectory}`);
-	validateRun(runDirectory);
+	validateRun(runDirectory, { fixHints });
 } else if (command === "finalize") commandFinalize(args);
+else if (command === "run") await commandRun(args);
 else fail(`unknown command: ${command}`, 2);

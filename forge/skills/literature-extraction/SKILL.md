@@ -8,6 +8,16 @@ description: Extract structured, source-backed evidence from academic articles, 
 Extract reviewable, provenance-backed evidence from research documents without
 overclaiming or blending source content with synthesis.
 
+## Command Card
+
+- `doctor --json`: capability check and embeddings availability.
+- `init <input> --output <run-directory>`: discover finalized Markdown/text sources; skips `Ingest/`, `Originals/`, and `Generated/` folders by default.
+- `init <input> --output <run-directory> --include-reserved`: opt in to processing reserved workspace folders.
+- `next <run-directory>`: one pending source with item types and progress.
+- `record <run-directory> --doc-id <id> --extraction-file <items.json>`: append one model-approved extraction.
+- `build <run-directory>`: build tables, claim clusters, and Markdown scaffolds.
+- `validate <run-directory> --fix-hints --json`: machine-readable quality gate with repair hints.
+
 ## Workflow
 
 1. Resolve this skill directory from the loaded `SKILL.md` path. Check local
@@ -29,7 +39,9 @@ overclaiming or blending source content with synthesis.
    ```
 
    `<input>` is a single file or a folder; folders are discovered recursively,
-   skipping hidden paths and symlinks.
+   skipping hidden paths, symlinks, and finalized ingest workspace folders
+   (`Ingest/`, `Originals/`, and `Generated/`). Use `--include-reserved` only
+   when you explicitly need internal artifacts.
 3. Read [references/extraction-contract.md](references/extraction-contract.md).
    Process **one document at a time**. Request the next pending document:
 
@@ -79,7 +91,7 @@ overclaiming or blending source content with synthesis.
 6. Validate the completed run and report outcomes:
 
    ```bash
-   python3 <skill-directory>/scripts/literature-extraction.py validate <run-directory>
+   python3 <skill-directory>/scripts/literature-extraction.py validate <run-directory> --fix-hints --json
    ```
 
    Resolve every error before completion. Report skipped, failed, and

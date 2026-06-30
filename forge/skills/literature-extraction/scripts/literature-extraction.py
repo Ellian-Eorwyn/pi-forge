@@ -50,6 +50,7 @@ NEGATION_CUES = (
     "does not",
 )
 SOURCE_EXTENSIONS = {".md", ".markdown", ".txt"}
+RESERVED_WORKSPACE_DIRECTORIES = {"Ingest", "Originals", "Generated"}
 ITEM_TYPES = [
     "claim",
     "connection",
@@ -248,7 +249,7 @@ def title_from_metadata(metadata_path):
     return value if isinstance(value, str) and value.strip() else None
 
 
-def discover_sources(root):
+def discover_sources(root, include_reserved=False):
     if root.is_file():
         if root.suffix.lower() not in SOURCE_EXTENSIONS:
             fail(f"unsupported input format {root.suffix or '(none)'}; expected .md, .markdown, or .txt")
@@ -259,6 +260,8 @@ def discover_sources(root):
             continue
         relative = path.relative_to(root)
         if any(part.startswith(".") for part in relative.parts):
+            continue
+        if not include_reserved and any(part in RESERVED_WORKSPACE_DIRECTORIES for part in relative.parts):
             continue
         # Reject any symlinked component between root and the file.
         current = root
@@ -357,7 +360,7 @@ def command_init(args):
     root = Path(args.input).expanduser().resolve()
     if not root.exists():
         fail(f"input does not exist: {root}")
-    sources = discover_sources(root)
+    sources = discover_sources(root, include_reserved=args.include_reserved)
     documents = build_document_records(sources)
     output = require_new_directory(args.output)
     try:
@@ -365,7 +368,7 @@ def command_init(args):
         run = {
             "schemaVersion": RUN_SCHEMA_VERSION,
             "createdAt": utc_now(),
-            "input": {"path": str(root), "isDirectory": root.is_dir()},
+            "input": {"path": str(root), "isDirectory": root.is_dir(), "includeReserved": args.include_reserved},
             "itemTypes": ITEM_TYPES,
             "documents": documents,
         }
@@ -887,9 +890,45 @@ def command_validate(args):
         "errors": errors,
         "warnings": warnings,
     }
+    if args.fix_hints:
+        result["issues"] = [validation_issue(error) for error in errors]
     print(json.dumps(result, indent=2))
     if errors:
         raise SystemExit(1)
+
+
+def validation_issue(message):
+    if "invalid status" in message:
+        return {
+            "code": "invalid_document_status",
+            "message": message,
+            "allowedValues": sorted(DOCUMENT_STATUSES),
+            "command": "Use record with --status success, needs_review, skipped, or failed.",
+        }
+    if "invalid extraction items" in message:
+        return {
+            "code": "invalid_extraction_items",
+            "message": message,
+            "allowedValues": {
+                "item_type": ITEM_TYPES,
+                "interpretation": sorted(INTERPRETATIONS),
+                "confidence": sorted(CONFIDENCES),
+            },
+            "command": "Call next, rewrite the working extraction JSON to the contract, then record it again in a fresh run.",
+        }
+    if "source file hash differs" in message:
+        return {
+            "code": "source_hash_changed",
+            "message": message,
+            "command": "Re-run init after source files are stable.",
+        }
+    if "unresolved placeholder" in message:
+        return {
+            "code": "deliverable_unreviewed",
+            "message": message,
+            "command": "Author the scaffolded Markdown deliverable from evidence_table.csv, methods_matrix.csv, and claim_clusters.md when present.",
+        }
+    return {"code": "validation_error", "message": message}
 
 
 def parser():
@@ -903,6 +942,11 @@ def parser():
     init = subparsers.add_parser("init", help="Discover sources and scaffold a resumable extraction run.")
     init.add_argument("input")
     init.add_argument("--output", required=True)
+    init.add_argument(
+        "--include-reserved",
+        action="store_true",
+        help="Include Ingest, Originals, and Generated folders instead of skipping them.",
+    )
     init.set_defaults(handler=command_init)
 
     next_command = subparsers.add_parser("next", help="Return exactly one pending document as JSON.")
@@ -938,6 +982,8 @@ def parser():
 
     validate = subparsers.add_parser("validate", help="Validate run state, provenance, schema, and built artifacts.")
     validate.add_argument("run_directory")
+    validate.add_argument("--fix-hints", action="store_true", help="Include machine-readable repair hints.")
+    validate.add_argument("--json", action="store_true", help="Accepted for symmetry; output is always JSON.")
     validate.set_defaults(handler=command_validate)
     return root
 

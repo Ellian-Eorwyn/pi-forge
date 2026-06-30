@@ -7,6 +7,17 @@ description: One-stop-shop folder ingestion pipeline. Ingest, normalize, and pro
 
 Process entire folders of documents and media deterministically, then orchestrate follow-up actions and file organization using the LLM.
 
+## Command Card
+
+- `doctor --json`: capability check.
+- `prepare <input> --output <input>/Ingest`: deterministic extraction and manifest creation.
+- `status <run-directory>`: compact progress, validation state, pending review list, and repair hints.
+- `next-review <run-directory>`: one structured review packet with allowed enum values, paths, metadata, and exact recording commands.
+- `record-review <run-directory> --review-file <review.json>`: atomically update `metadata.json`, `manifest.csv`, and `extraction_report.md` after model review.
+- `record-transcript <run-directory> --doc-id <id> --transcript <cleaned.md>`: atomically install a cleaned transcript as the final document text and repair transcript chunk validation state.
+- `validate <run-directory> --fix-hints --json`: machine-readable quality gate with repair hints.
+- `run <input> --output <input>/Ingest --literature`: deterministic prepare/resume wrapper that reports the next review action and downstream literature handoff.
+
 ## Workflow
 
 1. Resolve this skill directory from the loaded `SKILL.md` path. Run the capability check:
@@ -25,12 +36,21 @@ Process entire folders of documents and media deterministically, then orchestrat
 
    This deterministic step creates a `manifest.csv` containing all files, automatically extracts audio from videos (via `ffmpeg`), applies OCR to images/PDFs (via `glmocr`), and determines a `suggested_pipeline` (e.g. `personal-admin`, `literature`, `transcription,transcript-cleanup`, `basic-markdown`) based on the folder contents and file formats.
 
-3. Read the `manifest.csv` located in `<new-directory>`. For each file in the manifest with `status` == "needs_review", follow its `suggested_pipeline`:
+3. Use the structured review queue instead of reading the full manifest and
+   guessing valid values:
+
+   ```bash
+   node <skill-directory>/scripts/document-ingest.mjs status <new-directory>
+   node <skill-directory>/scripts/document-ingest.mjs next-review <new-directory>
+   ```
+
+   For each packet with `complete == false`, follow its `suggestedPipeline`:
 
    **For `basic-markdown`, `personal-admin`, or `literature`**:
    - Review and clean up the `document.md` structure in the file's output directory. 
    - Improve headings, paragraphs, lists, and tables supported by the source. Leave uncertain text visible and note it in `extraction_report.md`.
-   - Complete `metadata.json`, set `finalOutput.filename` to a meaningful
+   - Complete a review JSON file matching the packet shape, set
+     `finalOutput.filename` to a meaningful
      final Markdown filename, and mark review as complete.
    - Choose final filenames from the cleaned file contents, not just the
      original filename. Use concise names that make the file easy to browse and
@@ -40,22 +60,24 @@ Process entire folders of documents and media deterministically, then orchestrat
      diagnosis, procedure, and facility when those details are present.
    - `finalOutput.filename` must be a filename only, not a path, and must end
      in `.md`.
+   - Record the review with `record-review`; do not hand-edit `metadata.json`,
+     `manifest.csv`, or `extraction_report.md`.
    - If the pipeline is `personal-admin` or `literature`, load and execute that specific skill's instructions on the finalized `document.md` to produce the required summary/spreadsheet outputs.
 
    **For `transcription,transcript-cleanup`**:
    - Locate the extracted `derived/audio.mp3` in the file's output directory.
    - Load and execute the `transcription` skill instructions on the audio file to produce a transcript.
    - Load and execute the `transcript-cleanup` skill instructions to format the raw transcript into a clean, readable Markdown document.
-   - Save the final transcript as `document.md`, set `metadata.json`
-     `finalOutput.filename` to a meaningful transcript filename, and mark the
-     item as complete.
+   - Save the cleaned transcript with `record-transcript`, including a
+     meaningful `--filename` when known. Do not manually copy transcript text
+     into `working/` files.
 
 4. As you complete each file, update your internal task checklist or the `manifest.csv` to track progress. Ensure every successfully processed file is reviewed.
 
 5. Validate the completed run (this checks the formatting of the document ingest outputs):
 
    ```bash
-   node <skill-directory>/scripts/document-ingest.mjs validate <new-directory>
+   node <skill-directory>/scripts/document-ingest.mjs validate <new-directory> --fix-hints --json
    ```
 
 6. **Final File Organization**:

@@ -1041,6 +1041,41 @@ test("literature extraction rejects scaffolds and accepts authored deliverables"
 	});
 });
 
+test("literature extraction ignores finalized ingest workspace folders by default", () => {
+	withWorkspace((workspace) => {
+		const source = join(workspace, "lesson");
+		mkdirSync(join(source, "Ingest"), { recursive: true });
+		mkdirSync(join(source, "Originals"), { recursive: true });
+		mkdirSync(join(source, "Generated"), { recursive: true });
+		writeFileSync(join(source, "Final Reading.md"), "# Final Reading\n\nReviewed source.\n");
+		writeFileSync(join(source, "Ingest", "document.md"), "# Internal Ingest Artifact\n\nDo not extract.\n");
+		writeFileSync(join(source, "Originals", "original.md"), "# Original\n\nArchived source.\n");
+		writeFileSync(join(source, "Generated", "literature_summary.md"), "# Generated\n\nPrior synthesis.\n");
+
+		const defaultRun = join(workspace, "literature-default");
+		const initialized = jsonOutput(
+			run(python, [script("literature-extraction", "literature-extraction.py"), "init", source, "--output", defaultRun]),
+		);
+		assert.equal(initialized.documents, 1);
+		const defaultDocuments = readFileSync(join(defaultRun, "documents.csv"), "utf8");
+		assert.match(defaultDocuments, /Final Reading\.md/);
+		assert.doesNotMatch(defaultDocuments, /Internal Ingest Artifact|original\.md|literature_summary\.md/);
+
+		const includeRun = join(workspace, "literature-include-reserved");
+		const included = jsonOutput(
+			run(python, [
+				script("literature-extraction", "literature-extraction.py"),
+				"init",
+				source,
+				"--output",
+				includeRun,
+				"--include-reserved",
+			]),
+		);
+		assert.equal(included.documents, 4);
+	});
+});
+
 test("literature extraction clusters claims across documents", async () => {
 	await withAsyncWorkspace(async (workspace) => {
 		const sources = join(workspace, "sources");
@@ -1302,6 +1337,36 @@ test("document ingest, coding, and web collection expose review and safety bound
 		);
 		assert.equal(ingest.documents, 1);
 		runFailure("node", [script("document-ingest", "document-ingest.mjs"), "validate", ingestRun], /model review is not marked complete/);
+		const hintedValidation = jsonOutput(
+			run("node", [script("document-ingest", "document-ingest.mjs"), "validate", ingestRun, "--fix-hints", "--json"], 1),
+		);
+		assert.equal(hintedValidation.issues[0].code, "review_incomplete");
+		const packet = jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "next-review", ingestRun]));
+		assert.equal(packet.complete, false);
+		assert.equal(packet.documentId, firstManifestRow(ingestRun).document_id);
+		assert.deepEqual(packet.allowedValues.evidenceOrigins, ["embedded-metadata", "document-text", "filename", "user-provided"]);
+		const reviewFile = join(workspace, "review.json");
+		writeFileSync(
+			reviewFile,
+			`${JSON.stringify({
+				documentId: packet.documentId,
+				fields: {
+					title: { value: "Source Document", origin: "document-text", confidence: "high", locator: "document.md:1" },
+					author: null,
+					date: null,
+					source: null,
+				},
+				finalOutput: {
+					filename: "Source Document.md",
+					namingReason: "Uses the reviewed document title.",
+				},
+				reviewNotes: ["Reviewed structure and title."],
+			})}\n`,
+		);
+		const recorded = jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "record-review", ingestRun, "--review-file", reviewFile]));
+		assert.equal(recorded.status, "success");
+		assert.equal(jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", ingestRun])).valid, true);
+		assert.equal(jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "status", ingestRun])).counts.success, 1);
 		assert.equal(sha256(document), documentHash);
 
 		const repository = join(workspace, "repository");
@@ -1397,6 +1462,56 @@ printf 'synthetic audio' > "$output"
 		} finally {
 			await chatServer.close();
 		}
+	});
+});
+
+test("document ingest records cleaned transcripts without manual chunk repair", () => {
+	withWorkspace((workspace) => {
+		const fakeBin = join(workspace, "fake-bin");
+		mkdirSync(fakeBin);
+		writeFileSync(
+			join(fakeBin, "ffmpeg"),
+			`#!/usr/bin/env bash
+if [[ "$1" == "-version" ]]; then echo "ffmpeg fake 8.1.1"; exit 0; fi
+output="\${!#}"
+printf 'synthetic audio' > "$output"
+`,
+		);
+		chmodSync(join(fakeBin, "ffmpeg"), 0o755);
+		const source = join(workspace, "lecture.mp3");
+		writeFileSync(source, "synthetic media");
+		const runDirectory = join(workspace, "media-ingest");
+		const prepared = jsonOutput(
+			runWithEnvironment(
+				"node",
+				[script("document-ingest", "document-ingest.mjs"), "prepare", source, "--output", runDirectory],
+				{ PATH: `${fakeBin}:${process.env.PATH}` },
+			),
+		);
+		assert.equal(prepared.counts.needs_review, 1);
+		const packet = jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "next-review", runDirectory]));
+		assert.match(packet.commands.recordTranscript, /record-transcript/);
+		assert.equal(existsSync(packet.paths.derivedAudio), true);
+		const transcript = join(workspace, "cleaned-transcript.md");
+		writeFileSync(transcript, "# Lecture Transcript\n\nThis is the cleaned lecture transcript.\n");
+		const recorded = jsonOutput(
+			run("node", [
+				script("document-ingest", "document-ingest.mjs"),
+				"record-transcript",
+				runDirectory,
+				"--doc-id",
+				packet.documentId,
+				"--transcript",
+				transcript,
+				"--title",
+				"Lecture Transcript",
+				"--filename",
+				"Lecture Transcript.md",
+			]),
+		);
+		assert.equal(recorded.status, "success");
+		assert.match(readFileSync(packet.paths.extracted, "utf8"), /cleaned lecture transcript/);
+		assert.equal(jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", runDirectory])).valid, true);
 	});
 });
 
