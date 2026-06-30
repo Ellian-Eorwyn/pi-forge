@@ -14,12 +14,83 @@
 
 ## pi-forge
 
-pi-forge is a research and document-processing-focused fork of pi. Its `forge`
-profile, custom skills, and tools live in `forge/` and are installed alongside
-an isolated CLI without replacing an existing pi installation.
+pi-forge is a research and document-processing-focused fork of pi. It empowers users to automate complex workflows involving research, documentation, file manipulation, and data analysis using AI agents. By equipping agents with specialized tools (skills), pi-forge acts as an intelligent assistant capable of parsing, summarizing, organizing, and synthesizing massive amounts of information.
 
-See [pi-forge installation](docs/pi-forge-installation.md) for one-command
-installation, updates, paths, and profile layout.
+### What Can You Do With pi-forge?
+- **Research & Web Collection:** Search the web and archive websites to compile research repositories.
+- **Data & Document Processing:** Clean raw transcripts, convert documents (Markdown, EPUB, etc.), and analyze spreadsheets.
+- **Content Synthesis:** Extract literature, build action plans, and synthesize polished deliverables from raw documents.
+- **Workflow Automation:** Automatically organize messy folders and ship small, reviewable codebase changes.
+
+### Included Skills
+The `forge` profile provides agents with the following built-in skills:
+- **`coding`**: Inspect repos and ship small reviewable changes
+- **`document-ingest`**: Normalize documents with provenance
+- **`file-conversion`**: Convert files, including Markdown and EPUB
+- **`literature-extraction`**: Extract structured evidence from research documents
+- **`organize-folder`**: Sort a messy folder via a reviewable manifest
+- **`personal-admin`**: Summarize personal documents into action plans
+- **`report-output`**: Assemble polished deliverables from processed outputs
+- **`site-builder`**: Build a static website from a content folder
+- **`spreadsheet-analysis`**: Analyze and enrich tabular datasets
+- **`transcript-cleanup`**: Clean and structure raw transcripts
+- **`transcription`**: Transcribe audio or video, then correct and clean it
+- **`vault-handoff`**: Send completed text artifacts to pi-vault review
+- **`web-collection`**: Archive and organize web sources
+- **`web-research`**: Quick web search and page reading for information lookup
+
+---
+
+## Installation & Setup
+
+pi-forge currently supports macOS, Linux, and Windows with Git, npm, and Node.js 22.19 or newer. Its `forge` profile, custom skills, and tools live in `forge/` and are installed alongside an isolated CLI without replacing an existing pi installation.
+
+### 1. Install
+From a new machine, run the following command in your terminal:
+
+**macOS / Linux:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/Ellian-Eorwyn/pi-forge/main/install.sh | bash
+```
+
+**Windows (PowerShell):**
+```powershell
+Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://raw.githubusercontent.com/Ellian-Eorwyn/pi-forge/main/install.ps1'))
+```
+
+*Note: The installer adds `~/.pi-forge/bin` to your user PATH. Please open a new shell after installing.*
+
+### 2. Update
+To update pi-forge to the latest version (preserves your credentials, sessions, and settings):
+
+**macOS / Linux:**
+```bash
+pi-forge-update
+```
+
+**Windows (PowerShell/CMD):**
+```powershell
+pi-forge-update
+```
+*(Or run `pi-forge-update.ps1`)*
+
+### 3. Uninstall
+If you want to remove pi-forge:
+
+**macOS / Linux:**
+```bash
+~/.pi-forge/repository/uninstall.sh
+```
+
+**Windows (PowerShell):**
+```powershell
+~/.pi-forge/repository/uninstall.ps1
+```
+*To completely wipe all agent state and credentials along with the installation, run the uninstall script with `--purge-state` (macOS/Linux) or `-PurgeState` (Windows).*
+
+For advanced installation options, paths, and profile layouts, see the [detailed pi-forge installation guide](docs/pi-forge-installation.md).
+
+---
 
 This is the home of the Pi agent harness project including our self extensible coding agent.
 
