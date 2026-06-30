@@ -2088,3 +2088,50 @@ test("piped installer ignores the caller's checkout and uses the configured repo
 		assert.match(readFileSync(join(repositoryRoot, "scripts", "pi-forge-install.sh"), "utf8"), /run build:install/);
 	});
 });
+
+test("checkout installer clones into the install home by default", () => {
+	withWorkspace((workspace) => {
+		const fakeBin = join(workspace, "bin");
+		const installDirectory = join(workspace, "install");
+		const gitLog = join(workspace, "git-args.txt");
+		const installerLog = join(workspace, "installer-args.txt");
+		mkdirSync(fakeBin);
+		writeFileSync(
+			join(fakeBin, "git"),
+			`#!/usr/bin/env bash
+if [[ "$1" == "-C" ]]; then
+	printf 'https://example.invalid/pi-forge.git\\n'
+	exit 0
+fi
+printf '%s\\n' "$@" > "$INSTALLER_GIT_LOG"
+destination="$3"
+mkdir -p "$destination/scripts"
+cat > "$destination/scripts/pi-forge-install.sh" <<'SCRIPT'
+#!/usr/bin/env bash
+printf '%s\\n' "$@" > "$INSTALLER_RUN_LOG"
+SCRIPT
+chmod +x "$destination/scripts/pi-forge-install.sh"
+`,
+		);
+		chmodSync(join(fakeBin, "git"), 0o755);
+
+		const result = spawnSync("bash", [join(repositoryRoot, "install.sh")], {
+			cwd: repositoryRoot,
+			encoding: "utf8",
+			env: {
+				...environment,
+				HOME: workspace,
+				INSTALLER_GIT_LOG: gitLog,
+				INSTALLER_RUN_LOG: installerLog,
+				PATH: `${fakeBin}:${process.env.PATH}`,
+				PI_FORGE_INSTALL_DIR: installDirectory,
+			},
+		});
+		assert.equal(result.status, 0, result.stderr);
+		assert.equal(
+			readFileSync(gitLog, "utf8"),
+			`clone\nhttps://example.invalid/pi-forge.git\n${join(installDirectory, "repository")}\n`,
+		);
+		assert.equal(readFileSync(installerLog, "utf8"), `--source-dir\n${join(installDirectory, "repository")}\n`);
+	});
+});

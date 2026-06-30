@@ -363,19 +363,33 @@ test("installer exposes a usable MCP launcher", () => {
 	assert.equal(existsSync(join(repositoryRoot, "integrations", "pi-forge-delegation", "SKILL.md")), true);
 });
 
-test("development checkout launcher uses pi-forge agent home", () => {
+test("installer rejects checkout-linked source unless dev-link is explicit", () => {
 	const root = workspace();
 	const source = join(root, "source");
 	makeFakeInstallSource(source);
 	const piForgeHome = join(root, ".pi-forge");
 	const agent = join(piForgeHome, "agent");
 	const environment = cleanPiForgeEnvironment();
+	const rejected = spawnSync(
+		"bash",
+		[
+			join(repositoryRoot, "scripts", "pi-forge-install.sh"),
+			"--source-dir",
+			source,
+			"--resources-only",
+		],
+		{ encoding: "utf8", env: { ...environment, HOME: root, SHELL: "/bin/zsh" } },
+	);
+	assert.equal(rejected.status, 1);
+	assert.match(rejected.stderr, /Refusing split pi-forge install/);
+
 	const install = spawnSync(
 		"bash",
 		[
 			join(repositoryRoot, "scripts", "pi-forge-install.sh"),
 			"--source-dir",
 			source,
+			"--dev-link",
 			"--resources-only",
 		],
 		{ encoding: "utf8", env: { ...environment, HOME: root, SHELL: "/bin/zsh" } },
@@ -387,6 +401,37 @@ test("development checkout launcher uses pi-forge agent home", () => {
 	});
 	assert.equal(result.status, 0, result.stderr);
 	assert.equal(result.stdout.trim(), agent);
+});
+
+test("installer moves legacy local-share state during default home install", () => {
+	const root = workspace();
+	const dataHome = join(root, ".local", "share");
+	const oldHome = join(dataHome, "pi-forge");
+	const newHome = join(root, ".pi-forge");
+	const source = join(newHome, "repository");
+	makeFakeInstallSource(source);
+	mkdirSync(join(oldHome, "agent"), { recursive: true });
+	writeFileSync(join(oldHome, "agent", "auth.json"), "{}\n");
+	mkdirSync(join(oldHome, "bin"));
+	symlinkSync(join(oldHome, "repository", "scripts", "pi-forge-run.sh"), join(oldHome, "bin", "pi-forge"));
+
+	const install = spawnSync(
+		"bash",
+		[
+			join(repositoryRoot, "scripts", "pi-forge-install.sh"),
+			"--source-dir",
+			source,
+			"--resources-only",
+		],
+		{
+			encoding: "utf8",
+			env: { ...cleanPiForgeEnvironment(), HOME: root, XDG_DATA_HOME: dataHome, SHELL: "/bin/zsh" },
+		},
+	);
+	assert.equal(install.status, 0, install.stderr);
+	assert.equal(existsSync(join(newHome, "agent", "auth.json")), true);
+	assert.equal(existsSync(join(newHome, "agent", "AGENTS.md")), true);
+	assert.equal(existsSync(oldHome), false);
 });
 
 test("installer migrates mistaken pi-vault install into pi-forge home", () => {
@@ -468,4 +513,35 @@ test("installer migrates local-share pi-forge install into home pi-forge", () =>
 	assert.equal(existsSync(join(newHome, "agent", "auth.json")), true);
 	assert.equal(existsSync(join(newHome, "bin", "pi-forge")), true);
 	assert.match(readFileSync(join(root, ".zprofile"), "utf8"), new RegExp(newHome.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
+test("uninstaller removes managed repository while preserving agent state", () => {
+	const root = workspace();
+	const piForgeHome = join(root, ".pi-forge");
+	const source = join(piForgeHome, "repository");
+	const bin = join(piForgeHome, "bin");
+	const agent = join(piForgeHome, "agent");
+	makeFakeInstallSource(source);
+	mkdirSync(bin);
+	mkdirSync(agent);
+	writeFileSync(join(agent, ".pi-forge-profile-path"), `${join(source, "forge")}\n`);
+	writeFileSync(join(agent, "auth.json"), "{}\n");
+	symlinkSync(join(source, "scripts", "pi-forge-run.sh"), join(bin, "pi-forge"));
+	symlinkSync(join(source, "scripts", "pi-forge-mcp-run.sh"), join(bin, "pi-forge-mcp"));
+	symlinkSync(join(source, "update.sh"), join(bin, "pi-forge-update"));
+
+	const uninstall = spawnSync(
+		"bash",
+		[
+			join(repositoryRoot, "scripts", "pi-forge-uninstall.sh"),
+			"--source-dir",
+			source,
+			"--yes",
+		],
+		{ encoding: "utf8", env: { ...cleanPiForgeEnvironment(), HOME: root, SHELL: "/bin/zsh" } },
+	);
+	assert.equal(uninstall.status, 0, uninstall.stderr);
+	assert.equal(existsSync(source), false);
+	assert.equal(existsSync(join(bin, "pi-forge")), false);
+	assert.equal(existsSync(join(agent, "auth.json")), true);
 });

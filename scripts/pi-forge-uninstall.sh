@@ -30,7 +30,7 @@ by default so a later reinstall reuses your credentials and sessions.
 Options:
   --bin-dir <path>       Launcher directory (default: $PI_FORGE_HOME/bin)
   --agent-dir <path>     Agent state directory (default: $PI_FORGE_HOME/agent)
-  --install-dir <path>   Managed checkout root (default: $PI_FORGE_HOME)
+  --install-dir <path>   Managed checkout directory (default: $PI_FORGE_HOME/repository)
   --purge-state          Also delete the agent state directory (credentials,
                          sessions, settings). Irreversible.
   --dry-run              Print what would be removed without changing anything.
@@ -88,7 +88,7 @@ if [[ -z "$PI_FORGE_HOME" ]]; then
 fi
 BIN_DIR="${BIN_DIR:-$PI_FORGE_HOME/bin}"
 AGENT_DIR="${AGENT_DIR:-$PI_FORGE_HOME/agent}"
-INSTALL_DIR="${INSTALL_DIR:-$PI_FORGE_HOME}"
+INSTALL_DIR="${INSTALL_DIR:-$PI_FORGE_HOME/repository}"
 
 PLANNED=()
 WARNINGS=()
@@ -142,12 +142,11 @@ done
 REMOVE_INSTALL_DIR=false
 INSTALL_DIR_CANON="$(canonical "$INSTALL_DIR")"
 if [[ -d "$INSTALL_DIR" ]]; then
-	managed_repo="$INSTALL_DIR/repository"
 	if is_protected_path "$INSTALL_DIR_CANON"; then
 		note_warn "Refusing to remove managed checkout at protected path: $INSTALL_DIR"
-	elif [[ -n "$SOURCE_DIR" && ( "$INSTALL_DIR_CANON" == "$SOURCE_DIR" || "$SOURCE_DIR" == "$INSTALL_DIR_CANON"/* ) ]]; then
+	elif [[ -n "$SOURCE_DIR" && "$INSTALL_DIR_CANON" != "$SOURCE_DIR" && "$SOURCE_DIR" == "$INSTALL_DIR_CANON"/* ]]; then
 		note_warn "Skipping managed checkout: it contains this checkout ($SOURCE_DIR)."
-	elif [[ -f "$managed_repo/scripts/pi-forge-install.sh" ]]; then
+	elif [[ -f "$INSTALL_DIR/scripts/pi-forge-install.sh" ]]; then
 		REMOVE_INSTALL_DIR=true
 		note_plan "Remove managed checkout: $INSTALL_DIR"
 	else

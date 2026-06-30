@@ -10,6 +10,7 @@ BIN_DIR="${PI_FORGE_BIN_DIR:-}"
 AGENT_DIR="${PI_FORGE_AGENT_DIR:-}"
 NPM_CACHE_DIR="${PI_FORGE_NPM_CACHE:-}"
 PLAYWRIGHT_BROWSERS_DIR="${PI_FORGE_PLAYWRIGHT_BROWSERS:-}"
+DEV_LINK=false
 PATH_PROFILE_UPDATED=""
 PATH_PROFILE_PATH=""
 
@@ -20,6 +21,7 @@ Usage: scripts/pi-forge-install.sh --source-dir <path> [options]
 Options:
   --bin-dir <path>       Launcher directory (default: $PI_FORGE_HOME/bin)
   --agent-dir <path>     Isolated pi-forge state directory (default: $PI_FORGE_HOME/agent)
+  --dev-link             Link launchers and skills to the given source checkout
   --update               Update an existing installation
   --old-head <commit>    Previous revision used to detect core changes
   --resources-only       Update the profile without dependencies or a CLI rebuild
@@ -225,12 +227,34 @@ migrate_default_install_home() {
 	done
 }
 
+move_legacy_state_to_default_home() {
+	[[ -z "${PI_FORGE_INSTALL_DIR:-}" ]] || return 0
+	local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+	local install_home="$HOME/.pi-forge"
+	local legacy_home="$data_home/pi-forge"
+	[[ "$(canonical_existing "$PI_FORGE_HOME")" == "$(canonical_existing "$install_home")" ]] || return 0
+	[[ "$(canonical_existing "$legacy_home")" != "$(canonical_existing "$install_home")" ]] || return 0
+	[[ -d "$legacy_home" ]] || return 0
+
+	move_without_overwrite "$legacy_home/agent" "$install_home/agent"
+	move_without_overwrite "$legacy_home/transcription" "$install_home/transcription"
+	remove_legacy_launcher "$legacy_home/bin/pi-forge" "$legacy_home/repository"
+	remove_legacy_launcher "$legacy_home/bin/pi-forge-mcp" "$legacy_home/repository"
+	remove_legacy_launcher "$legacy_home/bin/pi-forge-update" "$legacy_home/repository"
+	remove_legacy_launcher "$HOME/.local/bin/pi-forge" "$legacy_home/repository"
+	remove_legacy_launcher "$HOME/.local/bin/pi-forge-mcp" "$legacy_home/repository"
+	remove_legacy_launcher "$HOME/.local/bin/pi-forge-update" "$legacy_home/repository"
+	rmdir "$legacy_home/bin" 2>/dev/null || true
+	rmdir "$legacy_home" 2>/dev/null || true
+}
+
 while (($#)); do
 	case "$1" in
 		--source-dir) SOURCE_DIR="${2:-}"; shift ;;
 		--bin-dir) BIN_DIR="${2:-}"; shift ;;
 		--agent-dir) AGENT_DIR="${2:-}"; shift ;;
 		--old-head) OLD_HEAD="${2:-}"; shift ;;
+		--dev-link) DEV_LINK=true ;;
 		--update) UPDATE=true ;;
 		--resources-only) RESOURCES_ONLY=true ;;
 		--help|-h) usage; exit 0 ;;
@@ -257,6 +281,14 @@ BIN_DIR="${BIN_DIR:-$PI_FORGE_HOME/bin}"
 AGENT_DIR="${AGENT_DIR:-$PI_FORGE_HOME/agent}"
 NPM_CACHE_DIR="${NPM_CACHE_DIR:-$AGENT_DIR/npm-cache}"
 PLAYWRIGHT_BROWSERS_DIR="${PLAYWRIGHT_BROWSERS_DIR:-$AGENT_DIR/playwright-browsers}"
+
+EXPECTED_SOURCE_DIR="$PI_FORGE_HOME/repository"
+if [[ "$DEV_LINK" != true && "$(canonical_existing "$SOURCE_DIR")" != "$(canonical_existing "$EXPECTED_SOURCE_DIR")" ]]; then
+	echo "Refusing split pi-forge install from source outside the install home: $SOURCE_DIR" >&2
+	echo "Install into $EXPECTED_SOURCE_DIR, or rerun with --dev-link for checkout-linked development mode." >&2
+	exit 1
+fi
+move_legacy_state_to_default_home
 
 command -v node >/dev/null 2>&1 || { echo "pi-forge requires Node.js 22.19 or newer." >&2; exit 1; }
 command -v npm >/dev/null 2>&1 || { echo "pi-forge requires npm." >&2; exit 1; }

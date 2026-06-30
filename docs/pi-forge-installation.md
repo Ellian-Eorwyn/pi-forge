@@ -34,9 +34,11 @@ agent directory. The installer adds `~/.pi-forge/bin` to the user
 profile when possible; open a new shell before relying on `pi-forge` from
 `PATH`.
 
-Installing from an existing checkout uses that checkout directly. This is
-useful for development; do not remove or move it while the installation is in
-use.
+Installing from an existing checkout clones that checkout into
+`~/.pi-forge/repository` by default, so the installed commands and skills do not
+depend on the development checkout. For checkout-linked development mode, run
+`./install.sh --dev-link`; do not remove or move that checkout while the
+development-linked installation is in use.
 
 ## Update
 
@@ -66,10 +68,10 @@ Local tracked changes also stop updates rather than being overwritten.
 ```
 
 This removes the `pi-forge`, `pi-forge-mcp`, and `pi-forge-update` launchers from
-the bin directory and the managed checkout under `~/.pi-forge` when a
+the bin directory and the managed checkout under `~/.pi-forge/repository` when a
 remote install created one. A launcher is removed only when it still points at a
-pi-forge script, and a development checkout is never deleted — including one you
-installed from directly.
+pi-forge script, and a development checkout outside the install home is never
+deleted.
 
 Agent state in `~/.pi-forge/agent` (credentials, sessions, settings)
 is preserved by default so a later reinstall reuses your login. To remove it too:
@@ -81,8 +83,8 @@ is preserved by default so a later reinstall reuses your login. To remove it too
 Preview without changing anything with `--dry-run`, and skip the confirmation
 prompt with `--yes`. The `--bin-dir`, `--agent-dir`, and `--install-dir` options
 (and the matching `PI_FORGE_*` variables) target a non-default layout. If you
-installed from a development checkout, uninstalling leaves that checkout in place;
-run `git clean -xdf` there to drop the build artifacts and `node_modules`.
+installed with `--dev-link`, uninstalling leaves that checkout in place; run
+`git clean -xdf` there to drop the build artifacts and `node_modules`.
 
 ## Profile layout
 
