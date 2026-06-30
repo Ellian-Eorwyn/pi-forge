@@ -1,7 +1,6 @@
 # pi-forge installation
 
-pi-forge currently supports macOS and Linux with Git, npm, and Node.js 22.19 or
-newer.
+pi-forge currently supports macOS, Linux, and Windows with Git, npm, and Node.js 22.19 or newer.
 
 ## Install
 
@@ -13,8 +12,14 @@ From a checkout:
 
 From a new machine:
 
+**macOS/Linux:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Ellian-Eorwyn/pi-forge/main/install.sh | bash
+```
+
+**Windows (PowerShell):**
+```powershell
+Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://raw.githubusercontent.com/Ellian-Eorwyn/pi-forge/main/install.ps1'))
 ```
 
 The default install home is `~/.pi-forge`.
@@ -24,6 +29,7 @@ pi-forge keeps its installed files under that one directory:
 - commands: `~/.pi-forge/bin/pi-forge`,
   `~/.pi-forge/bin/pi-forge-mcp`, and
   `~/.pi-forge/bin/pi-forge-update`
+  *(On Windows, these are `.cmd` and `.ps1` files)*
 - credentials, settings, copied `AGENTS.md`, sessions, caches, and other state:
   `~/.pi-forge/agent`
 
@@ -31,7 +37,7 @@ Set `PI_FORGE_HOME` to move the whole tree. Set `PI_FORGE_INSTALL_DIR`,
 `PI_FORGE_BIN_DIR`, or `PI_FORGE_AGENT_DIR` only when you intentionally want a
 split layout. `PI_FORGE_NPM_CACHE` overrides the isolated npm cache under the
 agent directory. The installer adds `~/.pi-forge/bin` to the user
-profile when possible; open a new shell before relying on `pi-forge` from
+profile/PATH when possible; open a new shell before relying on `pi-forge` from
 `PATH`.
 
 Installing from an existing checkout clones that checkout into
@@ -45,6 +51,7 @@ development-linked installation is in use.
 ```bash
 pi-forge-update
 ```
+*(On Windows: `pi-forge-update.ps1` or just `pi-forge-update`)*
 
 The updater performs a fast-forward-only Git pull. It rebuilds the CLI only
 when core source changed and reinstalls dependencies only when package metadata
@@ -66,6 +73,7 @@ Local tracked changes also stop updates rather than being overwritten.
 ```bash
 ./uninstall.sh
 ```
+*(On Windows: `.\uninstall.ps1`)*
 
 This removes the `pi-forge`, `pi-forge-mcp`, and `pi-forge-update` launchers from
 the bin directory and the managed checkout under `~/.pi-forge/repository` when a
@@ -79,6 +87,7 @@ is preserved by default so a later reinstall reuses your login. To remove it too
 ```bash
 ./uninstall.sh --purge-state
 ```
+*(On Windows: `.\uninstall.ps1 -PurgeState`)*
 
 Preview without changing anything with `--dry-run`, and skip the confirmation
 prompt with `--yes`. The `--bin-dir`, `--agent-dir`, and `--install-dir` options
