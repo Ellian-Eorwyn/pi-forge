@@ -3,6 +3,7 @@
 ## Run Layout
 
 Use one directory per source named `<source-stem>-<first-12-sha256-chars>`.
+For folder ingestion, the run root is the source folder's `Ingest/` directory.
 Write `manifest.csv` at the run root. A document directory contains:
 
 ```text
@@ -50,6 +51,7 @@ Keep `schemaVersion` equal to `1`. Preserve these top-level objects:
 - `fields`: `title`, `author`, `date`, and `source` evidence objects.
 - `structure`: detected headings, tables, citations, footnotes, and appendices.
 - `review`: whether model normalization is complete and any review notes.
+- `finalOutput`: the final Markdown filename and the reason for that name.
 
 Each evidence object has exactly:
 
@@ -66,6 +68,27 @@ Allowed origins are `embedded-metadata`, `document-text`, `filename`, and
 `user-provided`. Allowed confidence values are `high`, `medium`, and `low`.
 Use nulls when no defensible value exists. Preserve an embedded raw date when
 its normalized interpretation is uncertain.
+
+## Final Output Filename
+
+Set `metadata.finalOutput` before marking review complete:
+
+```json
+{
+  "filename": "2026-05-03 Insurance Claim - Diagnosis - Procedure - Facility.md",
+  "namingReason": "Uses the claim date, diagnosis, procedure, and facility stated in the source."
+}
+```
+
+`filename` must be a filename only, not a path, and must end in `.md`.
+`finalize` uses this filename for the final cleaned Markdown copy. If it is
+missing, `finalize` falls back to a safe title/source-derived filename.
+
+Choose names from the cleaned content and useful browsing cues, not merely the
+original source filename. For lecture transcripts, include `Lecture Transcript`
+or another content-supported transcript label. For administrative materials with
+dates, start with `YYYY-MM-DD`. For insurance claims, include the date,
+diagnosis, procedure, and facility when present. Do not invent missing details.
 
 ## Source Map
 
@@ -137,12 +160,51 @@ record `vision.unavailableReason`) before review is marked complete.
 Use exactly these columns:
 
 ```text
-document_id,source_path,source_sha256,source_format,status,output_directory,title,author,document_date,page_count,extraction_method,ocr_used,warning_count,error
+document_id,source_path,source_sha256,source_format,status,suggested_pipeline,output_directory,title,author,document_date,page_count,extraction_method,ocr_used,warning_count,error
 ```
 
 Allowed statuses are `success`, `needs_review`, `failed`, and `skipped`.
 Quote CSV values correctly. Keep paths absolute for sources and relative to the
-run root for outputs.
+run root for outputs. `suggested_pipeline` is advisory and may contain values
+such as `basic-markdown`, `personal-admin`, `literature`, or
+`transcription,transcript-cleanup`.
+
+## Final Folder Layout
+
+After every ingested file validates, run:
+
+```bash
+document-ingest.mjs finalize <source-folder>/Ingest --destination <source-folder>
+```
+
+`finalize` validates before moving or publishing anything, then preflights every
+destination. It refuses overwrite conflicts. The source folder uses:
+
+```text
+<source-folder>/
+  Ingest/       # run state, manifests, extraction reports, source maps, derived files
+  Originals/    # moved original source files, preserving relative paths
+  Generated/    # user-facing generated synthesis and tables
+  *.md          # final cleaned Markdown for flat folders
+```
+
+For structured folders, final cleaned Markdown preserves the source-relative
+subfolder path. `Ingest/`, `Originals/`, and `Generated/` are reserved and are
+ignored during future source discovery.
+
+`artifact_manifest.csv` is written under `Ingest/` with:
+
+```text
+role,document_id,source_path,destination_path,sha256,created_at
+```
+
+Roles are `original`, `final_markdown`, and `generated_artifact`.
+`destination_path` is relative to the finalized source folder. Generated
+artifacts include user-facing files such as `evidence_table.csv`,
+`methods_matrix.csv`, `claims_matrix.md`, `key_terms.md`,
+`literature_summary.md`, `citation_notes.md`, and `research_gaps.md`.
+Advisory processing files such as `claim_clusters.csv` and `claim_clusters.md`
+remain in `Ingest/`.
 
 ## Model Review and Chunks
 

@@ -142,6 +142,50 @@ function authorFiles(directory, names) {
 	}
 }
 
+function csvEscape(value) {
+	const text = value === null || value === undefined ? "" : String(value);
+	return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+function writeCsvRows(path, rows) {
+	writeFileSync(path, rows.map((row) => row.map(csvEscape).join(",")).join("\n") + "\n");
+}
+
+function readManifestRows(runDirectory) {
+	const rows = parseCsvRows(readFileSync(join(runDirectory, "manifest.csv"), "utf8"));
+	const columns = rows.shift();
+	return {
+		columns,
+		rows: rows.filter((row) => row.some((field) => field !== "")).map((row) => Object.fromEntries(columns.map((column, index) => [column, row[index] ?? ""]))),
+	};
+}
+
+function writeManifestRows(runDirectory, columns, rows) {
+	writeCsvRows(
+		join(runDirectory, "manifest.csv"),
+		[columns, ...rows.map((row) => columns.map((column) => row[column] ?? ""))],
+	);
+}
+
+function completeIngestRun(runDirectory) {
+	const manifest = readManifestRows(runDirectory);
+	for (const row of manifest.rows) {
+		if (row.status !== "needs_review") continue;
+		const documentDirectory = join(runDirectory, row.output_directory);
+		const metadataPath = join(documentDirectory, "metadata.json");
+		const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
+		metadata.extraction.status = "success";
+		metadata.review.completed = true;
+		metadata.finalOutput = metadata.finalOutput ?? { filename: null, namingReason: null };
+		writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
+		const reportPath = join(documentDirectory, "extraction_report.md");
+		writeFileSync(reportPath, readFileSync(reportPath, "utf8").replace("model normalization pending", "model normalization complete"));
+		row.status = "success";
+	}
+	writeManifestRows(runDirectory, manifest.columns, manifest.rows);
+	return manifest.rows;
+}
+
 function withWorkspace(callback) {
 	const workspace = mkdtempSync(join(tmpdir(), "pi-forge-skills-"));
 	try {
@@ -910,11 +954,38 @@ test("literature extraction rejects scaffolds and accepts authored deliverables"
 				{
 					item_type: "finding",
 					text: "The study reports a 12 percent increase.",
-					evidence_quote: "The study reports a 12 percent increase.",
+					direct_quotes: "The study reports a 12 percent increase.",
 					locator: "Study",
 					interpretation: "explicit",
 					confidence: "high",
 					notes: null,
+				},
+				{
+					item_type: "definition",
+					text: "Increase means a reported twelve percent change in the measured outcome.",
+					direct_quotes: "12 percent increase",
+					locator: "Study",
+					interpretation: "explicit",
+					confidence: "high",
+					notes: null,
+				},
+				{
+					item_type: "connection",
+					text: "The document links the outcome change to the broader study claim.",
+					direct_quotes: "The study reports a 12 percent increase.",
+					locator: "Study",
+					interpretation: "inferred",
+					confidence: "medium",
+					notes: null,
+				},
+				{
+					item_type: "author",
+					text: "The provided content does not identify an author.",
+					direct_quotes: null,
+					locator: "Study",
+					interpretation: "unclear",
+					confidence: "high",
+					notes: "Author description is limited to the provided source text.",
 				},
 			])}\n`,
 		);
@@ -928,12 +999,29 @@ test("literature extraction rejects scaffolds and accepts authored deliverables"
 			extractionPath,
 		]);
 		run(python, [script("literature-extraction", "literature-extraction.py"), "build", runDirectory, "--no-claim-clusters"]);
+		const evidenceRows = parseCsvRows(readFileSync(join(runDirectory, "evidence_table.csv"), "utf8"));
+		assert.deepEqual(evidenceRows[0], [
+			"document_id",
+			"source_path",
+			"source_title",
+			"item_type",
+			"item_text",
+			"direct_quotes",
+			"locator",
+			"interpretation",
+			"confidence",
+			"notes",
+		]);
+		assert.match(readFileSync(join(runDirectory, "evidence_table.csv"), "utf8"), /connection/);
+		assert.match(readFileSync(join(runDirectory, "evidence_table.csv"), "utf8"), /author/);
+		assert.equal(existsSync(join(runDirectory, "evidence_table.xlsx")), false);
+		assert.equal(existsSync(join(runDirectory, "key_terms.md")), true);
 		runFailure(
 			python,
 			[script("literature-extraction", "literature-extraction.py"), "validate", runDirectory],
 			/unresolved placeholder/,
 		);
-		authorFiles(runDirectory, ["literature_summary.md", "claims_matrix.md", "research_gaps.md", "citation_notes.md"]);
+		authorFiles(runDirectory, ["literature_summary.md", "claims_matrix.md", "key_terms.md", "research_gaps.md", "citation_notes.md"]);
 		const validation = jsonOutput(
 			run(python, [script("literature-extraction", "literature-extraction.py"), "validate", runDirectory]),
 		);
@@ -978,7 +1066,7 @@ test("literature extraction clusters claims across documents", async () => {
 					{
 						item_type: "claim",
 						text: claims[stem],
-						evidence_quote: null,
+						direct_quotes: null,
 						locator: "para 1",
 						interpretation: "explicit",
 						confidence: "high",
@@ -1018,7 +1106,7 @@ test("literature extraction clusters claims across documents", async () => {
 			assert.match(worksheet, /possible contradiction/);
 			assert.match(readFileSync(join(runDirectory, "claim_clusters.csv"), "utf8"), /negation_hint/);
 			// The optional worksheet does not block validation.
-			authorFiles(runDirectory, ["literature_summary.md", "claims_matrix.md", "research_gaps.md", "citation_notes.md"]);
+			authorFiles(runDirectory, ["literature_summary.md", "claims_matrix.md", "key_terms.md", "research_gaps.md", "citation_notes.md"]);
 			assert.equal(
 				jsonOutput(run(python, [script("literature-extraction", "literature-extraction.py"), "validate", runDirectory])).valid,
 				true,
@@ -1337,6 +1425,138 @@ test("document ingest categorizes folders with the base model endpoint", async (
 		} finally {
 			await chatServer.close();
 		}
+	});
+});
+
+test("document ingest finalizes flat folders into Ingest Originals Generated layout", () => {
+	withWorkspace((workspace) => {
+		const sourceDirectory = join(workspace, "flat-source");
+		mkdirSync(sourceDirectory);
+		mkdirSync(join(sourceDirectory, "Originals"));
+		mkdirSync(join(sourceDirectory, "Generated"));
+		writeFileSync(join(sourceDirectory, "lecture.txt"), "Speaker 1: Clean this transcript.\n");
+		writeFileSync(join(sourceDirectory, "Originals", "previous.txt"), "already archived\n");
+		writeFileSync(join(sourceDirectory, "Generated", "previous.md"), "# Prior generated note\n");
+		const runDirectory = join(sourceDirectory, "Ingest");
+
+		const prepared = jsonOutput(
+			run("node", [script("document-ingest", "document-ingest.mjs"), "prepare", sourceDirectory, "--output", runDirectory]),
+		);
+		assert.equal(prepared.documents, 1);
+		assert.equal(prepared.counts.needs_review, 1);
+		const rows = completeIngestRun(runDirectory);
+		assert.equal(rows.length, 1);
+		const documentDirectory = join(runDirectory, rows[0].output_directory);
+		const metadataPath = join(documentDirectory, "metadata.json");
+		const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
+		metadata.finalOutput = {
+			filename: "Intro to Archival Practice Lecture Transcript.md",
+			namingReason: "The source is a lecture-style transcript and the title reflects its cleaned content.",
+		};
+		writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
+		writeFileSync(join(runDirectory, "literature_summary.md"), "# Literature Summary\n\nGenerated synthesis.\n");
+		assert.equal(jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", runDirectory])).valid, true);
+
+		const finalized = jsonOutput(
+			run("node", [script("document-ingest", "document-ingest.mjs"), "finalize", runDirectory, "--destination", sourceDirectory]),
+		);
+		assert.equal(finalized.layout, "flat");
+		assert.equal(finalized.movedOriginals, 1);
+		assert.equal(finalized.publishedMarkdown, 1);
+		assert.equal(finalized.generatedArtifacts, 1);
+		assert.equal(existsSync(join(sourceDirectory, "lecture.txt")), false);
+		assert.equal(existsSync(join(sourceDirectory, "Originals", "lecture.txt")), true);
+		assert.match(readFileSync(join(sourceDirectory, "Intro to Archival Practice Lecture Transcript.md"), "utf8"), /Clean this transcript/);
+		assert.equal(existsSync(join(sourceDirectory, "Generated", "literature_summary.md")), true);
+		const artifactManifest = readFileSync(join(runDirectory, "artifact_manifest.csv"), "utf8");
+		assert.match(artifactManifest, /role,document_id,source_path,destination_path,sha256,created_at/);
+		assert.match(artifactManifest, /original/);
+		assert.match(artifactManifest, /final_markdown/);
+		assert.match(artifactManifest, /generated_artifact/);
+	});
+});
+
+test("document ingest finalizes structured folders and refuses unsafe finalize", () => {
+	withWorkspace((workspace) => {
+		const sourceDirectory = join(workspace, "structured-source");
+		mkdirSync(join(sourceDirectory, "Week 1"), { recursive: true });
+		mkdirSync(join(sourceDirectory, "Week 2"), { recursive: true });
+		writeFileSync(join(sourceDirectory, "Week 1", "reading.txt"), "Reading one source text.\n");
+		writeFileSync(join(sourceDirectory, "Week 2", "reading.txt"), "Reading two source text.\n");
+		const runDirectory = join(sourceDirectory, "Ingest");
+		run("node", [script("document-ingest", "document-ingest.mjs"), "prepare", sourceDirectory, "--output", runDirectory]);
+		runFailure(
+			"node",
+			[script("document-ingest", "document-ingest.mjs"), "finalize", runDirectory, "--destination", sourceDirectory],
+			/run must validate before finalize/,
+		);
+		completeIngestRun(runDirectory);
+		assert.equal(jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", runDirectory])).valid, true);
+		const finalized = jsonOutput(
+			run("node", [script("document-ingest", "document-ingest.mjs"), "finalize", runDirectory, "--destination", sourceDirectory]),
+		);
+		assert.equal(finalized.layout, "structured");
+		assert.equal(existsSync(join(sourceDirectory, "Week 1", "reading.md")), true);
+		assert.equal(existsSync(join(sourceDirectory, "Week 2", "reading.md")), true);
+		assert.equal(existsSync(join(sourceDirectory, "Originals", "Week 1", "reading.txt")), true);
+		assert.equal(existsSync(join(sourceDirectory, "Originals", "Week 2", "reading.txt")), true);
+	});
+});
+
+test("document ingest finalize refuses generated artifact overwrite conflicts", () => {
+	withWorkspace((workspace) => {
+		const sourceDirectory = join(workspace, "conflict-source");
+		mkdirSync(join(sourceDirectory, "Generated"), { recursive: true });
+		writeFileSync(join(sourceDirectory, "note.txt"), "Source text.\n");
+		writeFileSync(join(sourceDirectory, "Generated", "literature_summary.md"), "# Existing\n");
+		const runDirectory = join(sourceDirectory, "Ingest");
+		run("node", [script("document-ingest", "document-ingest.mjs"), "prepare", sourceDirectory, "--output", runDirectory]);
+		completeIngestRun(runDirectory);
+		writeFileSync(join(runDirectory, "literature_summary.md"), "# New\n");
+		runFailure(
+			"node",
+			[script("document-ingest", "document-ingest.mjs"), "finalize", runDirectory, "--destination", sourceDirectory],
+			/finalize destination already exists/,
+		);
+		assert.equal(existsSync(join(sourceDirectory, "note.txt")), true);
+		assert.equal(existsSync(join(sourceDirectory, "Originals", "note.txt")), false);
+	});
+});
+
+test("document ingest final output filenames support administrative naming and reject unsafe paths", () => {
+	withWorkspace((workspace) => {
+		const sourceDirectory = join(workspace, "admin-source");
+		mkdirSync(sourceDirectory);
+		writeFileSync(join(sourceDirectory, "scan.txt"), "Insurance claim for knee MRI at City Hospital.\n");
+		const runDirectory = join(sourceDirectory, "Ingest");
+		run("node", [script("document-ingest", "document-ingest.mjs"), "prepare", sourceDirectory, "--output", runDirectory]);
+		const rows = completeIngestRun(runDirectory);
+		const metadataPath = join(runDirectory, rows[0].output_directory, "metadata.json");
+		const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
+		metadata.finalOutput = {
+			filename: "2026-05-03 Insurance Claim - Knee Pain - MRI - City Hospital.md",
+			namingReason: "Administrative insurance claim name starts with date and includes diagnosis, procedure, and facility.",
+		};
+		writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
+		assert.equal(jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", runDirectory])).valid, true);
+		run("node", [script("document-ingest", "document-ingest.mjs"), "finalize", runDirectory, "--destination", sourceDirectory]);
+		assert.equal(existsSync(join(sourceDirectory, "2026-05-03 Insurance Claim - Knee Pain - MRI - City Hospital.md")), true);
+
+		const unsafeDirectory = join(workspace, "unsafe-source");
+		mkdirSync(unsafeDirectory);
+		writeFileSync(join(unsafeDirectory, "note.txt"), "Administrative note.\n");
+		const unsafeRun = join(unsafeDirectory, "Ingest");
+		run("node", [script("document-ingest", "document-ingest.mjs"), "prepare", unsafeDirectory, "--output", unsafeRun]);
+		const unsafeRows = completeIngestRun(unsafeRun);
+		const unsafeMetadataPath = join(unsafeRun, unsafeRows[0].output_directory, "metadata.json");
+		const unsafeMetadata = JSON.parse(readFileSync(unsafeMetadataPath, "utf8"));
+		unsafeMetadata.finalOutput = { filename: "../escape.md", namingReason: "bad path" };
+		writeFileSync(unsafeMetadataPath, `${JSON.stringify(unsafeMetadata, null, 2)}\n`);
+		runFailure(
+			"node",
+			[script("document-ingest", "document-ingest.mjs"), "validate", unsafeRun],
+			/finalOutput\.filename must be a safe Markdown filename/,
+		);
 	});
 });
 

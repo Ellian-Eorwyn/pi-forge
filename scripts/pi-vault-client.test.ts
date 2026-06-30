@@ -106,7 +106,7 @@ test("missing configuration is actionable and does not spawn", () => {
 
 test("configuration defaults to the pi-forge home agent directory", () => {
 	const root = workspace();
-	const piForgeHome = join(root, "pi-vault");
+	const piForgeHome = join(root, "pi-forge");
 	const server = fakeServer(root);
 	const agent = join(piForgeHome, "agent");
 	const vault = join(root, "vault");

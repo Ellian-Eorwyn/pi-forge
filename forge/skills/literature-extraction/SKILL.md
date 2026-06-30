@@ -11,7 +11,7 @@ overclaiming or blending source content with synthesis.
 ## Workflow
 
 1. Resolve this skill directory from the loaded `SKILL.md` path. Check local
-   capabilities when XLSX export is uncertain:
+   capabilities and optional embeddings availability:
 
    ```bash
    python3 <skill-directory>/scripts/literature-extraction.py doctor
@@ -66,13 +66,16 @@ overclaiming or blending source content with synthesis.
    endpoint is unavailable; pass `--no-claim-clusters` to skip it or
    `--claim-cluster-threshold` to tune grouping.
 
-   Then author `literature_summary.md`, `claims_matrix.md`, `research_gaps.md`,
-   and `citation_notes.md` from the evidence table, using `claim_clusters.md`
-   when present to find cross-source agreement and disagreement with better
-   recall. Keep verbatim quotes and extracted facts separate from generated
-   synthesis, and judge every flagged contradiction against the evidence rather
-   than trusting the lexical hint. Re-running `build` refreshes the tables and
-   worksheet without overwriting authored Markdown.
+   Then author `literature_summary.md`, `claims_matrix.md`, `key_terms.md`,
+   `research_gaps.md`, and `citation_notes.md` from the evidence table, using
+   `claim_clusters.md` when present to find cross-source agreement and
+   disagreement with better recall. Prioritize key terms and definitions,
+   connections between readings, claims and arguments, source-grounded author
+   descriptions, and methodology when applicable. Keep verbatim quotes and
+   extracted facts separate from generated synthesis, and judge every flagged
+   contradiction against the evidence rather than trusting the lexical hint.
+   Re-running `build` refreshes the tables and worksheet without overwriting
+   authored Markdown.
 6. Validate the completed run and report outcomes:
 
    ```bash
@@ -92,7 +95,7 @@ overclaiming or blending source content with synthesis.
   unclear. Do not extend a source's claims beyond what it supports.
 - When sources disagree, record both and surface the disagreement; do not
   reconcile it silently.
-- Keep `evidence_table.csv`, `evidence_table.xlsx`, and `methods_matrix.csv`
-  machine-readable and traceable. Keep the Markdown deliverables interpretive
-  and clearly marked as generated synthesis.
+- Keep `evidence_table.csv` and `methods_matrix.csv` machine-readable and
+  traceable. Use the `direct_quotes` column for quote support. Keep the
+  Markdown deliverables interpretive and clearly marked as generated synthesis.
 - Do not assume Obsidian schemas or frontmatter unless the user requests them.

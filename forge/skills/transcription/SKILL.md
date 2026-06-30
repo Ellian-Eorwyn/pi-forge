@@ -17,7 +17,7 @@ The recognition engine is **autoselected by platform**: parakeet-mlx on Apple
 Silicon (fast, native MLX), NVIDIA NeMo elsewhere (CUDA on Linux). Both run the
 Parakeet TDT v3 model locally — no audio leaves the machine. Dependencies and
 the model install into a managed virtual environment under
-`${PI_FORGE_HOME:-~/.local/share/pi-vault}/transcription`, outside the installed
+`${PI_FORGE_HOME:-~/.pi-forge}/transcription`, outside the installed
 repository checkout, so updates do not remove the local model cache.
 
 ## Workflow
@@ -77,7 +77,7 @@ repository checkout, so updates do not remove the local model cache.
 
 The dictionary fixes recognition errors deterministically: each entry maps a
 `correct` form to its known misheard `variants` (names, acronyms, jargon). It is
-stored globally at `${PI_FORGE_HOME:-~/.local/share/pi-vault}/transcription/dictionary.json` and accumulates
+stored globally at `${PI_FORGE_HOME:-~/.pi-forge}/transcription/dictionary.json` and accumulates
 across jobs; an optional per-project file
 (`.forge/transcription-dictionary.json`, or `--project-dictionary <path>`)
 overrides or extends it. Corrections are applied with word-boundary and

@@ -9,7 +9,7 @@ The recognition engine is autoselected by platform:
   * everything else, incl. Linux + NVIDIA -> NeMo (CUDA-accelerated)
 
 Dependencies and models install into a durable managed environment under
-${PI_FORGE_HOME:-~/.local/share/pi-vault}/transcription via `setup`, so updates
+${PI_FORGE_HOME:-~/.pi-forge}/transcription via `setup`, so updates
 to the repository do not remove the local Parakeet model cache."""
 
 import argparse
@@ -132,7 +132,7 @@ def run(command, **kwargs):
 # ---------------------------------------------------------------------------
 
 def pi_forge_home():
-    return Path(os.environ.get("PI_FORGE_HOME", Path.home() / ".local" / "share" / "pi-vault"))
+    return Path(os.environ.get("PI_FORGE_HOME", Path.home() / ".pi-forge"))
 
 
 def transcription_home():

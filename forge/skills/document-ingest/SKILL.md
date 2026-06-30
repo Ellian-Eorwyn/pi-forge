@@ -15,10 +15,12 @@ Process entire folders of documents and media deterministically, then orchestrat
    node <skill-directory>/scripts/document-ingest.mjs doctor
    ```
 
-2. Choose a new output directory and prepare the input folder:
+2. Choose the source folder's `Ingest/` directory as the run directory for
+   folder ingestion, or a new explicit run directory for a single-file run.
+   Prepare the input without moving or overwriting sources:
 
    ```bash
-   node <skill-directory>/scripts/document-ingest.mjs prepare <input> --output <new-directory>
+   node <skill-directory>/scripts/document-ingest.mjs prepare <input-folder> --output <input-folder>/Ingest
    ```
 
    This deterministic step creates a `manifest.csv` containing all files, automatically extracts audio from videos (via `ffmpeg`), applies OCR to images/PDFs (via `glmocr`), and determines a `suggested_pipeline` (e.g. `personal-admin`, `literature`, `transcription,transcript-cleanup`, `basic-markdown`) based on the folder contents and file formats.
@@ -28,14 +30,25 @@ Process entire folders of documents and media deterministically, then orchestrat
    **For `basic-markdown`, `personal-admin`, or `literature`**:
    - Review and clean up the `document.md` structure in the file's output directory. 
    - Improve headings, paragraphs, lists, and tables supported by the source. Leave uncertain text visible and note it in `extraction_report.md`.
-   - Complete `metadata.json` and mark review as complete.
+   - Complete `metadata.json`, set `finalOutput.filename` to a meaningful
+     final Markdown filename, and mark review as complete.
+   - Choose final filenames from the cleaned file contents, not just the
+     original filename. Use concise names that make the file easy to browse and
+     sort. Lecture transcripts should say they are lecture transcripts when
+     supported by the content. Administrative files with dates must begin with
+     `YYYY-MM-DD`. Insurance claim filenames should include the date,
+     diagnosis, procedure, and facility when those details are present.
+   - `finalOutput.filename` must be a filename only, not a path, and must end
+     in `.md`.
    - If the pipeline is `personal-admin` or `literature`, load and execute that specific skill's instructions on the finalized `document.md` to produce the required summary/spreadsheet outputs.
 
    **For `transcription,transcript-cleanup`**:
    - Locate the extracted `derived/audio.mp3` in the file's output directory.
    - Load and execute the `transcription` skill instructions on the audio file to produce a transcript.
    - Load and execute the `transcript-cleanup` skill instructions to format the raw transcript into a clean, readable Markdown document.
-   - Save the final transcript as `document.md` and mark the item as complete.
+   - Save the final transcript as `document.md`, set `metadata.json`
+     `finalOutput.filename` to a meaningful transcript filename, and mark the
+     item as complete.
 
 4. As you complete each file, update your internal task checklist or the `manifest.csv` to track progress. Ensure every successfully processed file is reviewed.
 
@@ -46,10 +59,29 @@ Process entire folders of documents and media deterministically, then orchestrat
    ```
 
 6. **Final File Organization**:
-   - Once all files in the manifest have been processed and validated, reorganize the folder.
-   - Create an `Originals/` folder inside `<new-directory>`.
-   - Move all original source files into `Originals/`.
-   - Extract the processed, final Markdown files (and any generated spreadsheets or reports) from their respective `output_directory` subfolders and place them directly in the top level of `<new-directory>`. Give them clean, descriptive names based on their content or original filename.
+   - Once all files in the manifest have been processed and validated, finalize
+     the source folder:
+
+     ```bash
+     node <skill-directory>/scripts/document-ingest.mjs finalize <input-folder>/Ingest --destination <input-folder>
+     ```
+
+   - `finalize` refuses to run unless validation passes and no destination
+     conflicts exist.
+   - For a flat source folder, final cleaned Markdown files go at the source
+     folder root. For a clearly structured folder with multiple source
+     subfolders, final cleaned Markdown preserves the relative subfolder
+     structure.
+   - Original source files move into `Originals/`, preserving relative paths.
+     Audio and video originals are moved there too.
+   - User-facing generated synthesis such as `evidence_table.csv`,
+     `claims_matrix.md`, `key_terms.md`, `literature_summary.md`,
+     `citation_notes.md`, and `research_gaps.md` goes under `Generated/`.
+   - `Ingest/` keeps the manifest, `artifact_manifest.csv`, extraction reports,
+     source maps, OCR/media derivatives, claim-clustering worksheets, and other
+     background processing files.
+   - Do not place raw originals or raw transcripts at the source-folder top
+     level. The top level should contain only final cleaned Markdown outputs.
 
 ## Safety and Failure Handling
 

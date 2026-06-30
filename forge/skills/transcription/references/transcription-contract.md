@@ -64,7 +64,7 @@ Follow an explicit user request when it conflicts with the type default.
 
 ### Storage and precedence
 
-1. Global: `${PI_FORGE_HOME:-~/.local/share/pi-vault}/transcription/dictionary.json`.
+1. Global: `${PI_FORGE_HOME:-~/.pi-forge}/transcription/dictionary.json`.
 2. Project: `.forge/transcription-dictionary.json` in the working directory, or
    `--project-dictionary <path>`.
 
@@ -110,13 +110,13 @@ dict apply  <transcript> --output <out> [--project-dictionary <path>] [--no-dict
 
 ## Managed Environment
 
-`setup` builds a self-contained install under `${PI_FORGE_HOME:-~/.local/share/pi-vault}/transcription`
+`setup` builds a self-contained install under `${PI_FORGE_HOME:-~/.pi-forge}/transcription`
 (honors `$PI_FORGE_TRANSCRIPTION_HOME`, then `$PI_FORGE_HOME`). This directory
 is durable local state outside the installed repository checkout, so
 `pi-forge-update` does not remove the venvs, model cache, or dictionary:
 
 ```
-~/.local/share/pi-vault/transcription/
+~/.pi-forge/transcription/
   venv-mlx/         # parakeet-mlx environment (built on Apple Silicon)
   venv-nemo/        # NeMo environment (built on Linux/NVIDIA)
   models/           # HF_HOME; models/hub is the Hugging Face cache

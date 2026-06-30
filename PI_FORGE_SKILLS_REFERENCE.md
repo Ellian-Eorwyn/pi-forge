@@ -115,7 +115,7 @@ Each skill is implemented as:
 - One document at a time
 - Distinguishes explicit vs. inferred vs. unclear claims
 - Surfaces source disagreements
-- Outputs: `evidence_table.csv/.xlsx`, `claim_clusters.csv/.md`
+- Outputs: `evidence_table.csv`, `claim_clusters.csv/.md`, `key_terms.md`
 
 ---
 

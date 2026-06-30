@@ -10,7 +10,7 @@ if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/scripts/pi-forge-install.sh" ]]; then
 	exec "$SCRIPT_DIR/scripts/pi-forge-install.sh" --source-dir "$SCRIPT_DIR" "$@"
 fi
 
-PI_FORGE_HOME="${PI_FORGE_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/pi-forge}"
+PI_FORGE_HOME="${PI_FORGE_HOME:-$HOME/.pi-forge}"
 INSTALL_DIR="${PI_FORGE_INSTALL_DIR:-$PI_FORGE_HOME}"
 REPOSITORY="${PI_FORGE_REPOSITORY:-https://github.com/Ellian-Eorwyn/pi-forge.git}"
 SOURCE_DIR="$INSTALL_DIR/repository"

@@ -17,20 +17,20 @@ From a new machine:
 curl -fsSL https://raw.githubusercontent.com/Ellian-Eorwyn/pi-forge/main/install.sh | bash
 ```
 
-The default install home is `${XDG_DATA_HOME:-~/.local/share}/pi-forge`.
+The default install home is `~/.pi-forge`.
 pi-forge keeps its installed files under that one directory:
 
-- checkout, scripts, and managed skills: `~/.local/share/pi-forge/repository`
-- commands: `~/.local/share/pi-forge/bin/pi-forge`,
-  `~/.local/share/pi-forge/bin/pi-forge-mcp`, and
-  `~/.local/share/pi-forge/bin/pi-forge-update`
+- checkout, scripts, and managed skills: `~/.pi-forge/repository`
+- commands: `~/.pi-forge/bin/pi-forge`,
+  `~/.pi-forge/bin/pi-forge-mcp`, and
+  `~/.pi-forge/bin/pi-forge-update`
 - credentials, settings, copied `AGENTS.md`, sessions, caches, and other state:
-  `~/.local/share/pi-forge/agent`
+  `~/.pi-forge/agent`
 
 Set `PI_FORGE_HOME` to move the whole tree. Set `PI_FORGE_INSTALL_DIR`,
 `PI_FORGE_BIN_DIR`, or `PI_FORGE_AGENT_DIR` only when you intentionally want a
 split layout. `PI_FORGE_NPM_CACHE` overrides the isolated npm cache under the
-agent directory. The installer adds `~/.local/share/pi-forge/bin` to the user
+agent directory. The installer adds `~/.pi-forge/bin` to the user
 profile when possible; open a new shell before relying on `pi-forge` from
 `PATH`.
 
@@ -66,12 +66,12 @@ Local tracked changes also stop updates rather than being overwritten.
 ```
 
 This removes the `pi-forge`, `pi-forge-mcp`, and `pi-forge-update` launchers from
-the bin directory and the managed checkout under `~/.local/share/pi-forge` when a
+the bin directory and the managed checkout under `~/.pi-forge` when a
 remote install created one. A launcher is removed only when it still points at a
 pi-forge script, and a development checkout is never deleted — including one you
 installed from directly.
 
-Agent state in `~/.local/share/pi-forge/agent` (credentials, sessions, settings)
+Agent state in `~/.pi-forge/agent` (credentials, sessions, settings)
 is preserved by default so a later reinstall reuses your login. To remove it too:
 
 ```bash

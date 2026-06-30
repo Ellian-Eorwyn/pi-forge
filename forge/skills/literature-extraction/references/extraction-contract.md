@@ -24,19 +24,19 @@ established.
   documents.csv              # per-source manifest with hashes and final disposition
   extraction_results.jsonl   # append-only, one record per document
   evidence_table.csv
-  evidence_table.xlsx        # only when openpyxl is available
   methods_matrix.csv
   claim_clusters.csv         # advisory; only when embeddings ran and >=2 claims/findings
   claim_clusters.md          # advisory worksheet; same condition
   literature_summary.md      # model-authored
   claims_matrix.md           # model-authored
+  key_terms.md               # model-authored
   research_gaps.md           # model-authored
   citation_notes.md          # model-authored
   working/                   # per-document extraction JSON written before `record`
 ```
 
 `run_config.json`, `documents.csv`, and `extraction_results.jsonl` are managed
-by the script. Do not hand-edit them. The four Markdown deliverables are
+by the script. Do not hand-edit them. The Markdown deliverables are
 scaffolded by `build` only when absent, then authored by the model.
 
 ## Extraction Schema
@@ -44,29 +44,32 @@ scaffolded by `build` only when absent, then authored by the model.
 Each document's extraction is a JSON array of item objects. Every item has
 exactly these fields:
 
-- `item_type`: one of `claim`, `method`, `data_source`, `finding`,
-  `limitation`, `definition`, `citation`, `quoted_evidence`, `variable`,
-  `population`, `technology`, `policy`, `research_gap`.
+- `item_type`: one of `claim`, `connection`, `method`, `data_source`,
+  `finding`, `limitation`, `definition`, `author`, `citation`,
+  `quoted_evidence`, `variable`, `population`, `technology`, `policy`,
+  `research_gap`.
 - `text`: the extracted statement in your words or a faithful paraphrase
   (required, nonblank).
-- `evidence_quote`: a short verbatim quote from the source supporting the item,
-  or null when no single quote applies.
+- `direct_quotes`: short verbatim quote support from the source, or null when no
+  quote is available. Include multiple short quotes in one field when needed.
 - `locator`: a page number, section, heading, or block reference, or null.
 - `interpretation`: `explicit`, `inferred`, or `unclear` (see below).
 - `confidence`: `high`, `medium`, or `low`.
 - `notes`: optional clarification, or null.
 
 Item-type meanings: `claim` is an assertion the source argues for; `finding` is
-a reported result; `method` covers study design, procedures, and analysis;
-`data_source` is a dataset, corpus, or instrument used; `definition` is a term
-the source defines; `citation` is a referenced work; `quoted_evidence` is a
+a reported result; `connection` is a shared idea or explicit/inferred link
+between readings; `method` covers study design, procedures, and analysis;
+`data_source` is a dataset, corpus, or instrument used; `definition` is a key
+term the source defines; `author` is a brief description of an author based only
+on the provided content; `citation` is a referenced work; `quoted_evidence` is a
 notable passage worth preserving verbatim; `variable`, `population`,
 `technology`, and `policy` capture the studied constructs and context;
 `research_gap` is an acknowledged or implied gap.
 
 ## Interpretation Discipline
 
-- `explicit`: the source states it directly. Prefer an `evidence_quote`.
+- `explicit`: the source states it directly. Prefer `direct_quotes`.
 - `inferred`: you concluded it from the source but the source does not say it
   outright. Never present inference as fact.
 - `unclear`: the source is ambiguous, contradictory, or silent where a value
@@ -86,11 +89,10 @@ must still match at `build` and `validate`; a changed source aborts the run.
 
 ## Evidence Table
 
-`evidence_table.csv` (and the XLSX twin) has one row per extracted item with
-columns:
+`evidence_table.csv` has one row per extracted item with columns:
 
 ```text
-document_id,source_path,source_title,item_type,item_text,evidence_quote,locator,interpretation,confidence,notes
+document_id,source_path,source_title,item_type,item_text,direct_quotes,locator,interpretation,confidence,notes
 ```
 
 ## Methods Matrix
@@ -134,6 +136,8 @@ This worksheet is advisory and is not a deliverable:
   disagreement, assumptions/limits, and open questions.
 - `claims_matrix.md`: one row per claim with source(s), locator, interpretation,
   and supporting/contradicting sources.
+- `key_terms.md`: one row per key term or definition with source(s), locator,
+  interpretation, and direct quote support.
 - `research_gaps.md`: explicitly stated gaps and inferred gaps, kept distinct.
 - `citation_notes.md`: one annotated entry per document.
 

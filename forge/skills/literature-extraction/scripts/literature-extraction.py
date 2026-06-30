@@ -3,7 +3,6 @@
 import argparse
 import csv
 import hashlib
-import importlib.util
 import json
 import os
 import re
@@ -53,11 +52,13 @@ NEGATION_CUES = (
 SOURCE_EXTENSIONS = {".md", ".markdown", ".txt"}
 ITEM_TYPES = [
     "claim",
+    "connection",
     "method",
     "data_source",
     "finding",
     "limitation",
     "definition",
+    "author",
     "citation",
     "quoted_evidence",
     "variable",
@@ -78,7 +79,7 @@ EVIDENCE_COLUMNS = [
     "source_title",
     "item_type",
     "item_text",
-    "evidence_quote",
+    "direct_quotes",
     "locator",
     "interpretation",
     "confidence",
@@ -152,6 +153,18 @@ MARKDOWN_DELIVERABLES = {
         "|---|---|---|---|---|",
         "",
     ],
+    "key_terms.md": [
+        "# Key Terms",
+        "",
+        PLACEHOLDER,
+        "",
+        "<!-- One row per definition or important term. Include source document,",
+        "locator, interpretation, and direct quote support when available. -->",
+        "",
+        "| Term | Definition | Source(s) | Locator | Direct quote(s) |",
+        "|---|---|---|---|---|",
+        "",
+    ],
     "research_gaps.md": [
         "# Research Gaps",
         "",
@@ -215,10 +228,6 @@ def require_run_directory(raw_path):
     if not (path / "run_config.json").is_file():
         fail(f"run_config.json is missing: {path}")
     return path
-
-
-def openpyxl_available():
-    return importlib.util.find_spec("openpyxl") is not None
 
 
 def read_text(path):
@@ -324,20 +333,12 @@ def write_documents_csv(run_directory, documents, dispositions):
 
 
 def command_doctor(args):
-    available = openpyxl_available()
-    version = None
-    if available:
-        import openpyxl
-
-        version = openpyxl.__version__
     embeddings = forge_embeddings.embeddings_doctor()
     result = {
         "python": sys.version.split()[0],
         "markdownText": True,
-        "xlsx": available,
-        "openpyxlVersion": version,
         "embeddings": embeddings,
-        "remediation": None if available else "Install openpyxl for the active Python 3 environment to export XLSX.",
+        "evidenceTable": "csv",
         "note": "Convert PDF, DOCX, HTML, and RTF sources with document-ingest first; this skill consumes document.md, .md, and .txt.",
     }
     if args.json:
@@ -345,12 +346,10 @@ def command_doctor(args):
         return
     print(f"Python: {result['python']}")
     print("Markdown/text sources: available")
-    print(f"XLSX export: {'available via openpyxl ' + version if available else 'unavailable (CSV only)'}")
+    print("Evidence table export: CSV")
     reach = "reachable" if embeddings["reachable"] else "unreachable"
     print(f"Embeddings ({embeddings['url']}): {reach} - {embeddings['detail']}")
     print("  Used by build for advisory cross-document claim clustering; build degrades cleanly when unreachable.")
-    if result["remediation"]:
-        print(f"Action: {result['remediation']}")
     print(f"Note: {result['note']}")
 
 
@@ -472,7 +471,7 @@ def normalize_items(raw):
         confidence = item.get("confidence")
         if confidence not in CONFIDENCES:
             fail(f"item {index} has invalid confidence {confidence!r}; expected high, medium, or low")
-        for optional in ("evidence_quote", "locator", "notes"):
+        for optional in ("direct_quotes", "locator", "notes"):
             value = item.get(optional)
             if value is not None and not isinstance(value, str):
                 fail(f"item {index} field {optional} must be a string or null")
@@ -480,7 +479,7 @@ def normalize_items(raw):
             {
                 "item_type": item_type,
                 "text": item["text"],
-                "evidence_quote": item.get("evidence_quote"),
+                "direct_quotes": item.get("direct_quotes"),
                 "locator": item.get("locator"),
                 "interpretation": interpretation,
                 "confidence": confidence,
@@ -559,7 +558,7 @@ def write_evidence_table(run_directory, run, results_by_id):
                     document["title"] or "",
                     item["item_type"],
                     item["text"],
-                    item.get("evidence_quote") or "",
+                    item.get("direct_quotes") or "",
                     item.get("locator") or "",
                     item["interpretation"],
                     item["confidence"],
@@ -571,19 +570,10 @@ def write_evidence_table(run_directory, run, results_by_id):
         writer = csv.writer(handle, lineterminator="\n")
         writer.writerow(EVIDENCE_COLUMNS)
         writer.writerows(rows)
-    xlsx_written = False
-    if openpyxl_available():
-        import openpyxl
-
-        workbook = openpyxl.Workbook()
-        worksheet = workbook.active
-        worksheet.title = "evidence"
-        worksheet.append(EVIDENCE_COLUMNS)
-        for row in rows:
-            worksheet.append(row)
-        workbook.save(run_directory / "evidence_table.xlsx")
-        xlsx_written = True
-    return len(rows), xlsx_written
+    xlsx_path = run_directory / "evidence_table.xlsx"
+    if xlsx_path.exists():
+        xlsx_path.unlink()
+    return len(rows)
 
 
 def write_methods_matrix(run_directory, run, results_by_id):
@@ -816,7 +806,7 @@ def command_build(args):
         fail("--claim-cluster-threshold must be between -1 and 1")
     verify_hashes(run)
     results_by_id = {result["documentId"]: result for result in results}
-    evidence_rows, xlsx_written = write_evidence_table(run_directory, run, results_by_id)
+    evidence_rows = write_evidence_table(run_directory, run, results_by_id)
     method_rows = write_methods_matrix(run_directory, run, results_by_id)
     claim_clusters = compute_claim_clusters(run_directory, run, results_by_id, args)
     created = scaffold_markdown(run_directory)
@@ -827,7 +817,6 @@ def command_build(args):
             {
                 "evidenceItems": evidence_rows,
                 "methodsRows": method_rows,
-                "xlsx": xlsx_written,
                 "scaffolded": created,
                 "claimClusters": claim_clusters,
                 "success": counts["success"],
