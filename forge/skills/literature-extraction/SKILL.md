@@ -8,6 +8,25 @@ description: Extract structured, source-backed evidence from academic articles, 
 Extract reviewable, provenance-backed evidence from research documents without
 overclaiming or blending source content with synthesis.
 
+## Natural Language Routing
+
+Use this skill directly when the user asks for literature review, source-backed
+evidence extraction, claims/terms/research gaps, annotated bibliography,
+cross-source synthesis, or similar analysis over already-clean Markdown/text
+sources.
+
+When this skill is reached from `document-ingest`, run it after document ingest
+has finalized the source folder. Use the finalized source folder as input and
+write the literature run to:
+
+```bash
+<input-folder>/Generated/Literature-Extraction
+```
+
+The default folder discovery skips `Ingest/`, `Originals/`, and `Generated/`, so
+this processes only the finalized clean Markdown files at the source folder
+surface.
+
 ## Command Card
 
 - `doctor --json`: capability check and embeddings availability.
@@ -32,7 +51,8 @@ overclaiming or blending source content with synthesis.
    already exist.
 2. Create a new output directory under
    `forge-output/literature-extraction/<input-stem>/`. If it exists, use a
-   numbered suffix. Then initialize the run:
+   numbered suffix. When invoked from `document-ingest`, instead use
+   `<input-folder>/Generated/Literature-Extraction`. Then initialize the run:
 
    ```bash
    python3 <skill-directory>/scripts/literature-extraction.py init <input> --output <new-directory>

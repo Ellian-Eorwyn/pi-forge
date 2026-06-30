@@ -7,6 +7,28 @@ description: One-stop-shop folder ingestion pipeline. Ingest, normalize, and pro
 
 Process entire folders of documents and media deterministically, then orchestrate follow-up actions and file organization using the LLM.
 
+## Natural Language Routing
+
+Use this skill when the user asks to "ingest", "process", "clean up",
+"convert these files", "handle this folder", or similar natural-language
+requests over a folder of documents or media. The user does not need to name
+`document-ingest`.
+
+If prepared files are categorized as `literature`, or the folder clearly
+contains readings, articles, reports, lecture transcripts, research material,
+or a corpus that would benefit from source-backed claims/terms/synthesis, run
+the literature workflow too. After document ingest validates and finalizes, run
+`literature-extraction` on the finalized source folder with output under:
+
+```bash
+<input-folder>/Generated/Literature-Extraction
+```
+
+Do this because `literature-extraction` skips `Ingest/`, `Originals/`, and
+`Generated/` by default, so running it on the finalized source folder processes
+only the clean top-level Markdown outputs. Do not ask the user to name the
+second skill when the document type makes the handoff clear.
+
 ## Command Card
 
 - `doctor --json`: capability check.
@@ -17,6 +39,7 @@ Process entire folders of documents and media deterministically, then orchestrat
 - `record-transcript <run-directory> --doc-id <id> --transcript <cleaned.md>`: atomically install a cleaned transcript as the final document text and repair transcript chunk validation state.
 - `validate <run-directory> --fix-hints --json`: machine-readable quality gate with repair hints.
 - `run <input> --output <input>/Ingest --literature`: deterministic prepare/resume wrapper that reports the next review action and downstream literature handoff.
+- For finalized literature-like folders: `python3 <literature-skill>/scripts/literature-extraction.py init <input-folder> --output <input-folder>/Generated/Literature-Extraction`.
 
 ## Workflow
 
@@ -104,6 +127,18 @@ Process entire folders of documents and media deterministically, then orchestrat
      background processing files.
    - Do not place raw originals or raw transcripts at the source-folder top
      level. The top level should contain only final cleaned Markdown outputs.
+
+7. **Automatic Literature Handoff**:
+   - If any successful item has `suggested_pipeline` containing `literature`, or
+     the final folder is clearly a set of readings, articles, reports, lecture
+     transcripts, or research sources, run `literature-extraction` after
+     finalization.
+   - Use the finalized source folder as the literature input and
+     `<input-folder>/Generated/Literature-Extraction` as the literature output.
+   - Complete the literature extraction workflow through `build`, model-authored
+     deliverables, and `validate --fix-hints --json`.
+   - Report both ingestion outputs and generated literature deliverables in the
+     final response.
 
 ## Safety and Failure Handling
 
