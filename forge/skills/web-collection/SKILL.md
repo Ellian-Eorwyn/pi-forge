@@ -18,8 +18,9 @@ the original sources; produce new files only.
    node <skill-directory>/scripts/web-collection.mjs doctor --json
    ```
 
-   Rendered capture needs Playwright and the Chromium browser. Search needs
-   `FORGE_SEARXNG_URL` or `--searxng <url>`.
+   Rendered capture needs Playwright and the Chromium browser. Search uses
+   the default SearXNG instance (`http://llms/searxng`) unless overridden
+   by `FORGE_SEARXNG_URL` or `--searxng <url>`.
 2. Choose a new output directory under
    `forge-output/web-collection/<source-stem>/`. If it exists, use the next
    numbered suffix. The script refuses to write into an existing directory.
@@ -38,15 +39,62 @@ the original sources; produce new files only.
        --output <new-directory> --ext pdf [--match <regex>] [--same-host] [--limit N]
      ```
 
-   - **search** through a local SearXNG instance:
+   - **search** through a local SearXNG instance (default: `http://llms/searxng`):
 
      ```bash
      node <skill-directory>/scripts/web-collection.mjs search <query...> \
        --output <new-directory> [--searxng <url>] [--limit N] [--collect]
+       [--categories <cats>] [--engines <engines>] [--language <lang>]
+       [--safesearch <0|1|2>] [--time-range <day|week|month|year>] [--pageno N]
      ```
 
    Add `--render` to also save full Playwright captures. Plain collection saves
    raw HTTP responses only.
+
+   ### SearXNG Search Parameters
+
+   Choose parameters based on the query topic and desired result quality:
+
+   - **`--categories`** (comma-separated): Filter by result category. Use
+     `general` (default) for broad searches, `news` for current events,
+     `science` or `scientific publications` for academic content, `it` for
+     developer topics, `images`/`videos` for media, `files` for downloads,
+     `books` for literature, `q&a` for Stack Overflow-style answers.
+     Combine with commas: `--categories science,it`.
+
+   - **`--engines`** (comma-separated): Restrict to specific search engines.
+     Use `google` for broad coverage, `duckduckgo` for privacy-focused results,
+     `wikipedia` for encyclopedic context, `google scholar` or `semantic scholar`
+     for academic papers, `pubmed` or `arxiv` for scientific preprints,
+     `github` for code repositories, `stackoverflow` for programming Q&A,
+     `startpage` for Google results via privacy proxy.
+     Example: `--engines google scholar,semantic scholar`.
+
+   - **`--language`**: Set result language (e.g., `en`, `de`, `fr`, `zh`).
+     Use when the query is in a specific language or you want results in a
+     particular language. Omit for auto-detection.
+
+   - **`--safesearch`**: Content filtering level: `0` (off), `1` (moderate),
+     `2` (strict). Use `0` for academic or technical research where filtering
+     may block relevant results. Use `2` for general-purpose searches.
+
+   - **`--time-range`**: Restrict to recent results. Use `day` for breaking
+     news, `week` for weekly developments, `month` for recent trends,
+     `year` for annual overviews. Omit for all-time results.
+
+   - **`--pageno`**: Paginate through results (1-indexed). Use with `--limit`
+     to collect more than the first page of results.
+
+   ### When to Use Which Settings
+
+   - **Academic/research queries**: `--categories science,scientific publications`
+     `--engines google scholar,semantic scholar,arxiv,pubmed` `--safesearch 0`
+   - **News/current events**: `--categories news` `--time-range week`
+   - **Developer/code queries**: `--categories it` `--engines github,stackoverflow`
+   - **General web research**: default settings (uses `general` category,
+     all enabled engines)
+   - **Multilingual research**: set `--language` to match the target language
+   - **Broadest coverage**: `--safesearch 0` to avoid filtering edge results
 4. Read [references/collection-contract.md](references/collection-contract.md).
    Review the run against `web_manifest.csv`, `web_manifest.json`, and
    `collection_report.md`. Confirm every intended source downloaded and inspect
@@ -60,6 +108,14 @@ the original sources; produce new files only.
 6. To extract text and metadata from the saved files, hand the `downloads/`
    directory to the document-ingest skill. Do not summarize or analyze inside
    this skill.
+
+## Configuration
+
+- **Default SearXNG URL**: `http://llms/searxng`. Override with
+  `FORGE_SEARXNG_URL` environment variable or `--searxng <url>` flag.
+- Run `doctor` to verify connectivity and see available capabilities.
+- The SearXNG instance exposes its full configuration at `<base>/config`;
+  use it to inspect enabled engines, categories, and locales.
 
 ## Safety and Failure Handling
 

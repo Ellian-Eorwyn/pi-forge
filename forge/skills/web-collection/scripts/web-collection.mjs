@@ -9,6 +9,7 @@ const DEFAULT_USER_AGENT = "pi-forge-web-collection/1 (+https://github.com/pi-fo
 const DEFAULT_DELAY_MS = 500;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BYTES = 100 * 1024 * 1024;
+const DEFAULT_SEARXNG_URL = "http://llms/searxng";
 const MAX_REDIRECTS = 10;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const CAPTURE_ARTIFACTS = ["rendered.html", "snapshot.mhtml", "screenshot.png", "page.pdf"];
@@ -302,7 +303,7 @@ async function loadPlaywright() {
 }
 
 function searxngBase(explicit) {
-	const base = explicit || process.env.FORGE_SEARXNG_URL || "";
+	const base = explicit || process.env.FORGE_SEARXNG_URL || DEFAULT_SEARXNG_URL;
 	return base.trim().replace(/\/+$/, "");
 }
 
@@ -354,7 +355,7 @@ async function doctor(options) {
 	if (tools.playwright.available && !tools.chromium.available) {
 		remediation.push("Install the Chromium browser: node_modules/.bin/playwright install chromium.");
 	}
-	if (!searxng.configured) remediation.push("Set FORGE_SEARXNG_URL (or pass --searxng) to enable search.");
+	if (!searxng.configured) remediation.push("Set FORGE_SEARXNG_URL or --searxng to enable search.");
 	else if (!searxng.reachable) remediation.push(`SearXNG is configured but not reachable: ${searxng.detail}`);
 	const report = { tools, capabilities, searxng, remediation };
 	if (options.json) {
@@ -367,6 +368,7 @@ async function doctor(options) {
 	process.stdout.write(`HTTP collection: ${capabilities.httpCollect ? "available" : "unavailable"}\n`);
 	process.stdout.write(`Rendered capture: ${capabilities.renderedCapture ? "available" : "unavailable"}\n`);
 	process.stdout.write(`SearXNG search: ${capabilities.searxngSearch ? "available" : `unavailable (${searxng.detail})`}\n`);
+	process.stdout.write(`SearXNG URL: ${searxngBase(options.searxng)}\n`);
 	for (const item of remediation) process.stdout.write(`Action: ${item}\n`);
 }
 
@@ -801,11 +803,21 @@ async function commandSearch(positionals, flags) {
 	if (!base) fail("search requires a SearXNG instance; set FORGE_SEARXNG_URL or pass --searxng <url>");
 	const options = commonOptions(flags);
 	const limit = flags.limit ?? 25;
+
+	// Build SearXNG query parameters
+	const params = new URLSearchParams({ q: query, format: "json" });
+	if (flags.categories) params.set("categories", flags.categories);
+	if (flags.engines) params.set("engines", flags.engines);
+	if (flags.language) params.set("language", flags.language);
+	if (flags.safesearch !== undefined) params.set("safesearch", String(flags.safesearch));
+	if (flags.timeRange) params.set("time_range", flags.timeRange);
+	if (flags.pageNo) params.set("pageno", String(flags.pageNo));
+
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), options.timeoutMs);
 	let payload;
 	try {
-		const response = await fetch(`${base}/search?q=${encodeURIComponent(query)}&format=json`, {
+		const response = await fetch(`${base}/search?${params.toString()}`, {
 			signal: controller.signal,
 			headers: { "user-agent": options.userAgent, accept: "application/json" },
 		});
@@ -823,9 +835,17 @@ async function commandSearch(positionals, flags) {
 		content: result.content ?? null,
 		engine: result.engine ?? null,
 	}));
+	const searchMeta = {
+		categories: flags.categories ?? null,
+		engines: flags.engines ?? null,
+		language: flags.language ?? null,
+		safesearch: flags.safesearch ?? null,
+		timeRange: flags.timeRange ?? null,
+		pageNo: flags.pageNo ?? null,
+	};
 	const runDirectory = resolve(flags.output);
 	prepareRunDirectory(runDirectory);
-	writeJson(join(runDirectory, "search_results.json"), { query, base, retrievedAt: nowIso(), results });
+	writeJson(join(runDirectory, "search_results.json"), { query, base, params: searchMeta, retrievedAt: nowIso(), results });
 	const playwright = options.render ? await loadPlaywright() : null;
 	const state = newRunState();
 	if (flags.collect) {
@@ -835,7 +855,7 @@ async function commandSearch(positionals, flags) {
 	writeRunArtifacts(runDirectory, state, {
 		command: "search",
 		options: reportOptions(options, flags),
-		search: { query, base, results },
+		search: { query, base, params: searchMeta, results },
 	});
 	process.stdout.write(`${JSON.stringify({ runDirectory, query, results: results.length, collected: state.rows.length, counts: counts(state.rows) }, null, 2)}\n`);
 }
@@ -920,6 +940,12 @@ const FLAG_SPECS = {
 	"--ignore-robots": { key: "ignoreRobots", value: false },
 	"--collect": { key: "collect", value: false },
 	"--json": { key: "json", value: false },
+	"--categories": { key: "categories", value: true },
+	"--engines": { key: "engines", value: true },
+	"--language": { key: "language", value: true },
+	"--safesearch": { key: "safesearch", value: true, integer: true },
+	"--time-range": { key: "timeRange", value: true },
+	"--pageno": { key: "pageNo", value: true, integer: true },
 };
 
 function parseArguments(args) {
@@ -958,6 +984,8 @@ function usage() {
   web-collection.mjs harvest <page-url> --output <dir> [--match <regex>] [--ext csv]
       [--same-host] [--limit N] [--render] [--ignore-robots]
   web-collection.mjs search <query...> --output <dir> [--searxng <url>] [--limit N] [--collect]
+      [--categories <cats>] [--engines <engines>] [--language <lang>]
+      [--safesearch <0|1|2>] [--time-range <day|week|month|year>] [--pageno N]
   web-collection.mjs validate <run-directory>
 `);
 }
