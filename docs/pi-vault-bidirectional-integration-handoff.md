@@ -2,8 +2,8 @@
 
 This document is an implementation brief for a Codex session working across:
 
-- pi-forge: `/Users/ellie/Documents/GitHub/pi-forge`
-- pi-vault: `/Users/ellie/Documents/GitHub/pi-vault`
+- pi-forge: `/path/to/pi-forge`
+- pi-vault: `/path/to/pi-vault`
 
 The first direction is implemented in pi-forge. The remaining work belongs
 primarily in pi-vault, plus one small MCP-client extension in pi-forge for the
@@ -305,7 +305,7 @@ Run each repository's required targeted tests and full `npm run check`. Run
 pi-vault's Python suite because the proposal service changes its engine:
 
 ```bash
-cd /Users/ellie/Documents/GitHub/pi-vault/vault-manager
+cd /path/to/pi-vault/vault-manager
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
 ```
 
@@ -332,12 +332,12 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
 Use this prompt in the next Codex session:
 
 > Implement the bidirectional pi-forge/pi-vault MCP integration described in
-> `/Users/ellie/Documents/GitHub/pi-forge/docs/pi-vault-bidirectional-integration-handoff.md`.
-> Work primarily in `/Users/ellie/Documents/GitHub/pi-vault`, starting with its
+> `/path/to/pi-forge/docs/pi-vault-bidirectional-integration-handoff.md`.
+> Work primarily in `/path/to/pi-vault`, starting with its
 > `AGENTS.md`, `PROJECT_STATUS.md`, `NEXT_ACTIONS.md`, and `DECISIONS.md`.
 > Preserve pi-vault's proposal/review/apply boundary: external artifacts may
 > create validated pending proposals but may never be auto-approved or applied.
 > Then add the documented reverse MCP-client extension and vault-handoff skill
-> in `/Users/ellie/Documents/GitHub/pi-forge`. Use one local model sequentially;
+> in `/path/to/pi-forge`. Use one local model sequentially;
 > neither MCP server may launch another agent or model request. Run all targeted
 > tests and each repository's required full checks. Do not commit unless asked.
