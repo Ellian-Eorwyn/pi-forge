@@ -72,6 +72,30 @@ function Resolve-PackageRoot {
     }
 }
 
+function New-LocalPackageSpec {
+    param(
+        [string]$PackageRoot,
+        [string]$AppDir,
+        [string]$NpmCacheDir
+    )
+    $packageCacheDir = Join-Path $AppDir "package-cache"
+    New-Item -ItemType Directory -Force -Path $packageCacheDir | Out-Null
+    New-Item -ItemType Directory -Force -Path $NpmCacheDir | Out-Null
+    $env:npm_config_cache = $NpmCacheDir
+    Push-Location $PackageRoot
+    try {
+        $packOutput = npm pack --json --pack-destination $packageCacheDir
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Could not pack local pi-forge package."
+            exit 1
+        }
+        $packed = $packOutput | ConvertFrom-Json
+        return "file:" + (Join-Path $packageCacheDir $packed[0].filename)
+    } finally {
+        Pop-Location
+    }
+}
+
 $PiForgeHome = $env:PI_FORGE_HOME
 if ([string]::IsNullOrEmpty($PiForgeHome)) {
     $PiForgeHome = Join-Path $HOME ".pi-forge"
@@ -93,7 +117,8 @@ $NpmCacheDir = $env:PI_FORGE_NPM_CACHE
 if ([string]::IsNullOrEmpty($NpmCacheDir)) { $NpmCacheDir = Join-Path $AgentDir "npm-cache" }
 
 $PackageSpec = $env:PI_FORGE_PACKAGE_SPEC
-if ([string]::IsNullOrEmpty($PackageSpec)) { $PackageSpec = $DefaultPackageSpec }
+$PackageSpecExplicit = -not [string]::IsNullOrEmpty($PackageSpec)
+if (-not $PackageSpecExplicit) { $PackageSpec = $DefaultPackageSpec }
 
 if (-not (Get-Command "node" -ErrorAction SilentlyContinue)) {
     Write-Error "pi-forge requires Node.js 22.19 or newer."
@@ -145,6 +170,9 @@ if ($DevLink) {
     $appPackageJson = Join-Path $AppDir "package.json"
     if (-not (Test-Path $appPackageJson)) {
         (@{ private = $true; dependencies = @{} } | ConvertTo-Json -Depth 4) + "`n" | Out-File -FilePath $appPackageJson -Encoding UTF8
+    }
+    if (-not $PackageSpecExplicit -and -not [string]::IsNullOrEmpty($SourceDir) -and (Test-Path (Join-Path $SourceDir "forge\package.json"))) {
+        $PackageSpec = New-LocalPackageSpec -PackageRoot (Join-Path $SourceDir "forge") -AppDir $AppDir -NpmCacheDir $NpmCacheDir
     }
     $env:npm_config_cache = $NpmCacheDir
     Invoke-Checked -Command "npm" -Arguments @("--prefix", $AppDir, "install", "--omit=dev", "--ignore-scripts", $PackageSpec)

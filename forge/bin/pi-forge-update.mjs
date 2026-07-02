@@ -2,9 +2,11 @@
 
 import {
 	DEFAULT_PACKAGE_SPEC,
+	PACKAGE_ROOT,
 	configurePackage,
 	getForgePaths,
 	installConfiguredPackage,
+	packPackageDirectory,
 	refreshLaunchers,
 } from "../scripts/runtime-env.mjs";
 
@@ -32,7 +34,14 @@ for (const arg of args) {
 }
 
 try {
-	const packageRoot = installConfiguredPackage();
+	let packageRoot;
+	try {
+		packageRoot = installConfiguredPackage(undefined, process.env.PI_FORGE_PACKAGE_SPEC ? {} : { stdio: ["inherit", "pipe", "pipe"] });
+	} catch (error) {
+		if (process.env.PI_FORGE_PACKAGE_SPEC) throw error;
+		process.stderr.write(`pi-forge-update: ${DEFAULT_PACKAGE_SPEC} is unavailable; refreshing from the installed package copy.\n`);
+		packageRoot = installConfiguredPackage(packPackageDirectory(PACKAGE_ROOT));
+	}
 	const paths = configurePackage(packageRoot);
 	refreshLaunchers(paths);
 	process.stdout.write(`pi-forge is up to date.\n`);

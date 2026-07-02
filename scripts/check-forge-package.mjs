@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { resolveCodingAgentCli } from "../forge/scripts/runtime-env.mjs";
 
 const forgeDirectory = "forge";
 const packageJson = JSON.parse(readFileSync(join(forgeDirectory, "package.json"), "utf8"));
@@ -18,6 +19,13 @@ for (const command of ["pi-forge", "pi-forge-mcp", "pi-forge-update"]) {
 	if (packageJson.bin?.[command] !== `bin/${command}.mjs`) {
 		throw new Error(`forge/package.json is missing bin.${command}`);
 	}
+}
+const codingAgentCli = resolveCodingAgentCli().replaceAll("\\", "/");
+if (
+	!codingAgentCli.endsWith("/packages/coding-agent/dist/cli.js") &&
+	!codingAgentCli.endsWith("/node_modules/@earendil-works/pi-coding-agent/dist/cli.js")
+) {
+	throw new Error(`could not resolve coding-agent CLI path: ${codingAgentCli}`);
 }
 
 const npmCache = mkdtempSync(join(tmpdir(), "pi-forge-pack-cache-"));

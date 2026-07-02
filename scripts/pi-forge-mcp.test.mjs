@@ -305,7 +305,9 @@ test("worker cancellation terminates the child process", async () => {
 
 function makeFakeInstallSource(source) {
 	mkdirSync(join(source, "scripts"), { recursive: true });
+	mkdirSync(join(source, "forge", "bin"), { recursive: true });
 	mkdirSync(join(source, "forge", "scripts"), { recursive: true });
+	mkdirSync(join(source, "forge", "skills", "document-ingest"), { recursive: true });
 	mkdirSync(join(source, "packages", "coding-agent", "dist"), { recursive: true });
 	for (const script of ["pi-forge-install.sh", "pi-forge-run.sh", "pi-forge-mcp-run.sh"]) {
 		const target = join(source, "scripts", script);
@@ -313,11 +315,41 @@ function makeFakeInstallSource(source) {
 		chmodSync(target, 0o755);
 	}
 	writeFileSync(
+		join(source, "forge", "package.json"),
+		`${JSON.stringify({
+			name: "@ellian-eorwyn/pi-forge",
+			version: "0.0.0-test",
+			type: "module",
+			bin: {
+				"pi-forge": "bin/pi-forge.mjs",
+				"pi-forge-mcp": "bin/pi-forge-mcp.mjs",
+				"pi-forge-update": "bin/pi-forge-update.mjs",
+			},
+			files: ["AGENTS.md", "bin", "scripts", "skills"],
+		})}\n`,
+	);
+	writeFileSync(
 		join(source, "forge", "scripts", "configure-pi-forge.mjs"),
 		readFileSync(join(repositoryRoot, "forge", "scripts", "configure-pi-forge.mjs"), "utf8"),
 	);
+	writeFileSync(
+		join(source, "forge", "bin", "pi-forge.mjs"),
+		"#!/usr/bin/env node\nimport { join } from 'node:path';\nconst home = process.env.PI_FORGE_HOME || join(process.env.HOME, '.pi-forge');\nconst agent = process.env.PI_CODING_AGENT_DIR || process.env.PI_FORGE_AGENT_DIR || join(home, 'agent');\nif (process.argv.includes('--print-agent-dir')) console.log(agent);\n",
+	);
+	writeFileSync(
+		join(source, "forge", "bin", "pi-forge-mcp.mjs"),
+		"#!/usr/bin/env node\nif (process.argv.includes('--help')) console.log('Usage: pi-forge-mcp');\n",
+	);
+	writeFileSync(join(source, "forge", "bin", "pi-forge-update.mjs"), "#!/usr/bin/env node\nconsole.log('updated');\n");
 	writeFileSync(join(source, "package.json"), "{}\n");
 	writeFileSync(join(source, "forge", "AGENTS.md"), "# Agent\n");
+	writeFileSync(
+		join(source, "forge", "skills", "document-ingest", "SKILL.md"),
+		"---\nname: document-ingest\ndescription: Test skill.\n---\n\n# Test\n",
+	);
+	for (const command of ["pi-forge.mjs", "pi-forge-mcp.mjs", "pi-forge-update.mjs"]) {
+		chmodSync(join(source, "forge", "bin", command), 0o755);
+	}
 	writeFileSync(
 		join(source, "packages", "coding-agent", "dist", "cli.js"),
 		"#!/usr/bin/env node\nif (process.argv.includes('--print-agent-dir')) console.log(process.env.PI_CODING_AGENT_DIR);\n",
@@ -563,6 +595,42 @@ test("installer migrates mistaken pi-vault install into pi-forge home", () => {
 	assert.equal(existsSync(join(legacyBin, "pi-forge-update")), false);
 });
 
+test("installer does not merge unrelated pi-vault state over an existing pi-forge agent", () => {
+	const root = workspace();
+	const dataHome = join(root, ".local", "share");
+	const piVaultHome = join(dataHome, "pi-vault");
+	const newHome = join(root, ".pi-forge");
+	const source = join(newHome, "repository");
+	makeFakeInstallSource(source);
+	mkdirSync(join(newHome, "agent"), { recursive: true });
+	writeFileSync(join(newHome, "agent", "auth.json"), '{"piForge":true}\n');
+	mkdirSync(join(piVaultHome, "agent"), { recursive: true });
+	writeFileSync(join(piVaultHome, "agent", "auth.json"), '{"piVault":true}\n');
+
+	const install = spawnSync(
+		"bash",
+		[
+			join(repositoryRoot, "scripts", "pi-forge-install.sh"),
+			"--source-dir",
+			source,
+			"--resources-only",
+		],
+		{
+			encoding: "utf8",
+			env: {
+				...cleanPiForgeEnvironment(),
+				HOME: root,
+				XDG_DATA_HOME: dataHome,
+				SHELL: "/bin/zsh",
+			},
+		},
+	);
+	assert.equal(install.status, 0, install.stderr);
+	assert.doesNotMatch(install.stderr, /leaving legacy path in place/);
+	assert.equal(readFileSync(join(newHome, "agent", "auth.json"), "utf8"), '{"piForge":true}\n');
+	assert.equal(readFileSync(join(piVaultHome, "agent", "auth.json"), "utf8"), '{"piVault":true}\n');
+});
+
 test("installer migrates local-share pi-forge install into home pi-forge", () => {
 	const root = workspace();
 	const tarball = makeFakePackageTarball(root);
@@ -605,7 +673,6 @@ test("installer migrates local-share pi-forge install into home pi-forge", () =>
 
 test("legacy pi-forge-update migrates managed repository to package app", () => {
 	const root = workspace();
-	const tarball = makeFakePackageTarball(root);
 	const piForgeHome = join(root, ".pi-forge");
 	const source = join(piForgeHome, "repository");
 	const fakeBin = join(root, "fake-bin");
@@ -639,12 +706,12 @@ esac
 			GIT_LOG: gitLog,
 			PATH: `${fakeBin}:${process.env.PATH}`,
 			SHELL: "/bin/zsh",
-			PI_FORGE_PACKAGE_SPEC: `file:${tarball}`,
 		},
 	});
 	assert.equal(update.status, 0, update.stderr);
 	assert.equal(readFileSync(gitLog, "utf8"), "pull\n");
 	assert.equal(existsSync(source), false);
+	assert.equal(existsSync(join(piForgeHome, "app", "package-cache")), true);
 	assert.equal(existsSync(join(piForgeHome, "app", "node_modules", "@ellian-eorwyn", "pi-forge", "package.json")), true);
 	assert.doesNotMatch(readlinkSync(join(piForgeHome, "bin", "pi-forge")), /repository/);
 });

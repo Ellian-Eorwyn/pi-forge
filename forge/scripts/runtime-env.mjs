@@ -58,8 +58,7 @@ export function exitWithResult(result) {
 }
 
 export function resolveCodingAgentCli() {
-	const require = createRequire(import.meta.url);
-	const entrypointPath = require.resolve("@earendil-works/pi-coding-agent");
+	const entrypointPath = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
 	return join(dirname(entrypointPath), "cli.js");
 }
 
@@ -78,14 +77,29 @@ export function ensureAppProject(appDir) {
 	}
 }
 
-export function installConfiguredPackage(packageSpec = process.env.PI_FORGE_PACKAGE_SPEC || DEFAULT_PACKAGE_SPEC) {
+export function installConfiguredPackage(packageSpec = process.env.PI_FORGE_PACKAGE_SPEC || DEFAULT_PACKAGE_SPEC, options = {}) {
 	const paths = getForgePaths();
 	ensureAppProject(paths.appDir);
 	mkdirSync(paths.npmCacheDir, { recursive: true });
 	runChecked("npm", ["--prefix", paths.appDir, "install", "--omit=dev", "--ignore-scripts", packageSpec], {
 		env: { ...process.env, npm_config_cache: paths.npmCacheDir },
+		stdio: options.stdio,
 	});
 	return resolveInstalledPackageRoot(paths.appDir);
+}
+
+export function packPackageDirectory(packageRoot) {
+	const paths = getForgePaths();
+	const packageCacheDir = join(paths.appDir, "package-cache");
+	mkdirSync(packageCacheDir, { recursive: true });
+	mkdirSync(paths.npmCacheDir, { recursive: true });
+	const result = runChecked("npm", ["pack", "--json", "--pack-destination", packageCacheDir], {
+		cwd: packageRoot,
+		env: { ...process.env, npm_config_cache: paths.npmCacheDir },
+		stdio: ["inherit", "pipe", "pipe"],
+	});
+	const packed = JSON.parse(result.stdout)[0];
+	return `file:${join(packageCacheDir, packed.filename)}`;
 }
 
 export function resolveInstalledPackageRoot(appDir) {

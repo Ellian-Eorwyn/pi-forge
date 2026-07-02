@@ -15,7 +15,13 @@ BIN_DIR="${PI_FORGE_BIN_DIR:-}"
 AGENT_DIR="${PI_FORGE_AGENT_DIR:-}"
 NPM_CACHE_DIR="${PI_FORGE_NPM_CACHE:-}"
 PLAYWRIGHT_BROWSERS_DIR="${PI_FORGE_PLAYWRIGHT_BROWSERS:-}"
-PACKAGE_SPEC="${PI_FORGE_PACKAGE_SPEC:-$DEFAULT_PACKAGE_SPEC}"
+PACKAGE_SPEC_EXPLICIT=false
+if [[ -n "${PI_FORGE_PACKAGE_SPEC:-}" ]]; then
+	PACKAGE_SPEC="$PI_FORGE_PACKAGE_SPEC"
+	PACKAGE_SPEC_EXPLICIT=true
+else
+	PACKAGE_SPEC="$DEFAULT_PACKAGE_SPEC"
+fi
 PATH_PROFILE_UPDATED=""
 PATH_PROFILE_PATH=""
 
@@ -168,18 +174,38 @@ move_legacy_state_to_default_home() {
 	local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
 	local install_home="$HOME/.pi-forge"
 	[[ "$(canonical_existing "$PI_FORGE_HOME")" == "$(canonical_existing "$install_home")" ]] || return 0
+	local source_canon=""
+	if [[ -n "$SOURCE_DIR" ]]; then
+		source_canon="$(canonical_existing "$SOURCE_DIR")"
+	fi
 	local legacy_home
 	for legacy_home in "$data_home/pi-forge" "$data_home/pi-vault"; do
 		[[ "$(canonical_existing "$legacy_home")" != "$(canonical_existing "$install_home")" ]] || continue
 		[[ -d "$legacy_home" ]] || continue
+		local legacy_repository="$legacy_home/repository"
+		local legacy_is_source=false
+		if [[ -n "$source_canon" && "$source_canon" == "$(canonical_existing "$legacy_repository")" ]]; then
+			legacy_is_source=true
+		fi
+		if [[ "$legacy_is_source" != true && -d "$install_home/agent" ]]; then
+			remove_legacy_launcher "$legacy_home/bin/pi-forge" "$legacy_repository"
+			remove_legacy_launcher "$legacy_home/bin/pi-forge-mcp" "$legacy_repository"
+			remove_legacy_launcher "$legacy_home/bin/pi-forge-update" "$legacy_repository"
+			remove_legacy_launcher "$HOME/.local/bin/pi-forge" "$legacy_repository"
+			remove_legacy_launcher "$HOME/.local/bin/pi-forge-mcp" "$legacy_repository"
+			remove_legacy_launcher "$HOME/.local/bin/pi-forge-update" "$legacy_repository"
+			rmdir "$legacy_home/bin" 2>/dev/null || true
+			rmdir "$legacy_home" 2>/dev/null || true
+			continue
+		fi
 		move_without_overwrite "$legacy_home/agent" "$install_home/agent"
 		move_without_overwrite "$legacy_home/transcription" "$install_home/transcription"
-		remove_legacy_launcher "$legacy_home/bin/pi-forge" "$legacy_home/repository"
-		remove_legacy_launcher "$legacy_home/bin/pi-forge-mcp" "$legacy_home/repository"
-		remove_legacy_launcher "$legacy_home/bin/pi-forge-update" "$legacy_home/repository"
-		remove_legacy_launcher "$HOME/.local/bin/pi-forge" "$legacy_home/repository"
-		remove_legacy_launcher "$HOME/.local/bin/pi-forge-mcp" "$legacy_home/repository"
-		remove_legacy_launcher "$HOME/.local/bin/pi-forge-update" "$legacy_home/repository"
+		remove_legacy_launcher "$legacy_home/bin/pi-forge" "$legacy_repository"
+		remove_legacy_launcher "$legacy_home/bin/pi-forge-mcp" "$legacy_repository"
+		remove_legacy_launcher "$legacy_home/bin/pi-forge-update" "$legacy_repository"
+		remove_legacy_launcher "$HOME/.local/bin/pi-forge" "$legacy_repository"
+		remove_legacy_launcher "$HOME/.local/bin/pi-forge-mcp" "$legacy_repository"
+		remove_legacy_launcher "$HOME/.local/bin/pi-forge-update" "$legacy_repository"
 		rmdir "$legacy_home/bin" 2>/dev/null || true
 		rmdir "$legacy_home" 2>/dev/null || true
 	done
@@ -203,6 +229,17 @@ ensure_app_project() {
 
 resolve_installed_package_root() {
 	(cd "$APP_DIR" && node -e 'const { createRequire } = require("node:module"); const { dirname } = require("node:path"); const req = createRequire(process.cwd() + "/package.json"); console.log(dirname(req.resolve("@ellian-eorwyn/pi-forge/package.json")));')
+}
+
+pack_local_package_spec() {
+	local package_root="$1"
+	local package_cache_dir="$APP_DIR/package-cache"
+	mkdir -p "$package_cache_dir" "$NPM_CACHE_DIR"
+	local pack_output
+	pack_output="$(cd "$package_root" && npm_config_cache="$NPM_CACHE_DIR" npm pack --json --pack-destination "$package_cache_dir")"
+	local filename
+	filename="$(printf '%s' "$pack_output" | node -e 'let input = ""; process.stdin.setEncoding("utf8"); process.stdin.on("data", (chunk) => { input += chunk; }); process.stdin.on("end", () => { const packed = JSON.parse(input)[0]; process.stdout.write(packed.filename); });')"
+	printf 'file:%s\n' "$package_cache_dir/$filename"
 }
 
 install_launcher() {
@@ -300,6 +337,10 @@ PLAYWRIGHT_BROWSERS_DIR="${PLAYWRIGHT_BROWSERS_DIR:-$AGENT_DIR/playwright-browse
 
 require_node_runtime
 move_legacy_state_to_default_home
+
+if [[ "$DEV_LINK" != true && "$PACKAGE_SPEC_EXPLICIT" != true && -n "$SOURCE_DIR" && -f "$SOURCE_DIR/forge/package.json" ]]; then
+	PACKAGE_SPEC="$(pack_local_package_spec "$SOURCE_DIR/forge")"
+fi
 
 if [[ "$DEV_LINK" == true ]]; then
 	install_dev_link
