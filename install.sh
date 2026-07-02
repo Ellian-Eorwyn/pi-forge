@@ -18,9 +18,15 @@ done
 
 if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/scripts/pi-forge-install.sh" ]]; then
 	if [[ "$DEV_LINK" == true ]]; then
-		exec "$SCRIPT_DIR/scripts/pi-forge-install.sh" --source-dir "$SCRIPT_DIR" --dev-link "${ARGS[@]}"
+		if ((${#ARGS[@]})); then
+			exec "$SCRIPT_DIR/scripts/pi-forge-install.sh" --source-dir "$SCRIPT_DIR" --dev-link "${ARGS[@]}"
+		fi
+		exec "$SCRIPT_DIR/scripts/pi-forge-install.sh" --source-dir "$SCRIPT_DIR" --dev-link
 	fi
-	exec "$SCRIPT_DIR/scripts/pi-forge-install.sh" "${ARGS[@]}"
+	if ((${#ARGS[@]})); then
+		exec "$SCRIPT_DIR/scripts/pi-forge-install.sh" "${ARGS[@]}"
+	fi
+	exec "$SCRIPT_DIR/scripts/pi-forge-install.sh"
 fi
 
 INSTALLER_URL="${PI_FORGE_INSTALLER_URL:-https://raw.githubusercontent.com/Ellian-Eorwyn/pi-forge/main/scripts/pi-forge-install.sh}"
@@ -44,4 +50,7 @@ if [[ "$DEV_LINK" == true ]]; then
 	echo "--dev-link requires running install.sh from a checkout." >&2
 	exit 1
 fi
-exec "$INSTALLER_PATH" "${ARGS[@]}"
+if ((${#ARGS[@]})); then
+	exec "$INSTALLER_PATH" "${ARGS[@]}"
+fi
+exec "$INSTALLER_PATH"

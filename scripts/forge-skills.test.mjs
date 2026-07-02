@@ -2171,6 +2171,7 @@ test("piped installer fetches standalone installer without cloning a repository"
 		const fakeBin = join(workspace, "bin");
 		const curlLog = join(workspace, "curl-args.txt");
 		const gitLog = join(workspace, "git-called.txt");
+		const installerRanLog = join(workspace, "installer-ran.txt");
 		mkdirSync(fakeBin);
 		writeFileSync(
 			join(fakeBin, "curl"),
@@ -2186,6 +2187,7 @@ while (($#)); do
 done
 cat > "$output" <<'SCRIPT'
 #!/usr/bin/env bash
+printf 'ran\n' > "$INSTALLER_RAN_LOG"
 exit 0
 SCRIPT
 chmod +x "$output"
@@ -2203,6 +2205,7 @@ chmod +x "$output"
 				HOME: workspace,
 				INSTALLER_CURL_LOG: curlLog,
 				INSTALLER_GIT_LOG: gitLog,
+				INSTALLER_RAN_LOG: installerRanLog,
 				PATH: `${fakeBin}:${process.env.PATH}`,
 				PI_FORGE_INSTALLER_URL: "https://example.invalid/pi-forge-install.sh",
 			},
@@ -2210,8 +2213,38 @@ chmod +x "$output"
 		});
 		assert.equal(result.status, 0, result.stderr);
 		assert.doesNotMatch(result.stderr, /BASH_SOURCE/);
+		assert.doesNotMatch(result.stderr, /ARGS\[@\]: unbound variable/);
 		assert.match(readFileSync(curlLog, "utf8"), /https:\/\/example\.invalid\/pi-forge-install\.sh/);
+		assert.equal(readFileSync(installerRanLog, "utf8"), "ran\n");
 		assert.equal(existsSync(gitLog), false);
+	});
+});
+
+test("checkout installer invokes local installer with no arguments under strict Bash", () => {
+	withWorkspace((workspace) => {
+		const scriptsDirectory = join(workspace, "scripts");
+		const installerLog = join(workspace, "installer-args.txt");
+		mkdirSync(scriptsDirectory);
+		copyFileSync(join(repositoryRoot, "install.sh"), join(workspace, "install.sh"));
+		writeFileSync(
+			join(scriptsDirectory, "pi-forge-install.sh"),
+			`#!/usr/bin/env bash
+printf 'argc=%s\\n' "$#" > "$INSTALLER_LOG"
+if (($#)); then
+	printf '%s\\n' "$@" >> "$INSTALLER_LOG"
+fi
+`,
+		);
+		chmodSync(join(scriptsDirectory, "pi-forge-install.sh"), 0o755);
+
+		const result = spawnSync("bash", [join(workspace, "install.sh")], {
+			cwd: workspace,
+			encoding: "utf8",
+			env: { ...environment, HOME: workspace, INSTALLER_LOG: installerLog },
+		});
+		assert.equal(result.status, 0, result.stderr);
+		assert.doesNotMatch(result.stderr, /ARGS\[@\]: unbound variable/);
+		assert.equal(readFileSync(installerLog, "utf8"), "argc=0\n");
 	});
 });
 
