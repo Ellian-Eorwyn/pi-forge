@@ -2270,7 +2270,7 @@ test("checkout installer invokes local installer without cloning by default", ()
 			},
 		});
 		assert.equal(result.status, 0, result.stderr);
-		assert.match(result.stdout, /Installs pi-forge from npm/);
+		assert.match(result.stdout, /Installs pi-forge into/);
 		assert.equal(existsSync(gitLog), false);
 	});
 });

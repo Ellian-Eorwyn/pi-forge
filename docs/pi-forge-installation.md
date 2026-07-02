@@ -40,9 +40,13 @@ agent directory. `PI_FORGE_PACKAGE_SPEC` overrides the installed package spec
 and defaults to `@ellian-eorwyn/pi-forge@latest`; tests and local release smoke
 tests can point it at `file:<packed-tarball>`. `PI_FORGE_PI_PACKAGE_SPEC`
 overrides the Pi CLI package spec and defaults to
-`@earendil-works/pi-coding-agent@latest`. The installer adds `~/.pi-forge/bin`
-to the user profile/PATH when possible; open a new shell before relying on
-`pi-forge` from `PATH`.
+`@earendil-works/pi-coding-agent@latest`. If the default pi-forge package is not
+available from npm, the macOS/Linux installer downloads
+`PI_FORGE_SOURCE_ARCHIVE_URL` (default:
+`https://github.com/Ellian-Eorwyn/pi-forge/archive/refs/heads/main.tar.gz`),
+packs `forge/` locally, and installs that package into the same npm app layout.
+The installer adds `~/.pi-forge/bin` to the user profile/PATH when possible;
+open a new shell before relying on `pi-forge` from `PATH`.
 
 For checkout-linked development mode, run `./install.sh --dev-link`; do not
 remove or move that checkout while the development-linked installation is in

@@ -53,7 +53,7 @@ pi-forge currently supports macOS, Linux, and Windows with npm and Node.js 22.19
 | `~/.pi-forge/bin` | stable launchers for `pi-forge`, `pi-forge-mcp`, and `pi-forge-update` |
 | `~/.pi-forge/agent` | credentials, settings, sessions, caches, copied `AGENTS.md`, and managed profile state |
 
-The installer registers the installed package root in Pi settings, so package-owned skills, prompts, themes, extensions, and MCP resources ship from npm while user state stays under `~/.pi-forge/agent`.
+The installer registers the installed package root in Pi settings, so package-owned skills, prompts, themes, extensions, and MCP resources ship from the installed package while user state stays under `~/.pi-forge/agent`.
 
 ### 1. Install
 From a new machine, run the following command in your terminal:
@@ -69,6 +69,8 @@ Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManage
 ```
 
 *Note: The installer adds `~/.pi-forge/bin` to your user PATH. Please open a new shell after installing.*
+
+If `@ellian-eorwyn/pi-forge@latest` is not published to npm yet, the macOS/Linux installer automatically downloads the GitHub source archive, packs the `forge` package locally, and installs that package into the same `~/.pi-forge/app` layout.
 
 ### 2. Update
 To update pi-forge and `@earendil-works/pi-coding-agent` to the latest versions while preserving credentials, sessions, and settings:
@@ -117,8 +119,9 @@ Use these only when you need a non-default layout, local smoke test, or developm
 | `PI_FORGE_PLAYWRIGHT_BROWSERS` | `$PI_FORGE_AGENT_DIR/playwright-browsers` |
 | `PI_FORGE_PACKAGE_SPEC` | `@ellian-eorwyn/pi-forge@latest` |
 | `PI_FORGE_PI_PACKAGE_SPEC` | `@earendil-works/pi-coding-agent@latest` |
+| `PI_FORGE_SOURCE_ARCHIVE_URL` | `https://github.com/Ellian-Eorwyn/pi-forge/archive/refs/heads/main.tar.gz` |
 
-`PI_FORGE_PACKAGE_SPEC` and `PI_FORGE_PI_PACKAGE_SPEC` can point at `file:<packed-tarball>` for local release and migration smoke tests. Checkout-linked development installs are still available with `./install.sh --dev-link`; that mode links launchers and package resources to the checkout instead of the npm app.
+`PI_FORGE_PACKAGE_SPEC` and `PI_FORGE_PI_PACKAGE_SPEC` can point at `file:<packed-tarball>` for local release and migration smoke tests. `PI_FORGE_SOURCE_ARCHIVE_URL` overrides the source archive fallback used only when the default pi-forge npm package is unavailable. Checkout-linked development installs are still available with `./install.sh --dev-link`; that mode links launchers and package resources to the checkout instead of the npm app.
 
 ---
 

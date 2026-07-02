@@ -5,6 +5,7 @@ PACKAGE_NAME="@ellian-eorwyn/pi-forge"
 DEFAULT_PACKAGE_SPEC="$PACKAGE_NAME@latest"
 PI_PACKAGE_NAME="@earendil-works/pi-coding-agent"
 DEFAULT_PI_PACKAGE_SPEC="$PI_PACKAGE_NAME@latest"
+DEFAULT_SOURCE_ARCHIVE_URL="https://github.com/Ellian-Eorwyn/pi-forge/archive/refs/heads/main.tar.gz"
 
 SOURCE_DIR=""
 OLD_HEAD=""
@@ -17,6 +18,7 @@ BIN_DIR="${PI_FORGE_BIN_DIR:-}"
 AGENT_DIR="${PI_FORGE_AGENT_DIR:-}"
 NPM_CACHE_DIR="${PI_FORGE_NPM_CACHE:-}"
 PLAYWRIGHT_BROWSERS_DIR="${PI_FORGE_PLAYWRIGHT_BROWSERS:-}"
+SOURCE_ARCHIVE_URL="${PI_FORGE_SOURCE_ARCHIVE_URL:-$DEFAULT_SOURCE_ARCHIVE_URL}"
 PACKAGE_SPEC_EXPLICIT=false
 if [[ -n "${PI_FORGE_PACKAGE_SPEC:-}" ]]; then
 	PACKAGE_SPEC="$PI_FORGE_PACKAGE_SPEC"
@@ -27,12 +29,22 @@ fi
 PI_PACKAGE_SPEC="${PI_FORGE_PI_PACKAGE_SPEC:-$DEFAULT_PI_PACKAGE_SPEC}"
 PATH_PROFILE_UPDATED=""
 PATH_PROFILE_PATH=""
+TEMP_DIRS=()
+
+cleanup_temp_dirs() {
+	((${#TEMP_DIRS[@]})) || return 0
+	local dir
+	for dir in "${TEMP_DIRS[@]}"; do
+		rm -rf "$dir"
+	done
+}
+trap cleanup_temp_dirs EXIT
 
 usage() {
 	cat <<'EOF'
 Usage: scripts/pi-forge-install.sh [options]
 
-Installs pi-forge from npm into ~/.pi-forge/app without cloning the repository.
+Installs pi-forge into ~/.pi-forge/app without cloning the repository.
 
 Options:
   --source-dir <path>    Existing checkout used only for migration or --dev-link
@@ -46,6 +58,7 @@ Options:
 Environment:
   PI_FORGE_PACKAGE_SPEC      pi-forge package spec (default: @ellian-eorwyn/pi-forge@latest)
   PI_FORGE_PI_PACKAGE_SPEC   Pi CLI package spec (default: @earendil-works/pi-coding-agent@latest)
+  PI_FORGE_SOURCE_ARCHIVE_URL source archive fallback when the default package is unavailable
 EOF
 }
 
@@ -249,6 +262,53 @@ pack_local_package_spec() {
 	printf 'file:%s\n' "$package_cache_dir/$filename"
 }
 
+download_file() {
+	local url="$1"
+	local output="$2"
+	if command -v curl >/dev/null 2>&1; then
+		curl -fsSL "$url" -o "$output"
+	elif command -v wget >/dev/null 2>&1; then
+		wget -qO "$output" "$url"
+	else
+		echo "pi-forge install requires curl or wget to fetch the source archive." >&2
+		return 1
+	fi
+}
+
+download_source_archive() {
+	command -v tar >/dev/null 2>&1 || {
+		echo "pi-forge install requires tar to unpack the source archive." >&2
+		return 1
+	}
+	local temp_dir
+	temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/pi-forge-source.XXXXXX")"
+	TEMP_DIRS+=("$temp_dir")
+	local archive="$temp_dir/pi-forge.tar.gz"
+	local extract_dir="$temp_dir/source"
+	mkdir -p "$extract_dir"
+	download_file "$SOURCE_ARCHIVE_URL" "$archive"
+	tar -xzf "$archive" -C "$extract_dir"
+	local source=""
+	local entry
+	for entry in "$extract_dir"/*; do
+		if [[ -d "$entry" && -f "$entry/forge/package.json" ]]; then
+			source="$entry"
+			break
+		fi
+	done
+	if [[ -z "$source" ]]; then
+		echo "Source archive did not contain a pi-forge checkout: $SOURCE_ARCHIVE_URL" >&2
+		return 1
+	fi
+	printf '%s\n' "$source"
+}
+
+pack_source_archive_package_spec() {
+	local source
+	source="$(download_source_archive)"
+	pack_local_package_spec "$source/forge"
+}
+
 install_launcher() {
 	local target="$1"
 	local launcher="$2"
@@ -262,7 +322,16 @@ install_launcher() {
 install_package() {
 	mkdir -p "$BIN_DIR" "$AGENT_DIR" "$NPM_CACHE_DIR"
 	ensure_app_project
-	npm_config_cache="$NPM_CACHE_DIR" npm --prefix "$APP_DIR" install --omit=dev --ignore-scripts "$PACKAGE_SPEC"
+	local install_output
+	if ! install_output="$(npm_config_cache="$NPM_CACHE_DIR" npm --prefix "$APP_DIR" install --omit=dev --ignore-scripts "$PACKAGE_SPEC" 2>&1)"; then
+		if [[ "$PACKAGE_SPEC_EXPLICIT" == true ]]; then
+			printf '%s\n' "$install_output" >&2
+			exit 1
+		fi
+		echo "pi-forge package $DEFAULT_PACKAGE_SPEC is unavailable; installing from $SOURCE_ARCHIVE_URL." >&2
+		PACKAGE_SPEC="$(pack_source_archive_package_spec)"
+		npm_config_cache="$NPM_CACHE_DIR" npm --prefix "$APP_DIR" install --omit=dev --ignore-scripts "$PACKAGE_SPEC"
+	fi
 	npm_config_cache="$NPM_CACHE_DIR" npm --prefix "$APP_DIR" install --omit=dev --ignore-scripts "$PI_PACKAGE_SPEC"
 	local package_root
 	package_root="$(resolve_installed_package_root)"

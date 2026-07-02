@@ -453,6 +453,13 @@ function makeFakePiPackageTarball(root) {
 	return join(root, JSON.parse(pack.stdout)[0].filename);
 }
 
+function makeSourceArchive(root, source) {
+	const archive = join(root, "pi-forge-source.tar.gz");
+	const pack = spawnSync("tar", ["-czf", archive, "-C", dirname(source), basename(source)], { encoding: "utf8" });
+	assert.equal(pack.status, 0, pack.stderr);
+	return archive;
+}
+
 function cleanPiForgeEnvironment() {
 	return Object.fromEntries(
 		Object.entries(process.env).filter(([key, value]) => value !== undefined && !key.startsWith("PI_FORGE_")),
@@ -524,6 +531,53 @@ test("installer exposes a usable MCP launcher from the npm package install", () 
 	});
 	assert.equal(piResult.status, 0, piResult.stderr);
 	assert.equal(piResult.stdout.trim(), "0.0.0-test");
+});
+
+test("installer falls back to source archive when default package is unpublished", () => {
+	const root = workspace();
+	const source = join(root, "source");
+	makeFakeInstallSource(source);
+	const sourceArchive = makeSourceArchive(root, source);
+	const piTarball = makeFakePiPackageTarball(root);
+	const fakeBin = join(root, "fake-bin");
+	const npmLog = join(root, "npm.log");
+	const realNpm = spawnSync("which", ["npm"], { encoding: "utf8" }).stdout.trim();
+	assert.notEqual(realNpm, "");
+	mkdirSync(fakeBin);
+	writeFileSync(
+		join(fakeBin, "npm"),
+		`#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$NPM_LOG"
+case " $* " in
+	*" @ellian-eorwyn/pi-forge@latest "*) echo "npm error code E404" >&2; exit 1 ;;
+esac
+exec "$REAL_NPM" "$@"
+`,
+	);
+	chmodSync(join(fakeBin, "npm"), 0o755);
+
+	const install = spawnSync("bash", [join(repositoryRoot, "scripts", "pi-forge-install.sh")], {
+		encoding: "utf8",
+		env: {
+			...cleanPiForgeEnvironment(),
+			HOME: root,
+			NPM_LOG: npmLog,
+			PATH: `${fakeBin}:${process.env.PATH}`,
+			PI_FORGE_PI_PACKAGE_SPEC: `file:${piTarball}`,
+			PI_FORGE_SOURCE_ARCHIVE_URL: `file://${sourceArchive}`,
+			REAL_NPM: realNpm,
+			SHELL: "/bin/zsh",
+		},
+	});
+	assert.equal(install.status, 0, install.stderr);
+	assert.match(install.stderr, /pi-forge package @ellian-eorwyn\/pi-forge@latest is unavailable/);
+	assert.doesNotMatch(install.stderr, /npm error code E404/);
+	const packageRoot = join(root, ".pi-forge", "app", "node_modules", "@ellian-eorwyn", "pi-forge");
+	assert.equal(existsSync(join(packageRoot, "package.json")), true);
+	assert.equal(existsSync(join(root, ".pi-forge", "app", "package-cache")), true);
+	const npmCalls = readFileSync(npmLog, "utf8");
+	assert.match(npmCalls, /@ellian-eorwyn\/pi-forge@latest/);
+	assert.match(npmCalls, /install --omit=dev --ignore-scripts file:/);
 });
 
 test("installer uses package install unless dev-link is explicit", () => {
