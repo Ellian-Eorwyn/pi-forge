@@ -23,6 +23,8 @@ pi-forge is a research and document-processing-focused fork of pi. It empowers u
 - **Workflow Automation:** Automatically organize messy folders and ship small, reviewable codebase changes.
 
 ### Included Skills
+The `@ellian-eorwyn/pi-forge` package ships Agent Skills under `forge/skills/<name>/SKILL.md`. Skill directory names match their `SKILL.md` frontmatter names, use lowercase hyphenated names, and keep scripts, assets, and references relative to the skill directory. The installed Pi settings point at the package root so Pi and the MCP bridge load skills from the installed package, not from a cloned repository.
+
 The `forge` profile provides agents with the following built-in skills:
 - **`coding`**: Inspect repos and ship small reviewable changes
 - **`document-ingest`**: Normalize documents with provenance
@@ -43,7 +45,15 @@ The `forge` profile provides agents with the following built-in skills:
 
 ## Installation & Setup
 
-pi-forge currently supports macOS, Linux, and Windows with npm and Node.js 22.19 or newer. New installs do not clone this repository. The installer installs the `@ellian-eorwyn/pi-forge` package into `~/.pi-forge/app`, writes stable launchers to `~/.pi-forge/bin`, and keeps credentials, settings, sessions, caches, and copied `AGENTS.md` under `~/.pi-forge/agent`.
+pi-forge currently supports macOS, Linux, and Windows with npm and Node.js 22.19 or newer. New installs do not clone this repository. The installer creates one managed home at `~/.pi-forge`:
+
+| Path | Purpose |
+|------|---------|
+| `~/.pi-forge/app` | npm app containing `@ellian-eorwyn/pi-forge` and the refreshed `@earendil-works/pi-coding-agent` package |
+| `~/.pi-forge/bin` | stable launchers for `pi-forge`, `pi-forge-mcp`, and `pi-forge-update` |
+| `~/.pi-forge/agent` | credentials, settings, sessions, caches, copied `AGENTS.md`, and managed profile state |
+
+The installer registers the installed package root in Pi settings, so package-owned skills, prompts, themes, extensions, and MCP resources ship from npm while user state stays under `~/.pi-forge/agent`.
 
 ### 1. Install
 From a new machine, run the following command in your terminal:
@@ -61,7 +71,7 @@ Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManage
 *Note: The installer adds `~/.pi-forge/bin` to your user PATH. Please open a new shell after installing.*
 
 ### 2. Update
-To update pi-forge to the latest version (preserves your credentials, sessions, and settings):
+To update pi-forge and `@earendil-works/pi-coding-agent` to the latest versions while preserving credentials, sessions, and settings:
 
 **macOS / Linux:**
 ```bash
@@ -73,6 +83,10 @@ pi-forge-update
 pi-forge-update
 ```
 *(Or run `pi-forge-update.ps1`)*
+
+`pi-forge-update` installs `@ellian-eorwyn/pi-forge@latest` and `@earendil-works/pi-coding-agent@latest` into `~/.pi-forge/app` with `npm install --omit=dev --ignore-scripts`, refreshes managed configuration, and rewrites launchers. If the scoped pi-forge package is not available yet, the updater refreshes from the installed package copy and still updates the Pi CLI package.
+
+Existing clone-based installs migrate automatically. The legacy updater runs one final Git pull when a managed repository is present, installs the npm app layout, rewires launchers to `~/.pi-forge/bin`, and removes only the managed `~/.pi-forge/repository` after package installation and configuration succeed. User-owned development checkouts are not removed.
 
 ### 3. Uninstall
 If you want to remove pi-forge:
@@ -89,6 +103,22 @@ Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManage
 *To completely wipe all agent state and credentials along with the installation, run the uninstall script with `--purge-state` (macOS/Linux) or `-PurgeState` (Windows).*
 
 For advanced installation options, paths, and profile layouts, see the [detailed pi-forge installation guide](docs/pi-forge-installation.md).
+
+### Environment overrides
+
+Use these only when you need a non-default layout, local smoke test, or development install:
+
+| Variable | Default |
+|----------|---------|
+| `PI_FORGE_HOME` | `~/.pi-forge` |
+| `PI_FORGE_BIN_DIR` | `$PI_FORGE_HOME/bin` |
+| `PI_FORGE_AGENT_DIR` | `$PI_FORGE_HOME/agent` |
+| `PI_FORGE_NPM_CACHE` | `$PI_FORGE_AGENT_DIR/npm-cache` |
+| `PI_FORGE_PLAYWRIGHT_BROWSERS` | `$PI_FORGE_AGENT_DIR/playwright-browsers` |
+| `PI_FORGE_PACKAGE_SPEC` | `@ellian-eorwyn/pi-forge@latest` |
+| `PI_FORGE_PI_PACKAGE_SPEC` | `@earendil-works/pi-coding-agent@latest` |
+
+`PI_FORGE_PACKAGE_SPEC` and `PI_FORGE_PI_PACKAGE_SPEC` can point at `file:<packed-tarball>` for local release and migration smoke tests. Checkout-linked development installs are still available with `./install.sh --dev-link`; that mode links launchers and package resources to the checkout instead of the npm app.
 
 ---
 

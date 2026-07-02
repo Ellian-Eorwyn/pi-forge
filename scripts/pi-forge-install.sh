@@ -3,6 +3,8 @@ set -euo pipefail
 
 PACKAGE_NAME="@ellian-eorwyn/pi-forge"
 DEFAULT_PACKAGE_SPEC="$PACKAGE_NAME@latest"
+PI_PACKAGE_NAME="@earendil-works/pi-coding-agent"
+DEFAULT_PI_PACKAGE_SPEC="$PI_PACKAGE_NAME@latest"
 
 SOURCE_DIR=""
 OLD_HEAD=""
@@ -22,6 +24,7 @@ if [[ -n "${PI_FORGE_PACKAGE_SPEC:-}" ]]; then
 else
 	PACKAGE_SPEC="$DEFAULT_PACKAGE_SPEC"
 fi
+PI_PACKAGE_SPEC="${PI_FORGE_PI_PACKAGE_SPEC:-$DEFAULT_PI_PACKAGE_SPEC}"
 PATH_PROFILE_UPDATED=""
 PATH_PROFILE_PATH=""
 
@@ -39,6 +42,10 @@ Options:
   --update               Update an existing installation
   --old-head <commit>    Accepted for legacy migration compatibility
   --resources-only       Accepted for update compatibility
+
+Environment:
+  PI_FORGE_PACKAGE_SPEC      pi-forge package spec (default: @ellian-eorwyn/pi-forge@latest)
+  PI_FORGE_PI_PACKAGE_SPEC   Pi CLI package spec (default: @earendil-works/pi-coding-agent@latest)
 EOF
 }
 
@@ -256,6 +263,7 @@ install_package() {
 	mkdir -p "$BIN_DIR" "$AGENT_DIR" "$NPM_CACHE_DIR"
 	ensure_app_project
 	npm_config_cache="$NPM_CACHE_DIR" npm --prefix "$APP_DIR" install --omit=dev --ignore-scripts "$PACKAGE_SPEC"
+	npm_config_cache="$NPM_CACHE_DIR" npm --prefix "$APP_DIR" install --omit=dev --ignore-scripts "$PI_PACKAGE_SPEC"
 	local package_root
 	package_root="$(resolve_installed_package_root)"
 	node "$package_root/scripts/configure-pi-forge.mjs" "$AGENT_DIR" "$package_root"

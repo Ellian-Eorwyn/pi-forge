@@ -1,12 +1,14 @@
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const PACKAGE_NAME = "@ellian-eorwyn/pi-forge";
 export const DEFAULT_PACKAGE_SPEC = `${PACKAGE_NAME}@latest`;
+export const PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
+export const DEFAULT_PI_PACKAGE_SPEC = `${PI_PACKAGE_NAME}@latest`;
 
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 export const PACKAGE_ROOT = resolve(SCRIPT_DIRECTORY, "..");
@@ -58,7 +60,16 @@ export function exitWithResult(result) {
 }
 
 export function resolveCodingAgentCli() {
-	const entrypointPath = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
+	const paths = getForgePaths();
+	const appDir = existsSync(paths.appDir) ? realpathSync(paths.appDir) : resolve(paths.appDir);
+	const packageRoot = existsSync(PACKAGE_ROOT) ? realpathSync(PACKAGE_ROOT) : resolve(PACKAGE_ROOT);
+	if (packageRoot === appDir || packageRoot.startsWith(`${appDir}${sep}`)) {
+		const appPackageCli = join(appDir, "node_modules", ...PI_PACKAGE_NAME.split("/"), "dist", "cli.js");
+		if (existsSync(appPackageCli)) return appPackageCli;
+		const appBin = join(appDir, "node_modules", ".bin", "pi");
+		if (process.platform !== "win32" && existsSync(appBin)) return realpathSync(appBin);
+	}
+	const entrypointPath = fileURLToPath(import.meta.resolve(PI_PACKAGE_NAME));
 	return join(dirname(entrypointPath), "cli.js");
 }
 
@@ -77,7 +88,7 @@ export function ensureAppProject(appDir) {
 	}
 }
 
-export function installConfiguredPackage(packageSpec = process.env.PI_FORGE_PACKAGE_SPEC || DEFAULT_PACKAGE_SPEC, options = {}) {
+function installAppPackage(packageSpec, options = {}) {
 	const paths = getForgePaths();
 	ensureAppProject(paths.appDir);
 	mkdirSync(paths.npmCacheDir, { recursive: true });
@@ -85,7 +96,16 @@ export function installConfiguredPackage(packageSpec = process.env.PI_FORGE_PACK
 		env: { ...process.env, npm_config_cache: paths.npmCacheDir },
 		stdio: options.stdio,
 	});
+	return paths;
+}
+
+export function installConfiguredPackage(packageSpec = process.env.PI_FORGE_PACKAGE_SPEC || DEFAULT_PACKAGE_SPEC, options = {}) {
+	const paths = installAppPackage(packageSpec, options);
 	return resolveInstalledPackageRoot(paths.appDir);
+}
+
+export function installConfiguredPiPackage(piPackageSpec = process.env.PI_FORGE_PI_PACKAGE_SPEC || DEFAULT_PI_PACKAGE_SPEC, options = {}) {
+	installAppPackage(piPackageSpec, options);
 }
 
 export function packPackageDirectory(packageRoot) {

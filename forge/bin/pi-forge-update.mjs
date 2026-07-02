@@ -2,10 +2,12 @@
 
 import {
 	DEFAULT_PACKAGE_SPEC,
+	DEFAULT_PI_PACKAGE_SPEC,
 	PACKAGE_ROOT,
 	configurePackage,
 	getForgePaths,
 	installConfiguredPackage,
+	installConfiguredPiPackage,
 	packPackageDirectory,
 	refreshLaunchers,
 } from "../scripts/runtime-env.mjs";
@@ -17,7 +19,8 @@ Updates the npm-installed pi-forge package, refreshes managed configuration, and
 rewrites the stable launchers in ~/.pi-forge/bin.
 
 Environment:
-  PI_FORGE_PACKAGE_SPEC   Package spec to install (default: ${DEFAULT_PACKAGE_SPEC})
+  PI_FORGE_PACKAGE_SPEC      pi-forge package spec to install (default: ${DEFAULT_PACKAGE_SPEC})
+  PI_FORGE_PI_PACKAGE_SPEC   Pi CLI package spec to install (default: ${DEFAULT_PI_PACKAGE_SPEC})
 `);
 }
 
@@ -42,10 +45,12 @@ try {
 		process.stderr.write(`pi-forge-update: ${DEFAULT_PACKAGE_SPEC} is unavailable; refreshing from the installed package copy.\n`);
 		packageRoot = installConfiguredPackage(packPackageDirectory(PACKAGE_ROOT));
 	}
+	installConfiguredPiPackage();
 	const paths = configurePackage(packageRoot);
 	refreshLaunchers(paths);
 	process.stdout.write(`pi-forge is up to date.\n`);
 	process.stdout.write(`  Package: ${packageRoot}\n`);
+	process.stdout.write(`  Pi package: ${process.env.PI_FORGE_PI_PACKAGE_SPEC || DEFAULT_PI_PACKAGE_SPEC}\n`);
 	process.stdout.write(`  CLI: ${getForgePaths().binDir}/pi-forge\n`);
 	process.stdout.write(`  State: ${paths.agentDir}\n`);
 } catch (error) {

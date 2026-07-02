@@ -388,8 +388,12 @@ function makeFakePackageTarball(root) {
 		readFileSync(join(repositoryRoot, "forge", "scripts", "configure-pi-forge.mjs"), "utf8"),
 	);
 	writeFileSync(
+		join(packageRoot, "scripts", "runtime-env.mjs"),
+		readFileSync(join(repositoryRoot, "forge", "scripts", "runtime-env.mjs"), "utf8"),
+	);
+	writeFileSync(
 		join(packageRoot, "bin", "pi-forge.mjs"),
-		"#!/usr/bin/env node\nimport { join } from 'node:path';\nconst home = process.env.PI_FORGE_HOME || join(process.env.HOME, '.pi-forge');\nconst agent = process.env.PI_CODING_AGENT_DIR || process.env.PI_FORGE_AGENT_DIR || join(home, 'agent');\nif (process.argv.includes('--print-agent-dir')) console.log(agent);\n",
+		readFileSync(join(repositoryRoot, "forge", "bin", "pi-forge.mjs"), "utf8"),
 	);
 	writeFileSync(
 		join(packageRoot, "bin", "pi-forge-mcp.mjs"),
@@ -414,6 +418,41 @@ function makeFakePackageTarball(root) {
 	return join(root, JSON.parse(pack.stdout)[0].filename);
 }
 
+function makeFakePiPackageTarball(root) {
+	const packageRoot = join(root, "pi-package-source");
+	mkdirSync(join(packageRoot, "dist"), { recursive: true });
+	writeFileSync(
+		join(packageRoot, "package.json"),
+		`${JSON.stringify({
+			name: "@earendil-works/pi-coding-agent",
+			version: "0.0.0-test",
+			type: "module",
+			exports: {
+				".": "./dist/index.js",
+			},
+			bin: {
+				pi: "dist/cli.js",
+			},
+			files: ["dist"],
+		})}\n`,
+	);
+	writeFileSync(join(packageRoot, "dist", "index.js"), "export const version = '0.0.0-test';\n");
+	writeFileSync(
+		join(packageRoot, "dist", "cli.js"),
+		"#!/usr/bin/env node\nif (process.argv.includes('--version')) console.log('0.0.0-test');\nif (process.argv.includes('--print-agent-dir')) console.log(process.env.PI_CODING_AGENT_DIR);\n",
+	);
+	chmodSync(join(packageRoot, "dist", "cli.js"), 0o755);
+	const npmCache = join(root, "pi-npm-cache");
+	mkdirSync(npmCache);
+	const pack = spawnSync("npm", ["pack", "--json", "--pack-destination", root], {
+		cwd: packageRoot,
+		encoding: "utf8",
+		env: { ...process.env, npm_config_cache: npmCache },
+	});
+	assert.equal(pack.status, 0, pack.stderr);
+	return join(root, JSON.parse(pack.stdout)[0].filename);
+}
+
 function cleanPiForgeEnvironment() {
 	return Object.fromEntries(
 		Object.entries(process.env).filter(([key, value]) => value !== undefined && !key.startsWith("PI_FORGE_")),
@@ -423,6 +462,7 @@ function cleanPiForgeEnvironment() {
 test("installer exposes a usable MCP launcher from the npm package install", () => {
 	const root = workspace();
 	const tarball = makeFakePackageTarball(root);
+	const piTarball = makeFakePiPackageTarball(root);
 	const piForgeHome = join(root, ".pi-forge");
 	const bin = join(piForgeHome, "bin");
 	const agent = join(piForgeHome, "agent");
@@ -434,7 +474,13 @@ test("installer exposes a usable MCP launcher from the npm package install", () 
 		],
 		{
 			encoding: "utf8",
-			env: { ...environment, HOME: root, SHELL: "/bin/zsh", PI_FORGE_PACKAGE_SPEC: `file:${tarball}` },
+			env: {
+				...environment,
+				HOME: root,
+				SHELL: "/bin/zsh",
+				PI_FORGE_PACKAGE_SPEC: `file:${tarball}`,
+				PI_FORGE_PI_PACKAGE_SPEC: `file:${piTarball}`,
+			},
 		},
 	);
 	assert.equal(install.status, 0, install.stderr);
@@ -442,6 +488,7 @@ test("installer exposes a usable MCP launcher from the npm package install", () 
 	const packageRoot = join(piForgeHome, "app", "node_modules", "@ellian-eorwyn", "pi-forge");
 	assert.equal(existsSync(join(bin, "pi-forge")), true);
 	assert.equal(existsSync(launcher), true);
+	assert.equal(existsSync(join(piForgeHome, "app", "node_modules", "@earendil-works", "pi-coding-agent", "package.json")), true);
 	assert.equal(existsSync(join(agent, "AGENTS.md")), true);
 	assert.equal(existsSync(join(agent, "sessions")), true);
 	assert.equal(existsSync(join(packageRoot, "skills", "document-ingest", "SKILL.md")), true);
@@ -450,14 +497,39 @@ test("installer exposes a usable MCP launcher from the npm package install", () 
 	assert.match(install.stdout, new RegExp(`State: ${agent.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
 	const settings = JSON.parse(readFileSync(join(agent, "settings.json"), "utf8"));
 	assert.equal(settings.packages[0], realpathSync(packageRoot));
+	const appPackage = JSON.parse(readFileSync(join(piForgeHome, "app", "package.json"), "utf8"));
+	assert.match(appPackage.dependencies["@earendil-works/pi-coding-agent"], /earendil-works-pi-coding-agent/);
 	const result = spawnSync(launcher, ["--help"], { encoding: "utf8", env: { ...environment, HOME: root, SHELL: "/bin/zsh" } });
 	assert.equal(result.status, 0, result.stderr);
 	assert.match(result.stdout, /Usage: pi-forge-mcp/);
+	const nestedPiRoot = join(packageRoot, "node_modules", "@earendil-works", "pi-coding-agent");
+	mkdirSync(join(nestedPiRoot, "dist"), { recursive: true });
+	writeFileSync(
+		join(nestedPiRoot, "package.json"),
+		`${JSON.stringify({
+			name: "@earendil-works/pi-coding-agent",
+			version: "0.0.0-nested",
+			type: "module",
+			exports: {
+				".": "./dist/index.js",
+			},
+		})}\n`,
+	);
+	writeFileSync(join(nestedPiRoot, "dist", "index.js"), "export const version = '0.0.0-nested';\n");
+	writeFileSync(join(nestedPiRoot, "dist", "cli.js"), "#!/usr/bin/env node\nconsole.log('0.0.0-nested');\n");
+	chmodSync(join(nestedPiRoot, "dist", "cli.js"), 0o755);
+	const piResult = spawnSync(join(bin, "pi-forge"), ["--version"], {
+		encoding: "utf8",
+		env: { ...environment, HOME: root, SHELL: "/bin/zsh" },
+	});
+	assert.equal(piResult.status, 0, piResult.stderr);
+	assert.equal(piResult.stdout.trim(), "0.0.0-test");
 });
 
 test("installer uses package install unless dev-link is explicit", () => {
 	const root = workspace();
 	const tarball = makeFakePackageTarball(root);
+	const piTarball = makeFakePiPackageTarball(root);
 	const source = join(root, "source");
 	makeFakeInstallSource(source);
 	const piForgeHome = join(root, ".pi-forge");
@@ -472,7 +544,13 @@ test("installer uses package install unless dev-link is explicit", () => {
 		],
 		{
 			encoding: "utf8",
-			env: { ...environment, HOME: root, SHELL: "/bin/zsh", PI_FORGE_PACKAGE_SPEC: `file:${tarball}` },
+			env: {
+				...environment,
+				HOME: root,
+				SHELL: "/bin/zsh",
+				PI_FORGE_PACKAGE_SPEC: `file:${tarball}`,
+				PI_FORGE_PI_PACKAGE_SPEC: `file:${piTarball}`,
+			},
 		},
 	);
 	assert.equal(packageInstall.status, 0, packageInstall.stderr);
@@ -502,6 +580,7 @@ test("installer uses package install unless dev-link is explicit", () => {
 test("installer moves legacy local-share state during default home install", () => {
 	const root = workspace();
 	const tarball = makeFakePackageTarball(root);
+	const piTarball = makeFakePiPackageTarball(root);
 	const dataHome = join(root, ".local", "share");
 	const oldHome = join(dataHome, "pi-forge");
 	const newHome = join(root, ".pi-forge");
@@ -528,6 +607,7 @@ test("installer moves legacy local-share state during default home install", () 
 				XDG_DATA_HOME: dataHome,
 				SHELL: "/bin/zsh",
 				PI_FORGE_PACKAGE_SPEC: `file:${tarball}`,
+				PI_FORGE_PI_PACKAGE_SPEC: `file:${piTarball}`,
 			},
 		},
 	);
@@ -541,6 +621,7 @@ test("installer moves legacy local-share state during default home install", () 
 test("installer migrates mistaken pi-vault install into pi-forge home", () => {
 	const root = workspace();
 	const tarball = makeFakePackageTarball(root);
+	const piTarball = makeFakePiPackageTarball(root);
 	const dataHome = join(root, ".local", "share");
 	const mistakenHome = join(dataHome, "pi-vault");
 	const newHome = join(root, ".pi-forge");
@@ -576,6 +657,7 @@ test("installer migrates mistaken pi-vault install into pi-forge home", () => {
 				XDG_DATA_HOME: dataHome,
 				SHELL: "/bin/zsh",
 				PI_FORGE_PACKAGE_SPEC: `file:${tarball}`,
+				PI_FORGE_PI_PACKAGE_SPEC: `file:${piTarball}`,
 			},
 		},
 	);
@@ -597,6 +679,7 @@ test("installer migrates mistaken pi-vault install into pi-forge home", () => {
 
 test("installer does not merge unrelated pi-vault state over an existing pi-forge agent", () => {
 	const root = workspace();
+	const piTarball = makeFakePiPackageTarball(root);
 	const dataHome = join(root, ".local", "share");
 	const piVaultHome = join(dataHome, "pi-vault");
 	const newHome = join(root, ".pi-forge");
@@ -622,6 +705,7 @@ test("installer does not merge unrelated pi-vault state over an existing pi-forg
 				HOME: root,
 				XDG_DATA_HOME: dataHome,
 				SHELL: "/bin/zsh",
+				PI_FORGE_PI_PACKAGE_SPEC: `file:${piTarball}`,
 			},
 		},
 	);
@@ -634,6 +718,7 @@ test("installer does not merge unrelated pi-vault state over an existing pi-forg
 test("installer migrates local-share pi-forge install into home pi-forge", () => {
 	const root = workspace();
 	const tarball = makeFakePackageTarball(root);
+	const piTarball = makeFakePiPackageTarball(root);
 	const dataHome = join(root, ".local", "share");
 	const oldHome = join(dataHome, "pi-forge");
 	const newHome = join(root, ".pi-forge");
@@ -659,6 +744,7 @@ test("installer migrates local-share pi-forge install into home pi-forge", () =>
 				XDG_DATA_HOME: dataHome,
 				SHELL: "/bin/zsh",
 				PI_FORGE_PACKAGE_SPEC: `file:${tarball}`,
+				PI_FORGE_PI_PACKAGE_SPEC: `file:${piTarball}`,
 			},
 		},
 	);
@@ -673,6 +759,7 @@ test("installer migrates local-share pi-forge install into home pi-forge", () =>
 
 test("legacy pi-forge-update migrates managed repository to package app", () => {
 	const root = workspace();
+	const piTarball = makeFakePiPackageTarball(root);
 	const piForgeHome = join(root, ".pi-forge");
 	const source = join(piForgeHome, "repository");
 	const fakeBin = join(root, "fake-bin");
@@ -706,6 +793,7 @@ esac
 			GIT_LOG: gitLog,
 			PATH: `${fakeBin}:${process.env.PATH}`,
 			SHELL: "/bin/zsh",
+			PI_FORGE_PI_PACKAGE_SPEC: `file:${piTarball}`,
 		},
 	});
 	assert.equal(update.status, 0, update.stderr);

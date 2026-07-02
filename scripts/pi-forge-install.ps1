@@ -12,6 +12,8 @@ param(
 
 $PackageName = "@ellian-eorwyn/pi-forge"
 $DefaultPackageSpec = "$PackageName@latest"
+$PiPackageName = "@earendil-works/pi-coding-agent"
+$DefaultPiPackageSpec = "$PiPackageName@latest"
 
 function Invoke-Checked {
     param(
@@ -119,6 +121,8 @@ if ([string]::IsNullOrEmpty($NpmCacheDir)) { $NpmCacheDir = Join-Path $AgentDir 
 $PackageSpec = $env:PI_FORGE_PACKAGE_SPEC
 $PackageSpecExplicit = -not [string]::IsNullOrEmpty($PackageSpec)
 if (-not $PackageSpecExplicit) { $PackageSpec = $DefaultPackageSpec }
+$PiPackageSpec = $env:PI_FORGE_PI_PACKAGE_SPEC
+if ([string]::IsNullOrEmpty($PiPackageSpec)) { $PiPackageSpec = $DefaultPiPackageSpec }
 
 if (-not (Get-Command "node" -ErrorAction SilentlyContinue)) {
     Write-Error "pi-forge requires Node.js 22.19 or newer."
@@ -176,6 +180,7 @@ if ($DevLink) {
     }
     $env:npm_config_cache = $NpmCacheDir
     Invoke-Checked -Command "npm" -Arguments @("--prefix", $AppDir, "install", "--omit=dev", "--ignore-scripts", $PackageSpec)
+    Invoke-Checked -Command "npm" -Arguments @("--prefix", $AppDir, "install", "--omit=dev", "--ignore-scripts", $PiPackageSpec)
 	$PackageRoot = Resolve-PackageRoot $AppDir
 	Invoke-Checked -Command "node" -Arguments @((Join-Path $PackageRoot "scripts\configure-pi-forge.mjs"), $AgentDir, $PackageRoot)
     Write-Launcher "pi-forge" $BinDir (Join-Path $AppDir "node_modules\.bin")
