@@ -1,14 +1,14 @@
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { existsSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const PACKAGE_NAME = "@ellian-eorwyn/pi-forge";
-export const DEFAULT_PACKAGE_SPEC = `${PACKAGE_NAME}@latest`;
 export const PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
 export const DEFAULT_PI_PACKAGE_SPEC = `${PI_PACKAGE_NAME}@latest`;
+export const DEFAULT_SOURCE_ARCHIVE_URL = "https://github.com/Ellian-Eorwyn/pi-forge/archive/refs/heads/main.tar.gz";
 
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 export const PACKAGE_ROOT = resolve(SCRIPT_DIRECTORY, "..");
@@ -99,13 +99,60 @@ function installAppPackage(packageSpec, options = {}) {
 	return paths;
 }
 
-export function installConfiguredPackage(packageSpec = process.env.PI_FORGE_PACKAGE_SPEC || DEFAULT_PACKAGE_SPEC, options = {}) {
+export function installConfiguredPackage(packageSpec = process.env.PI_FORGE_PACKAGE_SPEC || packSourceArchivePackageSpec(), options = {}) {
 	const paths = installAppPackage(packageSpec, options);
 	return resolveInstalledPackageRoot(paths.appDir);
 }
 
 export function installConfiguredPiPackage(piPackageSpec = process.env.PI_FORGE_PI_PACKAGE_SPEC || DEFAULT_PI_PACKAGE_SPEC, options = {}) {
 	installAppPackage(piPackageSpec, options);
+}
+
+function downloadFile(url, outputPath) {
+	if (url.startsWith("file://")) {
+		copyFileSync(fileURLToPath(url), outputPath);
+		return;
+	}
+	const curl = spawnSync("curl", ["-fsSL", url, "-o", outputPath], {
+		encoding: "utf8",
+		stdio: ["inherit", "pipe", "pipe"],
+	});
+	if (curl.status === 0) return;
+	if (!curl.error || curl.error.code !== "ENOENT") {
+		const output = [curl.stdout, curl.stderr].filter(Boolean).join("\n");
+		throw new Error(output || `Command failed: curl -fsSL ${url} -o ${outputPath}`);
+	}
+	const wget = spawnSync("wget", ["-qO", outputPath, url], {
+		encoding: "utf8",
+		stdio: ["inherit", "pipe", "pipe"],
+	});
+	if (wget.status === 0) return;
+	if (wget.error?.code === "ENOENT") {
+		throw new Error("pi-forge update requires curl or wget to fetch the source archive.");
+	}
+	const output = [wget.stdout, wget.stderr].filter(Boolean).join("\n");
+	throw new Error(output || `Command failed: wget -qO ${outputPath} ${url}`);
+}
+
+export function packSourceArchivePackageSpec(sourceArchiveUrl = process.env.PI_FORGE_SOURCE_ARCHIVE_URL || DEFAULT_SOURCE_ARCHIVE_URL) {
+	const tempDir = mkdtempSync(join(tmpdir(), "pi-forge-source-"));
+	try {
+		const archivePath = join(tempDir, "pi-forge.tar.gz");
+		const extractDir = join(tempDir, "source");
+		mkdirSync(extractDir);
+		downloadFile(sourceArchiveUrl, archivePath);
+		runChecked("tar", ["-xzf", archivePath, "-C", extractDir]);
+		const sourceRoot = readdirSync(extractDir, { withFileTypes: true })
+			.filter((entry) => entry.isDirectory())
+			.map((entry) => join(extractDir, entry.name))
+			.find((entry) => existsSync(join(entry, "forge", "package.json")));
+		if (!sourceRoot) {
+			throw new Error(`Source archive did not contain a pi-forge checkout: ${sourceArchiveUrl}`);
+		}
+		return packPackageDirectory(join(sourceRoot, "forge"));
+	} finally {
+		rmSync(tempDir, { recursive: true, force: true });
+	}
 }
 
 export function packPackageDirectory(packageRoot) {

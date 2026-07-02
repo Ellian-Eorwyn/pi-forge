@@ -4,7 +4,7 @@ pi-forge currently supports macOS, Linux, and Windows with npm and Node.js 22.19
 
 ## Install
 
-From a checkout, installing the published package:
+From a checkout, installing the GitHub-packaged app:
 
 ```bash
 ./install.sh
@@ -36,15 +36,15 @@ pi-forge keeps its installed files under that one directory:
 Set `PI_FORGE_HOME` to move the whole tree. Set `PI_FORGE_INSTALL_DIR`,
 `PI_FORGE_BIN_DIR`, or `PI_FORGE_AGENT_DIR` only when you intentionally want a
 split layout. `PI_FORGE_NPM_CACHE` overrides the isolated npm cache under the
-agent directory. `PI_FORGE_PACKAGE_SPEC` overrides the installed package spec
-and defaults to `@ellian-eorwyn/pi-forge@latest`; tests and local release smoke
-tests can point it at `file:<packed-tarball>`. `PI_FORGE_PI_PACKAGE_SPEC`
-overrides the Pi CLI package spec and defaults to
-`@earendil-works/pi-coding-agent@latest`. If the default pi-forge package is not
-available from npm, the macOS/Linux installer downloads
+agent directory. By default, the macOS/Linux installer downloads
 `PI_FORGE_SOURCE_ARCHIVE_URL` (default:
 `https://github.com/Ellian-Eorwyn/pi-forge/archive/refs/heads/main.tar.gz`),
-packs `forge/` locally, and installs that package into the same npm app layout.
+packs `forge/` locally, and installs that package into the npm app layout.
+`PI_FORGE_PACKAGE_SPEC` overrides that source archive package and can point at
+`file:<packed-tarball>` for tests and local release smoke tests, or at
+`@ellian-eorwyn/pi-forge@latest` if a registry package is intentionally used.
+`PI_FORGE_PI_PACKAGE_SPEC` overrides the Pi CLI package spec and defaults to
+`@earendil-works/pi-coding-agent@latest`.
 The installer adds `~/.pi-forge/bin` to the user profile/PATH when possible;
 open a new shell before relying on `pi-forge` from `PATH`.
 
@@ -60,10 +60,12 @@ pi-forge-update
 ```
 *(On Windows: `pi-forge-update.ps1` or just `pi-forge-update`)*
 
-The updater installs `PI_FORGE_PACKAGE_SPEC` and `PI_FORGE_PI_PACKAGE_SPEC` into
-`~/.pi-forge/app` with `npm install --omit=dev --ignore-scripts`, refreshes
-managed settings, and rewrites launchers. Credentials, sessions, and unrelated
-settings are preserved. Existing clone-based installs run one final
+The updater downloads the configured GitHub source archive for pi-forge, installs
+`PI_FORGE_PI_PACKAGE_SPEC` into `~/.pi-forge/app` with
+`npm install --omit=dev --ignore-scripts`, refreshes managed settings, and
+rewrites launchers. `PI_FORGE_PACKAGE_SPEC` overrides the GitHub source archive
+when set. Credentials, sessions, and unrelated settings are preserved. Existing
+clone-based installs run one final
 fast-forward-only Git pull, migrate to the npm app layout, then remove the
 managed `~/.pi-forge/repository` only after package installation and
 configuration succeed.

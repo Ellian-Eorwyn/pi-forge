@@ -303,7 +303,7 @@ test("worker cancellation terminates the child process", async () => {
 	assert.equal(result.signal, "SIGTERM");
 });
 
-function makeFakeInstallSource(source) {
+function makeFakeInstallSource(source, version = "0.0.0-test") {
 	mkdirSync(join(source, "scripts"), { recursive: true });
 	mkdirSync(join(source, "forge", "bin"), { recursive: true });
 	mkdirSync(join(source, "forge", "scripts"), { recursive: true });
@@ -318,7 +318,7 @@ function makeFakeInstallSource(source) {
 		join(source, "forge", "package.json"),
 		`${JSON.stringify({
 			name: "@ellian-eorwyn/pi-forge",
-			version: "0.0.0-test",
+			version,
 			type: "module",
 			bin: {
 				"pi-forge": "bin/pi-forge.mjs",
@@ -399,7 +399,10 @@ function makeFakePackageTarball(root) {
 		join(packageRoot, "bin", "pi-forge-mcp.mjs"),
 		"#!/usr/bin/env node\nif (process.argv.includes('--help')) console.log('Usage: pi-forge-mcp');\nelse console.log(new URL('../skills/', import.meta.url).pathname);\n",
 	);
-	writeFileSync(join(packageRoot, "bin", "pi-forge-update.mjs"), "#!/usr/bin/env node\nconsole.log('updated');\n");
+	writeFileSync(
+		join(packageRoot, "bin", "pi-forge-update.mjs"),
+		readFileSync(join(repositoryRoot, "forge", "bin", "pi-forge-update.mjs"), "utf8"),
+	);
 	writeFileSync(
 		join(packageRoot, "skills", "document-ingest", "SKILL.md"),
 		"---\nname: document-ingest\ndescription: Test skill.\n---\n\n# Test\n",
@@ -533,7 +536,7 @@ test("installer exposes a usable MCP launcher from the npm package install", () 
 	assert.equal(piResult.stdout.trim(), "0.0.0-test");
 });
 
-test("installer falls back to source archive when default package is unpublished", () => {
+test("installer uses the GitHub source archive when no package spec is configured", () => {
 	const root = workspace();
 	const source = join(root, "source");
 	makeFakeInstallSource(source);
@@ -570,14 +573,52 @@ exec "$REAL_NPM" "$@"
 		},
 	});
 	assert.equal(install.status, 0, install.stderr);
-	assert.match(install.stderr, /pi-forge package @ellian-eorwyn\/pi-forge@latest is unavailable/);
+	assert.match(install.stderr, /Installing pi-forge from file:/);
 	assert.doesNotMatch(install.stderr, /npm error code E404/);
 	const packageRoot = join(root, ".pi-forge", "app", "node_modules", "@ellian-eorwyn", "pi-forge");
 	assert.equal(existsSync(join(packageRoot, "package.json")), true);
 	assert.equal(existsSync(join(root, ".pi-forge", "app", "package-cache")), true);
 	const npmCalls = readFileSync(npmLog, "utf8");
-	assert.match(npmCalls, /@ellian-eorwyn\/pi-forge@latest/);
+	assert.doesNotMatch(npmCalls, /@ellian-eorwyn\/pi-forge@latest/);
 	assert.match(npmCalls, /install --omit=dev --ignore-scripts file:/);
+});
+
+test("packaged updater refreshes pi-forge from the GitHub source archive by default", () => {
+	const root = workspace();
+	const initialTarball = makeFakePackageTarball(root);
+	const piTarball = makeFakePiPackageTarball(root);
+	const updatedSource = join(root, "updated-source");
+	makeFakeInstallSource(updatedSource, "0.0.1-source");
+	const sourceArchive = makeSourceArchive(root, updatedSource);
+	const environment = cleanPiForgeEnvironment();
+	const install = spawnSync("bash", [join(repositoryRoot, "scripts", "pi-forge-install.sh")], {
+		encoding: "utf8",
+		env: {
+			...environment,
+			HOME: root,
+			SHELL: "/bin/zsh",
+			PI_FORGE_PACKAGE_SPEC: `file:${initialTarball}`,
+			PI_FORGE_PI_PACKAGE_SPEC: `file:${piTarball}`,
+		},
+	});
+	assert.equal(install.status, 0, install.stderr);
+
+	const update = spawnSync(join(root, ".pi-forge", "bin", "pi-forge-update"), [], {
+		encoding: "utf8",
+		env: {
+			...environment,
+			HOME: root,
+			SHELL: "/bin/zsh",
+			PI_FORGE_PI_PACKAGE_SPEC: `file:${piTarball}`,
+			PI_FORGE_SOURCE_ARCHIVE_URL: `file://${sourceArchive}`,
+		},
+	});
+	assert.equal(update.status, 0, update.stderr);
+	assert.match(update.stderr, /pi-forge-update: installing pi-forge from file:/);
+	const packageJson = JSON.parse(
+		readFileSync(join(root, ".pi-forge", "app", "node_modules", "@ellian-eorwyn", "pi-forge", "package.json"), "utf8"),
+	);
+	assert.equal(packageJson.version, "0.0.1-source");
 });
 
 test("installer uses package install unless dev-link is explicit", () => {

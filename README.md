@@ -70,7 +70,7 @@ Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManage
 
 *Note: The installer adds `~/.pi-forge/bin` to your user PATH. Please open a new shell after installing.*
 
-If `@ellian-eorwyn/pi-forge@latest` is not published to npm yet, the macOS/Linux installer automatically downloads the GitHub source archive, packs the `forge` package locally, and installs that package into the same `~/.pi-forge/app` layout.
+The macOS/Linux installer downloads the GitHub source archive, packs the `forge` package locally, and installs that package into the same `~/.pi-forge/app` layout. No published `@ellian-eorwyn/pi-forge` npm package is required.
 
 ### 2. Update
 To update pi-forge and `@earendil-works/pi-coding-agent` to the latest versions while preserving credentials, sessions, and settings:
@@ -86,7 +86,7 @@ pi-forge-update
 ```
 *(Or run `pi-forge-update.ps1`)*
 
-`pi-forge-update` installs `@ellian-eorwyn/pi-forge@latest` and `@earendil-works/pi-coding-agent@latest` into `~/.pi-forge/app` with `npm install --omit=dev --ignore-scripts`, refreshes managed configuration, and rewrites launchers. If the scoped pi-forge package is not available yet, the updater refreshes from the installed package copy and still updates the Pi CLI package.
+`pi-forge-update` downloads the GitHub source archive for pi-forge and installs `@earendil-works/pi-coding-agent@latest` into `~/.pi-forge/app` with `npm install --omit=dev --ignore-scripts`, refreshes managed configuration, and rewrites launchers.
 
 Existing clone-based installs migrate automatically. The legacy updater runs one final Git pull when a managed repository is present, installs the npm app layout, rewires launchers to `~/.pi-forge/bin`, and removes only the managed `~/.pi-forge/repository` after package installation and configuration succeed. User-owned development checkouts are not removed.
 
@@ -117,11 +117,11 @@ Use these only when you need a non-default layout, local smoke test, or developm
 | `PI_FORGE_AGENT_DIR` | `$PI_FORGE_HOME/agent` |
 | `PI_FORGE_NPM_CACHE` | `$PI_FORGE_AGENT_DIR/npm-cache` |
 | `PI_FORGE_PLAYWRIGHT_BROWSERS` | `$PI_FORGE_AGENT_DIR/playwright-browsers` |
-| `PI_FORGE_PACKAGE_SPEC` | `@ellian-eorwyn/pi-forge@latest` |
+| `PI_FORGE_PACKAGE_SPEC` | unset; default install packs the GitHub source archive |
 | `PI_FORGE_PI_PACKAGE_SPEC` | `@earendil-works/pi-coding-agent@latest` |
 | `PI_FORGE_SOURCE_ARCHIVE_URL` | `https://github.com/Ellian-Eorwyn/pi-forge/archive/refs/heads/main.tar.gz` |
 
-`PI_FORGE_PACKAGE_SPEC` and `PI_FORGE_PI_PACKAGE_SPEC` can point at `file:<packed-tarball>` for local release and migration smoke tests. `PI_FORGE_SOURCE_ARCHIVE_URL` overrides the source archive fallback used only when the default pi-forge npm package is unavailable. Checkout-linked development installs are still available with `./install.sh --dev-link`; that mode links launchers and package resources to the checkout instead of the npm app.
+`PI_FORGE_PACKAGE_SPEC` and `PI_FORGE_PI_PACKAGE_SPEC` can point at `file:<packed-tarball>` for local release and migration smoke tests. Set `PI_FORGE_PACKAGE_SPEC=@ellian-eorwyn/pi-forge@latest` only if you intentionally want to install a published npm package. `PI_FORGE_SOURCE_ARCHIVE_URL` overrides the GitHub source archive used for default pi-forge installs and updates. Checkout-linked development installs are still available with `./install.sh --dev-link`; that mode links launchers and package resources to the checkout instead of the npm app.
 
 ---
 

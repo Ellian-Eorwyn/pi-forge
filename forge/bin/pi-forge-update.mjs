@@ -1,14 +1,13 @@
 #!/usr/bin/env node
 
 import {
-	DEFAULT_PACKAGE_SPEC,
 	DEFAULT_PI_PACKAGE_SPEC,
-	PACKAGE_ROOT,
+	DEFAULT_SOURCE_ARCHIVE_URL,
 	configurePackage,
 	getForgePaths,
 	installConfiguredPackage,
 	installConfiguredPiPackage,
-	packPackageDirectory,
+	packSourceArchivePackageSpec,
 	refreshLaunchers,
 } from "../scripts/runtime-env.mjs";
 
@@ -19,8 +18,9 @@ Updates the npm-installed pi-forge package, refreshes managed configuration, and
 rewrites the stable launchers in ~/.pi-forge/bin.
 
 Environment:
-  PI_FORGE_PACKAGE_SPEC      pi-forge package spec to install (default: ${DEFAULT_PACKAGE_SPEC})
+  PI_FORGE_PACKAGE_SPEC      pi-forge package spec override (default: packed GitHub source archive)
   PI_FORGE_PI_PACKAGE_SPEC   Pi CLI package spec to install (default: ${DEFAULT_PI_PACKAGE_SPEC})
+  PI_FORGE_SOURCE_ARCHIVE_URL GitHub source archive used for default pi-forge updates
 `);
 }
 
@@ -38,12 +38,12 @@ for (const arg of args) {
 
 try {
 	let packageRoot;
-	try {
-		packageRoot = installConfiguredPackage(undefined, process.env.PI_FORGE_PACKAGE_SPEC ? {} : { stdio: ["inherit", "pipe", "pipe"] });
-	} catch (error) {
-		if (process.env.PI_FORGE_PACKAGE_SPEC) throw error;
-		process.stderr.write(`pi-forge-update: ${DEFAULT_PACKAGE_SPEC} is unavailable; refreshing from the installed package copy.\n`);
-		packageRoot = installConfiguredPackage(packPackageDirectory(PACKAGE_ROOT));
+	if (process.env.PI_FORGE_PACKAGE_SPEC) {
+		packageRoot = installConfiguredPackage();
+	} else {
+		const sourceArchiveUrl = process.env.PI_FORGE_SOURCE_ARCHIVE_URL || DEFAULT_SOURCE_ARCHIVE_URL;
+		process.stderr.write(`pi-forge-update: installing pi-forge from ${sourceArchiveUrl}.\n`);
+		packageRoot = installConfiguredPackage(packSourceArchivePackageSpec(sourceArchiveUrl));
 	}
 	installConfiguredPiPackage();
 	const paths = configurePackage(packageRoot);

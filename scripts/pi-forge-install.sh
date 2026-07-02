@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PACKAGE_NAME="@ellian-eorwyn/pi-forge"
-DEFAULT_PACKAGE_SPEC="$PACKAGE_NAME@latest"
 PI_PACKAGE_NAME="@earendil-works/pi-coding-agent"
 DEFAULT_PI_PACKAGE_SPEC="$PI_PACKAGE_NAME@latest"
 DEFAULT_SOURCE_ARCHIVE_URL="https://github.com/Ellian-Eorwyn/pi-forge/archive/refs/heads/main.tar.gz"
@@ -24,7 +22,7 @@ if [[ -n "${PI_FORGE_PACKAGE_SPEC:-}" ]]; then
 	PACKAGE_SPEC="$PI_FORGE_PACKAGE_SPEC"
 	PACKAGE_SPEC_EXPLICIT=true
 else
-	PACKAGE_SPEC="$DEFAULT_PACKAGE_SPEC"
+	PACKAGE_SPEC=""
 fi
 PI_PACKAGE_SPEC="${PI_FORGE_PI_PACKAGE_SPEC:-$DEFAULT_PI_PACKAGE_SPEC}"
 PATH_PROFILE_UPDATED=""
@@ -56,9 +54,9 @@ Options:
   --resources-only       Accepted for update compatibility
 
 Environment:
-  PI_FORGE_PACKAGE_SPEC      pi-forge package spec (default: @ellian-eorwyn/pi-forge@latest)
+  PI_FORGE_PACKAGE_SPEC      pi-forge package spec override (default: packed GitHub source archive)
   PI_FORGE_PI_PACKAGE_SPEC   Pi CLI package spec (default: @earendil-works/pi-coding-agent@latest)
-  PI_FORGE_SOURCE_ARCHIVE_URL source archive fallback when the default package is unavailable
+  PI_FORGE_SOURCE_ARCHIVE_URL GitHub source archive used for default pi-forge installs
 EOF
 }
 
@@ -322,16 +320,12 @@ install_launcher() {
 install_package() {
 	mkdir -p "$BIN_DIR" "$AGENT_DIR" "$NPM_CACHE_DIR"
 	ensure_app_project
-	local install_output
-	if ! install_output="$(npm_config_cache="$NPM_CACHE_DIR" npm --prefix "$APP_DIR" install --omit=dev --ignore-scripts "$PACKAGE_SPEC" 2>&1)"; then
-		if [[ "$PACKAGE_SPEC_EXPLICIT" == true ]]; then
-			printf '%s\n' "$install_output" >&2
-			exit 1
-		fi
-		echo "pi-forge package $DEFAULT_PACKAGE_SPEC is unavailable; installing from $SOURCE_ARCHIVE_URL." >&2
-		PACKAGE_SPEC="$(pack_source_archive_package_spec)"
-		npm_config_cache="$NPM_CACHE_DIR" npm --prefix "$APP_DIR" install --omit=dev --ignore-scripts "$PACKAGE_SPEC"
+	local install_spec="$PACKAGE_SPEC"
+	if [[ -z "$install_spec" ]]; then
+		echo "Installing pi-forge from $SOURCE_ARCHIVE_URL." >&2
+		install_spec="$(pack_source_archive_package_spec)"
 	fi
+	npm_config_cache="$NPM_CACHE_DIR" npm --prefix "$APP_DIR" install --omit=dev --ignore-scripts "$install_spec"
 	npm_config_cache="$NPM_CACHE_DIR" npm --prefix "$APP_DIR" install --omit=dev --ignore-scripts "$PI_PACKAGE_SPEC"
 	local package_root
 	package_root="$(resolve_installed_package_root)"
