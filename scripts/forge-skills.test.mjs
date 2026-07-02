@@ -2109,7 +2109,7 @@ test("installed launcher symlinks resolve their source checkout", () => {
 			`http://llms/searxng\n${join(realpathSync(repository), "packages", "coding-agent", "dist", "cli.js")}\n--version`,
 		);
 
-		const updater = runFailure(join(binaryDirectory, "pi-forge-update"), [], /pi-forge update requires a git checkout/);
+		const updater = runFailure(join(binaryDirectory, "pi-forge-update"), [], /legacy updater requires a git checkout/);
 		assert.match(updater.stderr, new RegExp(realpathSync(repository).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 	});
 });
@@ -2166,87 +2166,78 @@ test("profile configuration installs local service defaults without dropping use
 	});
 });
 
-test("piped installer ignores the caller's checkout and uses the configured repository", () => {
+test("piped installer fetches standalone installer without cloning a repository", () => {
 	withWorkspace((workspace) => {
 		const fakeBin = join(workspace, "bin");
-		const installDirectory = join(workspace, "install");
-		const gitLog = join(workspace, "git-args.txt");
+		const curlLog = join(workspace, "curl-args.txt");
+		const gitLog = join(workspace, "git-called.txt");
 		mkdirSync(fakeBin);
 		writeFileSync(
-			join(fakeBin, "git"),
-			"#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$INSTALLER_GIT_LOG\"\nexit 23\n",
+			join(fakeBin, "curl"),
+			`#!/usr/bin/env bash
+printf '%s\\n' "$@" > "$INSTALLER_CURL_LOG"
+output=""
+while (($#)); do
+	if [[ "$1" == "-o" ]]; then
+		output="$2"
+		break
+	fi
+	shift
+done
+cat > "$output" <<'SCRIPT'
+#!/usr/bin/env bash
+exit 0
+SCRIPT
+chmod +x "$output"
+`,
 		);
+		writeFileSync(join(fakeBin, "git"), "#!/usr/bin/env bash\nprintf 'git called\\n' > \"$INSTALLER_GIT_LOG\"\nexit 99\n");
+		chmodSync(join(fakeBin, "curl"), 0o755);
 		chmodSync(join(fakeBin, "git"), 0o755);
 
 		const result = spawnSync("bash", [], {
-			cwd: repositoryRoot,
+			cwd: workspace,
 			encoding: "utf8",
 			env: {
 				...environment,
 				HOME: workspace,
+				INSTALLER_CURL_LOG: curlLog,
 				INSTALLER_GIT_LOG: gitLog,
 				PATH: `${fakeBin}:${process.env.PATH}`,
-				PI_FORGE_INSTALL_DIR: installDirectory,
-				PI_FORGE_REPOSITORY: "https://example.invalid/pi-forge.git",
+				PI_FORGE_INSTALLER_URL: "https://example.invalid/pi-forge-install.sh",
 			},
 			input: readFileSync(join(repositoryRoot, "install.sh"), "utf8"),
 		});
-		assert.equal(result.status, 23);
+		assert.equal(result.status, 0, result.stderr);
 		assert.doesNotMatch(result.stderr, /BASH_SOURCE/);
-		assert.equal(
-			readFileSync(gitLog, "utf8"),
-			`clone\nhttps://example.invalid/pi-forge.git\n${join(installDirectory, "repository")}\n`,
-		);
-
-		const packageJson = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8"));
-		assert.equal(typeof packageJson.scripts["build:install"], "string");
-		assert.match(readFileSync(join(repositoryRoot, "scripts", "pi-forge-install.sh"), "utf8"), /run build:install/);
+		assert.match(readFileSync(curlLog, "utf8"), /https:\/\/example\.invalid\/pi-forge-install\.sh/);
+		assert.equal(existsSync(gitLog), false);
 	});
 });
 
-test("checkout installer clones into the install home by default", () => {
+test("checkout installer invokes local installer without cloning by default", () => {
 	withWorkspace((workspace) => {
 		const fakeBin = join(workspace, "bin");
-		const installDirectory = join(workspace, "install");
 		const gitLog = join(workspace, "git-args.txt");
-		const installerLog = join(workspace, "installer-args.txt");
 		mkdirSync(fakeBin);
 		writeFileSync(
 			join(fakeBin, "git"),
-			`#!/usr/bin/env bash
-if [[ "$1" == "-C" ]]; then
-	printf 'https://example.invalid/pi-forge.git\\n'
-	exit 0
-fi
-printf '%s\\n' "$@" > "$INSTALLER_GIT_LOG"
-destination="$3"
-mkdir -p "$destination/scripts"
-cat > "$destination/scripts/pi-forge-install.sh" <<'SCRIPT'
-#!/usr/bin/env bash
-printf '%s\\n' "$@" > "$INSTALLER_RUN_LOG"
-SCRIPT
-chmod +x "$destination/scripts/pi-forge-install.sh"
-`,
+			"#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$INSTALLER_GIT_LOG\"\nexit 99\n",
 		);
 		chmodSync(join(fakeBin, "git"), 0o755);
 
-		const result = spawnSync("bash", [join(repositoryRoot, "install.sh")], {
+		const result = spawnSync("bash", [join(repositoryRoot, "install.sh"), "--help"], {
 			cwd: repositoryRoot,
 			encoding: "utf8",
 			env: {
 				...environment,
 				HOME: workspace,
 				INSTALLER_GIT_LOG: gitLog,
-				INSTALLER_RUN_LOG: installerLog,
 				PATH: `${fakeBin}:${process.env.PATH}`,
-				PI_FORGE_INSTALL_DIR: installDirectory,
 			},
 		});
 		assert.equal(result.status, 0, result.stderr);
-		assert.equal(
-			readFileSync(gitLog, "utf8"),
-			`clone\nhttps://example.invalid/pi-forge.git\n${join(installDirectory, "repository")}\n`,
-		);
-		assert.equal(readFileSync(installerLog, "utf8"), `--source-dir\n${join(installDirectory, "repository")}\n`);
+		assert.match(result.stdout, /Installs pi-forge from npm/);
+		assert.equal(existsSync(gitLog), false);
 	});
 });

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Remove a pi-forge installation: the launchers in the bin directory and the
-# managed checkout created by a remote install. Agent state (credentials,
+# npm app created by a remote install. Agent state (credentials,
 # sessions, settings) is preserved unless --purge-state is given. A development
 # checkout is never deleted, including the one this script lives in.
 
@@ -18,19 +18,19 @@ ASSUME_YES=false
 LAUNCHERS=(pi-forge pi-forge-mcp pi-forge-update)
 # Symlink targets the installer creates; a launcher is only removed when it
 # points at one of these so an unrelated command of the same name is left alone.
-EXPECTED_TARGETS=(pi-forge-run.sh pi-forge-mcp-run.sh update.sh)
+EXPECTED_TARGETS=(pi-forge pi-forge-mcp pi-forge-update pi-forge-run.sh pi-forge-mcp-run.sh update.sh)
 
 usage() {
 	cat <<'EOF'
 Usage: scripts/pi-forge-uninstall.sh [options]
 
-Removes the pi-forge launchers and the managed checkout. Agent state is kept
+Removes the pi-forge launchers and the managed app. Agent state is kept
 by default so a later reinstall reuses your credentials and sessions.
 
 Options:
   --bin-dir <path>       Launcher directory (default: $PI_FORGE_HOME/bin)
   --agent-dir <path>     Agent state directory (default: $PI_FORGE_HOME/agent)
-  --install-dir <path>   Managed checkout directory (default: $PI_FORGE_HOME/repository)
+  --install-dir <path>   Managed app directory (default: $PI_FORGE_HOME/app)
   --purge-state          Also delete the agent state directory (credentials,
                          sessions, settings). Irreversible.
   --dry-run              Print what would be removed without changing anything.
@@ -88,7 +88,7 @@ if [[ -z "$PI_FORGE_HOME" ]]; then
 fi
 BIN_DIR="${BIN_DIR:-$PI_FORGE_HOME/bin}"
 AGENT_DIR="${AGENT_DIR:-$PI_FORGE_HOME/agent}"
-INSTALL_DIR="${INSTALL_DIR:-$PI_FORGE_HOME/repository}"
+INSTALL_DIR="${INSTALL_DIR:-$PI_FORGE_HOME/app}"
 
 PLANNED=()
 WARNINGS=()
@@ -138,19 +138,33 @@ for name in "${LAUNCHERS[@]}"; do
 	fi
 done
 
-# --- Plan: managed checkout ------------------------------------------------
+# --- Plan: managed app -----------------------------------------------------
 REMOVE_INSTALL_DIR=false
 INSTALL_DIR_CANON="$(canonical "$INSTALL_DIR")"
 if [[ -d "$INSTALL_DIR" ]]; then
 	if is_protected_path "$INSTALL_DIR_CANON"; then
-		note_warn "Refusing to remove managed checkout at protected path: $INSTALL_DIR"
+		note_warn "Refusing to remove managed app at protected path: $INSTALL_DIR"
 	elif [[ -n "$SOURCE_DIR" && "$INSTALL_DIR_CANON" != "$SOURCE_DIR" && "$SOURCE_DIR" == "$INSTALL_DIR_CANON"/* ]]; then
-		note_warn "Skipping managed checkout: it contains this checkout ($SOURCE_DIR)."
-	elif [[ -f "$INSTALL_DIR/scripts/pi-forge-install.sh" ]]; then
+		note_warn "Skipping managed app: it contains this checkout ($SOURCE_DIR)."
+	elif [[ -f "$INSTALL_DIR/node_modules/@ellian-eorwyn/pi-forge/package.json" || -f "$INSTALL_DIR/package.json" ]]; then
 		REMOVE_INSTALL_DIR=true
-		note_plan "Remove managed checkout: $INSTALL_DIR"
+		note_plan "Remove managed app: $INSTALL_DIR"
 	else
-		note_warn "Skipping $INSTALL_DIR: does not look like a managed pi-forge checkout."
+		note_warn "Skipping $INSTALL_DIR: does not look like a managed pi-forge app."
+	fi
+fi
+
+REMOVE_LEGACY_REPOSITORY=false
+LEGACY_REPOSITORY="$PI_FORGE_HOME/repository"
+LEGACY_REPOSITORY_CANON="$(canonical "$LEGACY_REPOSITORY")"
+if [[ -d "$LEGACY_REPOSITORY" && "$LEGACY_REPOSITORY_CANON" != "$INSTALL_DIR_CANON" ]]; then
+	if is_protected_path "$LEGACY_REPOSITORY_CANON"; then
+		note_warn "Refusing to remove legacy repository at protected path: $LEGACY_REPOSITORY"
+	elif [[ -n "$SOURCE_DIR" && "$LEGACY_REPOSITORY_CANON" == "$SOURCE_DIR" ]]; then
+		note_warn "Skipping legacy repository: it is this checkout ($SOURCE_DIR)."
+	elif [[ -f "$LEGACY_REPOSITORY/scripts/pi-forge-install.sh" ]]; then
+		REMOVE_LEGACY_REPOSITORY=true
+		note_plan "Remove legacy managed repository: $LEGACY_REPOSITORY"
 	fi
 fi
 
@@ -174,7 +188,7 @@ elif [[ -d "$AGENT_DIR" ]]; then
 fi
 
 # --- Report and confirm ----------------------------------------------------
-if [[ ${#LAUNCHERS_TO_REMOVE[@]} -eq 0 && "$REMOVE_INSTALL_DIR" == false && "$REMOVE_AGENT_DIR" == false ]]; then
+if [[ ${#LAUNCHERS_TO_REMOVE[@]} -eq 0 && "$REMOVE_INSTALL_DIR" == false && "$REMOVE_LEGACY_REPOSITORY" == false && "$REMOVE_AGENT_DIR" == false ]]; then
 	echo "Nothing to uninstall."
 	for warning in "${WARNINGS[@]:-}"; do
 		[[ -n "$warning" ]] && echo "  - $warning"
@@ -214,6 +228,9 @@ for launcher in "${LAUNCHERS_TO_REMOVE[@]}"; do
 done
 if [[ "$REMOVE_INSTALL_DIR" == true ]]; then
 	remove_path "$INSTALL_DIR" && echo "Removed $INSTALL_DIR" || true
+fi
+if [[ "$REMOVE_LEGACY_REPOSITORY" == true ]]; then
+	remove_path "$LEGACY_REPOSITORY" && echo "Removed $LEGACY_REPOSITORY" || true
 fi
 if [[ "$REMOVE_AGENT_DIR" == true ]]; then
 	remove_path "$AGENT_DIR" && echo "Removed $AGENT_DIR" || true

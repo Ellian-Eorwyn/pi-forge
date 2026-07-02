@@ -9,6 +9,7 @@ const packages = [
 	{ directory: "packages/agent", name: "@earendil-works/pi-agent-core" },
 	{ directory: "packages/tui", name: "@earendil-works/pi-tui" },
 	{ directory: "packages/coding-agent", name: "@earendil-works/pi-coding-agent" },
+	{ directory: "forge", name: "@ellian-eorwyn/pi-forge", requiresDist: false },
 ];
 
 const dryRun = process.argv.includes("--dry-run");
@@ -91,7 +92,9 @@ console.log(`Publishing pi packages at ${versions[0]}${dryRun ? " (dry run)" : "
 
 for (const pkg of packages) {
 	const version = packageVersions.get(pkg.name);
-	assertBuildOutputExists(pkg.directory);
+	if (pkg.requiresDist !== false) {
+		assertBuildOutputExists(pkg.directory);
+	}
 	const published = isPublished(pkg.name, version);
 
 	if (dryRun) {

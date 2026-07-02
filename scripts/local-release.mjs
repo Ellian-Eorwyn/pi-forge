@@ -6,10 +6,11 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const packages = [
-	{ directory: "packages/ai", name: "@earendil-works/pi-ai" },
-	{ directory: "packages/tui", name: "@earendil-works/pi-tui" },
-	{ directory: "packages/agent", name: "@earendil-works/pi-agent-core" },
-	{ directory: "packages/coding-agent", name: "@earendil-works/pi-coding-agent" },
+	{ directory: "packages/ai", name: "@earendil-works/pi-ai", build: true },
+	{ directory: "packages/tui", name: "@earendil-works/pi-tui", build: true },
+	{ directory: "packages/agent", name: "@earendil-works/pi-agent-core", build: true },
+	{ directory: "packages/coding-agent", name: "@earendil-works/pi-coding-agent", build: true },
+	{ directory: "forge", name: "@ellian-eorwyn/pi-forge", build: false },
 ];
 
 function printUsage() {
@@ -168,6 +169,18 @@ function createPiShim(installDirectory) {
 	symlinkSync(join("node_modules", ".bin", "pi"), join(installDirectory, "pi"));
 }
 
+function createForgeShims(installDirectory) {
+	const binDirectory = join(installDirectory, "node_modules", ".bin");
+	for (const command of ["pi-forge", "pi-forge-mcp", "pi-forge-update"]) {
+		if (process.platform === "win32") {
+			writeFileSync(join(installDirectory, `${command}.cmd`), `@ECHO off\r\n"%~dp0node_modules\\.bin\\${command}.cmd" %*\r\n`);
+			writeFileSync(join(installDirectory, `${command}.ps1`), `& "$PSScriptRoot/node_modules/.bin/${command}.ps1" @args\n`);
+			continue;
+		}
+		symlinkSync(join("node_modules", ".bin", command), join(installDirectory, command));
+	}
+}
+
 function packPackage(pkg, tarballDirectory) {
 	const packageJson = readPackageJson(pkg.directory);
 	if (packageJson.name !== pkg.name) {
@@ -202,6 +215,7 @@ if (!options.skipCheck) {
 }
 
 for (const pkg of packages) {
+	if (pkg.build === false) continue;
 	run("npm", ["run", "clean"], { cwd: pkg.directory });
 	run("npm", ["run", "build"], { cwd: pkg.directory });
 }
@@ -225,6 +239,7 @@ if (!options.skipInstall) {
 
 	run("npm", ["install", "--omit=dev", "--ignore-scripts"], { cwd: nodeInstallDirectory });
 	createPiShim(nodeInstallDirectory);
+	createForgeShims(nodeInstallDirectory);
 
 	if (!options.skipBunInstall) {
 		if (!commandExists("bun")) {
@@ -237,6 +252,7 @@ if (!options.skipInstall) {
 		writeFileSync(join(bunInstallDirectory, "package.json"), `${JSON.stringify({ private: true, dependencies: bunDependencies, overrides: bunDependencies }, undefined, "\t")}\n`);
 		run("bun", ["install", "--production", "--ignore-scripts"], { cwd: bunInstallDirectory });
 		createPiShim(bunInstallDirectory);
+		createForgeShims(bunInstallDirectory);
 	}
 }
 
@@ -258,11 +274,15 @@ if (!options.skipInstall) {
 	console.log(`  ${nodeInstallDirectory}`);
 	console.log("\nRun the locally packed npm CLI from outside the repository:");
 	console.log(`  ${join(nodeInstallDirectory, process.platform === "win32" ? "pi.cmd" : "pi")} --help`);
+	console.log("\nRun the locally packed pi-forge CLI from outside the repository:");
+	console.log(`  ${join(nodeInstallDirectory, process.platform === "win32" ? "pi-forge.cmd" : "pi-forge")} --help`);
 
 	if (!options.skipBunInstall) {
 		console.log("\nIsolated Bun package install:");
 		console.log(`  ${bunInstallDirectory}`);
 		console.log("\nRun the locally packed Bun package CLI from outside the repository:");
 		console.log(`  ${join(bunInstallDirectory, process.platform === "win32" ? "pi.cmd" : "pi")} --help`);
+		console.log("\nRun the locally packed Bun pi-forge CLI from outside the repository:");
+		console.log(`  ${join(bunInstallDirectory, process.platform === "win32" ? "pi-forge.cmd" : "pi-forge")} --help`);
 	}
 }

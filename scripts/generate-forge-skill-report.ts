@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { formatSkillsForPrompt, loadSkillsFromDir, type Skill } from "../packages/coding-agent/src/core/skills.ts";
@@ -10,6 +10,9 @@ const skillsDirectory = join(repositoryRoot, "forge", "skills");
 const reportPath = join(repositoryRoot, "FORGE_SKILLS.md");
 const checkOnly = process.argv.slice(2).includes("--check");
 const unknownOptions = process.argv.slice(2).filter((argument) => argument !== "--check");
+const skillNamePattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const maxSkillNameLength = 64;
+const maxDescriptionLength = 1024;
 
 if (unknownOptions.length > 0) {
 	console.error(`Unknown option: ${unknownOptions[0]}`);
@@ -53,6 +56,27 @@ function withStablePath(skill: Skill): Skill {
 	return { ...skill, filePath: repositoryPath(skill.filePath) };
 }
 
+function standardDiagnostics(skill: Skill): string[] {
+	const diagnostics: string[] = [];
+	const directoryName = basename(skill.baseDir);
+	if (skill.name !== directoryName) {
+		diagnostics.push(`${repositoryPath(skill.filePath)}: skill name "${skill.name}" must match directory "${directoryName}"`);
+	}
+	if (skill.name.length < 1 || skill.name.length > maxSkillNameLength) {
+		diagnostics.push(`${repositoryPath(skill.filePath)}: skill name must be 1-${maxSkillNameLength} characters`);
+	}
+	if (!skillNamePattern.test(skill.name)) {
+		diagnostics.push(`${repositoryPath(skill.filePath)}: skill name must use lowercase letters, numbers, and single hyphens`);
+	}
+	if (skill.description.trim().length === 0) {
+		diagnostics.push(`${repositoryPath(skill.filePath)}: skill description is required`);
+	}
+	if (skill.description.length > maxDescriptionLength) {
+		diagnostics.push(`${repositoryPath(skill.filePath)}: skill description must be at most ${maxDescriptionLength} characters`);
+	}
+	return diagnostics;
+}
+
 function marginalLaunchCharacters(skill: Skill): number {
 	if (skill.disableModelInvocation) return 0;
 	const synthetic: Skill = {
@@ -68,6 +92,13 @@ const loaded = loadSkillsFromDir({ dir: skillsDirectory, source: "forge-profile"
 if (loaded.diagnostics.length > 0) {
 	for (const diagnostic of loaded.diagnostics) {
 		console.error(`${diagnostic.path}: ${diagnostic.message}`);
+	}
+	process.exit(1);
+}
+const skillStandardDiagnostics = loaded.skills.flatMap(standardDiagnostics);
+if (skillStandardDiagnostics.length > 0) {
+	for (const diagnostic of skillStandardDiagnostics) {
+		console.error(diagnostic);
 	}
 	process.exit(1);
 }

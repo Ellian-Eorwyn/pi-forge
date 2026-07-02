@@ -17,7 +17,7 @@ for ($i = 0; $i -lt $args.Count; $i++) {
 }
 
 if (-not (Test-Path (Join-Path $ScriptDir ".git"))) {
-    Write-Error "pi-forge update requires a git checkout: $ScriptDir"
+    Write-Error "This legacy updater requires a git checkout: $ScriptDir. Use the installed pi-forge-update package command instead."
     exit 1
 }
 

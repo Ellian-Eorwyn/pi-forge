@@ -7,6 +7,8 @@ import {
 	mkdtempSync,
 	mkdirSync,
 	readFileSync,
+	readlinkSync,
+	realpathSync,
 	rmSync,
 	symlinkSync,
 	writeFileSync,
@@ -303,13 +305,17 @@ test("worker cancellation terminates the child process", async () => {
 
 function makeFakeInstallSource(source) {
 	mkdirSync(join(source, "scripts"), { recursive: true });
-	mkdirSync(join(source, "forge"), { recursive: true });
+	mkdirSync(join(source, "forge", "scripts"), { recursive: true });
 	mkdirSync(join(source, "packages", "coding-agent", "dist"), { recursive: true });
-	for (const script of ["pi-forge-install.sh", "configure-pi-forge.mjs", "pi-forge-run.sh", "pi-forge-mcp-run.sh"]) {
+	for (const script of ["pi-forge-install.sh", "pi-forge-run.sh", "pi-forge-mcp-run.sh"]) {
 		const target = join(source, "scripts", script);
 		writeFileSync(target, readFileSync(join(repositoryRoot, "scripts", script), "utf8"));
 		chmodSync(target, 0o755);
 	}
+	writeFileSync(
+		join(source, "forge", "scripts", "configure-pi-forge.mjs"),
+		readFileSync(join(repositoryRoot, "forge", "scripts", "configure-pi-forge.mjs"), "utf8"),
+	);
 	writeFileSync(join(source, "package.json"), "{}\n");
 	writeFileSync(join(source, "forge", "AGENTS.md"), "# Agent\n");
 	writeFileSync(
@@ -325,17 +331,67 @@ function makeFakeInstallSource(source) {
 	chmodSync(join(source, "scripts", "pi-forge-mcp-server.mjs"), 0o755);
 }
 
+function makeFakePackageTarball(root) {
+	const packageRoot = join(root, "package-source");
+	mkdirSync(join(packageRoot, "bin"), { recursive: true });
+	mkdirSync(join(packageRoot, "scripts"), { recursive: true });
+	mkdirSync(join(packageRoot, "skills", "document-ingest"), { recursive: true });
+	writeFileSync(
+		join(packageRoot, "package.json"),
+		`${JSON.stringify({
+			name: "@ellian-eorwyn/pi-forge",
+			version: "0.0.0-test",
+			type: "module",
+			bin: {
+				"pi-forge": "bin/pi-forge.mjs",
+				"pi-forge-mcp": "bin/pi-forge-mcp.mjs",
+				"pi-forge-update": "bin/pi-forge-update.mjs",
+			},
+			files: ["AGENTS.md", "bin", "scripts", "skills"],
+		})}\n`,
+	);
+	writeFileSync(join(packageRoot, "AGENTS.md"), "# Fake Package Agent\n");
+	writeFileSync(
+		join(packageRoot, "scripts", "configure-pi-forge.mjs"),
+		readFileSync(join(repositoryRoot, "forge", "scripts", "configure-pi-forge.mjs"), "utf8"),
+	);
+	writeFileSync(
+		join(packageRoot, "bin", "pi-forge.mjs"),
+		"#!/usr/bin/env node\nimport { join } from 'node:path';\nconst home = process.env.PI_FORGE_HOME || join(process.env.HOME, '.pi-forge');\nconst agent = process.env.PI_CODING_AGENT_DIR || process.env.PI_FORGE_AGENT_DIR || join(home, 'agent');\nif (process.argv.includes('--print-agent-dir')) console.log(agent);\n",
+	);
+	writeFileSync(
+		join(packageRoot, "bin", "pi-forge-mcp.mjs"),
+		"#!/usr/bin/env node\nif (process.argv.includes('--help')) console.log('Usage: pi-forge-mcp');\nelse console.log(new URL('../skills/', import.meta.url).pathname);\n",
+	);
+	writeFileSync(join(packageRoot, "bin", "pi-forge-update.mjs"), "#!/usr/bin/env node\nconsole.log('updated');\n");
+	writeFileSync(
+		join(packageRoot, "skills", "document-ingest", "SKILL.md"),
+		"---\nname: document-ingest\ndescription: Test skill.\n---\n\n# Test\n",
+	);
+	for (const command of ["pi-forge.mjs", "pi-forge-mcp.mjs", "pi-forge-update.mjs"]) {
+		chmodSync(join(packageRoot, "bin", command), 0o755);
+	}
+	const npmCache = join(root, "npm-cache");
+	mkdirSync(npmCache);
+	const pack = spawnSync("npm", ["pack", "--json", "--pack-destination", root], {
+		cwd: packageRoot,
+		encoding: "utf8",
+		env: { ...process.env, npm_config_cache: npmCache },
+	});
+	assert.equal(pack.status, 0, pack.stderr);
+	return join(root, JSON.parse(pack.stdout)[0].filename);
+}
+
 function cleanPiForgeEnvironment() {
 	return Object.fromEntries(
 		Object.entries(process.env).filter(([key, value]) => value !== undefined && !key.startsWith("PI_FORGE_")),
 	);
 }
 
-test("installer exposes a usable MCP launcher", () => {
+test("installer exposes a usable MCP launcher from the npm package install", () => {
 	const root = workspace();
+	const tarball = makeFakePackageTarball(root);
 	const piForgeHome = join(root, ".pi-forge");
-	const source = join(piForgeHome, "repository");
-	makeFakeInstallSource(source);
 	const bin = join(piForgeHome, "bin");
 	const agent = join(piForgeHome, "agent");
 	const environment = cleanPiForgeEnvironment();
@@ -343,45 +399,53 @@ test("installer exposes a usable MCP launcher", () => {
 		"bash",
 		[
 			join(repositoryRoot, "scripts", "pi-forge-install.sh"),
-			"--source-dir",
-			source,
-			"--resources-only",
 		],
-		{ encoding: "utf8", env: { ...environment, HOME: root, SHELL: "/bin/zsh" } },
+		{
+			encoding: "utf8",
+			env: { ...environment, HOME: root, SHELL: "/bin/zsh", PI_FORGE_PACKAGE_SPEC: `file:${tarball}` },
+		},
 	);
 	assert.equal(install.status, 0, install.stderr);
 	const launcher = join(bin, "pi-forge-mcp");
+	const packageRoot = join(piForgeHome, "app", "node_modules", "@ellian-eorwyn", "pi-forge");
 	assert.equal(existsSync(join(bin, "pi-forge")), true);
 	assert.equal(existsSync(launcher), true);
 	assert.equal(existsSync(join(agent, "AGENTS.md")), true);
 	assert.equal(existsSync(join(agent, "sessions")), true);
+	assert.equal(existsSync(join(packageRoot, "skills", "document-ingest", "SKILL.md")), true);
+	assert.doesNotMatch(readlinkSync(launcher), /repository/);
 	assert.match(readFileSync(join(root, ".zprofile"), "utf8"), new RegExp(piForgeHome.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 	assert.match(install.stdout, new RegExp(`State: ${agent.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+	const settings = JSON.parse(readFileSync(join(agent, "settings.json"), "utf8"));
+	assert.equal(settings.packages[0], realpathSync(packageRoot));
 	const result = spawnSync(launcher, ["--help"], { encoding: "utf8", env: { ...environment, HOME: root, SHELL: "/bin/zsh" } });
 	assert.equal(result.status, 0, result.stderr);
 	assert.match(result.stdout, /Usage: pi-forge-mcp/);
-	assert.equal(existsSync(join(repositoryRoot, "integrations", "pi-forge-delegation", "SKILL.md")), true);
 });
 
-test("installer rejects checkout-linked source unless dev-link is explicit", () => {
+test("installer uses package install unless dev-link is explicit", () => {
 	const root = workspace();
+	const tarball = makeFakePackageTarball(root);
 	const source = join(root, "source");
 	makeFakeInstallSource(source);
 	const piForgeHome = join(root, ".pi-forge");
 	const agent = join(piForgeHome, "agent");
 	const environment = cleanPiForgeEnvironment();
-	const rejected = spawnSync(
+	const packageInstall = spawnSync(
 		"bash",
 		[
 			join(repositoryRoot, "scripts", "pi-forge-install.sh"),
 			"--source-dir",
 			source,
-			"--resources-only",
 		],
-		{ encoding: "utf8", env: { ...environment, HOME: root, SHELL: "/bin/zsh" } },
+		{
+			encoding: "utf8",
+			env: { ...environment, HOME: root, SHELL: "/bin/zsh", PI_FORGE_PACKAGE_SPEC: `file:${tarball}` },
+		},
 	);
-	assert.equal(rejected.status, 1);
-	assert.match(rejected.stderr, /Refusing split pi-forge install/);
+	assert.equal(packageInstall.status, 0, packageInstall.stderr);
+	assert.equal(existsSync(source), true);
+	assert.doesNotMatch(readlinkSync(join(piForgeHome, "bin", "pi-forge")), /source/);
 
 	const install = spawnSync(
 		"bash",
@@ -405,6 +469,7 @@ test("installer rejects checkout-linked source unless dev-link is explicit", () 
 
 test("installer moves legacy local-share state during default home install", () => {
 	const root = workspace();
+	const tarball = makeFakePackageTarball(root);
 	const dataHome = join(root, ".local", "share");
 	const oldHome = join(dataHome, "pi-forge");
 	const newHome = join(root, ".pi-forge");
@@ -425,17 +490,25 @@ test("installer moves legacy local-share state during default home install", () 
 		],
 		{
 			encoding: "utf8",
-			env: { ...cleanPiForgeEnvironment(), HOME: root, XDG_DATA_HOME: dataHome, SHELL: "/bin/zsh" },
+			env: {
+				...cleanPiForgeEnvironment(),
+				HOME: root,
+				XDG_DATA_HOME: dataHome,
+				SHELL: "/bin/zsh",
+				PI_FORGE_PACKAGE_SPEC: `file:${tarball}`,
+			},
 		},
 	);
 	assert.equal(install.status, 0, install.stderr);
 	assert.equal(existsSync(join(newHome, "agent", "auth.json")), true);
 	assert.equal(existsSync(join(newHome, "agent", "AGENTS.md")), true);
+	assert.equal(existsSync(join(newHome, "app", "node_modules", "@ellian-eorwyn", "pi-forge", "package.json")), true);
 	assert.equal(existsSync(oldHome), false);
 });
 
 test("installer migrates mistaken pi-vault install into pi-forge home", () => {
 	const root = workspace();
+	const tarball = makeFakePackageTarball(root);
 	const dataHome = join(root, ".local", "share");
 	const mistakenHome = join(dataHome, "pi-vault");
 	const newHome = join(root, ".pi-forge");
@@ -465,11 +538,18 @@ test("installer migrates mistaken pi-vault install into pi-forge home", () => {
 		],
 		{
 			encoding: "utf8",
-			env: { ...cleanPiForgeEnvironment(), HOME: root, XDG_DATA_HOME: dataHome, SHELL: "/bin/zsh" },
+			env: {
+				...cleanPiForgeEnvironment(),
+				HOME: root,
+				XDG_DATA_HOME: dataHome,
+				SHELL: "/bin/zsh",
+				PI_FORGE_PACKAGE_SPEC: `file:${tarball}`,
+			},
 		},
 	);
 	assert.equal(install.status, 0, install.stderr);
-	assert.equal(existsSync(join(newHome, "repository", "scripts", "pi-forge-install.sh")), true);
+	assert.equal(existsSync(join(newHome, "repository")), false);
+	assert.equal(existsSync(join(newHome, "app", "node_modules", "@ellian-eorwyn", "pi-forge", "package.json")), true);
 	assert.equal(existsSync(mistakenHome), false);
 	assert.equal(existsSync(join(newHome, "agent", "auth.json")), true);
 	assert.equal(existsSync(join(newHome, "agent", "AGENTS.md")), true);
@@ -485,6 +565,7 @@ test("installer migrates mistaken pi-vault install into pi-forge home", () => {
 
 test("installer migrates local-share pi-forge install into home pi-forge", () => {
 	const root = workspace();
+	const tarball = makeFakePackageTarball(root);
 	const dataHome = join(root, ".local", "share");
 	const oldHome = join(dataHome, "pi-forge");
 	const newHome = join(root, ".pi-forge");
@@ -504,44 +585,102 @@ test("installer migrates local-share pi-forge install into home pi-forge", () =>
 		],
 		{
 			encoding: "utf8",
-			env: { ...cleanPiForgeEnvironment(), HOME: root, XDG_DATA_HOME: dataHome, SHELL: "/bin/zsh" },
+			env: {
+				...cleanPiForgeEnvironment(),
+				HOME: root,
+				XDG_DATA_HOME: dataHome,
+				SHELL: "/bin/zsh",
+				PI_FORGE_PACKAGE_SPEC: `file:${tarball}`,
+			},
 		},
 	);
 	assert.equal(install.status, 0, install.stderr);
-	assert.equal(existsSync(join(newHome, "repository", "scripts", "pi-forge-install.sh")), true);
+	assert.equal(existsSync(join(newHome, "repository")), false);
+	assert.equal(existsSync(join(newHome, "app", "node_modules", "@ellian-eorwyn", "pi-forge", "package.json")), true);
 	assert.equal(existsSync(oldHome), false);
 	assert.equal(existsSync(join(newHome, "agent", "auth.json")), true);
 	assert.equal(existsSync(join(newHome, "bin", "pi-forge")), true);
 	assert.match(readFileSync(join(root, ".zprofile"), "utf8"), new RegExp(newHome.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
-test("uninstaller removes managed repository while preserving agent state", () => {
+test("legacy pi-forge-update migrates managed repository to package app", () => {
 	const root = workspace();
+	const tarball = makeFakePackageTarball(root);
 	const piForgeHome = join(root, ".pi-forge");
 	const source = join(piForgeHome, "repository");
+	const fakeBin = join(root, "fake-bin");
+	const gitLog = join(root, "git.log");
+	makeFakeInstallSource(source);
+	mkdirSync(join(source, ".git"));
+	mkdirSync(fakeBin);
+	writeFileSync(join(source, "update.sh"), readFileSync(join(repositoryRoot, "update.sh"), "utf8"));
+	chmodSync(join(source, "update.sh"), 0o755);
+	writeFileSync(
+		join(fakeBin, "git"),
+		`#!/usr/bin/env bash
+if [[ "$1" == "-C" ]]; then
+	shift 2
+fi
+case "$1" in
+	status) exit 0 ;;
+	rev-parse) printf 'old-head\\n'; exit 0 ;;
+	pull) printf 'pull\\n' >> "$GIT_LOG"; exit 0 ;;
+	*) printf 'unexpected git command: %s\\n' "$*" >&2; exit 2 ;;
+esac
+`,
+	);
+	chmodSync(join(fakeBin, "git"), 0o755);
+
+	const update = spawnSync(join(source, "update.sh"), [], {
+		encoding: "utf8",
+		env: {
+			...cleanPiForgeEnvironment(),
+			HOME: root,
+			GIT_LOG: gitLog,
+			PATH: `${fakeBin}:${process.env.PATH}`,
+			SHELL: "/bin/zsh",
+			PI_FORGE_PACKAGE_SPEC: `file:${tarball}`,
+		},
+	});
+	assert.equal(update.status, 0, update.stderr);
+	assert.equal(readFileSync(gitLog, "utf8"), "pull\n");
+	assert.equal(existsSync(source), false);
+	assert.equal(existsSync(join(piForgeHome, "app", "node_modules", "@ellian-eorwyn", "pi-forge", "package.json")), true);
+	assert.doesNotMatch(readlinkSync(join(piForgeHome, "bin", "pi-forge")), /repository/);
+});
+
+test("uninstaller removes managed app while preserving agent state", () => {
+	const root = workspace();
+	const piForgeHome = join(root, ".pi-forge");
+	const app = join(piForgeHome, "app");
+	const packageRoot = join(app, "node_modules", "@ellian-eorwyn", "pi-forge");
+	const npmBin = join(app, "node_modules", ".bin");
 	const bin = join(piForgeHome, "bin");
 	const agent = join(piForgeHome, "agent");
-	makeFakeInstallSource(source);
+	mkdirSync(packageRoot, { recursive: true });
+	mkdirSync(npmBin, { recursive: true });
 	mkdirSync(bin);
 	mkdirSync(agent);
-	writeFileSync(join(agent, ".pi-forge-profile-path"), `${join(source, "forge")}\n`);
+	writeFileSync(join(packageRoot, "package.json"), "{}\n");
+	writeFileSync(join(npmBin, "pi-forge"), "#!/usr/bin/env bash\n");
+	writeFileSync(join(npmBin, "pi-forge-mcp"), "#!/usr/bin/env bash\n");
+	writeFileSync(join(npmBin, "pi-forge-update"), "#!/usr/bin/env bash\n");
+	writeFileSync(join(agent, ".pi-forge-profile-path"), `${packageRoot}\n`);
 	writeFileSync(join(agent, "auth.json"), "{}\n");
-	symlinkSync(join(source, "scripts", "pi-forge-run.sh"), join(bin, "pi-forge"));
-	symlinkSync(join(source, "scripts", "pi-forge-mcp-run.sh"), join(bin, "pi-forge-mcp"));
-	symlinkSync(join(source, "update.sh"), join(bin, "pi-forge-update"));
+	symlinkSync(join(npmBin, "pi-forge"), join(bin, "pi-forge"));
+	symlinkSync(join(npmBin, "pi-forge-mcp"), join(bin, "pi-forge-mcp"));
+	symlinkSync(join(npmBin, "pi-forge-update"), join(bin, "pi-forge-update"));
 
 	const uninstall = spawnSync(
 		"bash",
 		[
 			join(repositoryRoot, "scripts", "pi-forge-uninstall.sh"),
-			"--source-dir",
-			source,
 			"--yes",
 		],
 		{ encoding: "utf8", env: { ...cleanPiForgeEnvironment(), HOME: root, SHELL: "/bin/zsh" } },
 	);
 	assert.equal(uninstall.status, 0, uninstall.stderr);
-	assert.equal(existsSync(source), false);
+	assert.equal(existsSync(app), false);
 	assert.equal(existsSync(join(bin, "pi-forge")), false);
 	assert.equal(existsSync(join(agent, "auth.json")), true);
 });

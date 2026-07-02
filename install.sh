@@ -16,35 +16,32 @@ while (($#)); do
 	shift
 done
 
-PI_FORGE_HOME="${PI_FORGE_HOME:-$HOME/.pi-forge}"
-INSTALL_DIR="${PI_FORGE_INSTALL_DIR:-$PI_FORGE_HOME}"
-if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/scripts/pi-forge-install.sh" && "$DEV_LINK" == true ]]; then
-	if ((${#ARGS[@]} > 0)); then
+if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/scripts/pi-forge-install.sh" ]]; then
+	if [[ "$DEV_LINK" == true ]]; then
 		exec "$SCRIPT_DIR/scripts/pi-forge-install.sh" --source-dir "$SCRIPT_DIR" --dev-link "${ARGS[@]}"
 	fi
-	exec "$SCRIPT_DIR/scripts/pi-forge-install.sh" --source-dir "$SCRIPT_DIR" --dev-link
+	exec "$SCRIPT_DIR/scripts/pi-forge-install.sh" "${ARGS[@]}"
 fi
-SOURCE_DIR="$INSTALL_DIR/repository"
 
-command -v git >/dev/null 2>&1 || { echo "pi-forge requires git." >&2; exit 1; }
+INSTALLER_URL="${PI_FORGE_INSTALLER_URL:-https://raw.githubusercontent.com/Ellian-Eorwyn/pi-forge/main/scripts/pi-forge-install.sh}"
+INSTALLER_PATH="$(mktemp "${TMPDIR:-/tmp}/pi-forge-install.XXXXXX")"
+cleanup() {
+	rm -f "$INSTALLER_PATH"
+}
+trap cleanup EXIT
 
-if [[ -n "${PI_FORGE_REPOSITORY:-}" ]]; then
-	REPOSITORY="$PI_FORGE_REPOSITORY"
-elif [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/scripts/pi-forge-install.sh" ]]; then
-	REPOSITORY="$(git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null || printf '%s' "$SCRIPT_DIR")"
+if command -v curl >/dev/null 2>&1; then
+	curl -fsSL "$INSTALLER_URL" -o "$INSTALLER_PATH"
+elif command -v wget >/dev/null 2>&1; then
+	wget -qO "$INSTALLER_PATH" "$INSTALLER_URL"
 else
-	REPOSITORY="https://github.com/Ellian-Eorwyn/pi-forge.git"
-fi
-
-if [[ -e "$SOURCE_DIR" ]]; then
-	echo "Install checkout already exists: $SOURCE_DIR" >&2
-	echo "Run $INSTALL_DIR/bin/pi-forge-update, or remove the checkout before reinstalling." >&2
+	echo "pi-forge install requires curl or wget to fetch the installer." >&2
 	exit 1
 fi
 
-mkdir -p "$INSTALL_DIR"
-git clone "$REPOSITORY" "$SOURCE_DIR"
-if ((${#ARGS[@]} > 0)); then
-	exec "$SOURCE_DIR/scripts/pi-forge-install.sh" --source-dir "$SOURCE_DIR" "${ARGS[@]}"
+chmod +x "$INSTALLER_PATH"
+if [[ "$DEV_LINK" == true ]]; then
+	echo "--dev-link requires running install.sh from a checkout." >&2
+	exit 1
 fi
-exec "$SOURCE_DIR/scripts/pi-forge-install.sh" --source-dir "$SOURCE_DIR"
+exec "$INSTALLER_PATH" "${ARGS[@]}"

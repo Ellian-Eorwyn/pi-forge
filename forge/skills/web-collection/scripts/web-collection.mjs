@@ -351,7 +351,7 @@ async function doctor(options) {
 	};
 	const remediation = [];
 	if (!tools.fetch.available) remediation.push("Node 22.19+ with global fetch is required.");
-	if (!tools.playwright.available) remediation.push("Install Playwright (bundled with pi-forge; run npm ci at the repository root).");
+	if (!tools.playwright.available) remediation.push("Install Playwright (bundled with pi-forge; run pi-forge-update to refresh the installed package).");
 	if (tools.playwright.available && !tools.chromium.available) {
 		remediation.push("Install the Chromium browser: node_modules/.bin/playwright install chromium.");
 	}

@@ -26,9 +26,8 @@ usage() {
 	cat <<'EOF'
 Usage: pi-forge-update [--resources-only]
 
-Updates the pi-forge checkout and installation. Profile-only mode updates
-managed instructions, skills, extensions, prompts, and themes without
-rebuilding the CLI.
+Migrates an existing clone-based pi-forge install to the npm package install.
+The clone is pulled once, then the package is installed into ~/.pi-forge/app.
 EOF
 }
 
@@ -42,7 +41,8 @@ while (($#)); do
 done
 
 if [[ ! -d "$SOURCE_DIR/.git" ]]; then
-	echo "pi-forge update requires a git checkout: $SOURCE_DIR" >&2
+	echo "This legacy updater requires a git checkout: $SOURCE_DIR" >&2
+	echo "Use the installed pi-forge-update package command instead." >&2
 	exit 1
 fi
 

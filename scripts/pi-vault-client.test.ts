@@ -3,12 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSy
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, test } from "node:test";
-import bridgeModule from "../forge/extensions/pi-vault-client.ts";
-
-const { default: piVaultClientExtension, loadVaultBridgeConfiguration } = bridgeModule as unknown as {
-	default: (pi: unknown) => void;
-	loadVaultBridgeConfiguration: (path?: string) => { command: string; vaultRoot: string; readRoots: string[] };
-};
+import piVaultClientExtension, { loadVaultBridgeConfiguration } from "../forge/extensions/pi-vault-client.ts";
 
 const workspaces: string[] = [];
 

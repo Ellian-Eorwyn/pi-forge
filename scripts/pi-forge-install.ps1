@@ -10,23 +10,75 @@ param(
     [switch]$ResourcesOnly
 )
 
-# Use environmental variables if missing
-$PiForgeHome = $env:PI_FORGE_HOME
+$PackageName = "@ellian-eorwyn/pi-forge"
+$DefaultPackageSpec = "$PackageName@latest"
 
-if ([string]::IsNullOrEmpty($SourceDir) -or -not (Test-Path (Join-Path $SourceDir "package.json"))) {
-    Write-Error "A valid -SourceDir is required and must contain package.json."
-    exit 1
-}
-
-$SourceDir = (Resolve-Path $SourceDir).ProviderPath
-
-if ([string]::IsNullOrEmpty($PiForgeHome)) {
-    if ((Split-Path $SourceDir -Leaf) -eq "repository") {
-        $PiForgeHome = Split-Path $SourceDir -Parent
+function Invoke-Checked {
+    param(
+        [string]$Command,
+        [string[]]$Arguments,
+        [string]$WorkingDirectory = ""
+    )
+    if ([string]::IsNullOrEmpty($WorkingDirectory)) {
+        & $Command @Arguments
     } else {
-        $PiForgeHome = Join-Path $HOME ".pi-forge"
+        & $Command @Arguments
+    }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Command failed: $Command $($Arguments -join ' ')"
+        exit $LASTEXITCODE
     }
 }
+
+function Write-Launcher {
+    param(
+        [string]$CommandName,
+        [string]$BinDir,
+        [string]$TargetDir
+    )
+    $cmdPath = Join-Path $BinDir "$CommandName.cmd"
+    $psPath = Join-Path $BinDir "$CommandName.ps1"
+    $targetCmd = Join-Path $TargetDir "$CommandName.cmd"
+    $targetPs = Join-Path $TargetDir "$CommandName.ps1"
+    "@ECHO off`r`n`"$targetCmd`" %*`r`n" | Out-File -FilePath $cmdPath -Encoding ASCII
+    "& `"$targetPs`" @args`n" | Out-File -FilePath $psPath -Encoding UTF8
+}
+
+function Write-ScriptLauncher {
+    param(
+        [string]$CommandName,
+        [string]$BinDir,
+        [string]$ScriptPath
+    )
+    $cmdPath = Join-Path $BinDir "$CommandName.cmd"
+    $psPath = Join-Path $BinDir "$CommandName.ps1"
+    "@powershell -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" %*`r`n" | Out-File -FilePath $cmdPath -Encoding ASCII
+    "& `"$ScriptPath`" @args`n" | Out-File -FilePath $psPath -Encoding UTF8
+}
+
+function Resolve-PackageRoot {
+    param([string]$AppDir)
+    $script = 'const { createRequire } = require("node:module"); const { dirname } = require("node:path"); const req = createRequire(process.cwd() + "/package.json"); console.log(dirname(req.resolve("@ellian-eorwyn/pi-forge/package.json")));'
+    Push-Location $AppDir
+    try {
+        $packageRoot = node -e $script
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($packageRoot)) {
+            Write-Error "Could not resolve installed pi-forge package."
+            exit 1
+        }
+        return $packageRoot.Trim()
+    } finally {
+        Pop-Location
+    }
+}
+
+$PiForgeHome = $env:PI_FORGE_HOME
+if ([string]::IsNullOrEmpty($PiForgeHome)) {
+    $PiForgeHome = Join-Path $HOME ".pi-forge"
+}
+
+$AppDir = $env:PI_FORGE_INSTALL_DIR
+if ([string]::IsNullOrEmpty($AppDir)) { $AppDir = Join-Path $PiForgeHome "app" }
 
 if ([string]::IsNullOrEmpty($BinDir)) {
     $BinDir = $env:PI_FORGE_BIN_DIR
@@ -40,8 +92,8 @@ if ([string]::IsNullOrEmpty($AgentDir)) {
 $NpmCacheDir = $env:PI_FORGE_NPM_CACHE
 if ([string]::IsNullOrEmpty($NpmCacheDir)) { $NpmCacheDir = Join-Path $AgentDir "npm-cache" }
 
-$PlaywrightBrowsersDir = $env:PI_FORGE_PLAYWRIGHT_BROWSERS
-if ([string]::IsNullOrEmpty($PlaywrightBrowsersDir)) { $PlaywrightBrowsersDir = Join-Path $AgentDir "playwright-browsers" }
+$PackageSpec = $env:PI_FORGE_PACKAGE_SPEC
+if ([string]::IsNullOrEmpty($PackageSpec)) { $PackageSpec = $DefaultPackageSpec }
 
 if (-not (Get-Command "node" -ErrorAction SilentlyContinue)) {
     Write-Error "pi-forge requires Node.js 22.19 or newer."
@@ -52,91 +104,69 @@ if (-not (Get-Command "npm" -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$nodeVerCheck = @'
-const [major, minor] = process.versions.node.split(".").map(Number);
-if (major < 22 || (major === 22 && minor < 19)) process.exit(1);
-'@
+$nodeVerCheck = 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 22 || (major === 22 && minor < 19)) process.exit(1);'
 node -e $nodeVerCheck
 if ($LASTEXITCODE -ne 0) {
     Write-Error "pi-forge requires Node.js 22.19 or newer."
     exit 1
 }
 
-$NeedsBuild = $true
-$NeedsInstall = $true
-$BuildRevisionFile = Join-Path $AgentDir ".pi-forge-build-revision"
-$CompareRevision = $OldHead
-
-if (Test-Path $BuildRevisionFile) {
-    $CompareRevision = Get-Content $BuildRevisionFile -Raw
-}
-
-if ($Update -and -not [string]::IsNullOrEmpty($CompareRevision) -and (Test-Path (Join-Path $SourceDir ".git"))) {
-    $ChangedFiles = git -C $SourceDir diff --name-only $CompareRevision HEAD
-    $CoreFiles = $ChangedFiles | Where-Object { $_ -match "^(packages/|package(-lock)?\.json$|tsconfig|scripts/)" -and $_ -notmatch "^scripts/(configure-pi-forge\.mjs|pi-forge-(install|run)\.ps1)$" }
-    
-    if (-not $CoreFiles) {
-        $NeedsBuild = $false
-        $NeedsInstall = $false
-    } elseif (-not ($CoreFiles | Where-Object { $_ -match "(^|/)package(-lock)?\.json$" })) {
-        $NeedsInstall = $false
-    }
-}
-
-if ($ResourcesOnly) {
-    $NeedsBuild = $false
-    $NeedsInstall = $false
-}
-
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 New-Item -ItemType Directory -Force -Path $AgentDir | Out-Null
+New-Item -ItemType Directory -Force -Path $NpmCacheDir | Out-Null
 
-if ($NeedsInstall) {
+if ($DevLink) {
+    if ([string]::IsNullOrEmpty($SourceDir) -or -not (Test-Path (Join-Path $SourceDir "package.json"))) {
+        Write-Error "A valid -SourceDir is required with -DevLink."
+        exit 1
+    }
+    $SourceDir = (Resolve-Path $SourceDir).ProviderPath
+    if (-not $ResourcesOnly) {
+        $env:npm_config_cache = $NpmCacheDir
+        Push-Location $SourceDir
+        try {
+            Invoke-Checked -Command "npm" -Arguments @("ci", "--ignore-scripts")
+            Invoke-Checked -Command "npm" -Arguments @("run", "build:install")
+        } finally {
+            Pop-Location
+        }
+    }
+    if (-not (Test-Path (Join-Path $SourceDir "packages\coding-agent\dist\cli.js"))) {
+        Write-Error "The pi-forge CLI is not built. Run install.ps1 -DevLink without -ResourcesOnly."
+        exit 1
+    }
+    Invoke-Checked -Command "node" -Arguments @((Join-Path $SourceDir "forge\scripts\configure-pi-forge.mjs"), $AgentDir, (Join-Path $SourceDir "forge"))
+    Write-ScriptLauncher "pi-forge" $BinDir (Join-Path $SourceDir "scripts\pi-forge-run.ps1")
+    Write-ScriptLauncher "pi-forge-mcp" $BinDir (Join-Path $SourceDir "scripts\pi-forge-mcp-run.ps1")
+    Write-ScriptLauncher "pi-forge-update" $BinDir (Join-Path $SourceDir "update.ps1")
+    $PackageRoot = Join-Path $SourceDir "forge"
+} else {
+    New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
+    $appPackageJson = Join-Path $AppDir "package.json"
+    if (-not (Test-Path $appPackageJson)) {
+        (@{ private = $true; dependencies = @{} } | ConvertTo-Json -Depth 4) + "`n" | Out-File -FilePath $appPackageJson -Encoding UTF8
+    }
     $env:npm_config_cache = $NpmCacheDir
-    $proc = Start-Process npm -ArgumentList "ci", "--ignore-scripts" -WorkingDirectory $SourceDir -NoNewWindow -Wait -PassThru
-    if ($proc.ExitCode -ne 0) { Write-Error "npm ci failed."; exit 1 }
+    Invoke-Checked -Command "npm" -Arguments @("--prefix", $AppDir, "install", "--omit=dev", "--ignore-scripts", $PackageSpec)
+	$PackageRoot = Resolve-PackageRoot $AppDir
+	Invoke-Checked -Command "node" -Arguments @((Join-Path $PackageRoot "scripts\configure-pi-forge.mjs"), $AgentDir, $PackageRoot)
+    Write-Launcher "pi-forge" $BinDir (Join-Path $AppDir "node_modules\.bin")
+    Write-Launcher "pi-forge-mcp" $BinDir (Join-Path $AppDir "node_modules\.bin")
+    Write-Launcher "pi-forge-update" $BinDir (Join-Path $AppDir "node_modules\.bin")
 
-    $playwrightBin = Join-Path $SourceDir "node_modules\.bin\playwright.cmd"
-    if (Test-Path $playwrightBin) {
-        $env:PLAYWRIGHT_BROWSERS_PATH = $PlaywrightBrowsersDir
-        $proc = Start-Process $playwrightBin -ArgumentList "install", "chromium" -WorkingDirectory $SourceDir -NoNewWindow -Wait -PassThru
-        if ($proc.ExitCode -ne 0) {
-            Write-Warning "Chromium download failed; web-collection rendered capture will be unavailable until 'playwright install chromium' succeeds."
+    if (-not [string]::IsNullOrEmpty($SourceDir)) {
+        $managedRepository = Join-Path $PiForgeHome "repository"
+        if ((Test-Path $managedRepository) -and ((Resolve-Path $managedRepository).ProviderPath -eq (Resolve-Path $SourceDir).ProviderPath)) {
+            Remove-Item -Path $managedRepository -Recurse -Force
         }
     }
 }
 
-if ($NeedsBuild) {
-    $proc = Start-Process npm -ArgumentList "run", "build:install" -WorkingDirectory $SourceDir -NoNewWindow -Wait -PassThru
-    if ($proc.ExitCode -ne 0) { Write-Error "Build failed."; exit 1 }
-
-    if (Test-Path (Join-Path $SourceDir ".git")) {
-        git -C $SourceDir rev-parse HEAD | Out-File -FilePath $BuildRevisionFile -Encoding utf8
-    }
-} elseif (-not (Test-Path (Join-Path $SourceDir "packages\coding-agent\dist\cli.js"))) {
-    Write-Error "The pi-forge CLI is not built. Run install.ps1 without -ResourcesOnly."
-    exit 1
-}
-
-$proc = Start-Process node -ArgumentList (Join-Path $SourceDir "scripts\configure-pi-forge.mjs"), $AgentDir, (Join-Path $SourceDir "forge") -WorkingDirectory $SourceDir -NoNewWindow -Wait -PassThru
-if ($proc.ExitCode -ne 0) { Write-Error "Configuration failed."; exit 1 }
-
-# Create launchers
-$runSh = Join-Path $SourceDir "scripts\pi-forge-run.ps1"
-$runMcpSh = Join-Path $SourceDir "scripts\pi-forge-mcp-run.ps1"
-$updateSh = Join-Path $SourceDir "update.ps1"
-
-# Generate wrapper .cmd scripts so users can just type `pi-forge` in cmd or powershell
-"@powershell -NoProfile -ExecutionPolicy Bypass -File `"$runSh`" %*" | Out-File -FilePath (Join-Path $BinDir "pi-forge.cmd") -Encoding ASCII
-"@powershell -NoProfile -ExecutionPolicy Bypass -File `"$runMcpSh`" %*" | Out-File -FilePath (Join-Path $BinDir "pi-forge-mcp.cmd") -Encoding ASCII
-"@powershell -NoProfile -ExecutionPolicy Bypass -File `"$updateSh`" %*" | Out-File -FilePath (Join-Path $BinDir "pi-forge-update.cmd") -Encoding ASCII
-
-# Modify Windows Path
 $PathUpdated = $false
 try {
     $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if (-not ($UserPath -split ';' | Where-Object { $_ -eq $BinDir })) {
-        $NewPath = $UserPath + ";" + $BinDir
+        $NewPath = if ([string]::IsNullOrEmpty($UserPath)) { $BinDir } else { $UserPath + ";" + $BinDir }
         [Environment]::SetEnvironmentVariable("Path", $NewPath, "User")
         $PathUpdated = $true
     }
@@ -149,6 +179,7 @@ Write-Host "  CLI: $(Join-Path $BinDir 'pi-forge.cmd')"
 Write-Host "  MCP: $(Join-Path $BinDir 'pi-forge-mcp.cmd')"
 Write-Host "  Updater: $(Join-Path $BinDir 'pi-forge-update.cmd')"
 Write-Host "  State: $AgentDir"
+Write-Host "  Package: $PackageRoot"
 
 if ($PathUpdated) {
     Write-Host "Added $BinDir to your User PATH. Open a new shell before running pi-forge."

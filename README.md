@@ -43,7 +43,7 @@ The `forge` profile provides agents with the following built-in skills:
 
 ## Installation & Setup
 
-pi-forge currently supports macOS, Linux, and Windows with Git, npm, and Node.js 22.19 or newer. Its `forge` profile, custom skills, and tools live in `forge/` and are installed alongside an isolated CLI without replacing an existing pi installation.
+pi-forge currently supports macOS, Linux, and Windows with npm and Node.js 22.19 or newer. New installs do not clone this repository. The installer installs the `@ellian-eorwyn/pi-forge` package into `~/.pi-forge/app`, writes stable launchers to `~/.pi-forge/bin`, and keeps credentials, settings, sessions, caches, and copied `AGENTS.md` under `~/.pi-forge/agent`.
 
 ### 1. Install
 From a new machine, run the following command in your terminal:
@@ -79,12 +79,12 @@ If you want to remove pi-forge:
 
 **macOS / Linux:**
 ```bash
-~/.pi-forge/repository/uninstall.sh
+curl -fsSL https://raw.githubusercontent.com/Ellian-Eorwyn/pi-forge/main/uninstall.sh | bash
 ```
 
 **Windows (PowerShell):**
 ```powershell
-~/.pi-forge/repository/uninstall.ps1
+Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://raw.githubusercontent.com/Ellian-Eorwyn/pi-forge/main/uninstall.ps1'))
 ```
 *To completely wipe all agent state and credentials along with the installation, run the uninstall script with `--purge-state` (macOS/Linux) or `-PurgeState` (Windows).*
 
@@ -111,6 +111,7 @@ To learn more about Pi:
 | **[@earendil-works/pi-agent-core](packages/agent)** | Agent runtime with tool calling and state management |
 | **[@earendil-works/pi-coding-agent](packages/coding-agent)** | Interactive coding agent CLI |
 | **[@earendil-works/pi-tui](packages/tui)** | Terminal UI library with differential rendering |
+| **[@ellian-eorwyn/pi-forge](forge)** | pi-forge launchers, skills, profile resources, and MCP bridge |
 
 For Slack/chat automation and workflows see [earendil-works/pi-chat](https://github.com/earendil-works/pi-chat).
 

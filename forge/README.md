@@ -1,6 +1,12 @@
-# forge profile
+# pi-forge
 
-This package contains the profile instructions, extensions, skills, prompts,
-and themes maintained by pi-forge. The installer registers this directory as a
-local Pi package and installs `AGENTS.md` as the isolated profile's managed
-global instructions.
+`@ellian-eorwyn/pi-forge` packages the pi-forge launchers, managed Pi profile,
+skills, prompts, themes, extensions, and MCP bridge.
+
+Installers place the package under `~/.pi-forge/app`, stable launchers under
+`~/.pi-forge/bin`, and agent state under `~/.pi-forge/agent`.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Ellian-Eorwyn/pi-forge/main/install.sh | bash
+pi-forge-update
+```

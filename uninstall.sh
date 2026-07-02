@@ -10,18 +10,21 @@ if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/scripts/pi-forge-uninstall.sh" ]]; the
 	exec "$SCRIPT_DIR/scripts/pi-forge-uninstall.sh" --source-dir "$SCRIPT_DIR" "$@"
 fi
 
-# When run detached from a checkout (for example piped from curl), fall back to
-# the standalone uninstaller logic with no source directory. It removes the
-# installed launchers and managed checkout and, with --purge-state, the agent
-# state. It never deletes a development checkout.
-PI_FORGE_HOME="${PI_FORGE_HOME:-$HOME/.pi-forge}"
-INSTALL_DIR="${PI_FORGE_INSTALL_DIR:-$PI_FORGE_HOME}"
-SOURCE_DIR="$INSTALL_DIR/repository"
+UNINSTALLER_URL="${PI_FORGE_UNINSTALLER_URL:-https://raw.githubusercontent.com/Ellian-Eorwyn/pi-forge/main/scripts/pi-forge-uninstall.sh}"
+UNINSTALLER_PATH="$(mktemp "${TMPDIR:-/tmp}/pi-forge-uninstall.XXXXXX")"
+cleanup() {
+	rm -f "$UNINSTALLER_PATH"
+}
+trap cleanup EXIT
 
-if [[ -f "$SOURCE_DIR/scripts/pi-forge-uninstall.sh" ]]; then
-	exec "$SOURCE_DIR/scripts/pi-forge-uninstall.sh" --source-dir "$SOURCE_DIR" "$@"
+if command -v curl >/dev/null 2>&1; then
+	curl -fsSL "$UNINSTALLER_URL" -o "$UNINSTALLER_PATH"
+elif command -v wget >/dev/null 2>&1; then
+	wget -qO "$UNINSTALLER_PATH" "$UNINSTALLER_URL"
+else
+	echo "pi-forge uninstall requires curl or wget to fetch the uninstaller." >&2
+	exit 1
 fi
 
-echo "Cannot locate pi-forge-uninstall.sh. Run it from a pi-forge checkout:" >&2
-echo "  ./uninstall.sh" >&2
-exit 1
+chmod +x "$UNINSTALLER_PATH"
+exec "$UNINSTALLER_PATH" "$@"

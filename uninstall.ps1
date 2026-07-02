@@ -11,23 +11,16 @@ if ($ScriptDir -and (Test-Path (Join-Path $ScriptDir "scripts\pi-forge-uninstall
     exit $LASTEXITCODE
 }
 
-$PiForgeHome = $env:PI_FORGE_HOME
-if ([string]::IsNullOrEmpty($PiForgeHome)) {
-    $PiForgeHome = Join-Path $HOME ".pi-forge"
+$uninstallerUrl = $env:PI_FORGE_UNINSTALLER_URL
+if ([string]::IsNullOrEmpty($uninstallerUrl)) {
+    $uninstallerUrl = "https://raw.githubusercontent.com/Ellian-Eorwyn/pi-forge/main/scripts/pi-forge-uninstall.ps1"
 }
+$uninstallerPath = Join-Path ([System.IO.Path]::GetTempPath()) ("pi-forge-uninstall-" + [System.Guid]::NewGuid().ToString("N") + ".ps1")
 
-$InstallDir = $env:PI_FORGE_INSTALL_DIR
-if ([string]::IsNullOrEmpty($InstallDir)) {
-    $InstallDir = $PiForgeHome
-}
-
-$SourceDir = Join-Path $InstallDir "repository"
-
-if (Test-Path (Join-Path $SourceDir "scripts\pi-forge-uninstall.ps1")) {
-    $uninstallScript = Join-Path $SourceDir "scripts\pi-forge-uninstall.ps1"
-    & $uninstallScript -SourceDir $SourceDir @args
+try {
+    Invoke-WebRequest -UseBasicParsing -Uri $uninstallerUrl -OutFile $uninstallerPath
+    & $uninstallerPath @args
     exit $LASTEXITCODE
+} finally {
+    Remove-Item -Path $uninstallerPath -Force -ErrorAction SilentlyContinue
 }
-
-Write-Error "Cannot locate pi-forge-uninstall.ps1. Run it from a pi-forge checkout:`n  .\uninstall.ps1"
-exit 1

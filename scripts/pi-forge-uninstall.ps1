@@ -33,7 +33,7 @@ if ([string]::IsNullOrEmpty($AgentDir)) {
 }
 if ([string]::IsNullOrEmpty($InstallDir)) {
     $InstallDir = $env:PI_FORGE_INSTALL_DIR
-    if ([string]::IsNullOrEmpty($InstallDir)) { $InstallDir = Join-Path $PiForgeHome "repository" }
+    if ([string]::IsNullOrEmpty($InstallDir)) { $InstallDir = Join-Path $PiForgeHome "app" }
 }
 
 $Launchers = @("pi-forge.cmd", "pi-forge-mcp.cmd", "pi-forge-update.cmd")
@@ -54,13 +54,20 @@ foreach ($name in $Launchers) {
 $RemoveInstallDir = $false
 if (Test-Path $InstallDir) {
     if (-not [string]::IsNullOrEmpty($SourceDir) -and (Resolve-Path $InstallDir).ProviderPath -eq $SourceDir) {
-        $Warnings += "Skipping managed checkout: it contains this checkout ($SourceDir)."
-    } elseif (Test-Path (Join-Path $InstallDir "scripts\pi-forge-install.ps1")) {
+        $Warnings += "Skipping managed app: it contains this checkout ($SourceDir)."
+    } elseif ((Test-Path (Join-Path $InstallDir "node_modules\@ellian-eorwyn\pi-forge\package.json")) -or (Test-Path (Join-Path $InstallDir "package.json"))) {
         $RemoveInstallDir = $true
-        $Planned += "Remove managed checkout: $InstallDir"
+        $Planned += "Remove managed app: $InstallDir"
     } else {
-        $Warnings += "Skipping $InstallDir: does not look like a managed pi-forge checkout."
+        $Warnings += "Skipping $InstallDir: does not look like a managed pi-forge app."
     }
+}
+
+$LegacyRepository = Join-Path $PiForgeHome "repository"
+$RemoveLegacyRepository = $false
+if ((Test-Path $LegacyRepository) -and (Test-Path (Join-Path $LegacyRepository "scripts\pi-forge-install.ps1"))) {
+    $RemoveLegacyRepository = $true
+    $Planned += "Remove legacy managed repository: $LegacyRepository"
 }
 
 # Evaluate Agent Dir
@@ -76,7 +83,7 @@ if ($PurgeState) {
     $Planned += "Preserve agent state: $AgentDir"
 }
 
-if ($LaunchersToRemove.Count -eq 0 -and -not $RemoveInstallDir -and -not $RemoveAgentDir) {
+if ($LaunchersToRemove.Count -eq 0 -and -not $RemoveInstallDir -and -not $RemoveLegacyRepository -and -not $RemoveAgentDir) {
     Write-Host "Nothing to uninstall."
     foreach ($w in $Warnings) { Write-Host "  - $w" }
     exit 0
@@ -112,6 +119,11 @@ foreach ($launcher in $LaunchersToRemove) {
 if ($RemoveInstallDir) {
     Remove-Item -Path $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
     Write-Host "Removed $InstallDir"
+}
+
+if ($RemoveLegacyRepository) {
+    Remove-Item -Path $LegacyRepository -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "Removed $LegacyRepository"
 }
 
 if ($RemoveAgentDir) {

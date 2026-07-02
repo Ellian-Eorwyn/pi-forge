@@ -1,30 +1,38 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+PACKAGE_NAME="@ellian-eorwyn/pi-forge"
+DEFAULT_PACKAGE_SPEC="$PACKAGE_NAME@latest"
+
 SOURCE_DIR=""
 OLD_HEAD=""
 UPDATE=false
 RESOURCES_ONLY=false
+DEV_LINK=false
 PI_FORGE_HOME="${PI_FORGE_HOME:-}"
+APP_DIR="${PI_FORGE_INSTALL_DIR:-}"
 BIN_DIR="${PI_FORGE_BIN_DIR:-}"
 AGENT_DIR="${PI_FORGE_AGENT_DIR:-}"
 NPM_CACHE_DIR="${PI_FORGE_NPM_CACHE:-}"
 PLAYWRIGHT_BROWSERS_DIR="${PI_FORGE_PLAYWRIGHT_BROWSERS:-}"
-DEV_LINK=false
+PACKAGE_SPEC="${PI_FORGE_PACKAGE_SPEC:-$DEFAULT_PACKAGE_SPEC}"
 PATH_PROFILE_UPDATED=""
 PATH_PROFILE_PATH=""
 
 usage() {
 	cat <<'EOF'
-Usage: scripts/pi-forge-install.sh --source-dir <path> [options]
+Usage: scripts/pi-forge-install.sh [options]
+
+Installs pi-forge from npm into ~/.pi-forge/app without cloning the repository.
 
 Options:
+  --source-dir <path>    Existing checkout used only for migration or --dev-link
   --bin-dir <path>       Launcher directory (default: $PI_FORGE_HOME/bin)
   --agent-dir <path>     Isolated pi-forge state directory (default: $PI_FORGE_HOME/agent)
   --dev-link             Link launchers and skills to the given source checkout
   --update               Update an existing installation
-  --old-head <commit>    Previous revision used to detect core changes
-  --resources-only       Update the profile without dependencies or a CLI rebuild
+  --old-head <commit>    Accepted for legacy migration compatibility
+  --resources-only       Accepted for update compatibility
 EOF
 }
 
@@ -155,97 +163,114 @@ ensure_path_profile() {
 	PATH_PROFILE_PATH="$profile_file"
 }
 
-migrate_default_install_home() {
-	[[ -z "${PI_FORGE_HOME:-}" && -z "${PI_FORGE_INSTALL_DIR:-}" ]] || return 0
-	local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
-	local install_home="$HOME/.pi-forge"
-	local previous_homes=("$data_home/pi-forge" "$data_home/pi-vault")
-	local moved_homes=()
-	local moved_sources=()
-	local previous_home
-
-	for previous_home in "${previous_homes[@]}"; do
-		local previous_source="$previous_home/repository"
-		[[ "$(canonical_existing "$SOURCE_DIR")" == "$(canonical_existing "$previous_source")" ]] || continue
-		if [[ -e "$install_home" && ! -d "$install_home" ]]; then
-			echo "Cannot migrate pi-forge install: target exists and is not a directory: $install_home" >&2
-			echo "Move it, or set PI_FORGE_HOME to choose a different install home." >&2
-			exit 1
-		fi
-		if [[ -e "$install_home/repository" ]]; then
-			echo "Cannot migrate pi-forge install: target repository already exists: $install_home/repository" >&2
-			echo "Move it, or set PI_FORGE_HOME to choose a different install home." >&2
-			exit 1
-		fi
-		mkdir -p "$install_home"
-		mv "$previous_source" "$install_home/repository"
-		SOURCE_DIR="$install_home/repository"
-		moved_homes+=("$previous_home")
-		moved_sources+=("$previous_source")
-	done
-
-	if [[ "$(canonical_existing "$SOURCE_DIR")" != "$(canonical_existing "$install_home/repository")" ]]; then
-		return 0
-	fi
-	PI_FORGE_HOME="$install_home"
-
-	if ((${#moved_homes[@]} > 0)); then
-		for previous_home in "${moved_homes[@]}"; do
-			if [[ "$(canonical_existing "$previous_home")" == "$(canonical_existing "$install_home")" ]]; then
-				continue
-			fi
-			if [[ -e "$previous_home" && ! -d "$previous_home" ]]; then
-				echo "Cannot migrate pi-forge install: previous install path exists and is not a directory: $previous_home" >&2
-				echo "Move it, or set PI_FORGE_HOME to choose a different install home." >&2
-				exit 1
-			fi
-			move_without_overwrite "$previous_home/agent" "$install_home/agent"
-			move_without_overwrite "$previous_home/transcription" "$install_home/transcription"
-			for old_source in "${moved_sources[@]}" "$previous_home/repository"; do
-				[[ -n "$old_source" ]] || continue
-				remove_legacy_launcher "$previous_home/bin/pi-forge" "$old_source"
-				remove_legacy_launcher "$previous_home/bin/pi-forge-mcp" "$old_source"
-				remove_legacy_launcher "$previous_home/bin/pi-forge-update" "$old_source"
-			done
-			rmdir "$previous_home/bin" 2>/dev/null || true
-			rmdir "$previous_home" 2>/dev/null || true
-		done
-	fi
-
-	local legacy_bin="$HOME/.local/bin"
-	if ((${#moved_sources[@]} > 0)); then
-		for old_source in "${moved_sources[@]}"; do
-			remove_legacy_launcher "$legacy_bin/pi-forge" "$old_source"
-			remove_legacy_launcher "$legacy_bin/pi-forge-mcp" "$old_source"
-			remove_legacy_launcher "$legacy_bin/pi-forge-update" "$old_source"
-		done
-	fi
-	for old_source in "$install_home/repository"; do
-		remove_legacy_launcher "$legacy_bin/pi-forge" "$old_source"
-		remove_legacy_launcher "$legacy_bin/pi-forge-mcp" "$old_source"
-		remove_legacy_launcher "$legacy_bin/pi-forge-update" "$old_source"
-	done
-}
-
 move_legacy_state_to_default_home() {
 	[[ -z "${PI_FORGE_INSTALL_DIR:-}" ]] || return 0
 	local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
 	local install_home="$HOME/.pi-forge"
-	local legacy_home="$data_home/pi-forge"
 	[[ "$(canonical_existing "$PI_FORGE_HOME")" == "$(canonical_existing "$install_home")" ]] || return 0
-	[[ "$(canonical_existing "$legacy_home")" != "$(canonical_existing "$install_home")" ]] || return 0
-	[[ -d "$legacy_home" ]] || return 0
+	local legacy_home
+	for legacy_home in "$data_home/pi-forge" "$data_home/pi-vault"; do
+		[[ "$(canonical_existing "$legacy_home")" != "$(canonical_existing "$install_home")" ]] || continue
+		[[ -d "$legacy_home" ]] || continue
+		move_without_overwrite "$legacy_home/agent" "$install_home/agent"
+		move_without_overwrite "$legacy_home/transcription" "$install_home/transcription"
+		remove_legacy_launcher "$legacy_home/bin/pi-forge" "$legacy_home/repository"
+		remove_legacy_launcher "$legacy_home/bin/pi-forge-mcp" "$legacy_home/repository"
+		remove_legacy_launcher "$legacy_home/bin/pi-forge-update" "$legacy_home/repository"
+		remove_legacy_launcher "$HOME/.local/bin/pi-forge" "$legacy_home/repository"
+		remove_legacy_launcher "$HOME/.local/bin/pi-forge-mcp" "$legacy_home/repository"
+		remove_legacy_launcher "$HOME/.local/bin/pi-forge-update" "$legacy_home/repository"
+		rmdir "$legacy_home/bin" 2>/dev/null || true
+		rmdir "$legacy_home" 2>/dev/null || true
+	done
+}
 
-	move_without_overwrite "$legacy_home/agent" "$install_home/agent"
-	move_without_overwrite "$legacy_home/transcription" "$install_home/transcription"
-	remove_legacy_launcher "$legacy_home/bin/pi-forge" "$legacy_home/repository"
-	remove_legacy_launcher "$legacy_home/bin/pi-forge-mcp" "$legacy_home/repository"
-	remove_legacy_launcher "$legacy_home/bin/pi-forge-update" "$legacy_home/repository"
-	remove_legacy_launcher "$HOME/.local/bin/pi-forge" "$legacy_home/repository"
-	remove_legacy_launcher "$HOME/.local/bin/pi-forge-mcp" "$legacy_home/repository"
-	remove_legacy_launcher "$HOME/.local/bin/pi-forge-update" "$legacy_home/repository"
-	rmdir "$legacy_home/bin" 2>/dev/null || true
-	rmdir "$legacy_home" 2>/dev/null || true
+require_node_runtime() {
+	command -v node >/dev/null 2>&1 || { echo "pi-forge requires Node.js 22.19 or newer." >&2; exit 1; }
+	command -v npm >/dev/null 2>&1 || { echo "pi-forge requires npm." >&2; exit 1; }
+	node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 22 || (major === 22 && minor < 19)) process.exit(1)' || {
+		echo "pi-forge requires Node.js 22.19 or newer; found $(node --version)." >&2
+		exit 1
+	}
+}
+
+ensure_app_project() {
+	mkdir -p "$APP_DIR"
+	if [[ ! -f "$APP_DIR/package.json" ]]; then
+		printf '{\n\t"private": true,\n\t"dependencies": {}\n}\n' >"$APP_DIR/package.json"
+	fi
+}
+
+resolve_installed_package_root() {
+	(cd "$APP_DIR" && node -e 'const { createRequire } = require("node:module"); const { dirname } = require("node:path"); const req = createRequire(process.cwd() + "/package.json"); console.log(dirname(req.resolve("@ellian-eorwyn/pi-forge/package.json")));')
+}
+
+install_launcher() {
+	local target="$1"
+	local launcher="$2"
+	if [[ -e "$launcher" && ! -L "$launcher" ]]; then
+		echo "Refusing to overwrite non-symlink launcher: $launcher" >&2
+		exit 1
+	fi
+	ln -sfn "$target" "$launcher"
+}
+
+install_package() {
+	mkdir -p "$BIN_DIR" "$AGENT_DIR" "$NPM_CACHE_DIR"
+	ensure_app_project
+	npm_config_cache="$NPM_CACHE_DIR" npm --prefix "$APP_DIR" install --omit=dev --ignore-scripts "$PACKAGE_SPEC"
+	local package_root
+	package_root="$(resolve_installed_package_root)"
+	node "$package_root/scripts/configure-pi-forge.mjs" "$AGENT_DIR" "$package_root"
+	install_launcher "$APP_DIR/node_modules/.bin/pi-forge" "$BIN_DIR/pi-forge"
+	install_launcher "$APP_DIR/node_modules/.bin/pi-forge-mcp" "$BIN_DIR/pi-forge-mcp"
+	install_launcher "$APP_DIR/node_modules/.bin/pi-forge-update" "$BIN_DIR/pi-forge-update"
+}
+
+install_dev_link() {
+	if [[ -z "$SOURCE_DIR" || ! -f "$SOURCE_DIR/package.json" ]]; then
+		echo "A valid --source-dir is required with --dev-link." >&2
+		exit 1
+	fi
+	SOURCE_DIR="$(cd "$SOURCE_DIR" && pwd)"
+	mkdir -p "$BIN_DIR" "$AGENT_DIR" "$NPM_CACHE_DIR"
+	if [[ "$RESOURCES_ONLY" != true ]]; then
+		npm_config_cache="$NPM_CACHE_DIR" npm --prefix "$SOURCE_DIR" ci --ignore-scripts
+		npm --prefix "$SOURCE_DIR" run build:install
+	fi
+	if [[ ! -f "$SOURCE_DIR/packages/coding-agent/dist/cli.js" ]]; then
+		echo "The pi-forge CLI is not built. Run install.sh --dev-link without --resources-only." >&2
+		exit 1
+	fi
+	node "$SOURCE_DIR/forge/scripts/configure-pi-forge.mjs" "$AGENT_DIR" "$SOURCE_DIR/forge"
+	install_launcher "$SOURCE_DIR/scripts/pi-forge-run.sh" "$BIN_DIR/pi-forge"
+	install_launcher "$SOURCE_DIR/scripts/pi-forge-mcp-run.sh" "$BIN_DIR/pi-forge-mcp"
+	install_launcher "$SOURCE_DIR/update.sh" "$BIN_DIR/pi-forge-update"
+}
+
+retire_managed_repository() {
+	[[ -n "$SOURCE_DIR" && "$DEV_LINK" != true ]] || return 0
+	local source_canon
+	source_canon="$(canonical_existing "$SOURCE_DIR")"
+	local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+	local managed_source
+	for managed_source in "$PI_FORGE_HOME/repository" "$data_home/pi-forge/repository" "$data_home/pi-vault/repository"; do
+		if [[ "$source_canon" == "$(canonical_existing "$managed_source")" && -d "$SOURCE_DIR" ]]; then
+			rm -rf "$SOURCE_DIR"
+			rmdir "$(dirname "$SOURCE_DIR")/bin" 2>/dev/null || true
+			rmdir "$(dirname "$SOURCE_DIR")" 2>/dev/null || true
+			return 0
+		fi
+	done
+	local source_parent
+	source_parent="$(dirname "$SOURCE_DIR")"
+	case "$(basename "$SOURCE_DIR"):$(basename "$source_parent")" in
+		repository:.pi-forge | repository:pi-forge | repository:pi-vault)
+			rm -rf "$SOURCE_DIR"
+			rmdir "$source_parent/bin" 2>/dev/null || true
+			rmdir "$source_parent" 2>/dev/null || true
+			;;
+	esac
 }
 
 while (($#)); do
@@ -263,95 +288,26 @@ while (($#)); do
 	shift
 done
 
-if [[ -z "$SOURCE_DIR" || ! -f "$SOURCE_DIR/package.json" ]]; then
-	echo "A valid --source-dir is required." >&2
-	exit 1
+if [[ -n "$SOURCE_DIR" ]]; then
+	SOURCE_DIR="$(cd "$SOURCE_DIR" && pwd)"
 fi
-
-SOURCE_DIR="$(cd "$SOURCE_DIR" && pwd)"
-migrate_default_install_home
-if [[ -z "$PI_FORGE_HOME" ]]; then
-	if [[ "$(basename "$SOURCE_DIR")" == "repository" ]]; then
-		PI_FORGE_HOME="$(cd "$SOURCE_DIR/.." && pwd)"
-	else
-		PI_FORGE_HOME="$HOME/.pi-forge"
-	fi
-fi
+PI_FORGE_HOME="${PI_FORGE_HOME:-$HOME/.pi-forge}"
+APP_DIR="${APP_DIR:-$PI_FORGE_HOME/app}"
 BIN_DIR="${BIN_DIR:-$PI_FORGE_HOME/bin}"
 AGENT_DIR="${AGENT_DIR:-$PI_FORGE_HOME/agent}"
 NPM_CACHE_DIR="${NPM_CACHE_DIR:-$AGENT_DIR/npm-cache}"
 PLAYWRIGHT_BROWSERS_DIR="${PLAYWRIGHT_BROWSERS_DIR:-$AGENT_DIR/playwright-browsers}"
 
-EXPECTED_SOURCE_DIR="$PI_FORGE_HOME/repository"
-if [[ "$DEV_LINK" != true && "$(canonical_existing "$SOURCE_DIR")" != "$(canonical_existing "$EXPECTED_SOURCE_DIR")" ]]; then
-	echo "Refusing split pi-forge install from source outside the install home: $SOURCE_DIR" >&2
-	echo "Install into $EXPECTED_SOURCE_DIR, or rerun with --dev-link for checkout-linked development mode." >&2
-	exit 1
-fi
+require_node_runtime
 move_legacy_state_to_default_home
 
-command -v node >/dev/null 2>&1 || { echo "pi-forge requires Node.js 22.19 or newer." >&2; exit 1; }
-command -v npm >/dev/null 2>&1 || { echo "pi-forge requires npm." >&2; exit 1; }
-
-node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 22 || (major === 22 && minor < 19)) process.exit(1)' || {
-	echo "pi-forge requires Node.js 22.19 or newer; found $(node --version)." >&2
-	exit 1
-}
-
-NEEDS_BUILD=true
-NEEDS_INSTALL=true
-BUILD_REVISION_FILE="$AGENT_DIR/.pi-forge-build-revision"
-COMPARE_REVISION="$OLD_HEAD"
-if [[ -f "$BUILD_REVISION_FILE" ]]; then
-	COMPARE_REVISION="$(<"$BUILD_REVISION_FILE")"
+if [[ "$DEV_LINK" == true ]]; then
+	install_dev_link
+else
+	install_package
+	retire_managed_repository
 fi
 
-if [[ "$UPDATE" == true && -n "$COMPARE_REVISION" && -d "$SOURCE_DIR/.git" ]]; then
-	CHANGED_FILES="$(git -C "$SOURCE_DIR" diff --name-only "$COMPARE_REVISION" HEAD)"
-	CORE_FILES="$(grep -E '^(packages/|package(-lock)?\.json$|tsconfig|scripts/)' <<<"$CHANGED_FILES" | grep -Ev '^scripts/(configure-pi-forge\.mjs|pi-forge-(install|run)\.sh)$' || true)"
-	if [[ -z "$CORE_FILES" ]]; then
-		NEEDS_BUILD=false
-		NEEDS_INSTALL=false
-	elif ! grep -Eq '(^|/)package(-lock)?\.json$' <<<"$CORE_FILES"; then
-		NEEDS_INSTALL=false
-	fi
-fi
-
-if [[ "$RESOURCES_ONLY" == true ]]; then
-	NEEDS_BUILD=false
-	NEEDS_INSTALL=false
-fi
-
-mkdir -p "$BIN_DIR" "$AGENT_DIR"
-
-if [[ "$NEEDS_INSTALL" == true ]]; then
-	npm_config_cache="$NPM_CACHE_DIR" npm --prefix "$SOURCE_DIR" ci --ignore-scripts
-	# npm ci runs with --ignore-scripts, so Playwright's browser download is
-	# skipped. Fetch Chromium explicitly for the web-collection skill's rendered
-	# capture. No system packages are installed (--with-deps is intentionally
-	# omitted); the skill's doctor reports remediation if the browser is missing.
-	if [[ -x "$SOURCE_DIR/node_modules/.bin/playwright" ]]; then
-		PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_DIR" "$SOURCE_DIR/node_modules/.bin/playwright" install chromium ||
-			echo "Warning: Chromium download failed; web-collection rendered capture will be unavailable until 'playwright install chromium' succeeds." >&2
-	fi
-fi
-
-if [[ "$NEEDS_BUILD" == true ]]; then
-	# Installation builds consume the committed generated model registries. The
-	# normal development/release build refreshes them from upstream APIs, which
-	# would dirty an installed Git checkout and make pi-forge-update refuse it.
-	npm --prefix "$SOURCE_DIR" run build:install
-	if [[ -d "$SOURCE_DIR/.git" ]]; then
-		git -C "$SOURCE_DIR" rev-parse HEAD >"$BUILD_REVISION_FILE"
-	fi
-elif [[ ! -f "$SOURCE_DIR/packages/coding-agent/dist/cli.js" ]]; then
-	echo "The pi-forge CLI is not built. Run install.sh without --resources-only." >&2
-	exit 1
-fi
-node "$SOURCE_DIR/scripts/configure-pi-forge.mjs" "$AGENT_DIR" "$SOURCE_DIR/forge"
-ln -sfn "$SOURCE_DIR/scripts/pi-forge-run.sh" "$BIN_DIR/pi-forge"
-ln -sfn "$SOURCE_DIR/scripts/pi-forge-mcp-run.sh" "$BIN_DIR/pi-forge-mcp"
-ln -sfn "$SOURCE_DIR/update.sh" "$BIN_DIR/pi-forge-update"
 ensure_path_profile "$BIN_DIR"
 
 echo "pi-forge is installed."
@@ -359,6 +315,11 @@ echo "  CLI: $BIN_DIR/pi-forge"
 echo "  MCP: $BIN_DIR/pi-forge-mcp"
 echo "  Updater: $BIN_DIR/pi-forge-update"
 echo "  State: $AGENT_DIR"
+if [[ "$DEV_LINK" == true ]]; then
+	echo "  Package: $SOURCE_DIR/forge"
+else
+	echo "  Package: $(resolve_installed_package_root)"
+fi
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
 	if [[ "$PATH_PROFILE_UPDATED" == "true" ]]; then
 		echo "Added $BIN_DIR to PATH in $PATH_PROFILE_PATH. Open a new shell before running pi-forge."

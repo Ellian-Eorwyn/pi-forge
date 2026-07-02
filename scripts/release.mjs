@@ -99,9 +99,11 @@ function bumpOrSetVersion(target) {
 function getChangelogs() {
 	const packagesDir = "packages";
 	const packages = readdirSync(packagesDir);
-	return packages
+	const packageChangelogs = packages
 		.map((pkg) => join(packagesDir, pkg, "CHANGELOG.md"))
 		.filter((path) => existsSync(path));
+	const forgeChangelog = join("forge", "CHANGELOG.md");
+	return existsSync(forgeChangelog) ? [...packageChangelogs, forgeChangelog] : packageChangelogs;
 }
 
 function updateChangelogsForRelease(version) {
