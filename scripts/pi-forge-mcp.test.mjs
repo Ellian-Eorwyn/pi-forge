@@ -308,7 +308,9 @@ function makeFakeInstallSource(source, version = "0.0.0-test") {
 	mkdirSync(join(source, "forge", "bin"), { recursive: true });
 	mkdirSync(join(source, "forge", "scripts"), { recursive: true });
 	mkdirSync(join(source, "forge", "skills", "document-ingest"), { recursive: true });
-	mkdirSync(join(source, "packages", "coding-agent", "dist"), { recursive: true });
+	for (const packageDir of ["ai", "agent", "tui", "coding-agent"]) {
+		mkdirSync(join(source, "packages", packageDir, "dist"), { recursive: true });
+	}
 	for (const script of ["pi-forge-install.sh", "pi-forge-run.sh", "pi-forge-mcp-run.sh"]) {
 		const target = join(source, "scripts", script);
 		writeFileSync(target, readFileSync(join(repositoryRoot, "scripts", script), "utf8"));
@@ -341,7 +343,7 @@ function makeFakeInstallSource(source, version = "0.0.0-test") {
 		"#!/usr/bin/env node\nif (process.argv.includes('--help')) console.log('Usage: pi-forge-mcp');\n",
 	);
 	writeFileSync(join(source, "forge", "bin", "pi-forge-update.mjs"), "#!/usr/bin/env node\nconsole.log('updated');\n");
-	writeFileSync(join(source, "package.json"), "{}\n");
+	writeFileSync(join(source, "package.json"), `${JSON.stringify({ private: true, workspaces: ["packages/*", "forge"] })}\n`);
 	writeFileSync(join(source, "forge", "AGENTS.md"), "# Agent\n");
 	writeFileSync(
 		join(source, "forge", "skills", "document-ingest", "SKILL.md"),
@@ -350,10 +352,104 @@ function makeFakeInstallSource(source, version = "0.0.0-test") {
 	for (const command of ["pi-forge.mjs", "pi-forge-mcp.mjs", "pi-forge-update.mjs"]) {
 		chmodSync(join(source, "forge", "bin", command), 0o755);
 	}
-	writeFileSync(
-		join(source, "packages", "coding-agent", "dist", "cli.js"),
-		"#!/usr/bin/env node\nif (process.argv.includes('--print-agent-dir')) console.log(process.env.PI_CODING_AGENT_DIR);\n",
-	);
+	const packageDefinitions = [
+		{
+			directory: "ai",
+			json: {
+				name: "@earendil-works/pi-ai",
+				version,
+				type: "module",
+				main: "./dist/index.js",
+				exports: {
+					".": "./dist/index.js",
+					"./base": "./dist/base.js",
+				},
+				files: ["dist"],
+			},
+			files: {
+				"dist/index.js": "export const version = '0.0.0-source-runtime';\n",
+				"dist/base.js": "export const base = true;\n",
+			},
+		},
+		{
+			directory: "agent",
+			json: {
+				name: "@earendil-works/pi-agent-core",
+				version,
+				type: "module",
+				main: "./dist/index.js",
+				exports: {
+					".": "./dist/index.js",
+				},
+				files: ["dist"],
+				dependencies: {
+					"@earendil-works/pi-ai": version,
+				},
+			},
+			files: {
+				"dist/index.js": "export const version = '0.0.0-source-runtime';\n",
+			},
+		},
+		{
+			directory: "tui",
+			json: {
+				name: "@earendil-works/pi-tui",
+				version,
+				type: "module",
+				main: "./dist/index.js",
+				files: ["dist"],
+			},
+			files: {
+				"dist/index.js": "export const version = '0.0.0-source-runtime';\n",
+			},
+		},
+		{
+			directory: "coding-agent",
+			json: {
+				name: "@earendil-works/pi-coding-agent",
+				version,
+				type: "module",
+				main: "./dist/index.js",
+				exports: {
+					".": "./dist/index.js",
+				},
+				bin: {
+					pi: "dist/cli.js",
+				},
+				files: ["dist", "npm-shrinkwrap.json"],
+				dependencies: {
+					"@earendil-works/pi-agent-core": version,
+					"@earendil-works/pi-ai": version,
+					"@earendil-works/pi-tui": version,
+				},
+			},
+			files: {
+				"dist/index.js": "export const version = '0.0.0-source-runtime';\n",
+				"dist/cli.js": "#!/usr/bin/env node\nif (process.argv.includes('--version')) console.log('0.0.0-source-runtime');\nif (process.argv.includes('--print-agent-dir')) console.log(process.env.PI_CODING_AGENT_DIR);\n",
+				"dist/source-runtime-marker.js": "export const packedFromSource = true;\n",
+				"npm-shrinkwrap.json": `${JSON.stringify({
+					name: "@earendil-works/pi-coding-agent",
+					version,
+					lockfileVersion: 3,
+					requires: true,
+					packages: {
+						"": {
+							name: "@earendil-works/pi-coding-agent",
+							version,
+						},
+					},
+				})}\n`,
+			},
+		},
+	];
+	for (const definition of packageDefinitions) {
+		const packageRoot = join(source, "packages", definition.directory);
+		writeFileSync(join(packageRoot, "package.json"), `${JSON.stringify(definition.json)}\n`);
+		for (const [relativePath, contents] of Object.entries(definition.files)) {
+			writeFileSync(join(packageRoot, relativePath), contents);
+		}
+	}
+	chmodSync(join(source, "packages", "coding-agent", "dist", "cli.js"), 0o755);
 	writeFileSync(join(source, "update.sh"), "#!/usr/bin/env bash\nexit 0\n");
 	chmodSync(join(source, "update.sh"), 0o755);
 	writeFileSync(
@@ -463,6 +559,42 @@ function makeSourceArchive(root, source) {
 	return archive;
 }
 
+function makeFakeNpmWrapper(root, sourceRootName) {
+	const fakeBin = join(root, "fake-bin");
+	const npmLog = join(root, "npm.log");
+	const realNpm = spawnSync("which", ["npm"], { encoding: "utf8" }).stdout.trim();
+	assert.notEqual(realNpm, "");
+	mkdirSync(fakeBin);
+	writeFileSync(
+		join(fakeBin, "npm"),
+		`#!/usr/bin/env bash
+printf '%s|%s\\n' "$PWD" "$*" >> "$NPM_LOG"
+target="$PWD"
+command="$1"
+subcommand="$2"
+if [[ "$1" == "--prefix" ]]; then
+	target="$2"
+	command="$3"
+	subcommand="$4"
+fi
+if [[ "$(basename "$target")" == "$SOURCE_ROOT_NAME" ]]; then
+	if [[ "$command" == "ci" ]]; then
+		exit 0
+	fi
+	if [[ "$command" == "run" && "$subcommand" == "build:install" ]]; then
+		exit 0
+	fi
+fi
+case " $* " in
+	*" @ellian-eorwyn/pi-forge@latest "*|*" @earendil-works/pi-coding-agent@latest "*) echo "npm error code E404" >&2; exit 1 ;;
+esac
+exec "$REAL_NPM" "$@"
+`,
+	);
+	chmodSync(join(fakeBin, "npm"), 0o755);
+	return { fakeBin, npmLog, realNpm };
+}
+
 function cleanPiForgeEnvironment() {
 	return Object.fromEntries(
 		Object.entries(process.env).filter(([key, value]) => value !== undefined && !key.startsWith("PI_FORGE_")),
@@ -542,22 +674,7 @@ test("installer uses the GitHub source archive when no package spec is configure
 	makeFakeInstallSource(source);
 	const sourceArchive = makeSourceArchive(root, source);
 	const piTarball = makeFakePiPackageTarball(root);
-	const fakeBin = join(root, "fake-bin");
-	const npmLog = join(root, "npm.log");
-	const realNpm = spawnSync("which", ["npm"], { encoding: "utf8" }).stdout.trim();
-	assert.notEqual(realNpm, "");
-	mkdirSync(fakeBin);
-	writeFileSync(
-		join(fakeBin, "npm"),
-		`#!/usr/bin/env bash
-printf '%s\\n' "$*" >> "$NPM_LOG"
-case " $* " in
-	*" @ellian-eorwyn/pi-forge@latest "*) echo "npm error code E404" >&2; exit 1 ;;
-esac
-exec "$REAL_NPM" "$@"
-`,
-	);
-	chmodSync(join(fakeBin, "npm"), 0o755);
+	const { fakeBin, npmLog, realNpm } = makeFakeNpmWrapper(root, basename(source));
 
 	const install = spawnSync("bash", [join(repositoryRoot, "scripts", "pi-forge-install.sh")], {
 		encoding: "utf8",
@@ -569,6 +686,7 @@ exec "$REAL_NPM" "$@"
 			PI_FORGE_PI_PACKAGE_SPEC: `file:${piTarball}`,
 			PI_FORGE_SOURCE_ARCHIVE_URL: `file://${sourceArchive}`,
 			REAL_NPM: realNpm,
+			SOURCE_ROOT_NAME: basename(source),
 			SHELL: "/bin/zsh",
 		},
 	});
@@ -583,6 +701,50 @@ exec "$REAL_NPM" "$@"
 	assert.match(npmCalls, /install --omit=dev --ignore-scripts file:/);
 });
 
+test("installer packs Pi runtime packages from the GitHub source archive by default", () => {
+	const root = workspace();
+	const source = join(root, "source");
+	makeFakeInstallSource(source);
+	const sourceArchive = makeSourceArchive(root, source);
+	const { fakeBin, npmLog, realNpm } = makeFakeNpmWrapper(root, basename(source));
+
+	const install = spawnSync("bash", [join(repositoryRoot, "scripts", "pi-forge-install.sh")], {
+		encoding: "utf8",
+		env: {
+			...cleanPiForgeEnvironment(),
+			HOME: root,
+			NPM_LOG: npmLog,
+			PATH: `${fakeBin}:${process.env.PATH}`,
+			PI_FORGE_SOURCE_ARCHIVE_URL: `file://${sourceArchive}`,
+			REAL_NPM: realNpm,
+			SOURCE_ROOT_NAME: basename(source),
+			SHELL: "/bin/zsh",
+		},
+	});
+	assert.equal(install.status, 0, install.stderr);
+	assert.match(install.stderr, /Installing pi-forge from file:/);
+	assert.match(install.stderr, /Installing Pi runtime packages from file:/);
+	const appRoot = join(root, ".pi-forge", "app");
+	const appPackage = JSON.parse(readFileSync(join(appRoot, "package.json"), "utf8"));
+	for (const packageName of [
+		"@earendil-works/pi-ai",
+		"@earendil-works/pi-agent-core",
+		"@earendil-works/pi-tui",
+		"@earendil-works/pi-coding-agent",
+	]) {
+		assert.match(appPackage.dependencies[packageName], /^file:/);
+	}
+	assert.equal(
+		existsSync(join(appRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "source-runtime-marker.js")),
+		true,
+	);
+	assert.equal(existsSync(join(appRoot, "node_modules", "@earendil-works", "pi-coding-agent", "npm-shrinkwrap.json")), false);
+	const npmCalls = readFileSync(npmLog, "utf8");
+	assert.match(npmCalls, /ci --ignore-scripts/);
+	assert.match(npmCalls, /run build:install/);
+	assert.doesNotMatch(npmCalls, /@earendil-works\/pi-coding-agent@latest/);
+});
+
 test("packaged updater refreshes pi-forge from the GitHub source archive by default", () => {
 	const root = workspace();
 	const initialTarball = makeFakePackageTarball(root);
@@ -590,6 +752,7 @@ test("packaged updater refreshes pi-forge from the GitHub source archive by defa
 	const updatedSource = join(root, "updated-source");
 	makeFakeInstallSource(updatedSource, "0.0.1-source");
 	const sourceArchive = makeSourceArchive(root, updatedSource);
+	const { fakeBin, npmLog, realNpm } = makeFakeNpmWrapper(root, basename(updatedSource));
 	const environment = cleanPiForgeEnvironment();
 	const install = spawnSync("bash", [join(repositoryRoot, "scripts", "pi-forge-install.sh")], {
 		encoding: "utf8",
@@ -608,17 +771,31 @@ test("packaged updater refreshes pi-forge from the GitHub source archive by defa
 		env: {
 			...environment,
 			HOME: root,
+			NPM_LOG: npmLog,
+			PATH: `${fakeBin}:${process.env.PATH}`,
+			REAL_NPM: realNpm,
 			SHELL: "/bin/zsh",
-			PI_FORGE_PI_PACKAGE_SPEC: `file:${piTarball}`,
 			PI_FORGE_SOURCE_ARCHIVE_URL: `file://${sourceArchive}`,
+			SOURCE_ROOT_NAME: basename(updatedSource),
 		},
 	});
 	assert.equal(update.status, 0, update.stderr);
 	assert.match(update.stderr, /pi-forge-update: installing pi-forge from file:/);
+	assert.match(update.stdout, /Pi package: runtime packages from file:/);
 	const packageJson = JSON.parse(
 		readFileSync(join(root, ".pi-forge", "app", "node_modules", "@ellian-eorwyn", "pi-forge", "package.json"), "utf8"),
 	);
 	assert.equal(packageJson.version, "0.0.1-source");
+	const appRoot = join(root, ".pi-forge", "app");
+	const appPackage = JSON.parse(readFileSync(join(appRoot, "package.json"), "utf8"));
+	assert.match(appPackage.dependencies["@earendil-works/pi-coding-agent"], /^file:/);
+	assert.equal(
+		existsSync(join(appRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "source-runtime-marker.js")),
+		true,
+	);
+	const npmCalls = readFileSync(npmLog, "utf8");
+	assert.match(npmCalls, /ci --ignore-scripts/);
+	assert.doesNotMatch(npmCalls, /@earendil-works\/pi-coding-agent@latest/);
 });
 
 test("installer uses package install unless dev-link is explicit", () => {

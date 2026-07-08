@@ -39,12 +39,13 @@ split layout. `PI_FORGE_NPM_CACHE` overrides the isolated npm cache under the
 agent directory. By default, the macOS/Linux installer downloads
 `PI_FORGE_SOURCE_ARCHIVE_URL` (default:
 `https://github.com/Ellian-Eorwyn/pi-forge/archive/refs/heads/main.tar.gz`),
-packs `forge/` locally, and installs that package into the npm app layout.
+packs `forge/` plus the bundled Pi runtime packages locally, and installs those
+packages into the npm app layout.
 `PI_FORGE_PACKAGE_SPEC` overrides that source archive package and can point at
 `file:<packed-tarball>` for tests and local release smoke tests, or at
 `@ellian-eorwyn/pi-forge@latest` if a registry package is intentionally used.
-`PI_FORGE_PI_PACKAGE_SPEC` overrides the Pi CLI package spec and defaults to
-`@earendil-works/pi-coding-agent@latest`.
+`PI_FORGE_PI_PACKAGE_SPEC` overrides the bundled Pi runtime package install;
+when unset, pi-forge packs the runtime packages from the same source archive.
 The installer adds `~/.pi-forge/bin` to the user profile/PATH when possible;
 open a new shell before relying on `pi-forge` from `PATH`.
 
@@ -60,11 +61,13 @@ pi-forge-update
 ```
 *(On Windows: `pi-forge-update.ps1` or just `pi-forge-update`)*
 
-The updater downloads the configured GitHub source archive for pi-forge, installs
-`PI_FORGE_PI_PACKAGE_SPEC` into `~/.pi-forge/app` with
-`npm install --omit=dev --ignore-scripts`, refreshes managed settings, and
-rewrites launchers. `PI_FORGE_PACKAGE_SPEC` overrides the GitHub source archive
-when set. Credentials, sessions, and unrelated settings are preserved. Existing
+The updater downloads the configured GitHub source archive, packs pi-forge plus
+the bundled Pi runtime packages locally, installs those tarballs into
+`~/.pi-forge/app` with `npm install --omit=dev --ignore-scripts`, refreshes
+managed settings, and rewrites launchers. `PI_FORGE_PACKAGE_SPEC` overrides the
+pi-forge package source when set; `PI_FORGE_PI_PACKAGE_SPEC` overrides the
+bundled runtime package source when set. Credentials, sessions, and unrelated
+settings are preserved. Existing
 clone-based installs run one final
 fast-forward-only Git pull, migrate to the npm app layout, then remove the
 managed `~/.pi-forge/repository` only after package installation and

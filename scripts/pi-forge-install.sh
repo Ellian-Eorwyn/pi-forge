@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PI_PACKAGE_NAME="@earendil-works/pi-coding-agent"
-DEFAULT_PI_PACKAGE_SPEC="$PI_PACKAGE_NAME@latest"
+DEFAULT_PI_PACKAGE_SPEC="GitHub source archive runtime packages"
 DEFAULT_SOURCE_ARCHIVE_URL="https://github.com/Ellian-Eorwyn/pi-forge/archive/refs/heads/main.tar.gz"
 
 SOURCE_DIR=""
@@ -17,6 +17,7 @@ AGENT_DIR="${PI_FORGE_AGENT_DIR:-}"
 NPM_CACHE_DIR="${PI_FORGE_NPM_CACHE:-}"
 PLAYWRIGHT_BROWSERS_DIR="${PI_FORGE_PLAYWRIGHT_BROWSERS:-}"
 SOURCE_ARCHIVE_URL="${PI_FORGE_SOURCE_ARCHIVE_URL:-$DEFAULT_SOURCE_ARCHIVE_URL}"
+SOURCE_ARCHIVE_CHECKOUT=""
 PACKAGE_SPEC_EXPLICIT=false
 if [[ -n "${PI_FORGE_PACKAGE_SPEC:-}" ]]; then
 	PACKAGE_SPEC="$PI_FORGE_PACKAGE_SPEC"
@@ -24,7 +25,7 @@ if [[ -n "${PI_FORGE_PACKAGE_SPEC:-}" ]]; then
 else
 	PACKAGE_SPEC=""
 fi
-PI_PACKAGE_SPEC="${PI_FORGE_PI_PACKAGE_SPEC:-$DEFAULT_PI_PACKAGE_SPEC}"
+PI_PACKAGE_SPEC="${PI_FORGE_PI_PACKAGE_SPEC:-}"
 PATH_PROFILE_UPDATED=""
 PATH_PROFILE_PATH=""
 TEMP_DIRS=()
@@ -55,8 +56,8 @@ Options:
 
 Environment:
   PI_FORGE_PACKAGE_SPEC      pi-forge package spec override (default: packed GitHub source archive)
-  PI_FORGE_PI_PACKAGE_SPEC   Pi CLI package spec (default: @earendil-works/pi-coding-agent@latest)
-  PI_FORGE_SOURCE_ARCHIVE_URL GitHub source archive used for default pi-forge installs
+  PI_FORGE_PI_PACKAGE_SPEC   Pi CLI package spec override (default: GitHub source archive runtime packages)
+  PI_FORGE_SOURCE_ARCHIVE_URL GitHub source archive used for default pi-forge and runtime installs
 EOF
 }
 
@@ -301,10 +302,56 @@ download_source_archive() {
 	printf '%s\n' "$source"
 }
 
+source_archive_checkout() {
+	if [[ -z "$SOURCE_ARCHIVE_CHECKOUT" ]]; then
+		SOURCE_ARCHIVE_CHECKOUT="$(download_source_archive)"
+	fi
+	printf '%s\n' "$SOURCE_ARCHIVE_CHECKOUT"
+}
+
 pack_source_archive_package_spec() {
 	local source
-	source="$(download_source_archive)"
+	source="$(source_archive_checkout)"
 	pack_local_package_spec "$source/forge"
+}
+
+build_source_runtime_packages() {
+	local source="$1"
+	npm_config_cache="$NPM_CACHE_DIR" npm --prefix "$source" ci --ignore-scripts >&2
+	npm_config_cache="$NPM_CACHE_DIR" npm --prefix "$source" run build:install >&2
+	rm -f "$source/packages/coding-agent/npm-shrinkwrap.json"
+}
+
+pack_source_runtime_package_specs() {
+	local source="$1"
+	build_source_runtime_packages "$source"
+	local package_dir
+	for package_dir in packages/ai packages/agent packages/tui packages/coding-agent; do
+		pack_local_package_spec "$source/$package_dir"
+	done
+}
+
+install_pi_runtime_packages() {
+	if [[ -n "$PI_PACKAGE_SPEC" ]]; then
+		npm_config_cache="$NPM_CACHE_DIR" npm --prefix "$APP_DIR" install --omit=dev --ignore-scripts "$PI_PACKAGE_SPEC"
+		return 0
+	fi
+	local source
+	source="$(source_archive_checkout)"
+	echo "Installing Pi runtime packages from $SOURCE_ARCHIVE_URL." >&2
+	local package_specs_output
+	package_specs_output="$(pack_source_runtime_package_specs "$source")"
+	local pi_package_specs=()
+	local package_spec
+	while IFS= read -r package_spec; do
+		[[ -n "$package_spec" ]] || continue
+		pi_package_specs+=("$package_spec")
+	done <<<"$package_specs_output"
+	if [[ ${#pi_package_specs[@]} -eq 0 ]]; then
+		echo "No Pi runtime packages were packed from $SOURCE_ARCHIVE_URL." >&2
+		exit 1
+	fi
+	npm_config_cache="$NPM_CACHE_DIR" npm --prefix "$APP_DIR" install --omit=dev --ignore-scripts "${pi_package_specs[@]}"
 }
 
 install_launcher() {
@@ -326,7 +373,7 @@ install_package() {
 		install_spec="$(pack_source_archive_package_spec)"
 	fi
 	npm_config_cache="$NPM_CACHE_DIR" npm --prefix "$APP_DIR" install --omit=dev --ignore-scripts "$install_spec"
-	npm_config_cache="$NPM_CACHE_DIR" npm --prefix "$APP_DIR" install --omit=dev --ignore-scripts "$PI_PACKAGE_SPEC"
+	install_pi_runtime_packages
 	local package_root
 	package_root="$(resolve_installed_package_root)"
 	node "$package_root/scripts/configure-pi-forge.mjs" "$AGENT_DIR" "$package_root"

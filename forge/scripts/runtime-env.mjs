@@ -1,14 +1,25 @@
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+	copyFileSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const PACKAGE_NAME = "@ellian-eorwyn/pi-forge";
 export const PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
-export const DEFAULT_PI_PACKAGE_SPEC = `${PI_PACKAGE_NAME}@latest`;
+export const DEFAULT_PI_PACKAGE_SPEC = "GitHub source archive runtime packages";
 export const DEFAULT_SOURCE_ARCHIVE_URL = "https://github.com/Ellian-Eorwyn/pi-forge/archive/refs/heads/main.tar.gz";
+const SOURCE_RUNTIME_PACKAGE_DIRS = ["packages/ai", "packages/agent", "packages/tui", "packages/coding-agent"];
 
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 export const PACKAGE_ROOT = resolve(SCRIPT_DIRECTORY, "..");
@@ -89,10 +100,11 @@ export function ensureAppProject(appDir) {
 }
 
 function installAppPackage(packageSpec, options = {}) {
+	const packageSpecs = Array.isArray(packageSpec) ? packageSpec : [packageSpec];
 	const paths = getForgePaths();
 	ensureAppProject(paths.appDir);
 	mkdirSync(paths.npmCacheDir, { recursive: true });
-	runChecked("npm", ["--prefix", paths.appDir, "install", "--omit=dev", "--ignore-scripts", packageSpec], {
+	runChecked("npm", ["--prefix", paths.appDir, "install", "--omit=dev", "--ignore-scripts", ...packageSpecs], {
 		env: { ...process.env, npm_config_cache: paths.npmCacheDir },
 		stdio: options.stdio,
 	});
@@ -104,7 +116,10 @@ export function installConfiguredPackage(packageSpec = process.env.PI_FORGE_PACK
 	return resolveInstalledPackageRoot(paths.appDir);
 }
 
-export function installConfiguredPiPackage(piPackageSpec = process.env.PI_FORGE_PI_PACKAGE_SPEC || DEFAULT_PI_PACKAGE_SPEC, options = {}) {
+export function installConfiguredPiPackage(
+	piPackageSpec = process.env.PI_FORGE_PI_PACKAGE_SPEC || packSourceArchivePiPackageSpecs(),
+	options = {},
+) {
 	installAppPackage(piPackageSpec, options);
 }
 
@@ -135,6 +150,21 @@ function downloadFile(url, outputPath) {
 }
 
 export function packSourceArchivePackageSpec(sourceArchiveUrl = process.env.PI_FORGE_SOURCE_ARCHIVE_URL || DEFAULT_SOURCE_ARCHIVE_URL) {
+	return withSourceArchive(sourceArchiveUrl, (sourceRoot) => packPackageDirectory(join(sourceRoot, "forge")));
+}
+
+export function packSourceArchivePackageSpecs(sourceArchiveUrl = process.env.PI_FORGE_SOURCE_ARCHIVE_URL || DEFAULT_SOURCE_ARCHIVE_URL) {
+	return withSourceArchive(sourceArchiveUrl, (sourceRoot) => ({
+		forgePackageSpec: packPackageDirectory(join(sourceRoot, "forge")),
+		piPackageSpecs: packSourceRuntimePackageSpecs(sourceRoot),
+	}));
+}
+
+export function packSourceArchivePiPackageSpecs(sourceArchiveUrl = process.env.PI_FORGE_SOURCE_ARCHIVE_URL || DEFAULT_SOURCE_ARCHIVE_URL) {
+	return withSourceArchive(sourceArchiveUrl, (sourceRoot) => packSourceRuntimePackageSpecs(sourceRoot));
+}
+
+function withSourceArchive(sourceArchiveUrl, callback) {
 	const tempDir = mkdtempSync(join(tmpdir(), "pi-forge-source-"));
 	try {
 		const archivePath = join(tempDir, "pi-forge.tar.gz");
@@ -142,17 +172,40 @@ export function packSourceArchivePackageSpec(sourceArchiveUrl = process.env.PI_F
 		mkdirSync(extractDir);
 		downloadFile(sourceArchiveUrl, archivePath);
 		runChecked("tar", ["-xzf", archivePath, "-C", extractDir]);
-		const sourceRoot = readdirSync(extractDir, { withFileTypes: true })
-			.filter((entry) => entry.isDirectory())
-			.map((entry) => join(extractDir, entry.name))
-			.find((entry) => existsSync(join(entry, "forge", "package.json")));
-		if (!sourceRoot) {
-			throw new Error(`Source archive did not contain a pi-forge checkout: ${sourceArchiveUrl}`);
-		}
-		return packPackageDirectory(join(sourceRoot, "forge"));
+		const sourceRoot = findSourceRoot(extractDir, sourceArchiveUrl);
+		return callback(sourceRoot);
 	} finally {
 		rmSync(tempDir, { recursive: true, force: true });
 	}
+}
+
+function findSourceRoot(extractDir, sourceArchiveUrl) {
+	const sourceRoot = readdirSync(extractDir, { withFileTypes: true })
+		.filter((entry) => entry.isDirectory())
+		.map((entry) => join(extractDir, entry.name))
+		.find((entry) => existsSync(join(entry, "forge", "package.json")));
+	if (!sourceRoot) {
+		throw new Error(`Source archive did not contain a pi-forge checkout: ${sourceArchiveUrl}`);
+	}
+	return sourceRoot;
+}
+
+function packSourceRuntimePackageSpecs(sourceRoot) {
+	const paths = getForgePaths();
+	mkdirSync(paths.npmCacheDir, { recursive: true });
+	runChecked("npm", ["ci", "--ignore-scripts"], {
+		cwd: sourceRoot,
+		env: { ...process.env, npm_config_cache: paths.npmCacheDir },
+	});
+	runChecked("npm", ["run", "build:install"], {
+		cwd: sourceRoot,
+		env: { ...process.env, npm_config_cache: paths.npmCacheDir },
+	});
+	// Source-archive installs provide local workspace tarballs for these packages.
+	// Keeping the published shrinkwrap would force nested @earendil-works packages
+	// back to the npm registry and bypass the freshly built source packages.
+	rmSync(join(sourceRoot, "packages", "coding-agent", "npm-shrinkwrap.json"), { force: true });
+	return SOURCE_RUNTIME_PACKAGE_DIRS.map((packageDir) => packPackageDirectory(join(sourceRoot, packageDir)));
 }
 
 export function packPackageDirectory(packageRoot) {
