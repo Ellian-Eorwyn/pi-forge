@@ -11,7 +11,7 @@ import type {
 	ChatCompletionToolMessageParam,
 } from "openai/resources/chat/completions.js";
 import { registerApiProvider } from "../api-registry.ts";
-import { calculateCost, clampThinkingLevel } from "../models.ts";
+import { clampThinkingLevel } from "../models.ts";
 import type {
 	AssistantMessage,
 	CacheRetention,
@@ -36,6 +36,7 @@ import { headersToRecord } from "../utils/headers.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
+import { normalizeOpenAICompatibleTelemetry } from "../utils/stream-telemetry.ts";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
@@ -135,6 +136,25 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			},
 			stopReason: "stop",
 			timestamp: Date.now(),
+		};
+		const telemetryStartedAtMs = performance.now();
+		let telemetrySequence = 0;
+		let firstTokenAtMs: number | undefined;
+		const markFirstToken = () => {
+			firstTokenAtMs ??= performance.now();
+		};
+		const pushUsageTelemetry = (rawUsage: unknown, final = false) => {
+			const { usage, telemetry } = normalizeOpenAICompatibleTelemetry(rawUsage, model, {
+				sequence: ++telemetrySequence,
+				startedAtMs: telemetryStartedAtMs,
+				nowMs: performance.now(),
+				firstTokenAtMs,
+				final,
+				responseId: output.responseId,
+				responseModel: output.responseModel,
+			});
+			output.usage = usage;
+			stream.push({ type: "telemetry", telemetry, partial: output });
 		};
 
 		try {
@@ -276,17 +296,16 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				if (typeof chunk.model === "string" && chunk.model.length > 0 && chunk.model !== model.id) {
 					output.responseModel ||= chunk.model;
 				}
-				if (chunk.usage) {
-					output.usage = parseChunkUsage(chunk.usage, model);
-				}
-
 				const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
+				if (chunk.usage) {
+					pushUsageTelemetry(chunk.usage, !choice || !!choice.finish_reason);
+				}
 				if (!choice) continue;
 
 				// Fallback: some providers (e.g., Moonshot) return usage
 				// in choice.usage instead of the standard chunk.usage
 				if (!chunk.usage && (choice as any).usage) {
-					output.usage = parseChunkUsage((choice as any).usage, model);
+					pushUsageTelemetry((choice as any).usage, !!choice.finish_reason);
 				}
 
 				if (choice.finish_reason) {
@@ -306,6 +325,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					) {
 						const block = ensureTextBlock();
 						block.text += choice.delta.content;
+						markFirstToken();
 						stream.push({
 							type: "text_delta",
 							contentIndex: getContentIndex(block),
@@ -338,6 +358,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 									: foundReasoningField;
 							const block = ensureThinkingBlock(thinkingSignature);
 							block.thinking += delta;
+							markFirstToken();
 							stream.push({
 								type: "thinking_delta",
 								contentIndex: getContentIndex(block),
@@ -364,6 +385,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 								block.partialArgs = (block.partialArgs ?? "") + toolCall.function.arguments;
 								block.arguments = parseStreamingJson(block.partialArgs);
 							}
+							if (delta.length > 0) markFirstToken();
 							stream.push({
 								type: "toolcall_delta",
 								contentIndex: getContentIndex(block),
@@ -1030,42 +1052,6 @@ function convertTools(
 			...(compat.supportsStrictMode !== false && { strict: false }),
 		},
 	}));
-}
-
-function parseChunkUsage(
-	rawUsage: {
-		prompt_tokens?: number;
-		completion_tokens?: number;
-		prompt_cache_hit_tokens?: number;
-		prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
-	},
-	model: Model<"openai-completions">,
-): AssistantMessage["usage"] {
-	const promptTokens = rawUsage.prompt_tokens || 0;
-	const cacheReadTokens = rawUsage.prompt_tokens_details?.cached_tokens ?? rawUsage.prompt_cache_hit_tokens ?? 0;
-	const cacheWriteTokens = rawUsage.prompt_tokens_details?.cache_write_tokens || 0;
-
-	// Follow documented OpenAI/OpenRouter semantics: cached_tokens is cache-read
-	// tokens (hits). OpenAI does not document or emit cache_write_tokens, but
-	// OpenRouter-compatible providers can include it as a separate write count.
-	// OpenRouter's own provider/tests affirm the separate mapping:
-	// https://github.com/OpenRouterTeam/ai-sdk-provider/pull/409
-	// Do not subtract writes from cached_tokens, otherwise spec-compliant
-	// providers are under-reported. DS4 mirrors this contract too:
-	// https://github.com/antirez/ds4/pull/29
-	const input = Math.max(0, promptTokens - cacheReadTokens - cacheWriteTokens);
-	// OpenAI completion_tokens already includes reasoning_tokens.
-	const outputTokens = rawUsage.completion_tokens || 0;
-	const usage: AssistantMessage["usage"] = {
-		input,
-		output: outputTokens,
-		cacheRead: cacheReadTokens,
-		cacheWrite: cacheWriteTokens,
-		totalTokens: input + outputTokens + cacheReadTokens + cacheWriteTokens,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-	};
-	calculateCost(model, usage);
-	return usage;
 }
 
 function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | string): {

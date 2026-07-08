@@ -643,6 +643,7 @@ export class AgentSession {
 				type: "message_update",
 				message: event.message,
 				assistantMessageEvent: event.assistantMessageEvent,
+				telemetry: event.telemetry,
 			};
 			await this._extensionRunner.emit(extensionEvent);
 		} else if (event.type === "message_end") {

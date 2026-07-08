@@ -5,6 +5,7 @@ import type {
 	Message,
 	Model,
 	SimpleStreamOptions,
+	StreamTelemetry,
 	streamSimple,
 	TextContent,
 	Tool,
@@ -415,7 +416,12 @@ export type AgentEvent =
 	// Message lifecycle - emitted for user, assistant, and toolResult messages
 	| { type: "message_start"; message: AgentMessage }
 	// Only emitted for assistant messages during streaming
-	| { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
+	| {
+			type: "message_update";
+			message: AgentMessage;
+			assistantMessageEvent: AssistantMessageEvent;
+			telemetry?: StreamTelemetry;
+	  }
 	| { type: "message_end"; message: AgentMessage }
 	// Tool execution lifecycle
 	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }

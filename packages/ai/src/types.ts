@@ -271,6 +271,46 @@ export interface ToolCall {
 	thoughtSignature?: string; // Google-specific: opaque signature for reusing thought context
 }
 
+export interface StreamTelemetry {
+	schema: "pi.telemetry.v1";
+	sequence: number;
+	timestamp: number;
+	final?: boolean;
+	model?: string;
+	responseId?: string;
+	usage?: {
+		input?: number;
+		output?: number;
+		cacheRead?: number;
+		cacheWrite?: number;
+		totalTokens?: number;
+	};
+	details?: {
+		reasoningTokens?: number;
+		acceptedPredictionTokens?: number;
+		rejectedPredictionTokens?: number;
+	};
+	throughput?: {
+		elapsedMs?: number;
+		timeToFirstTokenMs?: number;
+		outputTokensPerSecond?: number;
+		acceptedTokensPerSecond?: number;
+		estimated?: boolean;
+	};
+	speculative?: {
+		method?: "mtp" | "dflash" | "speculative" | string;
+		draftTokens?: number;
+		acceptedTokens?: number;
+		rejectedTokens?: number;
+		acceptanceRate?: number;
+	};
+	provider?: {
+		api: string;
+		provider: string;
+		numericExtras?: Record<string, number>;
+	};
+}
+
 export interface Usage {
 	input: number;
 	output: number;
@@ -286,6 +326,10 @@ export interface Usage {
 		cacheWrite: number;
 		total: number;
 	};
+	details?: StreamTelemetry["details"];
+	throughput?: StreamTelemetry["throughput"];
+	speculative?: StreamTelemetry["speculative"];
+	providerExtras?: Record<string, number>;
 }
 
 export type StopReason = "stop" | "length" | "toolUse" | "error" | "aborted";
@@ -377,6 +421,7 @@ export type AssistantMessageEvent =
 	| { type: "toolcall_start"; contentIndex: number; partial: AssistantMessage }
 	| { type: "toolcall_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
 	| { type: "toolcall_end"; contentIndex: number; toolCall: ToolCall; partial: AssistantMessage }
+	| { type: "telemetry"; telemetry: StreamTelemetry; partial: AssistantMessage }
 	| { type: "done"; reason: Extract<StopReason, "stop" | "length" | "toolUse">; message: AssistantMessage }
 	| { type: "error"; reason: Extract<StopReason, "aborted" | "error">; error: AssistantMessage };
 

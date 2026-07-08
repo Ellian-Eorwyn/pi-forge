@@ -8,8 +8,11 @@ export { type ModelInfo, RpcClient, type RpcClientOptions, type RpcEventListener
 export { runRpcMode } from "./rpc/rpc-mode.ts";
 export type {
 	RpcCommand,
+	RpcEvent,
+	RpcExtensionError,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
+	RpcOutput,
 	RpcResponse,
 	RpcSessionState,
 } from "./rpc/rpc-types.ts";

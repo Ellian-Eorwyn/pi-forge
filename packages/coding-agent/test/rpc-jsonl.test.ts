@@ -11,6 +11,24 @@ describe("RPC JSONL framing", () => {
 		expect(JSON.parse(line.trim())).toEqual({ text: "a\u2028b\u2029c" });
 	});
 
+	test("serializes message_update telemetry for RPC consumers", () => {
+		const line = serializeJsonLine({
+			type: "message_update",
+			assistantMessageEvent: {
+				type: "telemetry",
+				telemetry: { schema: "pi.telemetry.v1", sequence: 1, timestamp: 123, usage: { output: 7 } },
+			},
+			telemetry: { schema: "pi.telemetry.v1", sequence: 1, timestamp: 123, usage: { output: 7 } },
+			message: { role: "assistant" },
+		});
+
+		const parsed = JSON.parse(line.trim());
+		expect(parsed.type).toBe("message_update");
+		expect(parsed.assistantMessageEvent.type).toBe("telemetry");
+		expect(parsed.telemetry.schema).toBe("pi.telemetry.v1");
+		expect(JSON.stringify(parsed.telemetry)).not.toContain("api-key");
+	});
+
 	test("splits on LF only and preserves U+2028/U+2029 inside payloads", async () => {
 		const lines: string[] = [];
 		const stream = Readable.from([serializeJsonLine({ text: "a\u2028b\u2029c" })]);

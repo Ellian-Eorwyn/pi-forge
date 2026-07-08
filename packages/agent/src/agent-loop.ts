@@ -328,6 +328,7 @@ async function streamAssistantResponse(
 			case "toolcall_start":
 			case "toolcall_delta":
 			case "toolcall_end":
+			case "telemetry":
 				if (partialMessage) {
 					partialMessage = event.partial;
 					context.messages[context.messages.length - 1] = partialMessage;
@@ -335,6 +336,7 @@ async function streamAssistantResponse(
 						type: "message_update",
 						assistantMessageEvent: event,
 						message: { ...partialMessage },
+						telemetry: event.type === "telemetry" ? event.telemetry : undefined,
 					});
 				}
 				break;

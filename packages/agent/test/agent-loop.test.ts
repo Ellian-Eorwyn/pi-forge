@@ -128,6 +128,52 @@ describe("agentLoop with AgentMessage", () => {
 		expect(eventTypes).toContain("agent_end");
 	});
 
+	it("forwards assistant telemetry as a message_update event", async () => {
+		const context: AgentContext = {
+			systemPrompt: "You are helpful.",
+			messages: [],
+			tools: [],
+		};
+
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+		};
+
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const partial = createAssistantMessage([{ type: "text", text: "" }]);
+				stream.push({ type: "start", partial });
+				stream.push({
+					type: "telemetry",
+					partial,
+					telemetry: {
+						schema: "pi.telemetry.v1",
+						sequence: 1,
+						timestamp: Date.now(),
+						usage: { output: 2 },
+					},
+				});
+				const finalMessage = createAssistantMessage([{ type: "text", text: "Hi" }]);
+				stream.push({ type: "done", reason: "stop", message: finalMessage });
+			});
+			return stream;
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("Hello")], context, config, undefined, streamFn);
+		for await (const event of stream) events.push(event);
+
+		const update = events.find((event) => event.type === "message_update");
+		expect(update?.type).toBe("message_update");
+		if (update?.type === "message_update") {
+			expect(update.assistantMessageEvent.type).toBe("telemetry");
+			expect(update.telemetry?.schema).toBe("pi.telemetry.v1");
+			expect(update.telemetry?.usage?.output).toBe(2);
+		}
+	});
+
 	it("should handle custom message types via convertToLlm", async () => {
 		// Create a custom message type
 		interface CustomNotification {

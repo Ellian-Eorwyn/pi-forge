@@ -26,6 +26,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
+import { buildTelemetryFromUsage } from "../utils/stream-telemetry.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
 
@@ -311,6 +312,28 @@ async function consumeChatStream(
 	const blocks = output.content;
 	const blockIndex = () => blocks.length - 1;
 	const toolBlocksByKey = new Map<string, number>();
+	const telemetryStartedAtMs = performance.now();
+	let telemetrySequence = 0;
+	let firstTokenAtMs: number | undefined;
+	const markFirstToken = () => {
+		firstTokenAtMs ??= performance.now();
+	};
+	const pushUsageTelemetry = (final = false) => {
+		if (output.usage.totalTokens === 0 && output.usage.output === 0 && output.usage.input === 0) return;
+		stream.push({
+			type: "telemetry",
+			telemetry: buildTelemetryFromUsage(output.usage, model, {
+				sequence: ++telemetrySequence,
+				startedAtMs: telemetryStartedAtMs,
+				nowMs: performance.now(),
+				firstTokenAtMs,
+				final,
+				responseId: output.responseId,
+				responseModel: output.responseModel,
+			}),
+			partial: output,
+		});
+	};
 
 	const finishCurrentBlock = (block?: typeof currentBlock) => {
 		if (!block) return;
@@ -351,6 +374,7 @@ async function consumeChatStream(
 				chunk.usage.totalTokens ||
 				output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 			calculateCost(model, output.usage);
+			pushUsageTelemetry(false);
 		}
 
 		const choice = chunk.choices[0];
@@ -373,6 +397,7 @@ async function consumeChatStream(
 						stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
 					}
 					currentBlock.text += textDelta;
+					markFirstToken();
 					stream.push({
 						type: "text_delta",
 						contentIndex: blockIndex(),
@@ -396,6 +421,7 @@ async function consumeChatStream(
 						stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
 					}
 					currentBlock.thinking += thinkingDelta;
+					markFirstToken();
 					stream.push({
 						type: "thinking_delta",
 						contentIndex: blockIndex(),
@@ -414,6 +440,7 @@ async function consumeChatStream(
 						stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
 					}
 					currentBlock.text += textDelta;
+					markFirstToken();
 					stream.push({
 						type: "text_delta",
 						contentIndex: blockIndex(),
@@ -464,6 +491,7 @@ async function consumeChatStream(
 					: JSON.stringify(toolCall.function.arguments || {});
 			block.partialArgs = (block.partialArgs || "") + argsDelta;
 			block.arguments = parseStreamingJson<Record<string, unknown>>(block.partialArgs);
+			if (argsDelta.length > 0) markFirstToken();
 			stream.push({
 				type: "toolcall_delta",
 				contentIndex: toolBlocksByKey.get(key)!,
@@ -474,6 +502,7 @@ async function consumeChatStream(
 	}
 
 	finishCurrentBlock(currentBlock);
+	pushUsageTelemetry(true);
 	for (const index of toolBlocksByKey.values()) {
 		const block = output.content[index];
 		if (block.type !== "toolCall") continue;

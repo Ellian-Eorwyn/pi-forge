@@ -12,7 +12,6 @@ import type {
 	ResponseReasoningItem,
 	ResponseStreamEvent,
 } from "openai/resources/responses/responses.js";
-import { calculateCost } from "../models.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -31,6 +30,7 @@ import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
+import { normalizeOpenAICompatibleTelemetry } from "../utils/stream-telemetry.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 // =============================================================================
@@ -296,6 +296,25 @@ export async function processResponsesStream<TApi extends Api>(
 	let currentBlock: ThinkingContent | TextContent | (ToolCall & { partialJson: string }) | null = null;
 	const blocks = output.content;
 	const blockIndex = () => blocks.length - 1;
+	const telemetryStartedAtMs = performance.now();
+	let telemetrySequence = 0;
+	let firstTokenAtMs: number | undefined;
+	const markFirstToken = () => {
+		firstTokenAtMs ??= performance.now();
+	};
+	const pushUsageTelemetry = (rawUsage: unknown, final = false) => {
+		const { usage, telemetry } = normalizeOpenAICompatibleTelemetry(rawUsage, model, {
+			sequence: ++telemetrySequence,
+			startedAtMs: telemetryStartedAtMs,
+			nowMs: performance.now(),
+			firstTokenAtMs,
+			final,
+			responseId: output.responseId,
+			responseModel: output.responseModel,
+		});
+		output.usage = usage;
+		stream.push({ type: "telemetry", telemetry, partial: output });
+	};
 
 	for await (const event of openaiStream) {
 		if (event.type === "response.created") {
@@ -336,6 +355,7 @@ export async function processResponsesStream<TApi extends Api>(
 				if (lastPart) {
 					currentBlock.thinking += event.delta;
 					lastPart.text += event.delta;
+					markFirstToken();
 					stream.push({
 						type: "thinking_delta",
 						contentIndex: blockIndex(),
@@ -351,6 +371,7 @@ export async function processResponsesStream<TApi extends Api>(
 				if (lastPart) {
 					currentBlock.thinking += "\n\n";
 					lastPart.text += "\n\n";
+					markFirstToken();
 					stream.push({
 						type: "thinking_delta",
 						contentIndex: blockIndex(),
@@ -362,6 +383,7 @@ export async function processResponsesStream<TApi extends Api>(
 		} else if (event.type === "response.reasoning_text.delta") {
 			if (currentItem?.type === "reasoning" && currentBlock?.type === "thinking") {
 				currentBlock.thinking += event.delta;
+				markFirstToken();
 				stream.push({
 					type: "thinking_delta",
 					contentIndex: blockIndex(),
@@ -386,6 +408,7 @@ export async function processResponsesStream<TApi extends Api>(
 				if (lastPart?.type === "output_text") {
 					currentBlock.text += event.delta;
 					lastPart.text += event.delta;
+					markFirstToken();
 					stream.push({
 						type: "text_delta",
 						contentIndex: blockIndex(),
@@ -403,6 +426,7 @@ export async function processResponsesStream<TApi extends Api>(
 				if (lastPart?.type === "refusal") {
 					currentBlock.text += event.delta;
 					lastPart.refusal += event.delta;
+					markFirstToken();
 					stream.push({
 						type: "text_delta",
 						contentIndex: blockIndex(),
@@ -415,6 +439,7 @@ export async function processResponsesStream<TApi extends Api>(
 			if (currentItem?.type === "function_call" && currentBlock?.type === "toolCall") {
 				currentBlock.partialJson += event.delta;
 				currentBlock.arguments = parseStreamingJson(currentBlock.partialJson);
+				if (event.delta.length > 0) markFirstToken();
 				stream.push({
 					type: "toolcall_delta",
 					contentIndex: blockIndex(),
@@ -431,6 +456,7 @@ export async function processResponsesStream<TApi extends Api>(
 				if (event.arguments.startsWith(previousPartialJson)) {
 					const delta = event.arguments.slice(previousPartialJson.length);
 					if (delta.length > 0) {
+						markFirstToken();
 						stream.push({
 							type: "toolcall_delta",
 							contentIndex: blockIndex(),
@@ -497,18 +523,8 @@ export async function processResponsesStream<TApi extends Api>(
 				output.responseId = response.id;
 			}
 			if (response?.usage) {
-				const cachedTokens = response.usage.input_tokens_details?.cached_tokens || 0;
-				output.usage = {
-					// OpenAI includes cached tokens in input_tokens, so subtract to get non-cached input
-					input: (response.usage.input_tokens || 0) - cachedTokens,
-					output: response.usage.output_tokens || 0,
-					cacheRead: cachedTokens,
-					cacheWrite: 0,
-					totalTokens: response.usage.total_tokens || 0,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				};
+				pushUsageTelemetry(response.usage, true);
 			}
-			calculateCost(model, output.usage);
 			if (options?.applyServiceTierPricing) {
 				const serviceTier = options.resolveServiceTier
 					? options.resolveServiceTier(response?.service_tier, options.serviceTier)

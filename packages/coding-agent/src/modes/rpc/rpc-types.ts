@@ -7,7 +7,7 @@
 
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Model } from "@earendil-works/pi-ai";
-import type { SessionStats } from "../../core/agent-session.ts";
+import type { AgentSessionEvent, SessionStats } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
@@ -204,6 +204,23 @@ export type RpcResponse =
 
 	// Error response (any command can fail)
 	| { id?: string; type: "response"; command: string; success: false; error: string };
+
+// ============================================================================
+// RPC Events (stdout)
+// ============================================================================
+
+/** Streamed session event emitted on stdout. */
+export type RpcEvent = AgentSessionEvent;
+
+/** Emitted when an extension event handler fails. */
+export interface RpcExtensionError {
+	type: "extension_error";
+	extensionPath: string;
+	event: string;
+	error: string;
+}
+
+export type RpcOutput = RpcResponse | RpcEvent | RpcExtensionUIRequest | RpcExtensionError;
 
 // ============================================================================
 // Extension UI Events (stdout)

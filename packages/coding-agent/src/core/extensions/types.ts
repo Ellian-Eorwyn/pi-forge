@@ -25,6 +25,7 @@ import type {
 	OAuthCredentials,
 	OAuthLoginCallbacks,
 	SimpleStreamOptions,
+	StreamTelemetry,
 	TextContent,
 	ToolResultMessage,
 } from "@earendil-works/pi-ai";
@@ -703,6 +704,7 @@ export interface MessageUpdateEvent {
 	type: "message_update";
 	message: AgentMessage;
 	assistantMessageEvent: AssistantMessageEvent;
+	telemetry?: StreamTelemetry;
 }
 
 /** Fired when a message ends */

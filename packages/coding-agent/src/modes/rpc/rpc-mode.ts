@@ -32,6 +32,7 @@ import type {
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
+	RpcOutput,
 	RpcResponse,
 	RpcSessionState,
 	RpcSlashCommand,
@@ -40,8 +41,11 @@ import type {
 // Re-export types for consumers
 export type {
 	RpcCommand,
+	RpcEvent,
+	RpcExtensionError,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
+	RpcOutput,
 	RpcResponse,
 	RpcSessionState,
 } from "./rpc-types.ts";
@@ -56,7 +60,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	let unsubscribe: (() => void) | undefined;
 	let unsubscribeBackpressure: (() => void) | undefined;
 
-	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
+	const output = (obj: RpcOutput) => {
 		writeRawStdout(serializeJsonLine(obj));
 	};
 

@@ -13,6 +13,7 @@ import {
 	parseStreamingJson,
 	type SimpleStreamOptions,
 	type StopReason,
+	type StreamTelemetry,
 	type ToolCall,
 } from "@earendil-works/pi-ai/base";
 
@@ -44,6 +45,7 @@ export type ProxyAssistantMessageEvent =
 	| { type: "toolcall_start"; contentIndex: number; id: string; toolName: string }
 	| { type: "toolcall_delta"; contentIndex: number; delta: string }
 	| { type: "toolcall_end"; contentIndex: number }
+	| { type: "telemetry"; telemetry: StreamTelemetry }
 	| {
 			type: "done";
 			reason: Extract<StopReason, "stop" | "length" | "toolUse">;
@@ -346,6 +348,9 @@ function processProxyEvent(
 			}
 			return undefined;
 		}
+
+		case "telemetry":
+			return { type: "telemetry", telemetry: proxyEvent.telemetry, partial };
 
 		case "done":
 			partial.stopReason = proxyEvent.reason;
