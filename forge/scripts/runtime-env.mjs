@@ -19,6 +19,7 @@ export const PACKAGE_NAME = "@ellian-eorwyn/pi-forge";
 export const PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
 export const DEFAULT_PI_PACKAGE_SPEC = "GitHub source archive runtime packages";
 export const DEFAULT_SOURCE_ARCHIVE_URL = "https://github.com/Ellian-Eorwyn/pi-forge/archive/refs/heads/main.tar.gz";
+export const DEFAULT_UPSTREAM_SOURCE_ARCHIVE_URL = "https://github.com/earendil-works/pi/archive/refs/heads/main.tar.gz";
 const SOURCE_RUNTIME_PACKAGE_DIRS = ["packages/ai", "packages/agent", "packages/tui", "packages/coding-agent"];
 
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url));
@@ -153,14 +154,23 @@ export function packSourceArchivePackageSpec(sourceArchiveUrl = process.env.PI_F
 	return withSourceArchive(sourceArchiveUrl, (sourceRoot) => packPackageDirectory(join(sourceRoot, "forge")));
 }
 
-export function packSourceArchivePackageSpecs(sourceArchiveUrl = process.env.PI_FORGE_SOURCE_ARCHIVE_URL || DEFAULT_SOURCE_ARCHIVE_URL) {
-	return withSourceArchive(sourceArchiveUrl, (sourceRoot) => ({
-		forgePackageSpec: packPackageDirectory(join(sourceRoot, "forge")),
-		piPackageSpecs: packSourceRuntimePackageSpecs(sourceRoot),
-	}));
+export function packSourceArchivePackageSpecs(
+	sourceArchiveUrl = process.env.PI_FORGE_SOURCE_ARCHIVE_URL || DEFAULT_SOURCE_ARCHIVE_URL,
+	upstreamArchiveUrl = process.env.PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL || DEFAULT_UPSTREAM_SOURCE_ARCHIVE_URL
+) {
+	if (sourceArchiveUrl === upstreamArchiveUrl) {
+		return withSourceArchive(sourceArchiveUrl, (sourceRoot) => ({
+			forgePackageSpec: packPackageDirectory(join(sourceRoot, "forge")),
+			piPackageSpecs: packSourceRuntimePackageSpecs(sourceRoot),
+		}));
+	}
+	return {
+		forgePackageSpec: packSourceArchivePackageSpec(sourceArchiveUrl),
+		piPackageSpecs: packSourceArchivePiPackageSpecs(upstreamArchiveUrl),
+	};
 }
 
-export function packSourceArchivePiPackageSpecs(sourceArchiveUrl = process.env.PI_FORGE_SOURCE_ARCHIVE_URL || DEFAULT_SOURCE_ARCHIVE_URL) {
+export function packSourceArchivePiPackageSpecs(sourceArchiveUrl = process.env.PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL || DEFAULT_UPSTREAM_SOURCE_ARCHIVE_URL) {
 	return withSourceArchive(sourceArchiveUrl, (sourceRoot) => packSourceRuntimePackageSpecs(sourceRoot));
 }
 
@@ -183,9 +193,9 @@ function findSourceRoot(extractDir, sourceArchiveUrl) {
 	const sourceRoot = readdirSync(extractDir, { withFileTypes: true })
 		.filter((entry) => entry.isDirectory())
 		.map((entry) => join(extractDir, entry.name))
-		.find((entry) => existsSync(join(entry, "forge", "package.json")));
+		.find((entry) => existsSync(join(entry, "forge", "package.json")) || existsSync(join(entry, "packages", "coding-agent", "package.json")));
 	if (!sourceRoot) {
-		throw new Error(`Source archive did not contain a pi-forge checkout: ${sourceArchiveUrl}`);
+		throw new Error(`Source archive did not contain a valid pi or pi-forge checkout: ${sourceArchiveUrl}`);
 	}
 	return sourceRoot;
 }

@@ -3,6 +3,7 @@
 import {
 	DEFAULT_PI_PACKAGE_SPEC,
 	DEFAULT_SOURCE_ARCHIVE_URL,
+	DEFAULT_UPSTREAM_SOURCE_ARCHIVE_URL,
 	configurePackage,
 	getForgePaths,
 	installConfiguredPackage,
@@ -22,6 +23,7 @@ Environment:
   PI_FORGE_PACKAGE_SPEC      pi-forge package spec override (default: packed GitHub source archive)
   PI_FORGE_PI_PACKAGE_SPEC   Pi CLI package spec override (default: ${DEFAULT_PI_PACKAGE_SPEC})
   PI_FORGE_SOURCE_ARCHIVE_URL GitHub source archive used for default pi-forge updates
+  PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL GitHub source archive used for default pi runtime updates
 `);
 }
 
@@ -45,21 +47,23 @@ try {
 		if (process.env.PI_FORGE_PI_PACKAGE_SPEC) {
 			installConfiguredPiPackage();
 		} else {
-			const sourceArchiveUrl = process.env.PI_FORGE_SOURCE_ARCHIVE_URL || DEFAULT_SOURCE_ARCHIVE_URL;
-			process.stderr.write(`pi-forge-update: installing Pi runtime from ${sourceArchiveUrl}.\n`);
-			installConfiguredPiPackage(packSourceArchivePiPackageSpecs(sourceArchiveUrl));
-			piPackageLabel = `runtime packages from ${sourceArchiveUrl}`;
+			const upstreamArchiveUrl = process.env.PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL || DEFAULT_UPSTREAM_SOURCE_ARCHIVE_URL;
+			process.stderr.write(`pi-forge-update: installing Pi runtime from ${upstreamArchiveUrl}.\n`);
+			installConfiguredPiPackage(packSourceArchivePiPackageSpecs(upstreamArchiveUrl));
+			piPackageLabel = `runtime packages from ${upstreamArchiveUrl}`;
 		}
 	} else {
 		const sourceArchiveUrl = process.env.PI_FORGE_SOURCE_ARCHIVE_URL || DEFAULT_SOURCE_ARCHIVE_URL;
+		const upstreamArchiveUrl = process.env.PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL || DEFAULT_UPSTREAM_SOURCE_ARCHIVE_URL;
 		process.stderr.write(`pi-forge-update: installing pi-forge from ${sourceArchiveUrl}.\n`);
-		const packageSpecs = packSourceArchivePackageSpecs(sourceArchiveUrl);
+		process.stderr.write(`pi-forge-update: installing Pi runtime from ${upstreamArchiveUrl}.\n`);
+		const packageSpecs = packSourceArchivePackageSpecs(sourceArchiveUrl, upstreamArchiveUrl);
 		packageRoot = installConfiguredPackage(packageSpecs.forgePackageSpec);
 		if (process.env.PI_FORGE_PI_PACKAGE_SPEC) {
 			installConfiguredPiPackage();
 		} else {
 			installConfiguredPiPackage(packageSpecs.piPackageSpecs);
-			piPackageLabel = `runtime packages from ${sourceArchiveUrl}`;
+			piPackageLabel = `runtime packages from ${upstreamArchiveUrl}`;
 		}
 	}
 	const paths = configurePackage(packageRoot);
