@@ -318,7 +318,11 @@ pack_source_archive_package_spec() {
 build_source_runtime_packages() {
 	local source="$1"
 	npm_config_cache="$NPM_CACHE_DIR" npm --prefix "$source" ci --ignore-scripts >&2
-	npm_config_cache="$NPM_CACHE_DIR" npm --prefix "$source" run build:install >&2
+	if node -e "const pkg = require('$source/package.json'); process.exit(pkg.scripts && pkg.scripts['build:install'] ? 0 : 1);" 2>/dev/null; then
+		npm_config_cache="$NPM_CACHE_DIR" npm --prefix "$source" run build:install >&2
+	else
+		npm_config_cache="$NPM_CACHE_DIR" npm --prefix "$source" run build >&2
+	fi
 	rm -f "$source/packages/coding-agent/npm-shrinkwrap.json"
 }
 

@@ -6,6 +6,7 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
+	readFileSync,
 	realpathSync,
 	rmSync,
 	symlinkSync,
@@ -207,7 +208,9 @@ function packSourceRuntimePackageSpecs(sourceRoot) {
 		cwd: sourceRoot,
 		env: { ...process.env, npm_config_cache: paths.npmCacheDir },
 	});
-	runChecked("npm", ["run", "build:install"], {
+	const pkg = JSON.parse(readFileSync(join(sourceRoot, "package.json"), "utf8"));
+	const buildScript = pkg.scripts?.["build:install"] ? "build:install" : "build";
+	runChecked("npm", ["run", buildScript], {
 		cwd: sourceRoot,
 		env: { ...process.env, npm_config_cache: paths.npmCacheDir },
 	});
