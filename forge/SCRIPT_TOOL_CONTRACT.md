@@ -14,27 +14,39 @@ Preferred contract:
 - Preserve source files unless the user explicitly requests destructive changes.
 - Record provenance for research, document, literature, web, and data workflows.
 
-A tool result should include at least:
+Scripts may also expose command-oriented CLIs when that is already the local
+convention, but new tool extraction should move toward this structured result
+shape so agents and MCP callers do not need to parse prose logs.
+
+Successful result shape:
 
 ```json
 {
 	"status": "ok",
 	"artifacts": [],
 	"warnings": [],
-	"errors": []
+	"errors": [],
+	"data": null
 }
 ```
 
-For failure:
+Failure result shape:
 
 ```json
 {
 	"status": "error",
+	"artifacts": [],
+	"warnings": [],
 	"errors": [
 		{
 			"code": "short_error_code",
 			"message": "Human-readable error message"
 		}
-	]
+	],
+	"data": null
 }
 ```
+
+`data` is tool-specific structured payload. Keep core execution facts, machine
+readable summaries, parsed metadata, and counts there instead of requiring
+agents to parse logs or Markdown reports.

@@ -109,6 +109,13 @@ the original sources; produce new files only.
    directory to the document-ingest skill. Do not summarize or analyze inside
    this skill.
 
+## Mechanical Tools
+
+For lower-level execution, the manifest also exposes `fetch_url`,
+`archive_page`, `html_to_markdown`, and `extract_metadata`. These tools accept
+structured JSON input and return structured JSON results; use them when the
+task needs one repeatable operation rather than the full collection workflow.
+
 ## Configuration
 
 - **Default SearXNG URL**: `http://llms/searxng`. Override with

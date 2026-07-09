@@ -7,7 +7,14 @@
 	"scripts_dir": "scripts",
 	"schemas_dir": "schemas",
 	"references_dir": "references",
-	"mechanical_operations": [],
+	"tools": [
+		{
+			"name": "web_research",
+			"description": "Search the web, read pages, and write structured research artifacts.",
+			"command": "node scripts/web-research.mjs",
+			"destructive": false
+		}
+	],
 	"safety": {
 		"destructive_by_default": false,
 		"requires_review_for_filesystem_changes": true,

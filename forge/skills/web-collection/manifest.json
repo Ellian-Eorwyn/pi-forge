@@ -7,7 +7,38 @@
 	"scripts_dir": "scripts",
 	"schemas_dir": "schemas",
 	"references_dir": "references",
-	"mechanical_operations": [],
+	"tools": [
+		{
+			"name": "web_collection",
+			"description": "Collect, harvest, search, render, and validate archived web-source runs.",
+			"command": "node scripts/web-collection.mjs",
+			"destructive": false
+		},
+		{
+			"name": "fetch_url",
+			"description": "Fetch one URL into a provenance-preserving web collection run.",
+			"command": "node scripts/fetch_url.mjs",
+			"destructive": false
+		},
+		{
+			"name": "archive_page",
+			"description": "Capture one rendered page with Playwright artifacts.",
+			"command": "node scripts/archive_page.mjs",
+			"destructive": false
+		},
+		{
+			"name": "html_to_markdown",
+			"description": "Convert a local HTML file to GitHub-Flavored Markdown with Pandoc.",
+			"command": "node scripts/html_to_markdown.mjs",
+			"destructive": false
+		},
+		{
+			"name": "extract_metadata",
+			"description": "Extract local web artifact metadata, hashes, titles, and links.",
+			"command": "node scripts/extract_metadata.mjs",
+			"destructive": false
+		}
+	],
 	"safety": {
 		"destructive_by_default": false,
 		"requires_review_for_filesystem_changes": true,

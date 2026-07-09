@@ -7,7 +7,38 @@
 	"scripts_dir": "scripts",
 	"schemas_dir": "schemas",
 	"references_dir": "references",
-	"mechanical_operations": [],
+	"tools": [
+		{
+			"name": "spreadsheet_analysis",
+			"description": "Profile tables, cluster rows, manage row enrichment, and validate outputs.",
+			"command": "python3 scripts/spreadsheet-analysis.py",
+			"destructive": false
+		},
+		{
+			"name": "load_table",
+			"description": "Load a bounded preview of a CSV, TSV, or XLSX table.",
+			"command": "python3 scripts/load_table.py",
+			"destructive": false
+		},
+		{
+			"name": "profile_columns",
+			"description": "Profile table columns, missing values, inferred types, and top values.",
+			"command": "python3 scripts/profile_columns.py",
+			"destructive": false
+		},
+		{
+			"name": "clean_columns",
+			"description": "Apply explicit column-cleaning operations to a new exported table.",
+			"command": "python3 scripts/clean_columns.py",
+			"destructive": false
+		},
+		{
+			"name": "export_table",
+			"description": "Export a loaded table to CSV, TSV, JSON, or XLSX without modifying the source.",
+			"command": "python3 scripts/export_table.py",
+			"destructive": false
+		}
+	],
 	"safety": {
 		"destructive_by_default": false,
 		"requires_review_for_filesystem_changes": true,

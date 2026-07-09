@@ -7,7 +7,14 @@
 	"scripts_dir": "scripts",
 	"schemas_dir": "schemas",
 	"references_dir": "references",
-	"mechanical_operations": [],
+	"tools": [
+		{
+			"name": "file_conversion",
+			"description": "Convert files between working formats and validate conversion manifests.",
+			"command": "python3 scripts/file-conversion.py",
+			"destructive": false
+		}
+	],
 	"safety": {
 		"destructive_by_default": false,
 		"requires_review_for_filesystem_changes": true,

@@ -7,7 +7,14 @@
 	"scripts_dir": "scripts",
 	"schemas_dir": "schemas",
 	"references_dir": "references",
-	"mechanical_operations": [],
+	"tools": [
+		{
+			"name": "literature_extraction",
+			"description": "Initialize, record, build, and validate source-backed literature extraction runs.",
+			"command": "python3 scripts/literature-extraction.py",
+			"destructive": false
+		}
+	],
 	"safety": {
 		"destructive_by_default": false,
 		"requires_review_for_filesystem_changes": true,

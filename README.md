@@ -14,7 +14,7 @@
 
 ## pi-forge
 
-pi-forge is a research and document-processing-focused fork of pi. It empowers users to automate complex workflows involving research, documentation, file manipulation, and data analysis using AI agents. By equipping agents with specialized tools (skills), pi-forge acts as an intelligent assistant capable of parsing, summarizing, organizing, and synthesizing massive amounts of information.
+pi-forge is a research and document-processing-focused fork of pi. It empowers users to automate complex workflows involving research, documentation, file manipulation, and data analysis using AI agents. By equipping agents with workflow skills and deterministic tools, pi-forge acts as an intelligent assistant capable of parsing, summarizing, organizing, and synthesizing massive amounts of information.
 
 ### What Can You Do With pi-forge?
 - **Research & Web Collection:** Search the web and archive websites to compile research repositories.
@@ -25,7 +25,7 @@ pi-forge is a research and document-processing-focused fork of pi. It empowers u
 ### Included Skills
 The `@ellian-eorwyn/pi-forge` package ships Agent Skills under `forge/skills/<name>/SKILL.md`. Skill directory names match their `SKILL.md` frontmatter names, use lowercase hyphenated names, and keep scripts, assets, and references relative to the skill directory. The installed Pi settings point at the package root so Pi and the MCP bridge load skills from the installed package, not from a cloned repository.
 
-pi-forge uses `forge/CAPABILITIES.md` as a compact startup capability index. Full workflows stay in `forge/skills/<name>/SKILL.md` and are loaded on demand. Each skill has a `manifest.json` describing its package boundary; repeatable mechanical operations should live under the skill directory as scripts/tools, while skills keep workflow judgment, review standards, provenance expectations, and output shape. This is a distribution/profile boundary, not a full extension rewrite.
+pi-forge uses `forge/CAPABILITIES.md` as a compact startup capability index. Full workflows stay in `forge/skills/<name>/SKILL.md` and are loaded on demand. Each skill has a `manifest.json` describing its package boundary and available real scripts/tools; repeatable mechanical operations should live under the skill directory as scripts/tools, while skills keep workflow judgment, review standards, provenance expectations, and output shape. This is a distribution/profile boundary, not a full extension rewrite.
 
 The `forge` profile provides agents with the following built-in skills:
 - **`coding`**: Inspect repos and ship small reviewable changes
@@ -42,6 +42,12 @@ The `forge` profile provides agents with the following built-in skills:
 - **`vault-handoff`**: Send completed text artifacts to pi-vault review
 - **`web-collection`**: Archive and organize web sources
 - **`web-research`**: Quick web search and page reading for information lookup
+
+
+### Skills vs. Extensions (Architectural Boundary)
+To maintain a clear architectural boundary, future work on this repository should adhere to the following distinction:
+- **Skills (Teaching by Instruction):** Located in `forge/skills/<name>/SKILL.md`, skills are low-complexity, Markdown-based instructional documents. They are used for **judgment**—defining workflows, routing tasks, setting standards, and providing "how-to" steps. If you are telling the agent *how to act* or what process to follow, it should be a Skill.
+- **Extensions & Tools (Adding New Capabilities):** Located in `forge/extensions/` or as skill-local `scripts/`, these are high-complexity, functional TypeScript modules or scripts. They are used for **execution**—fetching, converting, extracting, or safely interacting with the system. They should adhere to a structured JSON contract ([forge/SCRIPT_TOOL_CONTRACT.md](forge/SCRIPT_TOOL_CONTRACT.md)). If you are giving the agent a *new mechanical power* or custom UI, it should be an Extension or Tool.
 
 ---
 

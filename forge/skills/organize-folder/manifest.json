@@ -7,7 +7,38 @@
 	"scripts_dir": "scripts",
 	"schemas_dir": "schemas",
 	"references_dir": "references",
-	"mechanical_operations": [],
+	"tools": [
+		{
+			"name": "organize_folder",
+			"description": "Scan a folder, build a reviewable manifest, apply approved moves, and undo moves.",
+			"command": "python3 scripts/organize-folder.py",
+			"destructive": true
+		},
+		{
+			"name": "scan_folder",
+			"description": "Scan a folder with existing safeguards and produce run artifacts.",
+			"command": "python3 scripts/scan_folder.py",
+			"destructive": false
+		},
+		{
+			"name": "generate_manifest",
+			"description": "Create or refresh a reviewable organization manifest and plan report.",
+			"command": "python3 scripts/generate_manifest.py",
+			"destructive": false
+		},
+		{
+			"name": "apply_manifest",
+			"description": "Apply a validated organization manifest using integrity checks and move logging.",
+			"command": "python3 scripts/apply_manifest.py",
+			"destructive": true
+		},
+		{
+			"name": "hash_files",
+			"description": "Compute full SHA-256 hashes and organize-folder fingerprints for files.",
+			"command": "python3 scripts/hash_files.py",
+			"destructive": false
+		}
+	],
 	"safety": {
 		"destructive_by_default": false,
 		"requires_review_for_filesystem_changes": true,

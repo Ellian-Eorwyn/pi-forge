@@ -41,6 +41,14 @@ second skill when the document type makes the handoff clear.
 - `run <input> --output <input>/Ingest --literature`: deterministic prepare/resume wrapper that reports the next review action and downstream literature handoff.
 - For finalized literature-like folders: `python3 <literature-skill>/scripts/literature-extraction.py init <input-folder> --output <input-folder>/Generated/Literature-Extraction`.
 
+## Mechanical Tools
+
+For lower-level execution, the manifest also exposes `pdf_to_markdown`,
+`docx_to_markdown`, and `extract_metadata`. These tools accept structured JSON
+input and return structured JSON results with prepared Markdown, metadata,
+source-map, and extraction-report artifact paths. Use the full workflow for
+folder ingestion, review, finalization, and literature handoff.
+
 ## Workflow
 
 1. Resolve this skill directory from the loaded `SKILL.md` path. Run the capability check:

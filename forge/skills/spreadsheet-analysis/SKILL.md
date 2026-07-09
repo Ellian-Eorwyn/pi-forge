@@ -38,6 +38,14 @@ Analyze tabular data reproducibly while preserving every source file.
 6. Validate row-enrichment runs with the helper and report processed, skipped,
    failed, and review-needed rows. Never conceal incomplete coverage.
 
+## Mechanical Tools
+
+For lower-level execution, the manifest also exposes `load_table`,
+`profile_columns`, `clean_columns`, and `export_table`. These tools accept
+structured JSON input and return structured JSON results. `clean_columns`
+applies only explicit operations supplied by the caller; it does not infer or
+guess cleanup rules.
+
 ## Fuzzy Grouping and Record Linkage
 
 Use the `cluster` command when exact key matching is not enough: detecting

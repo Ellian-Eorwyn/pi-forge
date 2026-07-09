@@ -7,7 +7,14 @@
 	"scripts_dir": "scripts",
 	"schemas_dir": "schemas",
 	"references_dir": "references",
-	"mechanical_operations": [],
+	"tools": [
+		{
+			"name": "site_builder",
+			"description": "Initialize, build, eject theme assets, and validate static site runs.",
+			"command": "node scripts/site-builder.mjs",
+			"destructive": false
+		}
+	],
 	"safety": {
 		"destructive_by_default": false,
 		"requires_review_for_filesystem_changes": true,

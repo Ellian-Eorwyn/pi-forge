@@ -105,6 +105,13 @@ are relocated, never deleted, and every move is reversible.
    python3 <skill-directory>/scripts/organize-folder.py undo <run-directory>
    ```
 
+## Mechanical Tools
+
+For lower-level execution, the manifest also exposes `scan_folder`,
+`generate_manifest`, `apply_manifest`, and `hash_files`. These tools accept
+structured JSON input and return structured JSON results. Use them for bounded
+file execution while keeping the review-and-approval workflow in this skill.
+
 ## Safety and Failure Handling
 
 - Never move a file until the user has reviewed the manifest and agreed.

@@ -1326,6 +1326,97 @@ test("spreadsheet cluster groups similar rows for review", async () => {
 	});
 });
 
+test("extracted organize-folder and spreadsheet tools expose structured execution", () => {
+	withWorkspace((workspace) => {
+		const requiredTools = {
+			"organize-folder": ["scan_folder", "generate_manifest", "apply_manifest", "hash_files"],
+			"spreadsheet-analysis": ["load_table", "profile_columns", "clean_columns", "export_table"],
+		};
+		for (const [skill, names] of Object.entries(requiredTools)) {
+			const manifest = JSON.parse(readFileSync(join(skillsRoot, skill, "manifest.json"), "utf8"));
+			const available = new Set(manifest.tools.map((tool) => tool.name));
+			for (const name of names) assert.equal(available.has(name), true, `${skill} manifest lists ${name}`);
+		}
+
+		const messy = join(workspace, "messy");
+		mkdirSync(messy);
+		const note = join(messy, "note.txt");
+		writeFileSync(note, "A note to organize.\n");
+		const noteHash = sha256(note);
+		const hashInput = join(workspace, "hash-input.json");
+		writeFileSync(hashInput, `${JSON.stringify({ paths: [note] })}\n`);
+		const hashResult = jsonOutput(run(python, [script("organize-folder", "hash_files.py"), "--input", hashInput]));
+		assert.equal(hashResult.status, "ok");
+		assert.equal(hashResult.data.files[0].sha256, noteHash);
+		assert.match(hashResult.data.files[0].fingerprint, /^fp:/);
+
+		const organizeRun = join(workspace, "organize-run");
+		const scanInput = join(workspace, "scan-input.json");
+		writeFileSync(scanInput, `${JSON.stringify({ target: messy, output: organizeRun, fullHash: true, noEmbeddings: true })}\n`);
+		const scanResult = jsonOutput(run(python, [script("organize-folder", "scan_folder.py"), "--input", scanInput]));
+		assert.equal(scanResult.status, "ok");
+		assert.equal(existsSync(join(organizeRun, "manifest.csv")), true);
+
+		const manifestInput = join(workspace, "manifest-input.json");
+		writeFileSync(manifestInput, `${JSON.stringify({ runDirectory: organizeRun })}\n`);
+		const manifestResult = jsonOutput(run(python, [script("organize-folder", "generate_manifest.py"), "--input", manifestInput]));
+		assert.equal(manifestResult.status, "ok");
+		assert.equal(manifestResult.data.plan.valid, true);
+		assert.equal(existsSync(join(organizeRun, "plan_report.md")), true);
+
+		const applyResult = jsonOutput(run(python, [script("organize-folder", "apply_manifest.py"), "--input", manifestInput]));
+		assert.equal(applyResult.status, "ok");
+		assert.equal(applyResult.data.summary.moved, 1);
+		assert.equal(existsSync(join(messy, "Documents", "note.txt")), true);
+
+		const source = join(workspace, "data.csv");
+		writeFileSync(source, "name,amount,empty\n alpha ,10,N/A\n,,\n beta,20,missing\n");
+		const sourceHash = sha256(source);
+		const loadInput = join(workspace, "load-input.json");
+		writeFileSync(loadInput, `${JSON.stringify({ input: source, previewRows: 2 })}\n`);
+		const loadResult = jsonOutput(run(python, [script("spreadsheet-analysis", "load_table.py"), "--input", loadInput]));
+		assert.equal(loadResult.status, "ok");
+		assert.deepEqual(loadResult.data.sheets[0].headers, ["name", "amount", "empty"]);
+
+		const profileInput = join(workspace, "profile-input.json");
+		writeFileSync(profileInput, `${JSON.stringify({ input: source, maxCategories: 5 })}\n`);
+		const profileResult = jsonOutput(run(python, [script("spreadsheet-analysis", "profile_columns.py"), "--input", profileInput]));
+		assert.equal(profileResult.status, "ok");
+		assert.equal(profileResult.data.profile.sheets[0].columns[1].header, "amount");
+
+		const cleaned = join(workspace, "cleaned.csv");
+		const cleanInput = join(workspace, "clean-input.json");
+		writeFileSync(
+			cleanInput,
+			`${JSON.stringify({
+				input: source,
+				output: cleaned,
+				operations: [
+					{ op: "trim", columns: ["name"] },
+					{ op: "normalize_blanks", columns: ["empty"], tokens: ["N/A", "missing"] },
+					{ op: "drop_blank_rows" },
+					{ op: "rename", from: "amount", to: "Amount" },
+					{ op: "drop_columns", columns: ["empty"] },
+				],
+			})}\n`,
+		);
+		const cleanResult = jsonOutput(run(python, [script("spreadsheet-analysis", "clean_columns.py"), "--input", cleanInput]));
+		assert.equal(cleanResult.status, "ok");
+		assert.equal(sha256(source), sourceHash);
+		assert.equal(readFileSync(cleaned, "utf8"), "name,Amount\nalpha,10\nbeta,20\n");
+
+		const exported = join(workspace, "cleaned.json");
+		const exportInput = join(workspace, "export-input.json");
+		writeFileSync(exportInput, `${JSON.stringify({ input: cleaned, output: exported })}\n`);
+		const exportResult = jsonOutput(run(python, [script("spreadsheet-analysis", "export_table.py"), "--input", exportInput]));
+		assert.equal(exportResult.status, "ok");
+		assert.deepEqual(JSON.parse(readFileSync(exported, "utf8")), [
+			{ name: "alpha", Amount: "10" },
+			{ name: "beta", Amount: "20" },
+		]);
+	});
+});
+
 test("document ingest, coding, and web collection expose review and safety boundaries", () => {
 	withWorkspace((workspace) => {
 		const document = join(workspace, "document.md");
@@ -1417,6 +1508,93 @@ test("document ingest, coding, and web collection expose review and safety bound
 			"# Collection Report\n\n## Status\n\n## Run Summary\n\n## Sources\n\n## Captures\n\n## Duplicates\n\n## Failures and Blocks\n\n## Search\n\n## Review\n",
 		);
 		assert.equal(jsonOutput(run("node", [script("web-collection", "web-collection.mjs"), "validate", webRun])).valid, true);
+	});
+});
+
+test("extracted web and document tools expose metadata and conversion boundaries", () => {
+	withWorkspace((workspace) => {
+		const requiredTools = {
+			"web-collection": ["fetch_url", "archive_page", "html_to_markdown", "extract_metadata"],
+			"document-ingest": ["pdf_to_markdown", "docx_to_markdown", "extract_metadata"],
+		};
+		for (const [skill, names] of Object.entries(requiredTools)) {
+			const manifest = JSON.parse(readFileSync(join(skillsRoot, skill, "manifest.json"), "utf8"));
+			const available = new Set(manifest.tools.map((tool) => tool.name));
+			for (const name of names) assert.equal(available.has(name), true, `${skill} manifest lists ${name}`);
+		}
+
+		const html = join(workspace, "page.html");
+		writeFileSync(html, '<!doctype html><title>Example Page</title><h1>Example</h1><a href="/source.pdf">Source</a>\n');
+		const metadataInput = join(workspace, "web-metadata-input.json");
+		writeFileSync(metadataInput, `${JSON.stringify({ input: html, baseUrl: "https://example.test/articles/page.html" })}\n`);
+		const metadata = jsonOutput(run("node", [script("web-collection", "extract_metadata.mjs"), "--input", metadataInput]));
+		assert.equal(metadata.status, "ok");
+		assert.equal(metadata.data.entries[0].title, "Example Page");
+		assert.deepEqual(metadata.data.entries[0].links, ["https://example.test/source.pdf"]);
+
+		const fetchInput = join(workspace, "fetch-input.json");
+		writeFileSync(fetchInput, `${JSON.stringify({ url: "http://127.0.0.1/test", output: join(workspace, "rejected-fetch") })}\n`);
+		const rejectedFetch = jsonOutput(run("node", [script("web-collection", "fetch_url.mjs"), "--input", fetchInput], 1));
+		assert.equal(rejectedFetch.status, "error");
+		assert.equal(rejectedFetch.errors[0].code, "fetch_failed");
+		assert.match(rejectedFetch.errors[0].message, /refused loopback or metadata host/);
+
+		const pandoc = spawnSync("pandoc", ["--version"], { encoding: "utf8" });
+		if (pandoc.status === 0) {
+			const markdown = join(workspace, "page.md");
+			const htmlInput = join(workspace, "html-input.json");
+			writeFileSync(htmlInput, `${JSON.stringify({ input: html, output: markdown })}\n`);
+			const htmlResult = jsonOutput(run("node", [script("web-collection", "html_to_markdown.mjs"), "--input", htmlInput]));
+			assert.equal(htmlResult.status, "ok");
+			assert.match(readFileSync(markdown, "utf8"), /Example/);
+
+			const sourceMarkdown = join(workspace, "source.md");
+			const docx = join(workspace, "source.docx");
+			writeFileSync(sourceMarkdown, "# DOCX Source\n\nConverted body.\n");
+			run("pandoc", [sourceMarkdown, "--output", docx]);
+			const docxInput = join(workspace, "docx-input.json");
+			const docxRun = join(workspace, "docx-run");
+			writeFileSync(docxInput, `${JSON.stringify({ input: docx, output: docxRun })}\n`);
+			const docxResult = jsonOutput(run("node", [script("document-ingest", "docx_to_markdown.mjs"), "--input", docxInput]));
+			assert.equal(docxResult.status, "ok");
+			assert.match(readFileSync(docxResult.data.documents[0].markdownPath, "utf8"), /DOCX Source|Converted body/);
+		}
+
+		const fakeBin = join(workspace, "fake-bin");
+		mkdirSync(fakeBin);
+		writeFileSync(
+			join(fakeBin, "pdfinfo"),
+			`#!/usr/bin/env bash
+if [[ "$1" == "-v" ]]; then echo "pdfinfo fake"; exit 0; fi
+printf 'Pages: 1\\nTitle: Synthetic PDF\\nAuthor: Example Author\\n'
+`,
+		);
+		writeFileSync(
+			join(fakeBin, "pdftotext"),
+			`#!/usr/bin/env bash
+if [[ "$1" == "-v" ]]; then echo "pdftotext fake"; exit 0; fi
+printf 'Readable PDF text extracted by the fake pdftotext command for the tool wrapper test.\\n'
+`,
+		);
+		chmodSync(join(fakeBin, "pdfinfo"), 0o755);
+		chmodSync(join(fakeBin, "pdftotext"), 0o755);
+		const pdf = join(workspace, "source.pdf");
+		writeFileSync(pdf, "%PDF-1.4\nsynthetic\n");
+		const pdfRun = join(workspace, "pdf-run");
+		const pdfInput = join(workspace, "pdf-input.json");
+		writeFileSync(pdfInput, `${JSON.stringify({ input: pdf, output: pdfRun, ocr: "never", ocrBackend: "local" })}\n`);
+		const pdfResult = jsonOutput(
+			runWithEnvironment("node", [script("document-ingest", "pdf_to_markdown.mjs"), "--input", pdfInput], {
+				PATH: `${fakeBin}:${process.env.PATH}`,
+			}),
+		);
+		assert.equal(pdfResult.status, "ok");
+		assert.match(readFileSync(pdfResult.data.documents[0].markdownPath, "utf8"), /Readable PDF text/);
+		const ingestMetadataInput = join(workspace, "ingest-metadata-input.json");
+		writeFileSync(ingestMetadataInput, `${JSON.stringify({ input: pdfRun })}\n`);
+		const ingestMetadata = jsonOutput(run("node", [script("document-ingest", "extract_metadata.mjs"), "--input", ingestMetadataInput]));
+		assert.equal(ingestMetadata.status, "ok");
+		assert.equal(ingestMetadata.data.documents[0].metadata.fields.title.value, "Synthetic PDF");
 	});
 });
 
