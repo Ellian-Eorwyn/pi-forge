@@ -363,26 +363,31 @@ def command_init(args):
     sources = discover_sources(root, include_reserved=args.include_reserved)
     documents = build_document_records(sources)
     output = require_new_directory(args.output)
-    
+
     item_types = ITEM_TYPES
-    custom_instructions = ""
-    print("Select extraction schema:")
-    print("1. Academic Literature (claims, methods, findings, etc.)")
-    print("2. Products and Services (products, prices, specs, etc.)")
-    print("3. Custom (Provide your own categories and instructions)")
-    try:
-        choice = input("> ").strip()
-    except EOFError:
-        choice = "1"
-        
-    if choice == "2":
-        item_types = ["product", "service", "price", "specification", "target_audience", "competitor", "limitation"]
-    elif choice == "3":
-        cats = input("Enter comma-separated categories: ").strip()
-        item_types = [c.strip() for c in cats.split(",") if c.strip()]
+    custom_instructions = args.custom_instructions or ""
+    if args.item_types:
+        item_types = [value.strip() for value in args.item_types.split(",") if value.strip()]
         if not item_types:
-            fail("Custom schema requires at least one category.")
-        custom_instructions = input("Enter custom instruction for the model (optional): ").strip()
+            fail("--item-types requires at least one comma-separated category")
+    elif args.schema == "products":
+        item_types = ["product", "service", "price", "specification", "target_audience", "competitor", "limitation"]
+    elif args.schema == "custom":
+        fail("--schema custom requires --item-types")
+    elif sys.stdin.isatty():
+        print("Select extraction schema:")
+        print("1. Academic Literature (claims, methods, findings, etc.)")
+        print("2. Products and Services (products, prices, specs, etc.)")
+        print("3. Custom (Provide your own categories and instructions)")
+        choice = input("> ").strip()
+        if choice == "2":
+            item_types = ["product", "service", "price", "specification", "target_audience", "competitor", "limitation"]
+        elif choice == "3":
+            cats = input("Enter comma-separated categories: ").strip()
+            item_types = [c.strip() for c in cats.split(",") if c.strip()]
+            if not item_types:
+                fail("Custom schema requires at least one category.")
+            custom_instructions = input("Enter custom instruction for the model (optional): ").strip()
 
     try:
         (output / "working").mkdir()
@@ -877,7 +882,7 @@ def command_validate(args):
                 errors.append(f"successful document {document_id} has no items list")
             else:
                 try:
-                    normalize_items(result["items"])
+                    normalize_items(result["items"], run.get("itemTypes", ITEM_TYPES))
                 except SystemExit:
                     errors.append(f"document {document_id} has invalid extraction items")
         elif not result.get("note"):
@@ -966,6 +971,14 @@ def parser():
     init = subparsers.add_parser("init", help="Discover sources and scaffold a resumable extraction run.")
     init.add_argument("input")
     init.add_argument("--output", required=True)
+    init.add_argument(
+        "--schema",
+        choices=("academic", "products", "custom"),
+        default="academic",
+        help="Extraction schema to use noninteractively. Custom requires --item-types.",
+    )
+    init.add_argument("--item-types", help="Comma-separated item types for a custom extraction schema.")
+    init.add_argument("--custom-instructions", default="", help="Custom model instructions recorded in run_config.json.")
     init.add_argument(
         "--include-reserved",
         action="store_true",

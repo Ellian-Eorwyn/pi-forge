@@ -10,6 +10,11 @@ produce structured findings with source attribution. A deterministic script
 handles search, fetching, and text extraction; you supply the judgment — query
 formulation, result triage, and final synthesis.
 
+Use **`deep`** when the user asks for a full research pass, multiple seed
+queries, iterative follow-up searching, source-backed synthesis, or strict
+provenance. Read [references/deep-research-contract.md](references/deep-research-contract.md)
+before relying on deep research artifacts.
+
 The search backend is **SearXNG** (default: `http://llms/searxng`). Page
 extraction uses **Playwright + Chromium** for rendered pages with an HTTP
 fallback for simple pages.
@@ -59,13 +64,38 @@ fallback for simple pages.
      Extracts clean readable text from each URL. Use when you already know
      which pages to read.
 
+   - **`deep`** — Iterative multi-query research with provenance, evidence,
+     claims, gaps, and validation:
+
+     ```bash
+     node <skill-directory>/scripts/web-research.mjs deep <query...> \
+       --output <new-directory> [--query <query>] [--query-file <list>] \
+       [--max-iterations N] [--limit N] [--read-count N] [--render]
+     ```
+
+     This writes `research_run.json`, `query_log.jsonl`, `source_index.json`,
+     `evidence_items.jsonl`, `claim_register.jsonl`, `gap_log.jsonl`,
+     `model_calls.jsonl`, `web_manifest.*`, `sources.md`,
+     `deep_research_report.md`, and `validation_report.json`.
+
+   - **`validate`** — Validate a deep research run:
+
+     ```bash
+     node <skill-directory>/scripts/web-research.mjs validate <run-directory>
+     ```
+
+     Validation fails for missing provenance, uncited claims, missing evidence,
+     quotes not present in archived source text, or source hash drift.
+
 3. Read the output. `research_report.md` is human-readable with extracted
    content excerpts. `research_report.json` has the full structured data
    including all extracted text (not truncated).
 
-4. Synthesize findings. Use the extracted text to answer the user's question,
-   write a summary, or feed into downstream skills. Always attribute claims
-   to source URLs and mark uncertainty explicitly.
+4. Synthesize findings. For quick `research` runs, use the extracted text to
+   answer the user's question, write a summary, or feed into downstream skills.
+   For `deep` runs, synthesize only from `claim_register.jsonl` and
+   `evidence_items.jsonl`; cite claim ids, evidence ids, and source ids. Always
+   attribute claims to source URLs and mark uncertainty explicitly.
 
 ### SearXNG Parameters
 
@@ -109,6 +139,8 @@ When parameters are omitted, the script detects query type:
 ### When to Use Which Command
 
 - **`research`** — Default. Search + read in one step. Use for most lookups.
+- **`deep`** — Use for multi-query research, provenance-first synthesis,
+  source triangulation, and gap/contradiction tracking.
 - **`search`** — When you only need result metadata (titles, URLs, snippets)
   to decide what to read next.
 - **`read`** — When you already have specific URLs to extract text from.

@@ -41,7 +41,7 @@ The live skill inventory currently contains 14 capability workflows:
 - `transcription`: Transcribe audio/video, then correct and clean the transcript.
 - `vault-handoff`: Prepare completed artifacts for pi-vault or Obsidian review.
 - `web-collection`: Archive, organize, and preserve web sources.
-- `web-research`: Perform quick web search and page-reading workflows for information lookup.
+- `web-research`: Perform quick or deep web research with page reading, provenance, evidence, claims, and validation.
 
 Regenerate the generated inventory after changing skill names, descriptions,
 bodies, or visibility:
@@ -67,13 +67,16 @@ The current extension/tool surfaces outside skill-local scripts are:
 
 - `forge/extensions/pi-vault-client.ts`: provides `pi_vault_submit_artifact` for
   pending pi-vault proposal handoff.
+- `forge/extensions/web-research.ts`: provides `forge_deep_web_research` for
+  iterative web research with source provenance and validation artifacts.
 - `pi-forge-mcp`: exposes deterministic MCP tools `forge_transcribe` and
   `forge_convert_files`.
 
 ## Common pipelines
 
 - Web/document research: `web-collection` -> `document-ingest` -> `literature-extraction` -> `report-output`.
-- Quick lookup: `web-research` -> final answer or downstream skill.
+- Quick lookup: `web-research research` -> final answer or downstream skill.
+- Deep web research: `web-research deep` -> claim/evidence register -> `report-output`.
 - Media processing: `transcription` -> `transcript-cleanup` -> `report-output` or `personal-admin`.
 - Folder cleanup: `organize-folder` scan/plan -> user review -> apply.
 - Static site output: processed source folder -> `site-builder`.

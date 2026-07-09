@@ -157,7 +157,7 @@ export function packSourceArchivePackageSpec(sourceArchiveUrl = process.env.PI_F
 
 export function packSourceArchivePackageSpecs(
 	sourceArchiveUrl = process.env.PI_FORGE_SOURCE_ARCHIVE_URL || DEFAULT_SOURCE_ARCHIVE_URL,
-	upstreamArchiveUrl = process.env.PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL || DEFAULT_UPSTREAM_SOURCE_ARCHIVE_URL
+	upstreamArchiveUrl = process.env.PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL || sourceArchiveUrl
 ) {
 	if (sourceArchiveUrl === upstreamArchiveUrl) {
 		return withSourceArchive(sourceArchiveUrl, (sourceRoot) => ({

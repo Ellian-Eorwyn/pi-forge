@@ -13,6 +13,12 @@
 			"description": "Search the web, read pages, and write structured research artifacts.",
 			"command": "node scripts/web-research.mjs",
 			"destructive": false
+		},
+		{
+			"name": "web_deep_research",
+			"description": "Run iterative multi-query web research with source provenance, evidence, claims, gaps, and validation.",
+			"command": "node scripts/web-research.mjs deep",
+			"destructive": false
 		}
 	],
 	"safety": {

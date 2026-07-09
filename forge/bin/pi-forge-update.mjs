@@ -54,7 +54,7 @@ try {
 		}
 	} else {
 		const sourceArchiveUrl = process.env.PI_FORGE_SOURCE_ARCHIVE_URL || DEFAULT_SOURCE_ARCHIVE_URL;
-		const upstreamArchiveUrl = process.env.PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL || DEFAULT_UPSTREAM_SOURCE_ARCHIVE_URL;
+		const upstreamArchiveUrl = process.env.PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL || sourceArchiveUrl;
 		process.stderr.write(`pi-forge-update: installing pi-forge from ${sourceArchiveUrl}.\n`);
 		process.stderr.write(`pi-forge-update: installing Pi runtime from ${upstreamArchiveUrl}.\n`);
 		const packageSpecs = packSourceArchivePackageSpecs(sourceArchiveUrl, upstreamArchiveUrl);

@@ -41,7 +41,7 @@ The `forge` profile provides agents with the following built-in skills:
 - **`transcription`**: Transcribe audio or video, then correct and clean it
 - **`vault-handoff`**: Send completed text artifacts to pi-vault review
 - **`web-collection`**: Archive and organize web sources
-- **`web-research`**: Quick web search and page reading for information lookup
+- **`web-research`**: Quick or deep web research with provenance and validation
 
 
 ### Skills vs. Extensions (Architectural Boundary)

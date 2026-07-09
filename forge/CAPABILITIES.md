@@ -21,4 +21,4 @@ Prefer deterministic scripts/tools for mechanical work such as parsing, conversi
 - `transcription`: Transcribe audio/video, then correct and clean the transcript.
 - `vault-handoff`: Prepare completed artifacts for pi-vault or Obsidian review.
 - `web-collection`: Archive, organize, and preserve web sources.
-- `web-research`: Perform quick web search and page-reading workflows for information lookup.
+- `web-research`: Perform quick or deep web research with page reading, provenance, evidence, claims, and validation.

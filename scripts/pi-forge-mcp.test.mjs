@@ -343,7 +343,17 @@ function makeFakeInstallSource(source, version = "0.0.0-test") {
 		"#!/usr/bin/env node\nif (process.argv.includes('--help')) console.log('Usage: pi-forge-mcp');\n",
 	);
 	writeFileSync(join(source, "forge", "bin", "pi-forge-update.mjs"), "#!/usr/bin/env node\nconsole.log('updated');\n");
-	writeFileSync(join(source, "package.json"), `${JSON.stringify({ private: true, workspaces: ["packages/*", "forge"] })}\n`);
+	writeFileSync(
+		join(source, "package.json"),
+		`${JSON.stringify({
+			private: true,
+			workspaces: ["packages/*", "forge"],
+			scripts: {
+				build: "node scripts/build.mjs",
+				"build:install": "node scripts/build-install.mjs",
+			},
+		})}\n`,
+	);
 	writeFileSync(join(source, "forge", "AGENTS.md"), "# Agent\n");
 	writeFileSync(
 		join(source, "forge", "skills", "document-ingest", "SKILL.md"),

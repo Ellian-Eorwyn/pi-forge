@@ -15,6 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:http";
 import test from "node:test";
 
 const repositoryRoot = resolve(import.meta.dirname, "..");
@@ -72,6 +73,39 @@ function runWithEnvironment(command, args, extraEnvironment, expectedStatus = 0)
 		`${command} ${args.join(" ")} exited ${result.status}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
 	);
 	return result;
+}
+
+function runAsyncWithEnvironment(command, args, extraEnvironment, expectedStatus = 0) {
+	return new Promise((resolveRun, rejectRun) => {
+		const child = spawn(command, args, {
+			cwd: repositoryRoot,
+			env: { ...environment, ...extraEnvironment },
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		let stdout = "";
+		let stderr = "";
+		child.stdout.setEncoding("utf8");
+		child.stderr.setEncoding("utf8");
+		child.stdout.on("data", (chunk) => {
+			stdout += chunk;
+		});
+		child.stderr.on("data", (chunk) => {
+			stderr += chunk;
+		});
+		child.once("error", rejectRun);
+		child.once("exit", (status) => {
+			try {
+				assert.equal(
+					status,
+					expectedStatus,
+					`${command} ${args.join(" ")} exited ${status}\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+				);
+				resolveRun({ status, stdout, stderr });
+			} catch (error) {
+				rejectRun(error);
+			}
+		});
+	});
 }
 
 function runAt(directory, command, args, extraEnvironment = {}, expectedStatus = 0) {
@@ -202,6 +236,121 @@ async function withAsyncWorkspace(callback) {
 	} finally {
 		rmSync(workspace, { recursive: true, force: true });
 	}
+}
+
+function startDeepResearchFixture() {
+	const requests = [];
+	const server = createServer((request, response) => {
+		const url = new URL(request.url, "http://127.0.0.1");
+		if (url.pathname === "/searxng/search") {
+			const query = url.searchParams.get("q") ?? "";
+			const origin = `http://127.0.0.1:${server.address().port}`;
+			const results = [];
+			if (/alpha/i.test(query)) {
+				results.push(
+					{ title: "Alpha Source", url: `${origin}/page-alpha`, content: "Alpha snippet", engine: "fixture", score: 1 },
+					{ title: "Alpha Source Duplicate", url: `${origin}/page-alpha#duplicate`, content: "Duplicate snippet", engine: "fixture", score: 0.9 },
+				);
+			} else if (/beta/i.test(query)) {
+				results.push({ title: "Beta Source", url: `${origin}/page-beta`, content: "Beta snippet", engine: "fixture", score: 1 });
+			} else if (/follow-up/i.test(query)) {
+				results.push({ title: "Gamma Source", url: `${origin}/page-gamma`, content: "Gamma snippet", engine: "fixture", score: 1 });
+			} else if (/unsafe/i.test(query)) {
+				results.push({ title: "Unsafe Source", url: "http://127.0.0.1:9/unsafe", content: "Unsafe snippet", engine: "fixture", score: 1 });
+			}
+			response.writeHead(200, { "Content-Type": "application/json" });
+			response.end(JSON.stringify({ results }));
+			return;
+		}
+		if (url.pathname === "/chat") {
+			let body = "";
+			request.setEncoding("utf8");
+			request.on("data", (chunk) => {
+				body += chunk;
+			});
+			request.on("end", () => {
+				const payload = body ? JSON.parse(body) : {};
+				requests.push(payload);
+				const prompt = payload.messages?.at(-1)?.content ?? "";
+				let content = "{}";
+				if (prompt.includes("Plan follow-up web searches")) {
+					content = JSON.stringify({ queries: ["follow-up provenance validation"], rationale: "Need validation source." });
+				} else if (prompt.includes("Extract source-backed evidence")) {
+					const sourceId = prompt.match(/source_id: (src-[a-f0-9]+)/)?.[1] ?? "src-unknown";
+					let quote = "Alpha evidence quote supports deep research provenance.";
+					if (prompt.includes("Beta Source")) quote = "Beta evidence quote describes validation citations.";
+					if (prompt.includes("Gamma Source")) quote = "Gamma follow up quote identifies remaining gap.";
+					content = JSON.stringify({
+						evidence: [
+							{
+								text: `${quote} This is relevant to the research question.`,
+								direct_quote: quote,
+								locator: "article",
+								interpretation: "explicit",
+								confidence: "high",
+								notes: sourceId,
+							},
+						],
+					});
+				} else if (prompt.includes("Build a source-backed claim register")) {
+					const matches = [...prompt.matchAll(/evidence_id: (ev-\d+)\n  source_id: (src-[a-f0-9]+)/g)];
+					const evidenceIds = matches.slice(0, 2).map((match) => match[1]);
+					const sourceIds = [...new Set(matches.slice(0, 2).map((match) => match[2]))];
+					content = JSON.stringify({
+						claims: [
+							{
+								text: "Deep research provenance and citation validation are supported by fixture sources.",
+								evidence_ids: evidenceIds,
+								source_ids: sourceIds,
+								confidence: "high",
+								notes: "Fixture claim.",
+							},
+						],
+						gaps: [{ text: "Long-term WARC export is not covered.", reason: "No fixture evidence.", source_ids: sourceIds }],
+					});
+				}
+				response.writeHead(200, { "Content-Type": "application/json" });
+				response.end(JSON.stringify({ choices: [{ message: { content } }] }));
+			});
+			return;
+		}
+		const pages = {
+			"/page-alpha": ["Alpha Source", "Alpha evidence quote supports deep research provenance."],
+			"/page-beta": ["Beta Source", "Beta evidence quote describes validation citations."],
+			"/page-gamma": ["Gamma Source", "Gamma follow up quote identifies remaining gap."],
+		};
+		const page = pages[url.pathname];
+		if (page) {
+			response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+			response.end(`<!doctype html><title>${page[0]}</title><main><h1>${page[0]}</h1><p>${page[1]}</p></main>`);
+			return;
+		}
+		response.writeHead(404, { "Content-Type": "text/plain" });
+		response.end("not found");
+	});
+	return new Promise((resolveServer, rejectServer) => {
+		server.once("error", rejectServer);
+		server.listen(0, "127.0.0.1", () => {
+			const address = server.address();
+			if (!address || typeof address !== "object") {
+				rejectServer(new Error("fixture server did not expose a port"));
+				return;
+			}
+			const origin = `http://127.0.0.1:${address.port}`;
+			resolveServer({
+				origin,
+				searxng: `${origin}/searxng`,
+				chat: `${origin}/chat`,
+				requests,
+				close: () =>
+					new Promise((resolveClose) => {
+						server.closeAllConnections();
+						server.closeIdleConnections();
+						server.close(resolveClose);
+					}),
+			});
+		});
+	});
 }
 
 function startGlmocrFixture(workspace, responseBody) {
@@ -1508,6 +1657,121 @@ test("document ingest, coding, and web collection expose review and safety bound
 			"# Collection Report\n\n## Status\n\n## Run Summary\n\n## Sources\n\n## Captures\n\n## Duplicates\n\n## Failures and Blocks\n\n## Search\n\n## Review\n",
 		);
 		assert.equal(jsonOutput(run("node", [script("web-collection", "web-collection.mjs"), "validate", webRun])).valid, true);
+	});
+});
+
+test("web-research deep creates validated provenance-backed artifacts", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startDeepResearchFixture();
+		try {
+			const queries = join(workspace, "queries.txt");
+			writeFileSync(queries, "seed alpha\nseed beta\nseed alpha\n");
+			const deepRun = join(workspace, "deep-run");
+			const result = jsonOutput(
+				await runAsyncWithEnvironment(
+					"node",
+					[
+						script("web-research", "web-research.mjs"),
+						"deep",
+						"--question",
+						"How should deep web research preserve provenance?",
+						"--query-file",
+						queries,
+						"--output",
+						deepRun,
+						"--searxng",
+						fixture.searxng,
+						"--max-iterations",
+						"2",
+						"--limit",
+						"3",
+						"--read-count",
+						"3",
+						"--no-render",
+					],
+					{
+						FORGE_BASE_CHAT_URL: fixture.chat,
+						FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1",
+					},
+				),
+			);
+			assert.equal(result.valid, true);
+			assert.equal(result.queries, 3);
+			assert.equal(result.sources, 3);
+			assert.equal(result.evidence, 3);
+			assert.equal(result.claims, 1);
+			assert.equal(jsonOutput(run("node", [script("web-research", "web-research.mjs"), "validate", deepRun])).valid, true);
+			const sourceIndex = JSON.parse(readFileSync(join(deepRun, "source_index.json"), "utf8"));
+			assert.equal(sourceIndex.sources.length, 3);
+			assert.equal(sourceIndex.sources[0].searchOrigins.length, 2);
+			assert.match(readFileSync(join(deepRun, "deep_research_report.md"), "utf8"), /cl-0001/);
+			assert.match(readFileSync(join(deepRun, "sources.md"), "utf8"), /src-[a-f0-9]{12}/);
+			assert.match(readFileSync(join(deepRun, "web_manifest.csv"), "utf8"), /resource_id,source_url,final_url/);
+
+			const evidencePath = join(deepRun, "evidence_items.jsonl");
+			const originalEvidence = readFileSync(evidencePath, "utf8");
+			const evidenceRows = originalEvidence
+				.trim()
+				.split(/\r?\n/)
+				.map((line) => JSON.parse(line));
+			evidenceRows[0].directQuote = "This quote is not in the archived source text.";
+			writeFileSync(evidencePath, evidenceRows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+			runFailure("node", [script("web-research", "web-research.mjs"), "validate", deepRun], /direct quote was not found/);
+
+			writeFileSync(evidencePath, originalEvidence);
+			const claimsPath = join(deepRun, "claim_register.jsonl");
+			const originalClaims = readFileSync(claimsPath, "utf8");
+			const claimRows = originalClaims
+				.trim()
+				.split(/\r?\n/)
+				.map((line) => JSON.parse(line));
+			claimRows[0].sourceIds = [];
+			writeFileSync(claimsPath, claimRows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+			runFailure("node", [script("web-research", "web-research.mjs"), "validate", deepRun], /has no sourceIds/);
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("web-research deep records unsafe result URLs as failed sources", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startDeepResearchFixture();
+		try {
+			const deepRun = join(workspace, "deep-unsafe");
+			const result = jsonOutput(
+				await runAsyncWithEnvironment(
+					"node",
+					[
+						script("web-research", "web-research.mjs"),
+						"deep",
+						"unsafe lookup",
+						"--output",
+						deepRun,
+						"--searxng",
+						fixture.searxng,
+						"--max-iterations",
+						"1",
+						"--limit",
+						"1",
+						"--read-count",
+						"1",
+						"--no-render",
+					],
+					{
+						FORGE_BASE_CHAT_URL: fixture.chat,
+					},
+				),
+			);
+			assert.equal(result.valid, true);
+			const sourceIndex = JSON.parse(readFileSync(join(deepRun, "source_index.json"), "utf8"));
+			assert.equal(sourceIndex.sources.length, 1);
+			assert.equal(sourceIndex.sources[0].status, "failed");
+			assert.match(sourceIndex.sources[0].warnings.join("\n"), /refused loopback or metadata host/);
+			assert.equal(jsonOutput(run("node", [script("web-research", "web-research.mjs"), "validate", deepRun])).valid, true);
+		} finally {
+			await fixture.close();
+		}
 	});
 });
 
