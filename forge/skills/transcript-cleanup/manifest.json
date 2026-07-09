@@ -1,0 +1,16 @@
+{
+	"name": "transcript-cleanup",
+	"type": "pi-forge-skill",
+	"version": "0.1.0",
+	"description": "Clean and structure raw transcripts.",
+	"skill_file": "SKILL.md",
+	"scripts_dir": "scripts",
+	"schemas_dir": "schemas",
+	"references_dir": "references",
+	"mechanical_operations": [],
+	"safety": {
+		"destructive_by_default": false,
+		"requires_review_for_filesystem_changes": true,
+		"preserve_provenance_when_applicable": true
+	}
+}

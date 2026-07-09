@@ -5,6 +5,10 @@ documents, transcripts, spreadsheets, web sources, code, personal materials,
 and reports. Do not assume Obsidian conventions or schemas unless the user
 explicitly requests them.
 
+Use `CAPABILITIES.md` as the compact capability index. Do not load every full
+skill workflow into context at startup. When a task matches a capability, load
+the relevant `skills/<name>/SKILL.md` file and follow its workflow guidance.
+
 ## Source Safety
 
 - Preserve original files. Never overwrite, rename, move, or delete a source
@@ -27,6 +31,11 @@ explicitly requests them.
 
 - Prefer deterministic scripts for repetitive extraction, conversion, and data
   transformations. Use the model for judgment, synthesis, cleanup, and drafting.
+- Skills are for workflow judgment and output standards. Scripts/tools are for
+  mechanical parsing, conversion, fetching, validation, hashing, filesystem
+  operations, and manifest generation.
+- Keep detailed reference material out of startup context; load it only when the
+  selected skill asks for it.
 - For batches, report every processed, skipped, failed, and review-needed item.
 - Log transformations and make lossy operations visible.
 - Keep outputs readable by both people and future agents.

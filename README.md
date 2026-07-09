@@ -25,6 +25,8 @@ pi-forge is a research and document-processing-focused fork of pi. It empowers u
 ### Included Skills
 The `@ellian-eorwyn/pi-forge` package ships Agent Skills under `forge/skills/<name>/SKILL.md`. Skill directory names match their `SKILL.md` frontmatter names, use lowercase hyphenated names, and keep scripts, assets, and references relative to the skill directory. The installed Pi settings point at the package root so Pi and the MCP bridge load skills from the installed package, not from a cloned repository.
 
+pi-forge uses `forge/CAPABILITIES.md` as a compact startup capability index. Full workflows stay in `forge/skills/<name>/SKILL.md` and are loaded on demand. Each skill has a `manifest.json` describing its package boundary; repeatable mechanical operations should live under the skill directory as scripts/tools, while skills keep workflow judgment, review standards, provenance expectations, and output shape. This is a distribution/profile boundary, not a full extension rewrite.
+
 The `forge` profile provides agents with the following built-in skills:
 - **`coding`**: Inspect repos and ship small reviewable changes
 - **`document-ingest`**: Normalize documents with provenance

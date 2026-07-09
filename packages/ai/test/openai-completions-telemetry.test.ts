@@ -105,7 +105,7 @@ describe("openai-completions telemetry", () => {
 			rejectedTokens: 2,
 			acceptanceRate: 4 / 6,
 		});
-		expect(telemetry.provider?.numericExtras?.["dflash_tokens_per_second"]).toBe(41);
+		expect(telemetry.provider?.numericExtras?.dflash_tokens_per_second).toBe(41);
 		expect(JSON.stringify(telemetry)).not.toContain("hello");
 		expect(JSON.stringify(telemetry)).not.toContain("hi");
 		expect(JSON.stringify(telemetry)).not.toContain("secret-api-key");

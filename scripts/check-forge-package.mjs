@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveCodingAgentCli } from "../forge/scripts/runtime-env.mjs";
@@ -48,6 +48,8 @@ const [pack] = JSON.parse(result.stdout);
 const files = pack.files.map((file) => file.path).sort();
 const required = [
 	"AGENTS.md",
+	"CAPABILITIES.md",
+	"SCRIPT_TOOL_CONTRACT.md",
 	"bin/pi-forge.mjs",
 	"bin/pi-forge-mcp.mjs",
 	"bin/pi-forge-update.mjs",
@@ -56,6 +58,10 @@ const required = [
 	"scripts/runtime-env.mjs",
 	"skills/document-ingest/SKILL.md",
 ];
+const skillManifestPaths = readdirSync(join(forgeDirectory, "skills"), { withFileTypes: true })
+	.filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+	.map((entry) => `skills/${entry.name}/manifest.json`);
+required.push(...skillManifestPaths);
 for (const path of required) {
 	if (!files.includes(path)) {
 		throw new Error(`forge package is missing ${path}`);

@@ -6,10 +6,10 @@
 
 - Available skills: 14
 - Model-visible skills at launch: 14
-- Managed instructions (`AGENTS.md` with its `<project_context>` wrapper): 415 tokens
+- Managed instructions (`AGENTS.md` with its `<project_context>` wrapper): 550 tokens
 - Skills menu (metadata for all skills): 2343 tokens
-- **Total forge launch context (always processed): 2758 tokens**
-- **Maximum if every `SKILL.md` body is also loaded at once: 21891 tokens**
+- **Total forge launch context (always processed): 2893 tokens**
+- **Maximum if every `SKILL.md` body is also loaded at once: 22026 tokens**
 
 Of the skills menu above, the shared wrapper (instructions and XML envelope, independent of skill count) is ~92 tokens; the rest scales with the number of skills.
 
