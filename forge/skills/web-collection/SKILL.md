@@ -29,21 +29,21 @@ the original sources; produce new files only.
 
      ```bash
      node <skill-directory>/scripts/web-collection.mjs collect <url...> \
-       --output <new-directory> [--render] [--input-file <list>]
+       --output <new-directory> [--render] [--clean] [--input-file <list>]
      ```
 
    - **harvest** links from a page (for example every PDF):
 
      ```bash
      node <skill-directory>/scripts/web-collection.mjs harvest <page-url> \
-       --output <new-directory> --ext pdf [--match <regex>] [--same-host] [--limit N]
+       --output <new-directory> --ext pdf [--match <regex>] [--same-host] [--limit N] [--clean]
      ```
 
    - **spider** a page with LLM-guided domain extraction:
 
      ```bash
      node <skill-directory>/scripts/web-collection.mjs spider <page-url> \
-       --output <new-directory> [--limit N] [--render] [--ignore-robots]
+       --output <new-directory> [--limit N] [--render] [--clean] [--ignore-robots]
      ```
 
      This command interactively prompts you to choose which links to follow (e.g. all links, pricing/services, about/contact, or custom instruction). It extracts same-host links and uses the local LLM to intelligently filter down to the most relevant URLs before collecting them.
@@ -59,6 +59,7 @@ the original sources; produce new files only.
 
    Add `--render` to also save full Playwright captures. Plain collection saves
    raw HTTP responses only.
+   Add `--clean` to automatically convert downloaded HTML files into clean Markdown by stripping out boilerplate content, navigation menus, and footers using the local LLM.
 
    ### SearXNG Search Parameters
 

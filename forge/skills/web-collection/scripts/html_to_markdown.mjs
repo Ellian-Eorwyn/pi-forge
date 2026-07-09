@@ -2,9 +2,10 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { okResult, requiredString, runTool, ToolInputError } from "../../../lib/tool_contract.mjs";
+import { htmlToCleanMarkdown } from "../../../lib/html-cleaner.mjs";
 
 function sha256(path) {
 	return createHash("sha256").update(readFileSync(path)).digest("hex");
@@ -20,15 +21,18 @@ await runTool(async (input) => {
 	);
 	if (existsSync(output)) throw new ToolInputError("output_exists", `Output already exists: ${output}`);
 	mkdirSync(dirname(output), { recursive: true });
-	const result = spawnSync("pandoc", [source, "--from=html", "--to=gfm", "--wrap=none", "--output", output], { encoding: "utf8" });
-	if (result.error?.code === "ENOENT") throw new ToolInputError("pandoc_missing", "Pandoc is required for HTML to Markdown conversion");
-	if (result.error || result.status !== 0) {
-		throw new ToolInputError("pandoc_failed", result.stderr.trim() || result.error?.message || `exit status ${result.status}`);
+	try {
+		const buffer = readFileSync(source);
+		const cleanMd = await htmlToCleanMarkdown(buffer, basename(source));
+		if (!cleanMd) throw new Error("Extracted markdown is empty");
+		writeFileSync(output, cleanMd, "utf8");
+	} catch (error) {
+		throw new ToolInputError("html_cleaner_failed", `HTML cleaning failed: ${error.message}`);
 	}
 	const stat = statSync(output);
 	return okResult({
 		artifacts: [{ role: "markdown", path: output }],
-		warnings: result.stderr.trim() ? [result.stderr.trim()] : [],
+		warnings: [],
 		data: { input: source, output, sha256: sha256(output), sizeBytes: stat.size },
 	});
 });

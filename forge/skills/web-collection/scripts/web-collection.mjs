@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { basename, extname, join, resolve, sep } from "node:path";
 import * as readline from "node:readline/promises";
+import { htmlToCleanMarkdown } from "../../../lib/html-cleaner.mjs";
 
 const DEFAULT_USER_AGENT = "pi-forge-web-collection/1 (+https://github.com/pi-forge)";
 const DEFAULT_DELAY_MS = 500;
@@ -566,6 +567,17 @@ async function collectOne(url, runDirectory, state, options, playwright, sourceL
 		let rendered = false;
 		let captureRelative = null;
 		const captureWarnings = [];
+		if (options.cleanMarkdown && /html/i.test(contentType)) {
+			try {
+				const md = await htmlToCleanMarkdown(buffer, finalUrl);
+				if (md) {
+					const mdFilename = uniqueFilename(state, stemFromUrl(finalUrl), "md");
+					writeFileSync(join(downloadsDir, mdFilename), md, { flag: "wx" });
+				}
+			} catch (err) {
+				captureWarnings.push(`clean markdown failed: ${err.message}`);
+			}
+		}
 		if (options.render) {
 			if (!playwright) {
 				captureWarnings.push("rendered capture requested but Playwright is unavailable");
@@ -737,6 +749,7 @@ function commonOptions(flags) {
 		timeoutMs: flags.timeoutMs ?? DEFAULT_TIMEOUT_MS,
 		maxBytes: flags.maxBytes ?? DEFAULT_MAX_BYTES,
 		render: Boolean(flags.render),
+		cleanMarkdown: Boolean(flags.clean),
 	};
 }
 
@@ -875,6 +888,14 @@ async function commandSpider(positionals, flags) {
 	} else {
 		process.stdout.write("Collecting all links...\n");
 	}
+	
+	if (!options.cleanMarkdown) {
+		const cleanChoice = (await rl.question("Do you want to automatically clean downloaded HTML into Markdown? (y/N) ")).trim().toLowerCase();
+		if (cleanChoice === 'y' || cleanChoice === 'yes') {
+			options.cleanMarkdown = true;
+		}
+	}
+	
 	rl.close();
 	
 	if (flags.limit && selectedLinks.length > flags.limit) {
@@ -1034,6 +1055,7 @@ const FLAG_SPECS = {
 	"--max-bytes": { key: "maxBytes", value: true, integer: true },
 	"--limit": { key: "limit", value: true, integer: true },
 	"--render": { key: "render", value: false },
+	"--clean": { key: "clean", value: false },
 	"--same-host": { key: "sameHost", value: false },
 	"--ignore-robots": { key: "ignoreRobots", value: false },
 	"--collect": { key: "collect", value: false },
@@ -1077,11 +1099,11 @@ function parseArguments(args) {
 function usage() {
 	process.stdout.write(`Usage:
   web-collection.mjs doctor [--json] [--searxng <url>]
-  web-collection.mjs collect <url...> --output <dir> [--input-file <path>] [--render]
+  web-collection.mjs collect <url...> --output <dir> [--input-file <path>] [--render] [--clean]
       [--user-agent <ua>] [--delay-ms N] [--timeout-ms N] [--max-bytes N]
   web-collection.mjs harvest <page-url> --output <dir> [--match <regex>] [--ext csv]
-      [--same-host] [--limit N] [--render] [--ignore-robots]
-  web-collection.mjs spider <page-url> --output <dir> [--limit N] [--render] [--ignore-robots]
+      [--same-host] [--limit N] [--render] [--clean] [--ignore-robots]
+  web-collection.mjs spider <page-url> --output <dir> [--limit N] [--render] [--clean] [--ignore-robots]
   web-collection.mjs search <query...> --output <dir> [--searxng <url>] [--limit N] [--collect]
       [--categories <cats>] [--engines <engines>] [--language <lang>]
       [--safesearch <0|1|2>] [--time-range <day|week|month|year>] [--pageno N]

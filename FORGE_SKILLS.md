@@ -9,7 +9,7 @@
 - Managed instructions (`AGENTS.md` with its `<project_context>` wrapper): 550 tokens
 - Skills menu (metadata for all skills): 2343 tokens
 - **Total forge launch context (always processed): 2893 tokens**
-- **Maximum if every `SKILL.md` body is also loaded at once: 22368 tokens**
+- **Maximum if every `SKILL.md` body is also loaded at once: 22637 tokens**
 
 Of the skills menu above, the shared wrapper (instructions and XML envelope, independent of skill count) is ~92 tokens; the rest scales with the number of skills.
 
@@ -24,7 +24,7 @@ Still excluded, because they are owned by the Pi harness rather than this profil
 | [`coding`](forge/skills/coding/SKILL.md) | Inspect repos and ship small reviewable changes | 160 | 750 | 886 | Model-visible |
 | [`document-ingest`](forge/skills/document-ingest/SKILL.md) | Normalize documents with provenance | 122 | 2138 | 2234 | Model-visible |
 | [`file-conversion`](forge/skills/file-conversion/SKILL.md) | Convert files, including Markdown and EPUB | 213 | 1123 | 1310 | Model-visible |
-| [`literature-extraction`](forge/skills/literature-extraction/SKILL.md) | Extract structured evidence from research documents | 180 | 1554 | 1706 | Model-visible |
+| [`literature-extraction`](forge/skills/literature-extraction/SKILL.md) | Extract structured evidence from research documents | 180 | 1643 | 1796 | Model-visible |
 | [`organize-folder`](forge/skills/organize-folder/SKILL.md) | Sort a messy folder via a reviewable manifest | 167 | 1743 | 1883 | Model-visible |
 | [`personal-admin`](forge/skills/personal-admin/SKILL.md) | Summarize personal documents into action plans | 206 | 768 | 948 | Model-visible |
 | [`report-output`](forge/skills/report-output/SKILL.md) | Assemble polished deliverables from processed outputs | 181 | 729 | 884 | Model-visible |
@@ -33,7 +33,7 @@ Still excluded, because they are owned by the Pi harness rather than this profil
 | [`transcript-cleanup`](forge/skills/transcript-cleanup/SKILL.md) | Clean and structure raw transcripts | 144 | 1127 | 1244 | Model-visible |
 | [`transcription`](forge/skills/transcription/SKILL.md) | Transcribe audio or video, then correct and clean it | 185 | 1407 | 1566 | Model-visible |
 | [`vault-handoff`](forge/skills/vault-handoff/SKILL.md) | Send completed text artifacts to pi-vault review | 63 | 226 | 264 | Model-visible |
-| [`web-collection`](forge/skills/web-collection/SKILL.md) | Archive and organize web sources | 138 | 1661 | 1773 | Model-visible |
+| [`web-collection`](forge/skills/web-collection/SKILL.md) | Archive and organize web sources | 138 | 1839 | 1952 | Model-visible |
 | [`web-research`](forge/skills/web-research/SKILL.md) | Quick web search and page reading for information lookup. | 146 | 1333 | 1454 | Model-visible |
 
 ## Counting Method

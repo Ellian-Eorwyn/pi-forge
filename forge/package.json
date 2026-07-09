@@ -37,6 +37,8 @@
 	"dependencies": {
 		"@earendil-works/pi-coding-agent": "^0.79.8",
 		"@modelcontextprotocol/sdk": "1.29.0",
+		"@mozilla/readability": "0.5.0",
+		"jsdom": "26.0.0",
 		"playwright": "1.61.0",
 		"typebox": "1.1.38",
 		"zod": "4.4.3"
