@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { basename, extname, join, resolve, sep } from "node:path";
+import * as readline from "node:readline/promises";
 
 const DEFAULT_USER_AGENT = "pi-forge-web-collection/1 (+https://github.com/pi-forge)";
 const DEFAULT_DELAY_MS = 500;
@@ -795,6 +796,103 @@ async function commandHarvest(positionals, flags) {
 	);
 }
 
+async function filterLinksWithLlm(links, instruction) {
+	const baseChatUrl = process.env.FORGE_BASE_CHAT_URL || process.env.FORGE_CHAT_URL || "http://llms:8008/v1/chat/completions";
+	const baseModel = process.env.FORGE_BASE_MODEL || "llama-3.3-70b-versatile";
+	const prompt = `You are an expert web spider. I will provide a list of URLs and an instruction for what I'm looking for. Please return ONLY a JSON array of strings containing the URLs that are most likely to contain the requested information. Do not return any other text.
+Instruction: ${instruction}
+URLs:
+${links.join("\n")}`;
+
+	try {
+		const response = await fetch(baseChatUrl, {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "Authorization": "Bearer local" },
+			body: JSON.stringify({
+				model: baseModel,
+				messages: [{ role: "user", content: prompt }],
+			})
+		});
+		if (!response.ok) fail(`LLM API returned HTTP ${response.status}`);
+		const payload = await response.json();
+		const content = payload.choices[0]?.message?.content || "[]";
+		const match = content.match(/\[.*\]/s);
+		const jsonString = match ? match[0] : content;
+		const selected = JSON.parse(jsonString);
+		if (!Array.isArray(selected)) return links;
+		return selected;
+	} catch (error) {
+		fail(`Failed to filter links with LLM: ${error.message}`);
+	}
+}
+
+async function commandSpider(positionals, flags) {
+	if (positionals.length !== 1) fail("spider requires exactly one page URL");
+	if (!flags.output) fail("spider requires --output <new-directory>");
+	const pageUrl = positionals[0];
+	const parsedPage = assertCollectableUrl(pageUrl);
+	const options = commonOptions(flags);
+	const playwright = options.render ? await loadPlaywright() : null;
+	const runDirectory = resolve(flags.output);
+	prepareRunDirectory(runDirectory);
+	
+	const { response, finalUrl } = await fetchWithRedirects(pageUrl, options);
+	if (!response.ok) fail(`could not fetch page (HTTP ${response.status}): ${pageUrl}`);
+	const html = (await readCappedBody(response, options.maxBytes)).buffer.toString("utf8");
+	let links = extractLinks(html, finalUrl);
+	const disallows = flags.ignoreRobots ? [] : await fetchRobots(parsedPage.origin, options.userAgent, options.timeoutMs);
+	
+	const validLinks = [];
+	for (const link of links) {
+		const parsed = new URL(link);
+		if (parsed.hostname !== parsedPage.hostname) continue;
+		if (!flags.ignoreRobots && robotsBlocks(disallows, parsed.pathname)) continue;
+		validLinks.push(link);
+	}
+	
+	process.stdout.write(`Found ${validLinks.length} valid same-host links on ${finalUrl}\n`);
+	
+	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+	process.stdout.write(`What information are you looking for on this domain?
+1. All links (standard crawl)
+2. Pricing, Packages, and Services
+3. About and Contact
+4. Custom (Provide instructions for the model)
+`);
+	const choice = (await rl.question("> ")).trim();
+	let selectedLinks = validLinks;
+	
+	if (choice === "2") {
+		process.stdout.write("Asking LLM to filter for Pricing, Packages, and Services...\n");
+		selectedLinks = await filterLinksWithLlm(validLinks, "Find URLs related to pricing, pricing plans, service packages, or product offerings.");
+	} else if (choice === "3") {
+		process.stdout.write("Asking LLM to filter for About and Contact...\n");
+		selectedLinks = await filterLinksWithLlm(validLinks, "Find URLs related to 'About Us', company background, team, or contact information.");
+	} else if (choice === "4") {
+		const customInstruction = await rl.question("Enter custom instruction: ");
+		process.stdout.write("Asking LLM to filter based on custom instruction...\n");
+		selectedLinks = await filterLinksWithLlm(validLinks, customInstruction);
+	} else {
+		process.stdout.write("Collecting all links...\n");
+	}
+	rl.close();
+	
+	if (flags.limit && selectedLinks.length > flags.limit) {
+		selectedLinks = selectedLinks.slice(0, flags.limit);
+	}
+	
+	process.stdout.write(`Collecting ${selectedLinks.length} selected links...\n`);
+	const state = newRunState();
+	await collectUrls(selectedLinks, runDirectory, state, options, playwright, "spider");
+	writeRunArtifacts(runDirectory, state, {
+		command: "spider",
+		options: { ...reportOptions(options, flags), page: finalUrl, linkCount: validLinks.length, matchedCount: selectedLinks.length },
+	});
+	process.stdout.write(
+		`${JSON.stringify({ runDirectory, page: finalUrl, linksFound: validLinks.length, matched: selectedLinks.length, counts: counts(state.rows) }, null, 2)}\n`,
+	);
+}
+
 async function commandSearch(positionals, flags) {
 	if (positionals.length === 0) fail("search requires a query");
 	if (!flags.output) fail("search requires --output <new-directory>");
@@ -983,6 +1081,7 @@ function usage() {
       [--user-agent <ua>] [--delay-ms N] [--timeout-ms N] [--max-bytes N]
   web-collection.mjs harvest <page-url> --output <dir> [--match <regex>] [--ext csv]
       [--same-host] [--limit N] [--render] [--ignore-robots]
+  web-collection.mjs spider <page-url> --output <dir> [--limit N] [--render] [--ignore-robots]
   web-collection.mjs search <query...> --output <dir> [--searxng <url>] [--limit N] [--collect]
       [--categories <cats>] [--engines <engines>] [--language <lang>]
       [--safesearch <0|1|2>] [--time-range <day|week|month|year>] [--pageno N]
@@ -1000,6 +1099,7 @@ async function main() {
 	if (command === "doctor") await doctor(flags);
 	else if (command === "collect") await commandCollect(positionals, flags);
 	else if (command === "harvest") await commandHarvest(positionals, flags);
+	else if (command === "spider") await commandSpider(positionals, flags);
 	else if (command === "search") await commandSearch(positionals, flags);
 	else if (command === "validate") {
 		if (positionals.length !== 1) fail("validate requires exactly one run directory");

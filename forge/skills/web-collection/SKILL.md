@@ -39,6 +39,15 @@ the original sources; produce new files only.
        --output <new-directory> --ext pdf [--match <regex>] [--same-host] [--limit N]
      ```
 
+   - **spider** a page with LLM-guided domain extraction:
+
+     ```bash
+     node <skill-directory>/scripts/web-collection.mjs spider <page-url> \
+       --output <new-directory> [--limit N] [--render] [--ignore-robots]
+     ```
+
+     This command interactively prompts you to choose which links to follow (e.g. all links, pricing/services, about/contact, or custom instruction). It extracts same-host links and uses the local LLM to intelligently filter down to the most relevant URLs before collecting them.
+
    - **search** through a local SearXNG instance (default: `http://llms/searxng`):
 
      ```bash

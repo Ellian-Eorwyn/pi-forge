@@ -58,6 +58,8 @@ surface.
    python3 <skill-directory>/scripts/literature-extraction.py init <input> --output <new-directory>
    ```
 
+   The `init` command will interactively prompt you to select an extraction schema (Academic, Products & Services, or Custom). The chosen `itemTypes` and any `customInstructions` will be saved to `run_config.json`.
+   
    `<input>` is a single file or a folder; folders are discovered recursively,
    skipping hidden paths, symlinks, and finalized ingest workspace folders
    (`Ingest/`, `Originals/`, and `Generated/`). Use `--include-reserved` only
@@ -68,6 +70,8 @@ surface.
    ```bash
    python3 <skill-directory>/scripts/literature-extraction.py next <run-directory>
    ```
+
+   The `next` command will return the `itemTypes` and any `customInstructions` configured during initialization for the current document.
 
 4. Read that document's text, extract items with evidence quotes, locators, and
    the `explicit`/`inferred`/`unclear` distinction, and write the JSON array to

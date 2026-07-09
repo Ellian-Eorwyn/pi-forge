@@ -363,13 +363,35 @@ def command_init(args):
     sources = discover_sources(root, include_reserved=args.include_reserved)
     documents = build_document_records(sources)
     output = require_new_directory(args.output)
+    
+    item_types = ITEM_TYPES
+    custom_instructions = ""
+    print("Select extraction schema:")
+    print("1. Academic Literature (claims, methods, findings, etc.)")
+    print("2. Products and Services (products, prices, specs, etc.)")
+    print("3. Custom (Provide your own categories and instructions)")
+    try:
+        choice = input("> ").strip()
+    except EOFError:
+        choice = "1"
+        
+    if choice == "2":
+        item_types = ["product", "service", "price", "specification", "target_audience", "competitor", "limitation"]
+    elif choice == "3":
+        cats = input("Enter comma-separated categories: ").strip()
+        item_types = [c.strip() for c in cats.split(",") if c.strip()]
+        if not item_types:
+            fail("Custom schema requires at least one category.")
+        custom_instructions = input("Enter custom instruction for the model (optional): ").strip()
+
     try:
         (output / "working").mkdir()
         run = {
             "schemaVersion": RUN_SCHEMA_VERSION,
             "createdAt": utc_now(),
             "input": {"path": str(root), "isDirectory": root.is_dir(), "includeReserved": args.include_reserved},
-            "itemTypes": ITEM_TYPES,
+            "itemTypes": item_types,
+            "customInstructions": custom_instructions,
             "documents": documents,
         }
         (output / "run_config.json").write_text(json.dumps(run, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -448,7 +470,8 @@ def command_next(args):
                 "sourcePath": document["sourcePath"],
                 "textPath": document["sourcePath"],
                 "title": document["title"],
-                "itemTypes": run["itemTypes"],
+                "itemTypes": run.get("itemTypes", ITEM_TYPES),
+                "customInstructions": run.get("customInstructions", ""),
                 "progress": {"processed": len(results), "total": total},
             },
             ensure_ascii=False,
@@ -456,16 +479,17 @@ def command_next(args):
     )
 
 
-def normalize_items(raw):
+def normalize_items(raw, item_types):
     if not isinstance(raw, list):
         fail("extraction file must contain a JSON array of item objects")
     items = []
+    item_type_set = set(item_types)
     for index, item in enumerate(raw, start=1):
         if not isinstance(item, dict):
             fail(f"item {index} is not an object")
         item_type = item.get("item_type")
-        if item_type not in ITEM_TYPE_SET:
-            fail(f"item {index} has invalid item_type {item_type!r}; expected one of {', '.join(ITEM_TYPES)}")
+        if item_type not in item_type_set:
+            fail(f"item {index} has invalid item_type {item_type!r}; expected one of {', '.join(item_types)}")
         if blank(item.get("text")):
             fail(f"item {index} requires a nonblank text value")
         interpretation = item.get("interpretation")
@@ -513,7 +537,7 @@ def command_record(args):
             fail(f"extraction file is not valid UTF-8: {extraction_path}")
         except json.JSONDecodeError as error:
             fail(f"extraction file is not valid JSON: {error}")
-        items = normalize_items(raw)
+        items = normalize_items(raw, run.get("itemTypes", ITEM_TYPES))
         note = args.note
     else:
         if args.extraction_file:
