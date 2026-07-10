@@ -35,6 +35,16 @@ interface DeepWebResearchParams {
 	maxIterations?: number;
 	limit?: number;
 	readCount?: number;
+	maxQueries?: number;
+	maxSources?: number;
+	maxFollowupQueries?: number;
+	maxModelCalls?: number;
+	maxRuntimeMs?: number;
+	maxEvidenceChars?: number;
+	maxClaimEvidenceItems?: number;
+	timeoutMs?: number;
+	delayMs?: number;
+	playwrightWsEndpoint?: string;
 	searxng?: string;
 	categories?: string;
 	engines?: string;
@@ -57,6 +67,25 @@ const extensionDirectory = dirname(fileURLToPath(import.meta.url));
 const webResearchScript = join(extensionDirectory, "..", "skills", "web-research", "scripts", "web-research.mjs");
 
 export default function webResearchExtension(pi: ExtensionAPI) {
+	let deepResearchUsedThisTurn = false;
+
+	pi.on("turn_start", async () => {
+		deepResearchUsedThisTurn = false;
+	});
+
+	pi.on("tool_call", async (event) => {
+		if (event.toolName !== "forge_deep_web_research") return undefined;
+		if (deepResearchUsedThisTurn) {
+			return {
+				block: true,
+				reason:
+					"Only one deep web research run may execute per assistant turn. Combine related subtopics into a single forge_deep_web_research call with multiple seed queries.",
+			};
+		}
+		deepResearchUsedThisTurn = true;
+		return undefined;
+	});
+
 	pi.registerTool({
 		name: "forge_web_search",
 		label: "Forge web search",
@@ -150,6 +179,16 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 			maxIterations: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum search/read/refine iterations." })),
 			limit: Type.Optional(Type.Integer({ minimum: 1, description: "Search results per query." })),
 			readCount: Type.Optional(Type.Integer({ minimum: 1, description: "Results to read per query." })),
+			maxQueries: Type.Optional(Type.Integer({ minimum: 1, description: "Whole-run cap on searched queries." })),
+			maxSources: Type.Optional(Type.Integer({ minimum: 1, description: "Whole-run cap on unique sources read." })),
+			maxFollowupQueries: Type.Optional(Type.Integer({ minimum: 0, description: "Maximum follow-up queries accepted per expansion step." })),
+			maxModelCalls: Type.Optional(Type.Integer({ minimum: 1, description: "Whole-run cap on local model calls." })),
+			maxRuntimeMs: Type.Optional(Type.Integer({ minimum: 1, description: "Approximate whole-run runtime budget in milliseconds." })),
+			maxEvidenceChars: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum source-text characters sent to evidence extraction." })),
+			maxClaimEvidenceItems: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum evidence items sent to claim registration." })),
+			timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Request/navigation timeout in milliseconds." })),
+			delayMs: Type.Optional(Type.Integer({ minimum: 0, description: "Delay between URL reads in milliseconds." })),
+			playwrightWsEndpoint: Type.Optional(Type.String({ description: "One-run Playwright WebSocket endpoint override." })),
 			searxng: Type.Optional(Type.String({ description: "Override SearXNG base URL." })),
 			categories: Type.Optional(Type.String({ description: "Comma-separated SearXNG categories." })),
 			engines: Type.Optional(Type.String({ description: "Comma-separated SearXNG engines." })),
@@ -235,6 +274,16 @@ function buildDeepResearchArgs(input: DeepWebResearchParams): string[] {
 	if (input.maxIterations !== undefined) args.push("--max-iterations", String(input.maxIterations));
 	if (input.limit !== undefined) args.push("--limit", String(input.limit));
 	if (input.readCount !== undefined) args.push("--read-count", String(input.readCount));
+	if (input.maxQueries !== undefined) args.push("--max-queries", String(input.maxQueries));
+	if (input.maxSources !== undefined) args.push("--max-sources", String(input.maxSources));
+	if (input.maxFollowupQueries !== undefined) args.push("--max-followup-queries", String(input.maxFollowupQueries));
+	if (input.maxModelCalls !== undefined) args.push("--max-model-calls", String(input.maxModelCalls));
+	if (input.maxRuntimeMs !== undefined) args.push("--max-runtime-ms", String(input.maxRuntimeMs));
+	if (input.maxEvidenceChars !== undefined) args.push("--max-evidence-chars", String(input.maxEvidenceChars));
+	if (input.maxClaimEvidenceItems !== undefined) args.push("--max-claim-evidence-items", String(input.maxClaimEvidenceItems));
+	if (input.timeoutMs !== undefined) args.push("--timeout-ms", String(input.timeoutMs));
+	if (input.delayMs !== undefined) args.push("--delay-ms", String(input.delayMs));
+	if (input.playwrightWsEndpoint) args.push("--playwright-ws", input.playwrightWsEndpoint);
 	if (input.searxng) args.push("--searxng", input.searxng);
 	if (input.categories) args.push("--categories", input.categories);
 	if (input.engines) args.push("--engines", input.engines);
@@ -307,7 +356,32 @@ function runNode(args: string[], signal: AbortSignal): Promise<{ stdout: string;
 		child.once("exit", (code) => {
 			signal.removeEventListener("abort", abort);
 			if (code === 0) resolveRun({ stdout, stderr });
-			else rejectRun(new Error(`web-research deep exited ${code ?? "without status"}\n${stderr || stdout}`));
+			else rejectRun(new Error(formatRunFailure(args, code, stdout, stderr)));
 		});
 	});
+}
+
+function tail(value: string, maxLength = 12_000): string {
+	if (value.length <= maxLength) return value;
+	return `[truncated ${value.length - maxLength} chars]\n${value.slice(-maxLength)}`;
+}
+
+function summarizeStdout(stdout: string): string {
+	try {
+		const summary = JSON.parse(stdout);
+		if (Array.isArray(summary.validationErrors) && summary.validationErrors.length > 0) {
+			return JSON.stringify({ ...summary, validationErrors: summary.validationErrors.slice(0, 25) }, null, 2);
+		}
+		return JSON.stringify(summary, null, 2);
+	} catch {
+		return tail(stdout);
+	}
+}
+
+export function formatRunFailure(args: string[], code: number | null, stdout: string, stderr: string): string {
+	const command = ["node", ...args.map((arg) => (/\s/.test(arg) ? JSON.stringify(arg) : arg))].join(" ");
+	const parts = [`web-research exited ${code ?? "without status"}`, `command: ${command}`];
+	if (stdout.trim()) parts.push(`stdout:\n${summarizeStdout(stdout)}`);
+	if (stderr.trim()) parts.push(`stderr:\n${tail(stderr)}`);
+	return parts.join("\n");
 }

@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve, sep } from "node:path";
-import { JSDOM } from "jsdom";
+import { JSDOM, VirtualConsole } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import { resolveConnectedServices } from "../../../lib/connected-services.mjs";
 
@@ -12,7 +12,16 @@ const DEFAULT_USER_AGENT = "pi-forge-web-research/1 (+https://github.com/pi-forg
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_LIMIT = 10;
 const DEFAULT_READ_COUNT = 5;
-const DEFAULT_DEEP_ITERATIONS = 3;
+const DEFAULT_DEEP_ITERATIONS = 2;
+const DEFAULT_DEEP_LIMIT = 6;
+const DEFAULT_DEEP_READ_COUNT = 3;
+const DEFAULT_DEEP_MAX_QUERIES = 6;
+const DEFAULT_DEEP_MAX_SOURCES = 12;
+const DEFAULT_DEEP_MAX_FOLLOWUP_QUERIES = 2;
+const DEFAULT_DEEP_MAX_MODEL_CALLS = 16;
+const DEFAULT_DEEP_MAX_RUNTIME_MS = 600_000;
+const DEFAULT_DEEP_MAX_EVIDENCE_CHARS = 12_000;
+const DEFAULT_DEEP_MAX_CLAIM_EVIDENCE_ITEMS = 48;
 const DEEP_SCHEMA_VERSION = 1;
 const ACADEMIC_SCHEMA_VERSION = 1;
 const DEEP_MANIFEST_COLUMNS = [
@@ -67,6 +76,8 @@ const ACADEMIC_PROVIDER_LABELS = {
 	doaj: "DOAJ",
 	unpaywall: "Unpaywall",
 };
+const quietJsdomConsole = new VirtualConsole();
+quietJsdomConsole.on("jsdomError", () => {});
 
 // --- Utility ---------------------------------------------------------------
 
@@ -214,6 +225,81 @@ function normalizeWhitespace(value) {
 function includesQuote(text, quote) {
 	if (!quote) return true;
 	return normalizeWhitespace(text).toLowerCase().includes(normalizeWhitespace(quote).toLowerCase());
+}
+
+function normalizedWords(value) {
+	return normalizeTitleKey(value)
+		.split(/\s+/)
+		.filter((word) => word.length >= 4);
+}
+
+function truncateAtBoundary(value, maxChars) {
+	const text = String(value ?? "").trim();
+	if (text.length <= maxChars) return text;
+	const candidate = text.slice(0, maxChars);
+	const boundary = Math.max(candidate.lastIndexOf("\n\n"), candidate.lastIndexOf(". "), candidate.lastIndexOf("\n"));
+	return `${candidate.slice(0, boundary > maxChars * 0.6 ? boundary + 1 : maxChars).trim()}\n\n[truncated]`;
+}
+
+function selectRelevantText(text, question, maxChars) {
+	const normalized = normalizeWhitespace(text);
+	if (normalized.length <= maxChars) return String(text ?? "").trim();
+	const queryWords = new Set(normalizedWords(question));
+	const chunks = String(text ?? "")
+		.split(/\n{2,}/)
+		.map((chunk) => chunk.trim())
+		.filter(Boolean);
+	if (chunks.length <= 1) return truncateAtBoundary(text, maxChars);
+	const scored = chunks.map((chunk, index) => {
+		const lower = normalizeTitleKey(chunk);
+		let score = index === 0 ? 2 : 0;
+		for (const word of queryWords) {
+			if (lower.includes(word)) score += 1;
+		}
+		return { chunk, index, score };
+	});
+	const selected = [];
+	let used = 0;
+	for (const item of scored.sort((a, b) => b.score - a.score || a.index - b.index)) {
+		const nextSize = item.chunk.length + 2;
+		if (used + nextSize > maxChars && selected.length > 0) continue;
+		selected.push(item);
+		used += nextSize;
+		if (used >= maxChars) break;
+	}
+	return selected
+		.sort((a, b) => a.index - b.index)
+		.map((item) => item.chunk)
+		.join("\n\n")
+		.slice(0, maxChars)
+		.trim();
+}
+
+function htmlToReadableText(html) {
+	return String(html ?? "")
+		.replace(/<script[\s\S]*?<\/script>/gi, " ")
+		.replace(/<style[\s\S]*?<\/style>/gi, " ")
+		.replace(/<(br|\/p|\/div|\/section|\/article|\/main|\/h[1-6]|\/li)>/gi, "\n")
+		.replace(/<li[^>]*>/gi, "\n- ")
+		.replace(/<[^>]+>/g, " ")
+		.replace(/&nbsp;/g, " ")
+		.replace(/&amp;/g, "&")
+		.replace(/&lt;/g, "<")
+		.replace(/&gt;/g, ">")
+		.replace(/&quot;/g, '"')
+		.replace(/&#39;/g, "'")
+		.replace(/[ \t]{2,}/g, " ")
+		.replace(/\n[ \t]+/g, "\n")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
+}
+
+function looksBinaryLike(text) {
+	const sample = String(text ?? "").slice(0, 10_000);
+	if (!sample) return false;
+	const replacementRatio = (sample.match(/\uFFFD/g) ?? []).length / sample.length;
+	const controlRatio = (sample.match(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g) ?? []).length / sample.length;
+	return replacementRatio > 0.01 || controlRatio > 0.01;
 }
 
 function readQueryFile(filePath) {
@@ -1430,13 +1516,14 @@ async function connectPlaywrightBrowser(playwright, timeoutMs, explicitEndpoint)
 function readabilityMetadata(html, url) {
 	let dom = null;
 	try {
-		dom = new JSDOM(html, { url });
+		dom = new JSDOM(html, { url, virtualConsole: quietJsdomConsole });
 		const document = dom.window.document;
 		const article = new Readability(document).parse();
 		if (!article) return {};
+		const readableText = htmlToReadableText(article.content) || normalizeWhitespace(article.textContent);
 		return {
 			title: article.title ?? null,
-			textContent: article.textContent ?? null,
+			textContent: readableText || null,
 			excerpt: article.excerpt ?? null,
 			byline: article.byline ?? null,
 			dir: article.dir ?? null,
@@ -1499,7 +1586,7 @@ async function extractWithPlaywright(playwright, url, timeoutMs, userAgent, play
 			});
 		}
 
-		text = text.replace(/\n{3,}/g, "\n\n").trim();
+		text = text.replace(/[ \t]{2,}/g, " ").replace(/\n{3,}/g, "\n\n").trim();
 	} finally {
 		await browser.close();
 	}
@@ -1524,25 +1611,20 @@ async function extractWithHttp(url, timeoutMs, userAgent) {
 	}
 	if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
+	const contentType = response.headers.get("content-type") ?? "";
+	if (/application\/pdf/i.test(contentType) || /\.pdf($|[?#])/i.test(url)) {
+		throw new Error(`unsupported readable content type: ${contentType || "application/pdf"}`);
+	}
+	if (contentType && !/(text\/html|application\/xhtml\+xml|text\/plain|text\/xml|application\/xml)/i.test(contentType)) {
+		throw new Error(`unsupported readable content type: ${contentType}`);
+	}
 	const html = await response.text();
+	if (looksBinaryLike(html)) throw new Error("response looked like binary content");
 	const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
 	const title = titleMatch ? titleMatch[1].replace(/\s+/g, " ").trim() : null;
 	const metadata = readabilityMetadata(html, url);
 
-	// Strip tags and extract text
-	const text = html
-		.replace(/<script[\s\S]*?<\/script>/gi, " ")
-		.replace(/<style[\s\S]*?<\/style>/gi, " ")
-		.replace(/<[^>]+>/g, " ")
-		.replace(/&nbsp;/g, " ")
-		.replace(/&amp;/g, "&")
-		.replace(/&lt;/g, "<")
-		.replace(/&gt;/g, ">")
-		.replace(/&quot;/g, '"')
-		.replace(/&#39;/g, "'")
-		.replace(/\n{3,}/g, "\n\n")
-		.replace(/\s+/g, " ")
-		.trim();
+	const text = htmlToReadableText(html);
 
 	return {
 		text: metadata.textContent?.trim() || text,
@@ -1583,6 +1665,20 @@ async function readPage(url, options) {
 		warnings: extraction.warnings,
 		extractedAt: nowIso(),
 	};
+}
+
+function isLowValueReading(reading) {
+	const title = normalizeWhitespace(reading.title ?? "").toLowerCase();
+	const text = normalizeWhitespace(reading.text ?? "");
+	const lowerText = text.toLowerCase();
+	if (!text) return true;
+	if (text.length < 200 && /\b(vercel security checkpoint|security checkpoint|captcha|checking your browser|just a moment)\b/.test(`${title} ${lowerText}`)) {
+		return true;
+	}
+	if (/\b(vercel security checkpoint|cloudflare|attention required)\b/.test(title) && text.length < 1_000) {
+		return true;
+	}
+	return false;
 }
 
 // --- Auto-select SearXNG parameters ----------------------------------------
@@ -1685,14 +1781,56 @@ function buildReport(data) {
 function deepDefaults(flags) {
 	return {
 		maxIterations: flags.maxIterations ?? DEFAULT_DEEP_ITERATIONS,
-		limit: flags.limit ?? DEFAULT_LIMIT,
-		readCount: flags.readCount ?? DEFAULT_READ_COUNT,
+		limit: flags.limit ?? DEFAULT_DEEP_LIMIT,
+		readCount: flags.readCount ?? DEFAULT_DEEP_READ_COUNT,
+		maxQueries: flags.maxQueries ?? DEFAULT_DEEP_MAX_QUERIES,
+		maxSources: flags.maxSources ?? DEFAULT_DEEP_MAX_SOURCES,
+		maxFollowupQueries: flags.maxFollowupQueries ?? DEFAULT_DEEP_MAX_FOLLOWUP_QUERIES,
+		maxModelCalls: flags.maxModelCalls ?? DEFAULT_DEEP_MAX_MODEL_CALLS,
+		maxRuntimeMs: flags.maxRuntimeMs ?? DEFAULT_DEEP_MAX_RUNTIME_MS,
+		maxEvidenceChars: flags.maxEvidenceChars ?? DEFAULT_DEEP_MAX_EVIDENCE_CHARS,
+		maxClaimEvidenceItems: flags.maxClaimEvidenceItems ?? DEFAULT_DEEP_MAX_CLAIM_EVIDENCE_ITEMS,
 		delayMs: flags.delayMs ?? 500,
 		timeoutMs: flags.timeoutMs ?? DEFAULT_TIMEOUT_MS,
 		userAgent: flags.userAgent ?? DEFAULT_USER_AGENT,
 		render: flags.render !== false,
 		playwrightWsEndpoint: flags.playwrightWs,
 	};
+}
+
+function addBudgetEvent(state, reason, detail) {
+	if (state.budgetEvents.some((event) => event.reason === reason && event.detail === detail)) return;
+	state.budgetEvents.push({ reason, detail, recordedAt: nowIso() });
+}
+
+function runtimeBudgetExceeded(state, options) {
+	return Date.now() - state.startedAtMs >= options.maxRuntimeMs;
+}
+
+function canCallDeepModel(state, options, task) {
+	if (runtimeBudgetExceeded(state, options)) {
+		addBudgetEvent(state, "maxRuntimeMs", `Skipped ${task}; runtime budget reached.`);
+		return false;
+	}
+	if (state.modelCalls.length >= options.maxModelCalls) {
+		addBudgetEvent(state, "maxModelCalls", `Skipped ${task}; model call budget reached.`);
+		return false;
+	}
+	return true;
+}
+
+function appendBudgetGaps(state, gaps) {
+	let index = gaps.length + 1;
+	for (const event of state.budgetEvents) {
+		gaps.push({
+			gapId: nextId("gap", index++),
+			text: `Deep research stopped early because ${event.reason} was reached.`,
+			reason: event.detail,
+			sourceIds: [],
+			createdAt: event.recordedAt,
+		});
+	}
+	return gaps;
 }
 
 function searchParamsForQuery(query, flags, defaults) {
@@ -1748,8 +1886,8 @@ async function callLocalJsonModel(runDirectory, task, prompt, fallback) {
 	}
 }
 
-function evidencePrompt(source, question) {
-	const text = source.text.slice(0, 60_000);
+function evidencePrompt(source, question, maxEvidenceChars) {
+	const text = selectRelevantText(source.text, question, maxEvidenceChars);
 	return `Extract source-backed evidence for this research question.
 
 Question:
@@ -1810,11 +1948,29 @@ Return JSON with this shape:
   "rationale": "short reason"
 }
 
-Return at most 5 queries. Do not repeat existing queries.`;
+	Return at most 2 queries. Do not repeat existing queries.`;
 }
 
-function claimPrompt(question, evidenceItems) {
-	const evidence = evidenceItems
+function claimEvidenceItems(evidenceItems, maxItems) {
+	const bySource = new Set();
+	const selected = [];
+	for (const item of evidenceItems) {
+		if (selected.length >= maxItems) break;
+		if (bySource.has(item.sourceId)) continue;
+		selected.push(item);
+		bySource.add(item.sourceId);
+	}
+	for (const item of evidenceItems) {
+		if (selected.length >= maxItems) break;
+		if (selected.includes(item)) continue;
+		selected.push(item);
+	}
+	return selected;
+}
+
+function claimPrompt(question, evidenceItems, maxItems) {
+	const selectedEvidence = claimEvidenceItems(evidenceItems, maxItems);
+	const evidence = selectedEvidence
 		.map(
 			(item) =>
 				`- evidence_id: ${item.evidenceId}\n  source_id: ${item.sourceId}\n  confidence: ${item.confidence}\n  interpretation: ${item.interpretation}\n  text: ${item.text}\n  quote: ${item.directQuote ?? ""}`,
@@ -1854,6 +2010,13 @@ Evidence:
 ${evidence || "- no evidence"}`;
 }
 
+function verifiedDirectQuote(candidate, sourceText) {
+	if (!candidate) return null;
+	const quote = normalizeWhitespace(candidate);
+	if (!quote) return null;
+	return includesQuote(sourceText, quote) ? quote : null;
+}
+
 function sanitizeEvidence(rawEvidence, source, startIndex) {
 	const rows = Array.isArray(rawEvidence?.evidence) ? rawEvidence.evidence : Array.isArray(rawEvidence) ? rawEvidence : [];
 	const items = [];
@@ -1862,7 +2025,8 @@ function sanitizeEvidence(rawEvidence, source, startIndex) {
 		if (typeof row !== "object" || row === null) continue;
 		const text = typeof row.text === "string" ? row.text.trim() : "";
 		if (!text) continue;
-		const directQuote = typeof row.direct_quote === "string" && row.direct_quote.trim() ? row.direct_quote.trim() : null;
+		const directQuote =
+			typeof row.direct_quote === "string" && row.direct_quote.trim() ? verifiedDirectQuote(row.direct_quote, source.text) : null;
 		items.push({
 			evidenceId: nextId("ev", index++),
 			sourceId: source.sourceId,
@@ -1877,11 +2041,12 @@ function sanitizeEvidence(rawEvidence, source, startIndex) {
 	}
 	if (items.length === 0 && source.text.trim()) {
 		const fallbackText = source.text.trim().slice(0, 500);
+		const fallbackQuote = source.text.trim().slice(0, 180);
 		items.push({
 			evidenceId: nextId("ev", index++),
 			sourceId: source.sourceId,
 			text: fallbackText,
-			directQuote: fallbackText.slice(0, 180),
+			directQuote: fallbackQuote,
 			locator: source.finalUrl,
 			interpretation: "explicit",
 			confidence: "low",
@@ -1999,7 +2164,9 @@ function writeDeepArtifacts(runDirectory, state) {
 			claims: state.claims.length,
 			gaps: state.gaps.length,
 			modelCalls: state.modelCalls.length,
+			budgetEvents: state.budgetEvents.length,
 		},
+		budgetEvents: state.budgetEvents,
 	});
 	writeJsonl(join(runDirectory, "query_log.jsonl"), state.queryLog);
 	writeJson(join(runDirectory, "source_index.json"), {
@@ -2473,6 +2640,7 @@ async function commandDeep(positionals, flags) {
 	const state = {
 		question,
 		startedAt: nowIso(),
+		startedAtMs: Date.now(),
 		options: { ...options, searxng: base },
 		seedQueries: uniqueSeedQueries,
 		queryLog: [],
@@ -2481,14 +2649,24 @@ async function commandDeep(positionals, flags) {
 		claims: [],
 		gaps: [],
 		modelCalls: [],
+		budgetEvents: [],
 	};
 	const seenQueries = new Set();
 	const queuedQueries = [...uniqueSeedQueries];
 	const seenUrls = new Map();
 
 	for (let iteration = 1; iteration <= options.maxIterations; iteration += 1) {
+		if (runtimeBudgetExceeded(state, options)) {
+			addBudgetEvent(state, "maxRuntimeMs", "Stopped before starting another iteration.");
+			break;
+		}
 		const iterationQueries = [];
 		while (queuedQueries.length > 0) {
+			if (seenQueries.size >= options.maxQueries) {
+				addBudgetEvent(state, "maxQueries", "Stopped before scheduling another query.");
+				queuedQueries.length = 0;
+				break;
+			}
 			const query = queuedQueries.shift();
 			const key = query.toLowerCase();
 			if (seenQueries.has(key)) continue;
@@ -2498,6 +2676,10 @@ async function commandDeep(positionals, flags) {
 		if (iterationQueries.length === 0) break;
 
 		for (const query of iterationQueries) {
+			if (runtimeBudgetExceeded(state, options)) {
+				addBudgetEvent(state, "maxRuntimeMs", "Stopped before searching another query.");
+				break;
+			}
 			const searchParams = searchParamsForQuery(query, flags, options);
 			let results = [];
 			let error = null;
@@ -2519,12 +2701,20 @@ async function commandDeep(positionals, flags) {
 			state.queryLog.push({ iteration, query, params: searchParams, searchedAt: nowIso(), results, error });
 			const urlsToRead = results.slice(0, options.readCount).filter((result) => result.url);
 			for (const [index, result] of urlsToRead.entries()) {
+				if (runtimeBudgetExceeded(state, options)) {
+					addBudgetEvent(state, "maxRuntimeMs", "Stopped before reading another source.");
+					break;
+				}
 				if (index > 0 && options.delayMs > 0) await sleep(options.delayMs);
 				const normalized = normalizeUrl(result.url);
 				if (seenUrls.has(normalized)) {
 					const source = seenUrls.get(normalized);
 					source.searchOrigins.push({ iteration, query, rank: result.rank, engine: result.engine, score: result.score });
 					continue;
+				}
+				if (state.sources.length >= options.maxSources) {
+					addBudgetEvent(state, "maxSources", "Stopped before reading another unique source.");
+					break;
 				}
 				const source = {
 					sourceId: sourceIdForUrl(result.url),
@@ -2562,9 +2752,18 @@ async function commandDeep(positionals, flags) {
 					source.metadata = reading.metadata ?? {};
 					source.warnings = reading.warnings ?? [];
 					source.text = reading.text;
+					if (isLowValueReading(reading)) {
+						source.status = "needs_review";
+						source.warnings.push("skipped evidence extraction because the page looked like a security checkpoint or low-value response");
+					}
 					const archived = writeDeepSource(runDirectory, source);
 					Object.assign(source, archived);
-					const { value, record } = await callLocalJsonModel(runDirectory, "extract-evidence", evidencePrompt(source, question), {
+					if (source.status !== "success") continue;
+					if (!canCallDeepModel(state, options, "extract-evidence")) {
+						source.warnings.push("skipped evidence extraction because the model-call budget was reached");
+						continue;
+					}
+					const { value, record } = await callLocalJsonModel(runDirectory, "extract-evidence", evidencePrompt(source, question, options.maxEvidenceChars), {
 						evidence: [],
 					});
 					state.modelCalls.push(record);
@@ -2576,6 +2775,7 @@ async function commandDeep(positionals, flags) {
 		}
 
 		if (iteration < options.maxIterations) {
+			if (!canCallDeepModel(state, options, "expand-queries")) continue;
 			const { value, record } = await callLocalJsonModel(
 				runDirectory,
 				"expand-queries",
@@ -2583,23 +2783,31 @@ async function commandDeep(positionals, flags) {
 				{ queries: [] },
 			);
 			state.modelCalls.push(record);
-			const followUps = Array.isArray(value?.queries) ? value.queries : [];
+			const followUps = Array.isArray(value?.queries) ? value.queries.slice(0, options.maxFollowupQueries) : [];
 			for (const query of followUps) {
 				if (typeof query !== "string" || !query.trim()) continue;
+				if (queuedQueries.length + seenQueries.size >= options.maxQueries) {
+					addBudgetEvent(state, "maxQueries", "Dropped follow-up query because the query budget was reached.");
+					break;
+				}
 				const normalized = query.trim().toLowerCase();
 				if (!seenQueries.has(normalized)) queuedQueries.push(query.trim());
 			}
 		}
 	}
 
-	const { value: claimValue, record: claimRecord } = await callLocalJsonModel(runDirectory, "register-claims", claimPrompt(question, state.evidenceItems), {
-		claims: [],
-		gaps: [],
-	});
-	state.modelCalls.push(claimRecord);
+	let claimValue = { claims: [], gaps: [] };
+	if (canCallDeepModel(state, options, "register-claims")) {
+		const claimResult = await callLocalJsonModel(runDirectory, "register-claims", claimPrompt(question, state.evidenceItems, options.maxClaimEvidenceItems), {
+			claims: [],
+			gaps: [],
+		});
+		claimValue = claimResult.value;
+		state.modelCalls.push(claimResult.record);
+	}
 	const { claims, gaps } = sanitizeClaims(claimValue, state.evidenceItems);
 	state.claims = claims;
-	state.gaps = gaps;
+	state.gaps = appendBudgetGaps(state, gaps);
 	writeDeepArtifacts(runDirectory, state);
 	const validation = validateDeepRun(runDirectory, { emit: false });
 	process.stdout.write(
@@ -2612,6 +2820,8 @@ async function commandDeep(positionals, flags) {
 				evidence: state.evidenceItems.length,
 				claims: state.claims.length,
 				gaps: state.gaps.length,
+				modelCalls: state.modelCalls.length,
+				budgetEvents: state.budgetEvents.length,
 				valid: validation.valid,
 				validationErrors: validation.errors,
 			},
@@ -2754,6 +2964,13 @@ const FLAG_SPECS = {
 	"--limit": { key: "limit", value: true, integer: true },
 	"--read-count": { key: "readCount", value: true, integer: true },
 	"--max-iterations": { key: "maxIterations", value: true, integer: true },
+	"--max-queries": { key: "maxQueries", value: true, integer: true },
+	"--max-sources": { key: "maxSources", value: true, integer: true },
+	"--max-followup-queries": { key: "maxFollowupQueries", value: true, integer: true },
+	"--max-model-calls": { key: "maxModelCalls", value: true, integer: true },
+	"--max-runtime-ms": { key: "maxRuntimeMs", value: true, integer: true },
+	"--max-evidence-chars": { key: "maxEvidenceChars", value: true, integer: true },
+	"--max-claim-evidence-items": { key: "maxClaimEvidenceItems", value: true, integer: true },
 	"--delay-ms": { key: "delayMs", value: true, integer: true },
 	"--timeout-ms": { key: "timeoutMs", value: true, integer: true },
 	"--categories": { key: "categories", value: true },
@@ -2815,6 +3032,8 @@ function usage() {
       [--safesearch <0|1|2>] [--time-range <day|week|month|year>] [--pageno N]
   web-research.mjs deep <query...> --output <dir> [--question <text>] [--query <query>] [--query-file <path>]
       [--max-iterations N] [--limit N] [--read-count N] [--render] [--no-render] [--playwright-ws <ws-endpoint>]
+      [--max-queries N] [--max-sources N] [--max-followup-queries N] [--max-model-calls N]
+      [--max-runtime-ms N] [--max-evidence-chars N] [--max-claim-evidence-items N]
       [--categories <cats>] [--engines <engines>] [--language <lang>]
       [--safesearch <0|1|2>] [--time-range <day|week|month|year>] [--pageno N]
   web-research.mjs academic <query...> --output <dir> [--limit N]

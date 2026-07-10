@@ -17,6 +17,7 @@ import { join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import test from "node:test";
+import webResearchExtension, { formatRunFailure } from "../forge/extensions/web-research.ts";
 
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const skillsRoot = join(repositoryRoot, "forge", "skills");
@@ -255,6 +256,20 @@ function startDeepResearchFixture() {
 				results.push({ title: "Beta Source", url: `${origin}/page-beta`, content: "Beta snippet", engine: "fixture", score: 1 });
 			} else if (/follow-up/i.test(query)) {
 				results.push({ title: "Gamma Source", url: `${origin}/page-gamma`, content: "Gamma snippet", engine: "fixture", score: 1 });
+			} else if (/many/i.test(query)) {
+				for (let index = 1; index <= 8; index += 1) {
+					results.push({
+						title: `Many Source ${index}`,
+						url: `${origin}/page-many?query=${encodeURIComponent(query)}&n=${index}`,
+						content: `Many snippet ${index}`,
+						engine: "fixture",
+						score: 1 - index / 100,
+					});
+				}
+			} else if (/mismatch/i.test(query)) {
+				results.push({ title: "Mismatch Source", url: `${origin}/page-mismatch`, content: "Mismatch snippet", engine: "fixture", score: 1 });
+			} else if (/checkpoint/i.test(query)) {
+				results.push({ title: "Checkpoint Source", url: `${origin}/page-checkpoint`, content: "Checkpoint snippet", engine: "fixture", score: 1 });
 			} else if (/unsafe/i.test(query)) {
 				results.push({ title: "Unsafe Source", url: "http://127.0.0.1:9/unsafe", content: "Unsafe snippet", engine: "fixture", score: 1 });
 			}
@@ -280,6 +295,9 @@ function startDeepResearchFixture() {
 					let quote = "Alpha evidence quote supports deep research provenance.";
 					if (prompt.includes("Beta Source")) quote = "Beta evidence quote describes validation citations.";
 					if (prompt.includes("Gamma Source")) quote = "Gamma follow up quote identifies remaining gap.";
+					const manyQuote = prompt.match(/Many evidence quote \d+ for [^.]+\./)?.[0];
+					if (manyQuote) quote = manyQuote;
+					if (prompt.includes("Mismatch Source")) quote = "Invented quote that is absent from the archived source.";
 					content = JSON.stringify({
 						evidence: [
 							{
@@ -318,11 +336,22 @@ function startDeepResearchFixture() {
 			"/page-alpha": ["Alpha Source", "Alpha evidence quote supports deep research provenance."],
 			"/page-beta": ["Beta Source", "Beta evidence quote describes validation citations."],
 			"/page-gamma": ["Gamma Source", "Gamma follow up quote identifies remaining gap."],
+			"/page-mismatch": ["Mismatch Source", "Mismatch source text supports deterministic quote repair."],
+			"/page-checkpoint": ["Vercel Security Checkpoint", "Vercel Security Checkpoint | sfo1::test"],
 		};
 		const page = pages[url.pathname];
 		if (page) {
 			response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
 			response.end(`<!doctype html><title>${page[0]}</title><main><h1>${page[0]}</h1><p>${page[1]}</p></main>`);
+			return;
+		}
+		if (url.pathname === "/page-many") {
+			const query = url.searchParams.get("query") ?? "many";
+			const index = url.searchParams.get("n") ?? "0";
+			response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+			response.end(
+				`<!doctype html><title>Many Source ${index}</title><main><h1>Many Source ${index}</h1><p>Many evidence quote ${index} for ${query}. Budgeted research should preserve this source.</p></main>`,
+			);
 			return;
 		}
 		response.writeHead(404, { "Content-Type": "text/plain" });
@@ -1898,6 +1927,143 @@ test("web-research deep creates validated provenance-backed artifacts", async ()
 			await fixture.close();
 		}
 	});
+});
+
+test("web-research deep applies whole-run budgets and records budget gaps", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startDeepResearchFixture();
+		try {
+			const queries = join(workspace, "many-queries.txt");
+			writeFileSync(
+				queries,
+				Array.from({ length: 10 }, (_, index) => `many budget query ${index + 1}`).join("\n") + "\n",
+			);
+			const deepRun = join(workspace, "deep-budgeted");
+			const result = jsonOutput(
+				await runAsyncWithEnvironment(
+					"node",
+					[
+						script("web-research", "web-research.mjs"),
+						"deep",
+						"--question",
+						"How should deep web research stay bounded?",
+						"--query-file",
+						queries,
+						"--output",
+						deepRun,
+						"--searxng",
+						fixture.searxng,
+						"--no-render",
+					],
+					{
+						FORGE_BASE_CHAT_URL: fixture.chat,
+						FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1",
+					},
+				),
+			);
+			assert.equal(result.valid, true);
+			assert.equal(result.queries, 6);
+			assert.equal(result.sources, 12);
+			assert.ok(result.modelCalls <= 16);
+			const runInfo = JSON.parse(readFileSync(join(deepRun, "research_run.json"), "utf8"));
+			assert.equal(runInfo.options.maxQueries, 6);
+			assert.equal(runInfo.options.maxSources, 12);
+			assert.equal(runInfo.options.maxModelCalls, 16);
+			assert.ok(runInfo.budgetEvents.some((event) => event.reason === "maxSources" || event.reason === "maxQueries"));
+			const gaps = readFileSync(join(deepRun, "gap_log.jsonl"), "utf8");
+			assert.match(gaps, /Deep research stopped early/);
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("web-research deep repairs invalid direct quote candidates and skips checkpoints", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startDeepResearchFixture();
+		try {
+			const deepRun = join(workspace, "deep-quote-repair");
+			const result = jsonOutput(
+				await runAsyncWithEnvironment(
+					"node",
+					[
+						script("web-research", "web-research.mjs"),
+						"deep",
+						"--question",
+						"How should quote validation work?",
+						"--query",
+						"mismatch quote",
+						"--query",
+						"checkpoint page",
+						"--output",
+						deepRun,
+						"--searxng",
+						fixture.searxng,
+						"--max-iterations",
+						"1",
+						"--limit",
+						"2",
+						"--read-count",
+						"2",
+						"--no-render",
+					],
+					{
+						FORGE_BASE_CHAT_URL: fixture.chat,
+						FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1",
+					},
+				),
+			);
+			assert.equal(result.valid, true);
+			const evidenceRows = readFileSync(join(deepRun, "evidence_items.jsonl"), "utf8")
+				.trim()
+				.split(/\r?\n/)
+				.filter(Boolean)
+				.map((line) => JSON.parse(line));
+			assert.equal(evidenceRows.length, 1);
+			assert.equal(evidenceRows[0].directQuote, null);
+			const sourceIndex = JSON.parse(readFileSync(join(deepRun, "source_index.json"), "utf8"));
+			const checkpoint = sourceIndex.sources.find((source) => /checkpoint/i.test(source.title ?? ""));
+			assert.ok(checkpoint);
+			assert.equal(checkpoint.status, "needs_review");
+			assert.match(checkpoint.warnings.join("\n"), /skipped evidence extraction/);
+			assert.equal(jsonOutput(run("node", [script("web-research", "web-research.mjs"), "validate", deepRun])).valid, true);
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("web-research extension blocks duplicate same-turn deep runs and preserves failure stdout", async () => {
+	const handlers = new Map();
+	const tools = [];
+	const pi = {
+		on(event, handler) {
+			handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+		},
+		registerTool(tool) {
+			tools.push(tool);
+		},
+	};
+	webResearchExtension(pi);
+	const toolCall = handlers.get("tool_call")[0];
+	const turnStart = handlers.get("turn_start")[0];
+	assert.ok(tools.some((tool) => tool.name === "forge_deep_web_research"));
+	assert.equal(await toolCall({ type: "tool_call", toolName: "forge_deep_web_research", toolCallId: "one", input: {} }), undefined);
+	const blocked = await toolCall({ type: "tool_call", toolName: "forge_deep_web_research", toolCallId: "two", input: {} });
+	assert.equal(blocked.block, true);
+	assert.match(blocked.reason, /Only one deep web research run/);
+	await turnStart({ type: "turn_start" });
+	assert.equal(await toolCall({ type: "tool_call", toolName: "forge_deep_web_research", toolCallId: "three", input: {} }), undefined);
+
+	const message = formatRunFailure(
+		["/tmp/web-research.mjs", "deep"],
+		1,
+		JSON.stringify({ valid: false, validationErrors: ["ev-0001 direct quote was not found in archived source text"] }),
+		"Error: Could not parse CSS stylesheet\n".repeat(200),
+	);
+	assert.match(message, /validationErrors/);
+	assert.match(message, /direct quote was not found/);
+	assert.match(message, /stderr:/);
 });
 
 test("web-research quick search and read produce report artifacts", async () => {
