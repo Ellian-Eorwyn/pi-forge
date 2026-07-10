@@ -19,6 +19,12 @@
 			"description": "Run iterative multi-query web research with source provenance, evidence, claims, gaps, and validation.",
 			"command": "node scripts/web-research.mjs deep",
 			"destructive": false
+		},
+		{
+			"name": "web_academic_research",
+			"description": "Search scholarly metadata providers, dedupe canonical works, preserve provenance, and export RIS citations.",
+			"command": "node scripts/web-research.mjs academic",
+			"destructive": false
 		}
 	],
 	"safety": {

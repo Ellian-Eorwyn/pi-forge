@@ -20,6 +20,15 @@ interface DeepWebResearchParams {
 	render?: boolean;
 }
 
+interface AcademicWebResearchParams {
+	query: string;
+	output: string;
+	limit?: number;
+	providers?: string[];
+	contactEmail?: string;
+	timeoutMs?: number;
+}
+
 const extensionDirectory = dirname(fileURLToPath(import.meta.url));
 const webResearchScript = join(extensionDirectory, "..", "skills", "web-research", "scripts", "web-research.mjs");
 
@@ -61,6 +70,37 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 			};
 		},
 	});
+
+	pi.registerTool({
+		name: "forge_academic_web_research",
+		label: "Academic web research",
+		description: "Run pi-forge academic search with deduped canonical works, provider provenance, and RIS exports.",
+		promptSnippet:
+			"Use forge_academic_web_research for scholarly literature discovery that needs deduped works, metadata provenance, and RIS citation exports.",
+		promptGuidelines: [
+			"Use this tool when the user asks for academic articles, literature search, DOI/PubMed/arXiv discovery, or citation-manager-ready exports.",
+			"Treat works.jsonl as the canonical deduped work list and works.ris plus ris/*.ris as the citation export artifacts.",
+		],
+		parameters: Type.Object({
+			query: Type.String({ description: "Academic search query." }),
+			output: Type.String({ description: "New output directory. The CLI refuses to overwrite existing directories." }),
+			limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum results per provider." })),
+			providers: Type.Optional(Type.Array(Type.String(), { description: "Optional provider list, e.g. crossref, semantic-scholar, pubmed, arxiv." })),
+			contactEmail: Type.Optional(Type.String({ description: "Contact email for polite API use and Unpaywall when configured." })),
+			timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Provider request timeout in milliseconds." })),
+		}),
+		executionMode: "sequential",
+		async execute(_toolCallId, params, signal) {
+			const input = params as AcademicWebResearchParams;
+			const args = buildAcademicResearchArgs(input);
+			const result = await runNode(args, signal);
+			const summary = JSON.parse(result.stdout);
+			return {
+				content: [{ type: "text", text: JSON.stringify(summary, null, 2) }],
+				details: { ...summary, stderr: result.stderr },
+			};
+		},
+	});
 }
 
 function buildDeepResearchArgs(input: DeepWebResearchParams): string[] {
@@ -80,6 +120,15 @@ function buildDeepResearchArgs(input: DeepWebResearchParams): string[] {
 	if (input.timeRange) args.push("--time-range", input.timeRange);
 	if (input.render === false) args.push("--no-render");
 	else if (input.render === true) args.push("--render");
+	return args;
+}
+
+function buildAcademicResearchArgs(input: AcademicWebResearchParams): string[] {
+	const args = [webResearchScript, "academic", input.query, "--output", input.output];
+	if (input.limit !== undefined) args.push("--limit", String(input.limit));
+	if (input.providers && input.providers.length > 0) args.push("--providers", input.providers.join(","));
+	if (input.contactEmail) args.push("--contact-email", input.contactEmail);
+	if (input.timeoutMs !== undefined) args.push("--timeout-ms", String(input.timeoutMs));
 	return args;
 }
 

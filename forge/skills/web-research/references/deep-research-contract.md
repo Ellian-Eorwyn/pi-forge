@@ -105,3 +105,32 @@ disagreement; record conflicting evidence and surface the limit in the report.
 
 The report is generated from `claim_register.jsonl` and `evidence_items.jsonl`.
 Do not hand-author unsupported findings directly in the report.
+
+## Academic Research Output Contract
+
+Academic research is a metadata-first workflow for scholarly discovery. It
+queries structured academic providers, normalizes records into canonical works,
+deduplicates them, and emits citation-manager-ready RIS.
+
+```text
+<run-dir>/
+  academic_run.json          # run configuration, provider capabilities, counts
+  works.jsonl                # one canonical Work per deduped article/work
+  source_records.jsonl       # provider records and normalized payloads
+  field_provenance.jsonl     # field-level provider/source-path provenance
+  dedupe_decisions.jsonl     # merge/link/keep decisions and evidence
+  provider_requests.jsonl    # request URLs, status, raw paths, hashes
+  provider_errors.jsonl      # non-fatal provider failures
+  raw/<provider>/*           # archived provider responses
+  works.ris                  # aggregate RIS, one record per unique Work
+  ris/<work-id>.ris          # individual RIS record for each unique Work
+  ris_manifest.json          # Work-to-RIS mapping and dedupe keys
+  academic_report.md         # deterministic work/provider summary
+  validation_report.json     # validator output
+```
+
+RIS is generated only after dedupe. `works.ris` must contain exactly one RIS
+record for each canonical Work, and every Work must have a matching
+`ris/<work-id>.ris` file. Validation fails on duplicate DOI/PMID/arXiv/title-year
+RIS keys, missing per-work RIS files, missing manifest records, or RIS records
+without `ER  -` terminators.

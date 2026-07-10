@@ -14,6 +14,7 @@ const DEFAULT_LIMIT = 10;
 const DEFAULT_READ_COUNT = 5;
 const DEFAULT_DEEP_ITERATIONS = 3;
 const DEEP_SCHEMA_VERSION = 1;
+const ACADEMIC_SCHEMA_VERSION = 1;
 const DEEP_MANIFEST_COLUMNS = [
 	"resource_id",
 	"source_url",
@@ -32,6 +33,40 @@ const DEEP_MANIFEST_COLUMNS = [
 	"duplicate_of",
 	"error",
 ];
+const ACADEMIC_DEFAULT_PROVIDERS = ["crossref", "semantic-scholar", "europepmc", "pubmed", "arxiv", "datacite", "openaire", "doaj"];
+const ACADEMIC_PROVIDER_BASES = {
+	crossref: "https://api.crossref.org",
+	"semantic-scholar": "https://api.semanticscholar.org",
+	europepmc: "https://www.ebi.ac.uk/europepmc/webservices/rest",
+	pubmed: "https://eutils.ncbi.nlm.nih.gov/entrez/eutils",
+	arxiv: "https://export.arxiv.org/api",
+	datacite: "https://api.datacite.org",
+	openaire: "https://api.openaire.eu",
+	doaj: "https://doaj.org/api",
+	unpaywall: "https://api.unpaywall.org/v2",
+};
+const ACADEMIC_PROVIDER_ENV = {
+	crossref: "FORGE_ACADEMIC_CROSSREF_URL",
+	"semantic-scholar": "FORGE_ACADEMIC_SEMANTIC_SCHOLAR_URL",
+	europepmc: "FORGE_ACADEMIC_EUROPEPMC_URL",
+	pubmed: "FORGE_ACADEMIC_PUBMED_URL",
+	arxiv: "FORGE_ACADEMIC_ARXIV_URL",
+	datacite: "FORGE_ACADEMIC_DATACITE_URL",
+	openaire: "FORGE_ACADEMIC_OPENAIRE_URL",
+	doaj: "FORGE_ACADEMIC_DOAJ_URL",
+	unpaywall: "FORGE_ACADEMIC_UNPAYWALL_URL",
+};
+const ACADEMIC_PROVIDER_LABELS = {
+	crossref: "Crossref",
+	"semantic-scholar": "Semantic Scholar",
+	europepmc: "Europe PMC",
+	pubmed: "PubMed",
+	arxiv: "arXiv",
+	datacite: "DataCite",
+	openaire: "OpenAIRE",
+	doaj: "DOAJ",
+	unpaywall: "Unpaywall",
+};
 
 // --- Utility ---------------------------------------------------------------
 
@@ -208,6 +243,1115 @@ function extractJsonFromText(text, fallback) {
 			return fallback;
 		}
 	}
+}
+
+function stripTags(value) {
+	return String(value ?? "")
+		.replace(/<[^>]+>/g, " ")
+		.replace(/&nbsp;/g, " ")
+		.replace(/&amp;/g, "&")
+		.replace(/&lt;/g, "<")
+		.replace(/&gt;/g, ">")
+		.replace(/&quot;/g, '"')
+		.replace(/&#39;/g, "'")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function firstText(value) {
+	if (Array.isArray(value)) return normalizeWhitespace(value.find((item) => typeof item === "string" && item.trim()) ?? "");
+	return normalizeWhitespace(value ?? "");
+}
+
+function compactObject(value) {
+	const output = {};
+	for (const [key, entry] of Object.entries(value)) {
+		if (entry === undefined || entry === null) continue;
+		if (Array.isArray(entry) && entry.length === 0) continue;
+		if (typeof entry === "string" && !entry.trim()) continue;
+		output[key] = entry;
+	}
+	return output;
+}
+
+function parseDateParts(parts) {
+	if (!Array.isArray(parts) || !Array.isArray(parts[0])) return { date: null, year: null };
+	const [year, month, day] = parts[0];
+	if (!Number.isInteger(year)) return { date: null, year: null };
+	const date = [year, month, day]
+		.filter((part) => Number.isInteger(part))
+		.map((part, index) => (index === 0 ? String(part) : String(part).padStart(2, "0")))
+		.join("-");
+	return { date, year };
+}
+
+function yearFromDate(value) {
+	const match = String(value ?? "").match(/\b(16|17|18|19|20)\d{2}\b/);
+	return match ? Number.parseInt(match[0], 10) : null;
+}
+
+function normalizeDoi(value) {
+	const text = String(value ?? "")
+		.trim()
+		.replace(/^https?:\/\/(dx\.)?doi\.org\//i, "")
+		.replace(/^doi:\s*/i, "")
+		.toLowerCase();
+	return text || null;
+}
+
+function normalizeArxivId(value) {
+	const text = String(value ?? "")
+		.trim()
+		.replace(/^https?:\/\/arxiv\.org\/abs\//i, "")
+		.replace(/^arxiv:/i, "")
+		.replace(/v\d+$/i, "");
+	return text || null;
+}
+
+function normalizeIdentifier(value) {
+	const text = String(value ?? "").trim();
+	return text || null;
+}
+
+function normalizeTitleKey(value) {
+	return normalizeWhitespace(value)
+		.toLowerCase()
+		.normalize("NFKD")
+		.replace(/[\u0300-\u036f]/g, "")
+		.replace(/[^\p{L}\p{N}]+/gu, " ")
+		.trim();
+}
+
+function authorDisplayName(author) {
+	if (!author) return "";
+	if (typeof author === "string") return normalizeWhitespace(author);
+	const parts = [author.family, author.given].filter(Boolean);
+	if (parts.length > 0) return normalizeWhitespace(parts.join(", "));
+	if (author.name) return normalizeWhitespace(author.name);
+	return "";
+}
+
+function firstAuthorKey(authors) {
+	const name = authorDisplayName(authors?.[0]);
+	return normalizeTitleKey(name).split(" ", 1)[0] ?? "";
+}
+
+function academicProviderBase(provider, flags = {}) {
+	const envName = ACADEMIC_PROVIDER_ENV[provider];
+	const explicit = flags[`${provider}Base`];
+	const base = explicit || (envName ? process.env[envName] : null) || ACADEMIC_PROVIDER_BASES[provider];
+	return String(base ?? "").trim().replace(/\/+$/, "");
+}
+
+function academicProviderList(flags, classification) {
+	const requested = flags.providers
+		? String(flags.providers)
+				.split(",")
+				.map((provider) => provider.trim())
+				.filter(Boolean)
+		: null;
+	const providers = requested ?? ACADEMIC_DEFAULT_PROVIDERS;
+	const unique = [...new Set(providers)];
+	if (flags.contactEmail || process.env.FORGE_ACADEMIC_CONTACT_EMAIL || process.env.UNPAYWALL_EMAIL) unique.push("unpaywall");
+	return unique.filter((provider) => {
+		if (!ACADEMIC_PROVIDER_BASES[provider]) return false;
+		if (provider === "arxiv" && classification.domain !== "technical-preprint" && classification.domain !== "general") return flags.providers?.includes(provider);
+		if (provider === "pubmed" && classification.domain !== "biomedical" && !flags.providers?.includes(provider)) return true;
+		return true;
+	});
+}
+
+function classifyAcademicQuery(query) {
+	const lower = query.toLowerCase();
+	const identifiers = {
+		doi: lower.match(/\b10\.\d{4,9}\/[-._;()/:a-z0-9]+\b/i)?.[0] ?? null,
+		pmid: lower.match(/\bpmid[:\s]*(\d{6,9})\b/i)?.[1] ?? null,
+		pmcid: lower.match(/\bpmc\d+\b/i)?.[0]?.toUpperCase() ?? null,
+		arxivId: lower.match(/\barxiv[:\s]*(\d{4}\.\d{4,5}(v\d+)?|[a-z-]+\/\d{7}(v\d+)?)\b/i)?.[1] ?? null,
+	};
+	let domain = "general";
+	if (/\b(clinical|biomedical|pubmed|pmid|pmc|disease|drug|therapy|genetic|neuroscience|epidemiology|public health)\b/.test(lower)) {
+		domain = "biomedical";
+	} else if (/\b(arxiv|preprint|machine learning|computer science|physics|mathematics|statistics|algorithm)\b/.test(lower)) {
+		domain = "technical-preprint";
+	} else if (/\b(dataset|software|repository|zenodo|figshare|data citation)\b/.test(lower)) {
+		domain = "data-software";
+	} else if (/\b(open access|oa|doaj|unpaywall|repository copy)\b/.test(lower)) {
+		domain = "oa-focused";
+	}
+	const goals = ["broad-discovery"];
+	if (identifiers.doi || /\bdoi\b/.test(lower)) goals.push("doi-lookup");
+	if (/\babstract\b/.test(lower)) goals.push("abstract-retrieval");
+	if (/\bfull text|open access|pdf\b/.test(lower)) goals.push("oa-discovery");
+	return { domain, goals, identifiers };
+}
+
+function academicWorkKey(record) {
+	const identifiers = record.identifiers ?? {};
+	if (identifiers.doi) return `doi:${normalizeDoi(identifiers.doi)}`;
+	if (identifiers.pmid) return `pmid:${identifiers.pmid}`;
+	if (identifiers.pmcid) return `pmcid:${identifiers.pmcid}`;
+	if (identifiers.arxiv_id) return `arxiv:${normalizeArxivId(identifiers.arxiv_id)}`;
+	if (identifiers.semantic_scholar_paper_id) return `s2:${identifiers.semantic_scholar_paper_id}`;
+	const title = normalizeTitleKey(record.canonical_title);
+	return `title:${title}|${record.publication_year ?? ""}|${firstAuthorKey(record.authors)}`;
+}
+
+function sourceRecordId(provider, providerRecordId, index) {
+	return `sr-${sha256(`${provider}:${providerRecordId ?? "record"}:${index}`).slice(0, 12)}`;
+}
+
+function fieldValueMap(record) {
+	return {
+		canonical_title: record.canonical_title,
+		abstract_best: record.abstract_best,
+		authors: record.authors,
+		publication_year: record.publication_year,
+		publication_date: record.publication_date,
+		venue_name: record.venue_name,
+		venue_type: record.venue_type,
+		publisher: record.publisher,
+		type: record.type,
+		identifiers: record.identifiers,
+		urls: record.urls,
+		subjects: record.subjects,
+		licenses: record.licenses,
+		oa_status: record.oa_status,
+		oa_locations: record.oa_locations,
+		full_text_candidates: record.full_text_candidates,
+		funders: record.funders,
+	};
+}
+
+function providerPriority(provider) {
+	return {
+		pubmed: 1,
+		europepmc: 2,
+		crossref: 3,
+		arxiv: 4,
+		"semantic-scholar": 5,
+		datacite: 6,
+		openaire: 7,
+		doaj: 8,
+		unpaywall: 9,
+	}[provider] ?? 10;
+}
+
+function preferValue(field, current, incoming, currentProvider, incomingProvider) {
+	if (incoming === undefined || incoming === null) return false;
+	if (Array.isArray(incoming) && incoming.length === 0) return false;
+	if (typeof incoming === "string" && !incoming.trim()) return false;
+	if (current === undefined || current === null) return true;
+	if (Array.isArray(current) && current.length === 0) return true;
+	if (typeof current === "string" && !current.trim()) return true;
+	if (field === "abstract_best") return providerPriority(incomingProvider) < providerPriority(currentProvider);
+	return false;
+}
+
+function mergeArrayUnique(current = [], incoming = [], keyFn = (value) => JSON.stringify(value)) {
+	const byKey = new Map();
+	for (const value of [...current, ...incoming]) {
+		const key = keyFn(value);
+		if (!key || byKey.has(key)) continue;
+		byKey.set(key, value);
+	}
+	return [...byKey.values()];
+}
+
+function mergeIdentifiers(current = {}, incoming = {}) {
+	const merged = { ...current };
+	for (const [key, value] of Object.entries(incoming)) {
+		if (value === undefined || value === null || value === "") continue;
+		if (Array.isArray(value)) merged[key] = mergeArrayUnique(asArray(merged[key]), value, (entry) => String(entry).toLowerCase());
+		else if (!merged[key]) merged[key] = value;
+	}
+	return compactObject(merged);
+}
+
+function createCanonicalWork(normalized, sourceRecord) {
+	const key = academicWorkKey(normalized);
+	const workId = `work-${sha256(key).slice(0, 12)}`;
+	return {
+		work_id: workId,
+		canonical_title: normalized.canonical_title ?? null,
+		normalized_title: normalizeTitleKey(normalized.canonical_title),
+		abstract_best: normalized.abstract_best ?? null,
+		abstract_best_source: normalized.abstract_best ? sourceRecord.source_record_id : null,
+		abstract_alternates: normalized.abstract_best ? [{ value: normalized.abstract_best, sourceRecordId: sourceRecord.source_record_id }] : [],
+		authors: normalized.authors ?? [],
+		publication_year: normalized.publication_year ?? null,
+		publication_date: normalized.publication_date ?? null,
+		venue_name: normalized.venue_name ?? null,
+		venue_type: normalized.venue_type ?? null,
+		publisher: normalized.publisher ?? null,
+		type: normalized.type ?? "unknown",
+		identifiers: compactObject(normalized.identifiers ?? {}),
+		urls: normalized.urls ?? [],
+		source_records: [sourceRecord.source_record_id],
+		oa_status: normalized.oa_status ?? null,
+		oa_locations: normalized.oa_locations ?? [],
+		full_text_candidates: normalized.full_text_candidates ?? [],
+		licenses: normalized.licenses ?? [],
+		subjects: normalized.subjects ?? [],
+		fields_of_study: normalized.fields_of_study ?? [],
+		funders: normalized.funders ?? [],
+		grants: normalized.grants ?? [],
+		institutions: normalized.institutions ?? [],
+		citations_count_by_provider: normalized.citations_count_by_provider ?? [],
+		references: [],
+		citations: [],
+		related_works: [],
+		retraction_or_update_status: normalized.retraction_or_update_status ?? null,
+		confidence_score: 0.5,
+		dedupe_cluster_id: `cluster-${sha256(key).slice(0, 12)}`,
+		created_at: nowIso(),
+		updated_at: nowIso(),
+		_fieldSources: Object.fromEntries(Object.keys(fieldValueMap(normalized)).map((field) => [field, sourceRecord.provider])),
+	};
+}
+
+function addFieldProvenance(rows, work, sourceRecord, normalized, conflictStatus = "uncontested") {
+	for (const [field, value] of Object.entries(fieldValueMap(normalized))) {
+		if (value === undefined || value === null) continue;
+		if (Array.isArray(value) && value.length === 0) continue;
+		if (typeof value === "string" && !value.trim()) continue;
+		rows.push({
+			field_name: field,
+			work_id: work.work_id,
+			value,
+			source_provider: sourceRecord.provider,
+			source_record_id: sourceRecord.source_record_id,
+			source_path: normalized.field_paths?.[field] ?? null,
+			retrieved_at: sourceRecord.retrieved_at,
+			transformation_applied: normalized.transformations?.[field] ?? null,
+			confidence: normalized.field_confidence?.[field] ?? "medium",
+			conflict_status: conflictStatus,
+			notes: null,
+		});
+	}
+}
+
+function mergeCanonicalWork(work, normalized, sourceRecord, provenanceRows) {
+	work.source_records = mergeArrayUnique(work.source_records, [sourceRecord.source_record_id], String);
+	work.identifiers = mergeIdentifiers(work.identifiers, normalized.identifiers);
+	work.authors = mergeArrayUnique(work.authors, normalized.authors ?? [], (author) => authorDisplayName(author).toLowerCase());
+	work.urls = mergeArrayUnique(work.urls ?? [], normalized.urls ?? [], (url) => String(url).toLowerCase());
+	work.subjects = mergeArrayUnique(work.subjects, normalized.subjects ?? [], (subject) => String(subject).toLowerCase());
+	work.fields_of_study = mergeArrayUnique(work.fields_of_study, normalized.fields_of_study ?? [], (field) => String(field).toLowerCase());
+	work.funders = mergeArrayUnique(work.funders, normalized.funders ?? [], (funder) => JSON.stringify(funder).toLowerCase());
+	work.licenses = mergeArrayUnique(work.licenses, normalized.licenses ?? [], (license) => JSON.stringify(license).toLowerCase());
+	work.oa_locations = mergeArrayUnique(work.oa_locations, normalized.oa_locations ?? [], (location) => location.url ?? JSON.stringify(location));
+	work.full_text_candidates = mergeArrayUnique(work.full_text_candidates, normalized.full_text_candidates ?? [], (location) => location.url ?? String(location));
+	if (normalized.abstract_best) {
+		work.abstract_alternates = mergeArrayUnique(
+			work.abstract_alternates,
+			[{ value: normalized.abstract_best, sourceRecordId: sourceRecord.source_record_id }],
+			(item) => normalizeWhitespace(item.value).toLowerCase(),
+		);
+	}
+	for (const field of ["canonical_title", "publication_year", "publication_date", "venue_name", "venue_type", "publisher", "type", "oa_status"]) {
+		if (preferValue(field, work[field], normalized[field], work._fieldSources?.[field], sourceRecord.provider)) {
+			work[field] = normalized[field];
+			work._fieldSources[field] = sourceRecord.provider;
+		}
+	}
+	if (preferValue("abstract_best", work.abstract_best, normalized.abstract_best, work._fieldSources?.abstract_best, sourceRecord.provider)) {
+		work.abstract_best = normalized.abstract_best;
+		work.abstract_best_source = sourceRecord.source_record_id;
+		work._fieldSources.abstract_best = sourceRecord.provider;
+	}
+	work.normalized_title = normalizeTitleKey(work.canonical_title);
+	work.updated_at = nowIso();
+	addFieldProvenance(provenanceRows, work, sourceRecord, normalized, "merged");
+}
+
+function findRelatedWork(work, normalized) {
+	const title = normalizeTitleKey(normalized.canonical_title);
+	if (!title || work.normalized_title !== title) return null;
+	const year = normalized.publication_year;
+	const closeYear = !work.publication_year || !year || Math.abs(work.publication_year - year) <= 1;
+	if (!closeYear) return null;
+	const types = new Set([work.type, normalized.type]);
+	if (types.has("preprint") && types.has("article")) return "preprint_published_version";
+	return null;
+}
+
+function dedupeAcademicRecords(sourceRecords, normalizedRecords) {
+	const works = [];
+	const byKey = new Map();
+	const provenanceRows = [];
+	const decisions = [];
+	for (const [index, normalized] of normalizedRecords.entries()) {
+		const sourceRecord = sourceRecords[index];
+		const key = academicWorkKey(normalized);
+		const existing = byKey.get(key);
+		if (existing) {
+			mergeCanonicalWork(existing, normalized, sourceRecord, provenanceRows);
+			decisions.push({
+				decision: "merge",
+				reason: `Matched ${key}`,
+				work_id: existing.work_id,
+				source_record_id: sourceRecord.source_record_id,
+				compared_fields: { key },
+				confidence: "high",
+				provider_evidence: [sourceRecord.provider],
+			});
+			continue;
+		}
+		const work = createCanonicalWork(normalized, sourceRecord);
+		works.push(work);
+		byKey.set(key, work);
+		addFieldProvenance(provenanceRows, work, sourceRecord, normalized);
+		decisions.push({
+			decision: "keep_separate",
+			reason: `New canonical work from ${key}`,
+			work_id: work.work_id,
+			source_record_id: sourceRecord.source_record_id,
+			compared_fields: { key },
+			confidence: "medium",
+			provider_evidence: [sourceRecord.provider],
+		});
+		for (const other of works) {
+			if (other.work_id === work.work_id) continue;
+			const relation = findRelatedWork(other, normalized);
+			if (!relation) continue;
+			other.related_works.push({ workId: work.work_id, relation, sourceRecordId: sourceRecord.source_record_id });
+			work.related_works.push({ workId: other.work_id, relation, sourceRecordId: sourceRecord.source_record_id });
+			decisions.push({
+				decision: "link_related",
+				reason: relation,
+				work_id: work.work_id,
+				related_work_id: other.work_id,
+				source_record_id: sourceRecord.source_record_id,
+				compared_fields: { title: work.normalized_title, year: work.publication_year },
+				confidence: "medium",
+				provider_evidence: [sourceRecord.provider],
+			});
+		}
+	}
+	for (const work of works) delete work._fieldSources;
+	return { works, provenanceRows, decisions };
+}
+
+// --- Academic providers ----------------------------------------------------
+
+function providerCapabilities(provider) {
+	const common = { authRequired: false, optionalAuth: false, rateLimit: "conservative", searchSyntaxNotes: "provider native query syntax" };
+	return {
+		crossref: {
+			...common,
+			fields: ["doi", "title", "authors", "venue", "publisher", "license", "funder", "references"],
+			strengths: ["DOI metadata", "publisher-deposited bibliographic verification"],
+			limits: ["abstract coverage varies", "not full-text access"],
+		},
+		"semantic-scholar": {
+			...common,
+			optionalAuth: true,
+			fields: ["paperId", "externalIds", "title", "authors", "abstract", "citations", "fieldsOfStudy", "openAccessPdf"],
+			strengths: ["broad paper discovery", "abstracts", "citation graph signals"],
+			limits: ["public quota can throttle", "aggregated metadata is not canonical"],
+		},
+		europepmc: {
+			...common,
+			fields: ["pmid", "pmcid", "doi", "title", "authors", "journal", "abstract", "fullTextUrlList"],
+			strengths: ["biomedical metadata", "PubMed/PMC abstracts", "OA links"],
+			limits: ["domain-specific coverage"],
+		},
+		pubmed: {
+			...common,
+			optionalAuth: true,
+			fields: ["pmid", "title", "authors", "journal", "publicationTypes"],
+			strengths: ["canonical PubMed lookup", "medical indexing"],
+			limits: ["biomedical scope", "ESummary omits abstracts"],
+		},
+		arxiv: {
+			...common,
+			fields: ["arxiv_id", "title", "authors", "abstract", "categories", "doi", "journal_ref"],
+			strengths: ["technical preprints", "stable arXiv identifiers"],
+			limits: ["limited disciplinary coverage", "preprints are not peer-reviewed"],
+		},
+		datacite: {
+			...common,
+			fields: ["doi", "resourceType", "creators", "descriptions", "publisher"],
+			strengths: ["datasets", "software", "reports", "repository objects"],
+			limits: ["not primarily a journal article database"],
+		},
+		openaire: {
+			...common,
+			fields: ["doi", "title", "authors", "publisher", "projects", "oa status"],
+			strengths: ["open scholarly graph", "projects and funders"],
+			limits: ["aggregated metadata can be noisy"],
+		},
+		doaj: {
+			...common,
+			fields: ["doi", "title", "authors", "journal", "abstract", "license", "fullTextUrl"],
+			strengths: ["OA journal metadata", "journal legitimacy signal"],
+			limits: ["only DOAJ-indexed OA journals"],
+		},
+		unpaywall: {
+			...common,
+			authRequired: true,
+			fields: ["doi", "oa_status", "best_oa_location", "oa_locations"],
+			strengths: ["legal OA copy discovery"],
+			limits: ["requires DOI and email", "not a search provider"],
+		},
+	}[provider];
+}
+
+function rawResponsePath(runDirectory, provider, requestId, extension) {
+	mkdirSync(join(runDirectory, "raw", provider), { recursive: true });
+	return join("raw", provider, `${requestId}.${extension}`);
+}
+
+async function providerFetch(runDirectory, provider, url, options, state) {
+	const startedAt = nowIso();
+	const requestId = `${provider}-${sha256(`${startedAt}:${url}`).slice(0, 12)}`;
+	const record = {
+		request_id: requestId,
+		provider,
+		url,
+		method: "GET",
+		status: "failed",
+		http_status: null,
+		started_at: startedAt,
+		ended_at: null,
+		raw_response_path: null,
+		raw_hash: null,
+		error: null,
+	};
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), options.timeoutMs);
+	try {
+		assertFetchableUrl(url);
+		const response = await fetch(url, {
+			signal: controller.signal,
+			headers: { "user-agent": options.userAgent, accept: options.accept ?? "application/json, application/xml;q=0.9, text/xml;q=0.8" },
+		});
+		record.http_status = response.status;
+		const text = await response.text();
+		const hash = sha256(text);
+		const contentType = response.headers.get("content-type") ?? "";
+		const extension = contentType.includes("xml") || text.trimStart().startsWith("<") ? "xml" : "json";
+		const relativePath = rawResponsePath(runDirectory, provider, requestId, extension);
+		writeFileSync(join(runDirectory, relativePath), text);
+		record.raw_response_path = relativePath;
+		record.raw_hash = hash;
+		if (!response.ok) throw new Error(`${provider} returned HTTP ${response.status}`);
+		record.status = "success";
+		record.ended_at = nowIso();
+		state.providerRequests.push(record);
+		return { text, json: extension === "json" ? JSON.parse(text) : null, record };
+	} catch (error) {
+		record.error = error instanceof Error ? error.message : String(error);
+		record.ended_at = nowIso();
+		state.providerRequests.push(record);
+		state.providerErrors.push({
+			provider,
+			url,
+			error: record.error,
+			http_status: record.http_status,
+			recorded_at: record.ended_at,
+		});
+		return { text: "", json: null, record, error: record.error };
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+function buildUrl(base, pathname, params = {}) {
+	const url = new URL(`${base}${pathname}`);
+	for (const [key, value] of Object.entries(params)) {
+		if (value === undefined || value === null || value === "") continue;
+		url.searchParams.set(key, String(value));
+	}
+	return url.toString();
+}
+
+function normalizeCrossrefType(type) {
+	if (type === "journal-article") return "article";
+	if (type === "proceedings-article") return "proceedings";
+	if (type === "book-chapter") return "chapter";
+	if (type === "posted-content") return "preprint";
+	if (type === "book") return "book";
+	if (type === "report") return "report";
+	return type || "unknown";
+}
+
+function normalizeCrossrefItem(item) {
+	const published = parseDateParts(item["published-print"]?.["date-parts"] ?? item["published-online"]?.["date-parts"] ?? item.created?.["date-parts"]);
+	const authors = asArray(item.author).map((author) =>
+		compactObject({
+			given: author.given ?? null,
+			family: author.family ?? null,
+			name: author.name ?? [author.given, author.family].filter(Boolean).join(" "),
+			orcid: author.ORCID ?? null,
+		}),
+	);
+	return {
+		canonical_title: firstText(item.title),
+		abstract_best: stripTags(item.abstract),
+		authors,
+		publication_year: published.year,
+		publication_date: published.date,
+		venue_name: firstText(item["container-title"]),
+		venue_type: item.type?.includes("journal") ? "journal" : null,
+		publisher: item.publisher ?? null,
+		type: normalizeCrossrefType(item.type),
+		identifiers: compactObject({
+			doi: normalizeDoi(item.DOI),
+			issn: asArray(item.ISSN),
+			isbn: asArray(item.ISBN),
+		}),
+		urls: asArray(item.URL),
+		subjects: asArray(item.subject),
+		licenses: asArray(item.license).map((license) => compactObject({ url: license.URL, start: license.start?.["date-time"] })),
+		funders: asArray(item.funder).map((funder) => compactObject({ name: funder.name, doi: normalizeDoi(funder.DOI), awards: asArray(funder.award) })),
+		field_paths: {
+			canonical_title: "message.items[].title",
+			abstract_best: "message.items[].abstract",
+			identifiers: "message.items[].DOI",
+		},
+		transformations: { abstract_best: item.abstract ? "stripped XML/HTML tags and normalized whitespace" : null, identifiers: "normalized DOI" },
+	};
+}
+
+function normalizeSemanticScholarItem(item) {
+	const externalIds = item.externalIds ?? {};
+	return {
+		canonical_title: normalizeWhitespace(item.title),
+		abstract_best: normalizeWhitespace(item.abstract),
+		authors: asArray(item.authors).map((author) => compactObject({ name: author.name, semanticScholarAuthorId: author.authorId })),
+		publication_year: Number.isInteger(item.year) ? item.year : null,
+		publication_date: item.publicationDate ?? null,
+		venue_name: item.venue || item.journal?.name || null,
+		venue_type: item.journal?.name ? "journal" : null,
+		publisher: null,
+		type: asArray(item.publicationTypes).some((type) => /preprint/i.test(type)) ? "preprint" : "article",
+		identifiers: compactObject({
+			doi: normalizeDoi(externalIds.DOI),
+			pmid: normalizeIdentifier(externalIds.PubMed),
+			pmcid: normalizeIdentifier(externalIds.PubMedCentral),
+			arxiv_id: normalizeArxivId(externalIds.ArXiv),
+			semantic_scholar_paper_id: normalizeIdentifier(item.paperId),
+		}),
+		urls: [item.url, item.openAccessPdf?.url].filter(Boolean),
+		fields_of_study: asArray(item.fieldsOfStudy),
+		full_text_candidates: item.openAccessPdf?.url ? [{ url: item.openAccessPdf.url, source: "Semantic Scholar openAccessPdf" }] : [],
+		citations_count_by_provider: Number.isInteger(item.citationCount)
+			? [{ provider: "semantic-scholar", citationCount: item.citationCount, influentialCitationCount: item.influentialCitationCount ?? null }]
+			: [],
+		field_paths: { canonical_title: "data[].title", abstract_best: "data[].abstract", identifiers: "data[].externalIds" },
+		transformations: { identifiers: "normalized external IDs" },
+	};
+}
+
+function normalizeEuropePmcItem(item) {
+	const date = item.firstPublicationDate || item.pubYear || item.journalInfo?.printPublicationDate || null;
+	return {
+		canonical_title: stripTags(item.title),
+		abstract_best: stripTags(item.abstractText),
+		authors: asArray(item.authorList?.author).map((author) => compactObject({ name: author.fullName, given: author.firstName, family: author.lastName })),
+		publication_year: Number.parseInt(item.pubYear, 10) || yearFromDate(date),
+		publication_date: date,
+		venue_name: item.journalInfo?.journal?.title || item.journalTitle || null,
+		venue_type: "journal",
+		publisher: null,
+		type: item.pubType?.toLowerCase?.().includes("preprint") ? "preprint" : "article",
+		identifiers: compactObject({
+			doi: normalizeDoi(item.doi),
+			pmid: normalizeIdentifier(item.pmid),
+			pmcid: normalizeIdentifier(item.pmcid),
+			issn: item.journalInfo?.journal?.issn ? [item.journalInfo.journal.issn] : [],
+		}),
+		urls: [item.fullTextUrlList?.fullTextUrl?.[0]?.url, item.authorString ? null : item.source].filter(Boolean),
+		full_text_candidates: asArray(item.fullTextUrlList?.fullTextUrl).map((entry) => compactObject({ url: entry.url, availability: entry.availability, documentStyle: entry.documentStyle })),
+		subjects: asArray(item.meshHeadingList?.meshHeading).map((heading) => heading.descriptorName).filter(Boolean),
+		field_paths: { canonical_title: "resultList.result[].title", abstract_best: "resultList.result[].abstractText", identifiers: "resultList.result[]" },
+		transformations: { abstract_best: item.abstractText ? "stripped XML/HTML tags and normalized whitespace" : null, identifiers: "normalized DOI/PMID/PMCID" },
+	};
+}
+
+function normalizePubmedSummary(uid, item) {
+	const authors = asArray(item.authors).map((author) => compactObject({ name: author.name }));
+	return {
+		canonical_title: stripTags(item.title),
+		abstract_best: null,
+		authors,
+		publication_year: yearFromDate(item.pubdate),
+		publication_date: item.pubdate ?? null,
+		venue_name: item.fulljournalname || item.source || null,
+		venue_type: "journal",
+		publisher: null,
+		type: "article",
+		identifiers: compactObject({ pmid: uid, doi: normalizeDoi(asArray(item.articleids).find((id) => id.idtype === "doi")?.value) }),
+		urls: [`https://pubmed.ncbi.nlm.nih.gov/${uid}/`],
+		subjects: asArray(item.pubtype),
+		field_paths: { canonical_title: "result.<pmid>.title", identifiers: "result.<pmid>.articleids" },
+		transformations: { identifiers: "normalized PubMed article IDs" },
+	};
+}
+
+function parseArxivFeed(text) {
+	const dom = new JSDOM(text, { contentType: "text/xml" });
+	try {
+		return [...dom.window.document.querySelectorAll("entry")].map((entry) => {
+			const textOf = (selector) => entry.querySelector(selector)?.textContent?.trim() ?? null;
+			const id = textOf("id");
+			const authors = [...entry.querySelectorAll("author")].map((author) => compactObject({ name: normalizeWhitespace(author.querySelector("name")?.textContent) }));
+			const categories = [...entry.querySelectorAll("category")].map((category) => category.getAttribute("term")).filter(Boolean);
+			const links = [...entry.querySelectorAll("link")].map((link) => link.getAttribute("href")).filter(Boolean);
+			return {
+				canonical_title: normalizeWhitespace(textOf("title")),
+				abstract_best: normalizeWhitespace(textOf("summary")),
+				authors,
+				publication_year: yearFromDate(textOf("published")),
+				publication_date: textOf("published"),
+				venue_name: textOf("arxiv\\:journal_ref") ?? textOf("journal_ref"),
+				venue_type: null,
+				publisher: "arXiv",
+				type: "preprint",
+				identifiers: compactObject({
+					arxiv_id: normalizeArxivId(id),
+					doi: normalizeDoi(textOf("arxiv\\:doi") ?? textOf("doi")),
+				}),
+				urls: links.length > 0 ? links : [id].filter(Boolean),
+				subjects: categories,
+				field_paths: { canonical_title: "feed.entry.title", abstract_best: "feed.entry.summary", identifiers: "feed.entry.id" },
+				transformations: { identifiers: "normalized arXiv ID and DOI" },
+			};
+		});
+	} finally {
+		dom.window.close();
+	}
+}
+
+function normalizeDataCiteItem(item) {
+	const attributes = item.attributes ?? {};
+	const creators = asArray(attributes.creators).map((creator) => compactObject({ name: creator.name, given: creator.givenName, family: creator.familyName }));
+	const abstract = asArray(attributes.descriptions).find((description) => /abstract/i.test(description.descriptionType ?? ""))?.description;
+	const resourceType = attributes.types?.resourceTypeGeneral || attributes.types?.resourceType || null;
+	return {
+		canonical_title: firstText(asArray(attributes.titles).map((title) => title.title)),
+		abstract_best: stripTags(abstract),
+		authors: creators,
+		publication_year: Number.parseInt(attributes.publicationYear, 10) || null,
+		publication_date: attributes.published ?? attributes.created ?? null,
+		venue_name: attributes.container?.title ?? null,
+		venue_type: attributes.container?.type ?? null,
+		publisher: attributes.publisher ?? null,
+		type: /dataset/i.test(resourceType ?? "") ? "dataset" : /software/i.test(resourceType ?? "") ? "software" : /report/i.test(resourceType ?? "") ? "report" : "unknown",
+		identifiers: compactObject({ doi: normalizeDoi(attributes.doi), datacite_id: item.id }),
+		urls: [attributes.url].filter(Boolean),
+		subjects: asArray(attributes.subjects).map((subject) => subject.subject).filter(Boolean),
+		licenses: asArray(attributes.rightsList).map((right) => compactObject({ rights: right.rights, url: right.rightsUri })),
+		field_paths: { canonical_title: "data[].attributes.titles", abstract_best: "data[].attributes.descriptions", identifiers: "data[].attributes.doi" },
+		transformations: { abstract_best: abstract ? "stripped XML/HTML tags and normalized whitespace" : null, identifiers: "normalized DOI" },
+	};
+}
+
+function normalizeOpenAireResult(item) {
+	const metadata = item.metadata?.["oaf:entity"]?.["oaf:result"] ?? item.metadata ?? item;
+	const title = firstText(metadata.title?.content ?? metadata.title);
+	const authors = asArray(metadata.creator).map((creator) => compactObject({ name: creator.content ?? creator }));
+	return {
+		canonical_title: title,
+		abstract_best: stripTags(metadata.description?.content ?? metadata.description),
+		authors,
+		publication_year: yearFromDate(metadata.dateofacceptance ?? metadata.date),
+		publication_date: metadata.dateofacceptance ?? metadata.date ?? null,
+		venue_name: metadata.journal?.content ?? metadata.publisher ?? null,
+		venue_type: metadata.journal ? "journal" : null,
+		publisher: metadata.publisher ?? null,
+		type: "article",
+		identifiers: compactObject({ doi: normalizeDoi(metadata.pid?.content ?? metadata.doi), openaire_id: item.header?.dri?.objIdentifier ?? item.id }),
+		urls: asArray(metadata.children?.instance).map((instance) => instance.webresource?.url).filter(Boolean),
+		field_paths: { canonical_title: "response.results.result[].metadata", identifiers: "response.results.result[].metadata.pid" },
+		transformations: { identifiers: "normalized DOI/OpenAIRE ID" },
+	};
+}
+
+function normalizeDoajItem(item) {
+	const bibjson = item.bibjson ?? item;
+	const identifiers = asArray(bibjson.identifier);
+	return {
+		canonical_title: normalizeWhitespace(bibjson.title),
+		abstract_best: stripTags(bibjson.abstract),
+		authors: asArray(bibjson.author).map((author) => compactObject({ name: author.name, affiliation: author.affiliation })),
+		publication_year: yearFromDate(bibjson.year ?? bibjson.month),
+		publication_date: bibjson.year ? String(bibjson.year) : null,
+		venue_name: bibjson.journal?.title ?? null,
+		venue_type: "journal",
+		publisher: bibjson.journal?.publisher ?? null,
+		type: "article",
+		identifiers: compactObject({
+			doi: normalizeDoi(identifiers.find((id) => id.type === "doi")?.id),
+			issn: identifiers.filter((id) => /issn/i.test(id.type ?? "")).map((id) => id.id),
+		}),
+		urls: asArray(bibjson.link).map((link) => link.url).filter(Boolean),
+		subjects: asArray(bibjson.subject).map((subject) => subject.term).filter(Boolean),
+		licenses: asArray(bibjson.license).map((license) => compactObject({ type: license.type, url: license.url })),
+		field_paths: { canonical_title: "results[].bibjson.title", abstract_best: "results[].bibjson.abstract", identifiers: "results[].bibjson.identifier" },
+		transformations: { abstract_best: bibjson.abstract ? "stripped XML/HTML tags and normalized whitespace" : null, identifiers: "normalized DOI/ISSN" },
+	};
+}
+
+function normalizeUnpaywallItem(item) {
+	const locations = asArray(item.oa_locations).map((location) =>
+		compactObject({
+			url: location.url_for_landing_page ?? location.url,
+			pdfUrl: location.url_for_pdf,
+			hostType: location.host_type,
+			version: location.version,
+			license: location.license,
+		}),
+	);
+	return {
+		canonical_title: normalizeWhitespace(item.title),
+		abstract_best: null,
+		authors: [],
+		publication_year: Number.parseInt(item.year, 10) || null,
+		publication_date: null,
+		venue_name: item.journal_name ?? null,
+		venue_type: "journal",
+		publisher: item.publisher ?? null,
+		type: "article",
+		identifiers: compactObject({ doi: normalizeDoi(item.doi) }),
+		urls: locations.map((location) => location.url).filter(Boolean),
+		oa_status: item.oa_status ?? null,
+		oa_locations: locations,
+		full_text_candidates: locations.filter((location) => location.pdfUrl).map((location) => ({ url: location.pdfUrl, source: "Unpaywall" })),
+		field_paths: { oa_status: "oa_status", oa_locations: "oa_locations", identifiers: "doi" },
+		transformations: { identifiers: "normalized DOI" },
+	};
+}
+
+const ACADEMIC_PROVIDERS = {
+	crossref: {
+		providerCapabilities: () => providerCapabilities("crossref"),
+		async search(context) {
+			const url = buildUrl(context.base, "/works", { query: context.query, rows: context.limit, mailto: context.contactEmail });
+			const response = await providerFetch(context.runDirectory, "crossref", url, context.options, context.state);
+			return asArray(response.json?.message?.items);
+		},
+		lookup: async () => [],
+		hydrate: async (record) => record,
+		normalize: normalizeCrossrefItem,
+	},
+	"semantic-scholar": {
+		providerCapabilities: () => providerCapabilities("semantic-scholar"),
+		async search(context) {
+			const fields = "paperId,externalIds,title,authors,year,venue,abstract,citationCount,influentialCitationCount,publicationTypes,fieldsOfStudy,openAccessPdf,url,journal,publicationDate";
+			const url = buildUrl(context.base, "/graph/v1/paper/search", { query: context.query, limit: context.limit, fields });
+			const response = await providerFetch(context.runDirectory, "semantic-scholar", url, context.options, context.state);
+			return asArray(response.json?.data);
+		},
+		lookup: async () => [],
+		hydrate: async (record) => record,
+		normalize: normalizeSemanticScholarItem,
+	},
+	europepmc: {
+		providerCapabilities: () => providerCapabilities("europepmc"),
+		async search(context) {
+			const url = buildUrl(context.base, "/search", { query: context.query, format: "json", pageSize: context.limit, resultType: "core" });
+			const response = await providerFetch(context.runDirectory, "europepmc", url, context.options, context.state);
+			return asArray(response.json?.resultList?.result);
+		},
+		lookup: async () => [],
+		hydrate: async (record) => record,
+		normalize: normalizeEuropePmcItem,
+	},
+	pubmed: {
+		providerCapabilities: () => providerCapabilities("pubmed"),
+		async search(context) {
+			const searchUrl = buildUrl(context.base, "/esearch.fcgi", {
+				db: "pubmed",
+				term: context.query,
+				retmode: "json",
+				retmax: context.limit,
+				tool: "pi-forge",
+				email: context.contactEmail,
+			});
+			const searchResponse = await providerFetch(context.runDirectory, "pubmed", searchUrl, context.options, context.state);
+			const ids = asArray(searchResponse.json?.esearchresult?.idlist).slice(0, context.limit);
+			if (ids.length === 0) return [];
+			const summaryUrl = buildUrl(context.base, "/esummary.fcgi", {
+				db: "pubmed",
+				id: ids.join(","),
+				retmode: "json",
+				tool: "pi-forge",
+				email: context.contactEmail,
+			});
+			const summaryResponse = await providerFetch(context.runDirectory, "pubmed", summaryUrl, context.options, context.state);
+			return ids.map((id) => ({ uid: id, summary: summaryResponse.json?.result?.[id] })).filter((item) => item.summary);
+		},
+		lookup: async () => [],
+		hydrate: async (record) => record,
+		normalize: (record) => normalizePubmedSummary(record.uid, record.summary),
+	},
+	arxiv: {
+		providerCapabilities: () => providerCapabilities("arxiv"),
+		async search(context) {
+			const url = buildUrl(context.base, "/query", { search_query: `all:${context.query}`, start: 0, max_results: context.limit });
+			const response = await providerFetch(context.runDirectory, "arxiv", url, { ...context.options, accept: "application/atom+xml, application/xml" }, context.state);
+			return response.text ? parseArxivFeed(response.text) : [];
+		},
+		lookup: async () => [],
+		hydrate: async (record) => record,
+		normalize: (record) => record,
+	},
+	datacite: {
+		providerCapabilities: () => providerCapabilities("datacite"),
+		async search(context) {
+			const url = buildUrl(context.base, "/dois", { query: context.query, "page[size]": context.limit });
+			const response = await providerFetch(context.runDirectory, "datacite", url, context.options, context.state);
+			return asArray(response.json?.data);
+		},
+		lookup: async () => [],
+		hydrate: async (record) => record,
+		normalize: normalizeDataCiteItem,
+	},
+	openaire: {
+		providerCapabilities: () => providerCapabilities("openaire"),
+		async search(context) {
+			const url = buildUrl(context.base, "/search/publications", { keywords: context.query, format: "json", size: context.limit });
+			const response = await providerFetch(context.runDirectory, "openaire", url, context.options, context.state);
+			return asArray(response.json?.response?.results?.result);
+		},
+		lookup: async () => [],
+		hydrate: async (record) => record,
+		normalize: normalizeOpenAireResult,
+	},
+	doaj: {
+		providerCapabilities: () => providerCapabilities("doaj"),
+		async search(context) {
+			const url = `${context.base}/search/articles/${encodeURIComponent(context.query)}?page=1&pageSize=${context.limit}`;
+			const response = await providerFetch(context.runDirectory, "doaj", url, context.options, context.state);
+			return asArray(response.json?.results);
+		},
+		lookup: async () => [],
+		hydrate: async (record) => record,
+		normalize: normalizeDoajItem,
+	},
+	unpaywall: {
+		providerCapabilities: () => providerCapabilities("unpaywall"),
+		async search(context) {
+			const dois = [...new Set(context.knownDois)].filter(Boolean);
+			const records = [];
+			for (const doi of dois.slice(0, context.limit)) {
+				const url = buildUrl(context.base, `/${encodeURIComponent(doi)}`, { email: context.contactEmail });
+				const response = await providerFetch(context.runDirectory, "unpaywall", url, context.options, context.state);
+				if (response.json) records.push(response.json);
+			}
+			return records;
+		},
+		lookup: async () => [],
+		hydrate: async (record) => record,
+		normalize: normalizeUnpaywallItem,
+	},
+};
+
+async function runAcademicProvider(providerName, context, sourceRecords, normalizedRecords) {
+	const provider = ACADEMIC_PROVIDERS[providerName];
+	if (!provider) return;
+	const records = await provider.search(context);
+	let index = 0;
+	for (const record of records) {
+		const hydrated = await provider.hydrate(record, context);
+		const normalized = provider.normalize(hydrated, context);
+		if (!normalized?.canonical_title && !normalized?.identifiers?.doi && !normalized?.identifiers?.pmid && !normalized?.identifiers?.arxiv_id) continue;
+		const providerRecordId =
+			normalized.identifiers?.doi ??
+			normalized.identifiers?.pmid ??
+			normalized.identifiers?.arxiv_id ??
+			normalized.identifiers?.semantic_scholar_paper_id ??
+			normalized.canonical_title;
+		const sourceRecord = {
+			source_record_id: sourceRecordId(providerName, providerRecordId, index++),
+			work_id: null,
+			provider: providerName,
+			provider_record_id: providerRecordId ?? null,
+			provider_url: normalized.urls?.[0] ?? null,
+			request_url: context.state.providerRequests.filter((request) => request.provider === providerName).at(-1)?.url ?? null,
+			request_params: { query: context.query, limit: context.limit },
+			retrieved_at: nowIso(),
+			raw_response_path: context.state.providerRequests.filter((request) => request.provider === providerName).at(-1)?.raw_response_path ?? null,
+			raw_hash: context.state.providerRequests.filter((request) => request.provider === providerName).at(-1)?.raw_hash ?? null,
+			normalized_payload: normalized,
+			field_provenance: normalized.field_paths ?? {},
+			provider_confidence_notes: provider.providerCapabilities().strengths.join("; "),
+			rate_limit_state: null,
+		};
+		sourceRecords.push(sourceRecord);
+		normalizedRecords.push(normalized);
+	}
+}
+
+function risType(work) {
+	if (work.type === "article") return "JOUR";
+	if (work.type === "report") return "RPRT";
+	if (work.type === "thesis") return "THES";
+	if (work.type === "book") return "BOOK";
+	if (work.type === "chapter") return "CHAP";
+	if (work.type === "dataset" || work.type === "software") return "DATA";
+	return "GEN";
+}
+
+function risValue(value) {
+	return normalizeWhitespace(value).replace(/\s+ER\s+-\s*/g, " ");
+}
+
+function risLine(tag, value) {
+	const text = risValue(value);
+	return text ? `${tag}  - ${text}` : null;
+}
+
+function buildRisRecord(work, sourceRecords) {
+	const sourceById = new Map(sourceRecords.map((source) => [source.source_record_id, source]));
+	const providers = [...new Set(work.source_records.map((id) => sourceById.get(id)?.provider).filter(Boolean))];
+	const lines = [`TY  - ${risType(work)}`];
+	lines.push(risLine("TI", work.canonical_title));
+	for (const author of work.authors ?? []) lines.push(risLine("AU", authorDisplayName(author)));
+	lines.push(risLine("AB", work.abstract_best));
+	if (work.publication_year) lines.push(risLine("PY", work.publication_year));
+	lines.push(risLine("Y1", work.publication_date));
+	lines.push(risLine("JO", work.venue_name));
+	lines.push(risLine("T2", work.venue_name));
+	lines.push(risLine("PB", work.publisher));
+	lines.push(risLine("DO", work.identifiers?.doi));
+	const primaryUrl = work.urls?.[0] ?? work.oa_locations?.[0]?.url ?? work.full_text_candidates?.[0]?.url;
+	lines.push(risLine("UR", primaryUrl));
+	for (const subject of [...(work.subjects ?? []), ...(work.fields_of_study ?? [])].slice(0, 20)) lines.push(risLine("KW", subject));
+	for (const issn of asArray(work.identifiers?.issn)) lines.push(risLine("SN", issn));
+	for (const isbn of asArray(work.identifiers?.isbn)) lines.push(risLine("SN", isbn));
+	const notes = [
+		`work_id=${work.work_id}`,
+		`providers=${providers.map((provider) => ACADEMIC_PROVIDER_LABELS[provider] ?? provider).join(", ")}`,
+		`dedupe_cluster=${work.dedupe_cluster_id}`,
+		work.identifiers?.pmid ? `PMID=${work.identifiers.pmid}` : null,
+		work.identifiers?.pmcid ? `PMCID=${work.identifiers.pmcid}` : null,
+		work.identifiers?.arxiv_id ? `arXiv=${work.identifiers.arxiv_id}` : null,
+		work.oa_status ? `OA=${work.oa_status}` : null,
+	].filter(Boolean);
+	lines.push(risLine("N1", notes.join("; ")));
+	lines.push("ER  -");
+	return `${lines.filter(Boolean).join("\n")}\n`;
+}
+
+function risDuplicateKey(work) {
+	if (work.identifiers?.doi) return `doi:${normalizeDoi(work.identifiers.doi)}`;
+	if (work.identifiers?.pmid) return `pmid:${work.identifiers.pmid}`;
+	if (work.identifiers?.arxiv_id) return `arxiv:${normalizeArxivId(work.identifiers.arxiv_id)}`;
+	return `title:${work.normalized_title}|${work.publication_year ?? ""}`;
+}
+
+function writeRisArtifacts(runDirectory, works, sourceRecords) {
+	mkdirSync(join(runDirectory, "ris"), { recursive: true });
+	const records = [];
+	const manifest = [];
+	for (const work of works) {
+		const relativePath = `ris/${work.work_id}.ris`;
+		const record = buildRisRecord(work, sourceRecords);
+		writeFileSync(join(runDirectory, relativePath), record);
+		records.push(record.trimEnd());
+		const providers = [
+			...new Set(
+				work.source_records
+					.map((id) => sourceRecords.find((source) => source.source_record_id === id)?.provider)
+					.filter(Boolean),
+			),
+		];
+		manifest.push({
+			workId: work.work_id,
+			risPath: relativePath,
+			risKey: risDuplicateKey(work),
+			identifiers: work.identifiers ?? {},
+			providers,
+			dedupeClusterId: work.dedupe_cluster_id,
+		});
+	}
+	writeFileSync(join(runDirectory, "works.ris"), records.length > 0 ? `${records.join("\n\n")}\n` : "");
+	writeJson(join(runDirectory, "ris_manifest.json"), { schemaVersion: ACADEMIC_SCHEMA_VERSION, generatedAt: nowIso(), records: manifest });
+	return manifest;
+}
+
+function buildAcademicReport(state) {
+	const lines = ["# Academic Research Report", "", `**Query**: ${state.query}`, `**Generated**: ${nowIso()}`, ""];
+	lines.push("## Provider Summary", "");
+	for (const provider of state.providers) {
+		const requests = state.providerRequests.filter((request) => request.provider === provider);
+		const errors = state.providerErrors.filter((error) => error.provider === provider);
+		lines.push(`- ${ACADEMIC_PROVIDER_LABELS[provider] ?? provider}: ${requests.length} request(s), ${errors.length} error(s)`);
+	}
+	lines.push("");
+	lines.push("## Works", "");
+	for (const work of state.works) {
+		lines.push(`### ${work.work_id}`);
+		lines.push("");
+		lines.push(`- Title: ${work.canonical_title || "Untitled"}`);
+		lines.push(`- Type: ${work.type}`);
+		if (work.publication_year) lines.push(`- Year: ${work.publication_year}`);
+		if (work.venue_name) lines.push(`- Venue: ${work.venue_name}`);
+		if (work.identifiers?.doi) lines.push(`- DOI: ${work.identifiers.doi}`);
+		if (work.identifiers?.pmid) lines.push(`- PMID: ${work.identifiers.pmid}`);
+		if (work.identifiers?.arxiv_id) lines.push(`- arXiv: ${work.identifiers.arxiv_id}`);
+		lines.push(`- RIS: ris/${work.work_id}.ris`);
+		lines.push("");
+	}
+	return `${lines.join("\n")}\n`;
+}
+
+function validateAcademicRun(runDirectory, options = {}) {
+	const errors = [];
+	const warnings = [];
+	const required = [
+		"academic_run.json",
+		"works.jsonl",
+		"source_records.jsonl",
+		"field_provenance.jsonl",
+		"dedupe_decisions.jsonl",
+		"provider_requests.jsonl",
+		"provider_errors.jsonl",
+		"works.ris",
+		"ris_manifest.json",
+		"academic_report.md",
+	];
+	for (const name of required) {
+		if (!existsSync(join(runDirectory, name))) errors.push(`${name} is missing`);
+	}
+	let works = [];
+	let risManifest = { records: [] };
+	let worksRis = "";
+	try {
+		works = readJsonl(join(runDirectory, "works.jsonl"));
+		risManifest = existsSync(join(runDirectory, "ris_manifest.json")) ? JSON.parse(readFileSync(join(runDirectory, "ris_manifest.json"), "utf8")) : { records: [] };
+		worksRis = existsSync(join(runDirectory, "works.ris")) ? readFileSync(join(runDirectory, "works.ris"), "utf8") : "";
+	} catch (error) {
+		errors.push(`could not parse academic artifacts: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	const manifestByWork = new Map(asArray(risManifest.records).map((record) => [record.workId, record]));
+	const keys = new Set();
+	for (const work of works) {
+		const manifest = manifestByWork.get(work.work_id);
+		if (!manifest) {
+			errors.push(`${work.work_id} has no RIS manifest record`);
+			continue;
+		}
+		const risPath = resolve(runDirectory, manifest.risPath);
+		if (!risPath.startsWith(`${resolve(runDirectory)}${sep}`)) errors.push(`${work.work_id} RIS path escapes run directory: ${manifest.risPath}`);
+		else if (!existsSync(risPath)) errors.push(`${work.work_id} per-work RIS file is missing: ${manifest.risPath}`);
+		const key = manifest.risKey ?? risDuplicateKey(work);
+		if (keys.has(key)) errors.push(`duplicate RIS key after dedupe: ${key}`);
+		keys.add(key);
+	}
+	const recordCount = (worksRis.match(/^TY  - /gm) ?? []).length;
+	const endCount = (worksRis.match(/^ER  -$/gm) ?? []).length;
+	if (recordCount !== works.length) errors.push(`works.ris contains ${recordCount} records for ${works.length} works`);
+	if (endCount !== recordCount) errors.push("works.ris has records without ER terminators");
+	const result = { valid: errors.length === 0, errors, warnings };
+	writeJson(join(runDirectory, "validation_report.json"), result);
+	if (options.emit !== false) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+	if (errors.length > 0 && options.exitOnError) process.exit(1);
+	return result;
 }
 
 // --- SearXNG ---------------------------------------------------------------
@@ -1465,6 +2609,124 @@ async function commandDeep(positionals, flags) {
 	if (!validation.valid) process.exit(1);
 }
 
+async function commandAcademic(positionals, flags) {
+	if (positionals.length === 0) fail("academic requires a query");
+	if (!flags.output) fail("academic requires --output <new-directory>");
+	const query = positionals.join(" ");
+	const runDirectory = resolve(flags.output);
+	if (existsSync(runDirectory)) fail(`output directory already exists: ${runDirectory}`);
+	mkdirSync(runDirectory, { recursive: true });
+
+	const classification = classifyAcademicQuery(query);
+	const providers = academicProviderList(flags, classification);
+	const contactEmail = flags.contactEmail || process.env.FORGE_ACADEMIC_CONTACT_EMAIL || process.env.UNPAYWALL_EMAIL || null;
+	const options = {
+		userAgent: flags.userAgent ?? DEFAULT_USER_AGENT,
+		timeoutMs: flags.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+	};
+	const state = {
+		query,
+		startedAt: nowIso(),
+		classification,
+		providers,
+		options,
+		providerRequests: [],
+		providerErrors: [],
+		works: [],
+	};
+	const sourceRecords = [];
+	const normalizedRecords = [];
+	const limit = flags.limit ?? DEFAULT_LIMIT;
+	for (const providerName of providers.filter((provider) => provider !== "unpaywall")) {
+		const provider = ACADEMIC_PROVIDERS[providerName];
+		if (!provider) continue;
+		const context = {
+			query,
+			limit,
+			base: academicProviderBase(providerName, flags),
+			runDirectory,
+			options,
+			state,
+			contactEmail,
+			classification,
+			knownDois: [],
+		};
+		await runAcademicProvider(providerName, context, sourceRecords, normalizedRecords);
+	}
+	const knownDois = normalizedRecords.map((record) => record.identifiers?.doi).filter(Boolean);
+	if (providers.includes("unpaywall") && contactEmail && knownDois.length > 0) {
+		await runAcademicProvider(
+			"unpaywall",
+			{
+				query,
+				limit,
+				base: academicProviderBase("unpaywall", flags),
+				runDirectory,
+				options,
+				state,
+				contactEmail,
+				classification,
+				knownDois,
+			},
+			sourceRecords,
+			normalizedRecords,
+		);
+	}
+	const { works, provenanceRows, decisions } = dedupeAcademicRecords(sourceRecords, normalizedRecords);
+	const workBySource = new Map();
+	for (const work of works) {
+		for (const sourceRecordId of work.source_records) workBySource.set(sourceRecordId, work.work_id);
+	}
+	for (const source of sourceRecords) source.work_id = workBySource.get(source.source_record_id) ?? null;
+	state.works = works;
+	const risManifest = writeRisArtifacts(runDirectory, works, sourceRecords);
+	writeJson(join(runDirectory, "academic_run.json"), {
+		schemaVersion: ACADEMIC_SCHEMA_VERSION,
+		query,
+		startedAt: state.startedAt,
+		completedAt: nowIso(),
+		classification,
+		providers,
+		options: { ...options, limit, contactEmailConfigured: Boolean(contactEmail) },
+		counts: {
+			works: works.length,
+			sourceRecords: sourceRecords.length,
+			fieldProvenance: provenanceRows.length,
+			dedupeDecisions: decisions.length,
+			providerRequests: state.providerRequests.length,
+			providerErrors: state.providerErrors.length,
+			risRecords: risManifest.length,
+		},
+		providerCapabilities: Object.fromEntries(providers.map((provider) => [provider, providerCapabilities(provider)])),
+	});
+	writeJsonl(join(runDirectory, "works.jsonl"), works);
+	writeJsonl(join(runDirectory, "source_records.jsonl"), sourceRecords);
+	writeJsonl(join(runDirectory, "field_provenance.jsonl"), provenanceRows);
+	writeJsonl(join(runDirectory, "dedupe_decisions.jsonl"), decisions);
+	writeJsonl(join(runDirectory, "provider_requests.jsonl"), state.providerRequests);
+	writeJsonl(join(runDirectory, "provider_errors.jsonl"), state.providerErrors);
+	writeFileSync(join(runDirectory, "academic_report.md"), buildAcademicReport(state));
+	const validation = validateAcademicRun(runDirectory, { emit: false });
+	process.stdout.write(
+		`${JSON.stringify(
+			{
+				runDirectory,
+				query,
+				providers,
+				works: works.length,
+				sourceRecords: sourceRecords.length,
+				providerErrors: state.providerErrors.length,
+				risRecords: risManifest.length,
+				valid: validation.valid,
+				validationErrors: validation.errors,
+			},
+			null,
+			2,
+		)}\n`,
+	);
+	if (!validation.valid) process.exit(1);
+}
+
 // --- Argument parsing -------------------------------------------------------
 
 const FLAG_SPECS = {
@@ -1486,6 +2748,8 @@ const FLAG_SPECS = {
 	"--safesearch": { key: "safesearch", value: true, integer: true },
 	"--time-range": { key: "timeRange", value: true },
 	"--pageno": { key: "pageNo", value: true, integer: true },
+	"--providers": { key: "providers", value: true },
+	"--contact-email": { key: "contactEmail", value: true },
 	"--render": { key: "render", value: false },
 	"--no-render": { key: "noRender", value: false },
 	"--json": { key: "json", value: false },
@@ -1539,6 +2803,8 @@ function usage() {
       [--max-iterations N] [--limit N] [--read-count N] [--render] [--no-render]
       [--categories <cats>] [--engines <engines>] [--language <lang>]
       [--safesearch <0|1|2>] [--time-range <day|week|month|year>] [--pageno N]
+  web-research.mjs academic <query...> --output <dir> [--limit N]
+      [--providers <comma-separated>] [--contact-email <email>] [--timeout-ms N]
   web-research.mjs validate <run-directory>
 `);
 }
@@ -1555,9 +2821,12 @@ async function main() {
 	else if (command === "read") await commandRead(positionals, flags);
 	else if (command === "research") await commandResearch(positionals, flags);
 	else if (command === "deep") await commandDeep(positionals, flags);
+	else if (command === "academic") await commandAcademic(positionals, flags);
 	else if (command === "validate") {
 		if (positionals.length !== 1) fail("validate requires exactly one run directory");
-		validateDeepRun(resolve(positionals[0]), { exitOnError: true });
+		const runDirectory = resolve(positionals[0]);
+		if (existsSync(join(runDirectory, "academic_run.json"))) validateAcademicRun(runDirectory, { exitOnError: true });
+		else validateDeepRun(runDirectory, { exitOnError: true });
 	}
 	else fail(`unknown command: ${command}`, 2);
 }

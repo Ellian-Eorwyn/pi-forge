@@ -353,6 +353,172 @@ function startDeepResearchFixture() {
 	});
 }
 
+function startAcademicResearchFixture() {
+	const requests = [];
+	const server = createServer((request, response) => {
+		const url = new URL(request.url, "http://127.0.0.1");
+		requests.push({ pathname: url.pathname, search: url.search });
+		if (url.pathname === "/crossref/works") {
+			response.writeHead(200, { "Content-Type": "application/json" });
+			response.end(
+				JSON.stringify({
+					message: {
+						items: [
+							{
+								DOI: "10.1234/ALPHA",
+								title: ["Alpha & Beta RIS Study"],
+								abstract: "<jats:p>Crossref abstract for the alpha study.</jats:p>",
+								author: [
+									{ given: "Ada", family: "Lovelace" },
+									{ given: "Grace", family: "Hopper" },
+								],
+								"published-print": { "date-parts": [[2024, 5, 2]] },
+								"container-title": ["Journal of Test Metadata"],
+								publisher: "Fixture Press",
+								type: "journal-article",
+								ISSN: ["1234-5678"],
+								subject: ["metadata"],
+								URL: "https://doi.org/10.1234/alpha",
+							},
+							{
+								DOI: "10.1234/NOABSTRACT",
+								title: ["No Abstract in Crossref"],
+								author: [{ given: "Nora", family: "Null" }],
+								"published-online": { "date-parts": [[2023]] },
+								"container-title": ["Sparse Metadata Quarterly"],
+								publisher: "Fixture Press",
+								type: "journal-article",
+								URL: "https://doi.org/10.1234/noabstract",
+							},
+						],
+					},
+				}),
+			);
+			return;
+		}
+		if (url.pathname === "/semantic/graph/v1/paper/search") {
+			response.writeHead(200, { "Content-Type": "application/json" });
+			response.end(
+				JSON.stringify({
+					data: [
+						{
+							paperId: "S2-ALPHA",
+							externalIds: { DOI: "10.1234/alpha", PubMed: "123456" },
+							title: "Alpha & Beta RIS Study",
+							authors: [
+								{ name: "Ada Lovelace", authorId: "1" },
+								{ name: "Grace Hopper", authorId: "2" },
+							],
+							year: 2024,
+							venue: "Journal of Test Metadata",
+							abstract: "Semantic Scholar abstract for the duplicated alpha study.",
+							citationCount: 7,
+							influentialCitationCount: 2,
+							publicationTypes: ["JournalArticle"],
+							fieldsOfStudy: ["Computer Science"],
+							openAccessPdf: { url: "https://example.test/alpha.pdf" },
+							url: "https://semanticscholar.org/paper/S2-ALPHA",
+						},
+						{
+							paperId: "S2-NOABSTRACT",
+							externalIds: { DOI: "10.1234/noabstract" },
+							title: "No Abstract in Crossref",
+							authors: [{ name: "Nora Null", authorId: "3" }],
+							year: 2023,
+							venue: "Sparse Metadata Quarterly",
+							abstract: "Semantic Scholar supplies the missing abstract.",
+							citationCount: 1,
+							influentialCitationCount: 0,
+							publicationTypes: ["JournalArticle"],
+							fieldsOfStudy: ["Information Science"],
+							url: "https://semanticscholar.org/paper/S2-NOABSTRACT",
+						},
+					],
+				}),
+			);
+			return;
+		}
+		if (url.pathname === "/pubmed/esearch.fcgi") {
+			response.writeHead(200, { "Content-Type": "application/json" });
+			response.end(JSON.stringify({ esearchresult: { idlist: ["123456"] } }));
+			return;
+		}
+		if (url.pathname === "/pubmed/esummary.fcgi") {
+			response.writeHead(200, { "Content-Type": "application/json" });
+			response.end(
+				JSON.stringify({
+					result: {
+						uids: ["123456"],
+						123456: {
+							uid: "123456",
+							title: "Alpha & Beta RIS Study",
+							authors: [{ name: "Ada Lovelace" }, { name: "Grace Hopper" }],
+							pubdate: "2024 May",
+							fulljournalname: "Journal of Test Metadata",
+							pubtype: ["Journal Article"],
+							articleids: [{ idtype: "doi", value: "10.1234/alpha" }],
+						},
+					},
+				}),
+			);
+			return;
+		}
+		if (url.pathname === "/arxiv/query") {
+			response.writeHead(200, { "Content-Type": "application/atom+xml" });
+			response.end(`<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <entry>
+    <id>http://arxiv.org/abs/2401.00001v2</id>
+    <title>Alpha &amp; Beta RIS Study</title>
+    <summary>Preprint abstract for the alpha study.</summary>
+    <published>2024-01-02T00:00:00Z</published>
+    <updated>2024-02-03T00:00:00Z</updated>
+    <author><name>Ada Lovelace</name></author>
+    <category term="cs.DL" />
+    <link href="http://arxiv.org/abs/2401.00001v2" />
+  </entry>
+</feed>`);
+			return;
+		}
+		if (url.pathname.startsWith("/doaj/search/articles/")) {
+			response.writeHead(500, { "Content-Type": "application/json" });
+			response.end(JSON.stringify({ error: "fixture provider failure" }));
+			return;
+		}
+		response.writeHead(404, { "Content-Type": "text/plain" });
+		response.end("not found");
+	});
+	return new Promise((resolveServer, rejectServer) => {
+		server.once("error", rejectServer);
+		server.listen(0, "127.0.0.1", () => {
+			const address = server.address();
+			if (!address || typeof address !== "object") {
+				rejectServer(new Error("fixture server did not expose a port"));
+				return;
+			}
+			const origin = `http://127.0.0.1:${address.port}`;
+			resolveServer({
+				origin,
+				environment: {
+					FORGE_ACADEMIC_CROSSREF_URL: `${origin}/crossref`,
+					FORGE_ACADEMIC_SEMANTIC_SCHOLAR_URL: `${origin}/semantic`,
+					FORGE_ACADEMIC_PUBMED_URL: `${origin}/pubmed`,
+					FORGE_ACADEMIC_ARXIV_URL: `${origin}/arxiv`,
+					FORGE_ACADEMIC_DOAJ_URL: `${origin}/doaj`,
+					FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1",
+				},
+				requests,
+				close: () =>
+					new Promise((resolveClose) => {
+						server.closeAllConnections();
+						server.closeIdleConnections();
+						server.close(resolveClose);
+					}),
+			});
+		});
+	});
+}
+
 function startGlmocrFixture(workspace, responseBody) {
 	const requestsPath = join(workspace, "glmocr-requests.jsonl");
 	const serverPath = join(workspace, "glmocr-server.mjs");
@@ -1769,6 +1935,97 @@ test("web-research deep records unsafe result URLs as failed sources", async () 
 			assert.equal(sourceIndex.sources[0].status, "failed");
 			assert.match(sourceIndex.sources[0].warnings.join("\n"), /refused loopback or metadata host/);
 			assert.equal(jsonOutput(run("node", [script("web-research", "web-research.mjs"), "validate", deepRun])).valid, true);
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("web-research academic dedupes works and exports RIS artifacts", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startAcademicResearchFixture();
+		try {
+			const academicRun = join(workspace, "academic-run");
+			const result = jsonOutput(
+				await runAsyncWithEnvironment(
+					"node",
+					[
+						script("web-research", "web-research.mjs"),
+						"academic",
+						"alpha beta scholarly metadata",
+						"--output",
+						academicRun,
+						"--providers",
+						"crossref,semantic-scholar,pubmed,arxiv",
+						"--limit",
+						"5",
+					],
+					fixture.environment,
+				),
+			);
+			assert.equal(result.valid, true);
+			assert.equal(result.works, 3);
+			assert.equal(result.risRecords, 3);
+			assert.equal(jsonOutput(run("node", [script("web-research", "web-research.mjs"), "validate", academicRun])).valid, true);
+			const works = readFileSync(join(academicRun, "works.jsonl"), "utf8")
+				.trim()
+				.split(/\r?\n/)
+				.map((line) => JSON.parse(line));
+			const alpha = works.find((work) => work.identifiers.doi === "10.1234/alpha");
+			assert.ok(alpha);
+			assert.equal(alpha.source_records.length, 3);
+			const noAbstract = works.find((work) => work.identifiers.doi === "10.1234/noabstract");
+			assert.equal(noAbstract.abstract_best, "Semantic Scholar supplies the missing abstract.");
+			const arxiv = works.find((work) => work.identifiers.arxiv_id === "2401.00001");
+			assert.ok(arxiv);
+			assert.equal(arxiv.type, "preprint");
+			assert.equal(arxiv.related_works.some((relation) => relation.relation === "preprint_published_version"), true);
+			const aggregateRis = readFileSync(join(academicRun, "works.ris"), "utf8");
+			assert.equal((aggregateRis.match(/^TY  - /gm) ?? []).length, 3);
+			assert.equal((aggregateRis.match(/^ER  -$/gm) ?? []).length, 3);
+			assert.match(aggregateRis, /^DO  - 10\.1234\/alpha$/m);
+			assert.match(aggregateRis, /^AU  - Lovelace, Ada$/m);
+			const risManifest = JSON.parse(readFileSync(join(academicRun, "ris_manifest.json"), "utf8"));
+			assert.equal(risManifest.records.length, 3);
+			for (const record of risManifest.records) assert.equal(existsSync(join(academicRun, record.risPath)), true);
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("web-research academic records provider failures without blocking RIS export", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startAcademicResearchFixture();
+		try {
+			const academicRun = join(workspace, "academic-failure-run");
+			const result = jsonOutput(
+				await runAsyncWithEnvironment(
+					"node",
+					[
+						script("web-research", "web-research.mjs"),
+						"academic",
+						"alpha beta scholarly metadata",
+						"--output",
+						academicRun,
+						"--providers",
+						"crossref,doaj",
+						"--limit",
+						"5",
+					],
+					fixture.environment,
+				),
+			);
+			assert.equal(result.valid, true);
+			assert.equal(result.works, 2);
+			assert.equal(result.providerErrors, 1);
+			assert.equal((readFileSync(join(academicRun, "works.ris"), "utf8").match(/^TY  - /gm) ?? []).length, 2);
+			const errors = readFileSync(join(academicRun, "provider_errors.jsonl"), "utf8")
+				.trim()
+				.split(/\r?\n/)
+				.map((line) => JSON.parse(line));
+			assert.equal(errors[0].provider, "doaj");
+			assert.match(errors[0].error, /HTTP 500/);
 		} finally {
 			await fixture.close();
 		}

@@ -78,14 +78,32 @@ fallback for simple pages.
      `model_calls.jsonl`, `web_manifest.*`, `sources.md`,
      `deep_research_report.md`, and `validation_report.json`.
 
+   - **`academic`** — Scholarly metadata search with canonical works,
+     provider provenance, deduplication, and RIS export:
+
+     ```bash
+     node <skill-directory>/scripts/web-research.mjs academic <query...> \
+       --output <new-directory> [--limit N] [--providers crossref,semantic-scholar,pubmed,arxiv] \
+       [--contact-email <email>]
+     ```
+
+     This queries no-key academic providers, writes `works.jsonl`,
+     `source_records.jsonl`, `field_provenance.jsonl`,
+     `dedupe_decisions.jsonl`, `provider_requests.jsonl`,
+     `provider_errors.jsonl`, `academic_report.md`, aggregate `works.ris`,
+     one `ris/<work-id>.ris` per unique work, and `ris_manifest.json`.
+
    - **`validate`** — Validate a deep research run:
 
      ```bash
      node <skill-directory>/scripts/web-research.mjs validate <run-directory>
      ```
 
-     Validation fails for missing provenance, uncited claims, missing evidence,
-     quotes not present in archived source text, or source hash drift.
+     Validation detects whether the run is deep or academic. Deep validation
+     fails for missing provenance, uncited claims, missing evidence, quotes not
+     present in archived source text, or source hash drift. Academic validation
+     fails when canonical works lack RIS records, aggregate RIS duplicates
+     deduped article keys, or per-work RIS files are missing.
 
 3. Read the output. `research_report.md` is human-readable with extracted
    content excerpts. `research_report.json` has the full structured data
@@ -141,6 +159,8 @@ When parameters are omitted, the script detects query type:
 - **`research`** — Default. Search + read in one step. Use for most lookups.
 - **`deep`** — Use for multi-query research, provenance-first synthesis,
   source triangulation, and gap/contradiction tracking.
+- **`academic`** — Use for scholarly article discovery, DOI/PubMed/arXiv
+  metadata, deduped canonical works, and citation-manager-ready RIS exports.
 - **`search`** — When you only need result metadata (titles, URLs, snippets)
   to decide what to read next.
 - **`read`** — When you already have specific URLs to extract text from.
