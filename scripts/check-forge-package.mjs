@@ -53,6 +53,7 @@ const required = [
 	"bin/pi-forge.mjs",
 	"bin/pi-forge-mcp.mjs",
 	"bin/pi-forge-update.mjs",
+	"lib/connected-services.mjs",
 	"scripts/configure-pi-forge.mjs",
 	"scripts/pi-forge-mcp-server.mjs",
 	"scripts/runtime-env.mjs",

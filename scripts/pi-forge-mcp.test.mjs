@@ -306,6 +306,7 @@ test("worker cancellation terminates the child process", async () => {
 function makeFakeInstallSource(source, version = "0.0.0-test") {
 	mkdirSync(join(source, "scripts"), { recursive: true });
 	mkdirSync(join(source, "forge", "bin"), { recursive: true });
+	mkdirSync(join(source, "forge", "lib"), { recursive: true });
 	mkdirSync(join(source, "forge", "scripts"), { recursive: true });
 	mkdirSync(join(source, "forge", "skills", "document-ingest"), { recursive: true });
 	for (const packageDir of ["ai", "agent", "tui", "coding-agent"]) {
@@ -327,8 +328,12 @@ function makeFakeInstallSource(source, version = "0.0.0-test") {
 				"pi-forge-mcp": "bin/pi-forge-mcp.mjs",
 				"pi-forge-update": "bin/pi-forge-update.mjs",
 			},
-			files: ["AGENTS.md", "bin", "scripts", "skills"],
+			files: ["AGENTS.md", "bin", "lib", "scripts", "skills"],
 		})}\n`,
+	);
+	writeFileSync(
+		join(source, "forge", "lib", "connected-services.mjs"),
+		readFileSync(join(repositoryRoot, "forge", "lib", "connected-services.mjs"), "utf8"),
 	);
 	writeFileSync(
 		join(source, "forge", "scripts", "configure-pi-forge.mjs"),
@@ -472,6 +477,7 @@ function makeFakeInstallSource(source, version = "0.0.0-test") {
 function makeFakePackageTarball(root) {
 	const packageRoot = join(root, "package-source");
 	mkdirSync(join(packageRoot, "bin"), { recursive: true });
+	mkdirSync(join(packageRoot, "lib"), { recursive: true });
 	mkdirSync(join(packageRoot, "scripts"), { recursive: true });
 	mkdirSync(join(packageRoot, "skills", "document-ingest"), { recursive: true });
 	writeFileSync(
@@ -485,10 +491,14 @@ function makeFakePackageTarball(root) {
 				"pi-forge-mcp": "bin/pi-forge-mcp.mjs",
 				"pi-forge-update": "bin/pi-forge-update.mjs",
 			},
-			files: ["AGENTS.md", "bin", "scripts", "skills"],
+			files: ["AGENTS.md", "bin", "lib", "scripts", "skills"],
 		})}\n`,
 	);
 	writeFileSync(join(packageRoot, "AGENTS.md"), "# Fake Package Agent\n");
+	writeFileSync(
+		join(packageRoot, "lib", "connected-services.mjs"),
+		readFileSync(join(repositoryRoot, "forge", "lib", "connected-services.mjs"), "utf8"),
+	);
 	writeFileSync(
 		join(packageRoot, "scripts", "configure-pi-forge.mjs"),
 		readFileSync(join(repositoryRoot, "forge", "scripts", "configure-pi-forge.mjs"), "utf8"),

@@ -83,9 +83,10 @@ The current extension/tool surfaces outside skill-local scripts are:
 
 ## Local defaults
 
-The installed forge profile defaults to local services unless overridden:
+The installed forge profile defaults to local services unless overridden in
+`~/.pi-forge/agent/settings.json`:
 
 - Primary LLM: `http://llms:8008` with model `code`.
 - Embeddings: `http://llms:8005` with model `embed`.
-- SearXNG: `http://llms/searxng`.
-- Playwright endpoint for future tool extraction: `ws://llms/playwright/`.
+- SearXNG search: `connectedServices.searxng.baseUrl` defaults to `http://llms/searxng`.
+- Playwright rendered browsing: `connectedServices.playwright.wsEndpoint` defaults to `ws://llms/playwright`.

@@ -2,6 +2,7 @@
 
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { seedConnectedServicesSettings } from "../lib/connected-services.mjs";
 
 // Local model limits for the forge-local "code" model. Kept here so every
 // install and `pi-forge-update` writes the same context and output budgets.
@@ -80,6 +81,7 @@ settings.contextBudget = {
 	useTaskModel: false,
 	verbatimRecentTokens: CONTEXT_BUDGET_VERBATIM_RECENT_TOKENS,
 };
+seedConnectedServicesSettings(settings);
 
 let models = {};
 try {

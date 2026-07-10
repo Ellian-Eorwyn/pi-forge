@@ -128,8 +128,12 @@ Use these only when you need a non-default layout, local smoke test, or developm
 | `PI_FORGE_PACKAGE_SPEC` | unset; default install packs the GitHub source archive |
 | `PI_FORGE_PI_PACKAGE_SPEC` | unset; default install packs bundled Pi runtime packages from the GitHub source archive |
 | `PI_FORGE_SOURCE_ARCHIVE_URL` | `https://github.com/Ellian-Eorwyn/pi-forge/archive/refs/heads/main.tar.gz` |
+| `FORGE_SEARXNG_URL` | one-launch override for `connectedServices.searxng.baseUrl` |
+| `FORGE_PLAYWRIGHT_WS_ENDPOINT` | one-launch override for `connectedServices.playwright.wsEndpoint` |
 
 `PI_FORGE_PACKAGE_SPEC` and `PI_FORGE_PI_PACKAGE_SPEC` can point at `file:<packed-tarball>` for local release and migration smoke tests. Set `PI_FORGE_PACKAGE_SPEC=@ellian-eorwyn/pi-forge@latest` or `PI_FORGE_PI_PACKAGE_SPEC=@earendil-works/pi-coding-agent@latest` only if you intentionally want to install published npm packages. `PI_FORGE_SOURCE_ARCHIVE_URL` overrides the GitHub source archive used for default pi-forge and runtime installs and updates. Checkout-linked development installs are still available with `./install.sh --dev-link`; that mode links launchers and package resources to the checkout instead of the npm app.
+
+Persistent local backend settings live in `~/.pi-forge/agent/settings.json` under `connectedServices`. The installed defaults are SearXNG at `http://llms/searxng` and Playwright rendered browsing at `ws://llms/playwright`.
 
 ---
 

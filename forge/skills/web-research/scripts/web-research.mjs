@@ -6,10 +6,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve, sep } from "node:path";
 import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
+import { resolveConnectedServices } from "../../../lib/connected-services.mjs";
 
 const DEFAULT_USER_AGENT = "pi-forge-web-research/1 (+https://github.com/pi-forge)";
 const DEFAULT_TIMEOUT_MS = 30_000;
-const DEFAULT_SEARXNG_URL = "http://llms/searxng";
 const DEFAULT_LIMIT = 10;
 const DEFAULT_READ_COUNT = 5;
 const DEFAULT_DEEP_ITERATIONS = 3;
@@ -1357,8 +1357,8 @@ function validateAcademicRun(runDirectory, options = {}) {
 // --- SearXNG ---------------------------------------------------------------
 
 function searxngBase(explicit) {
-	const base = explicit || process.env.FORGE_SEARXNG_URL || DEFAULT_SEARXNG_URL;
-	return base.trim().replace(/\/+$/, "");
+	const services = resolveConnectedServices({ searxngUrl: explicit });
+	return services.searxng.enabled ? services.searxng.baseUrl : "";
 }
 
 async function pingSearxng(base, userAgent, timeoutMs) {
@@ -1414,6 +1414,19 @@ async function loadPlaywright() {
 	}
 }
 
+function playwrightWsEndpoint(explicit) {
+	const services = resolveConnectedServices({ playwrightWsEndpoint: explicit });
+	return services.playwright.enabled ? services.playwright.wsEndpoint : "";
+}
+
+async function connectPlaywrightBrowser(playwright, timeoutMs, explicitEndpoint) {
+	const wsEndpoint = playwrightWsEndpoint(explicitEndpoint);
+	if (!wsEndpoint) {
+		throw new Error("Playwright rendered browsing is disabled in settings");
+	}
+	return playwright.chromium.connect(wsEndpoint, { timeout: timeoutMs });
+}
+
 function readabilityMetadata(html, url) {
 	let dom = null;
 	try {
@@ -1439,8 +1452,8 @@ function readabilityMetadata(html, url) {
 	}
 }
 
-async function extractWithPlaywright(playwright, url, timeoutMs, userAgent) {
-	const browser = await playwright.chromium.launch({ headless: true });
+async function extractWithPlaywright(playwright, url, timeoutMs, userAgent, playwrightWsEndpointOverride) {
+	const browser = await connectPlaywrightBrowser(playwright, timeoutMs, playwrightWsEndpointOverride);
 	let text = "";
 	let title = null;
 	let finalUrl = url;
@@ -1546,7 +1559,13 @@ async function readPage(url, options) {
 	let extraction;
 	if (playwright && options.render) {
 		try {
-			extraction = await extractWithPlaywright(playwright, url, options.timeoutMs, options.userAgent);
+			extraction = await extractWithPlaywright(
+				playwright,
+				url,
+				options.timeoutMs,
+				options.userAgent,
+				options.playwrightWsEndpoint,
+			);
 		} catch (error) {
 			extraction = await extractWithHttp(url, options.timeoutMs, options.userAgent);
 			extraction.warnings.push(`Playwright extraction failed (${error.message}); fell back to HTTP`);
@@ -1672,6 +1691,7 @@ function deepDefaults(flags) {
 		timeoutMs: flags.timeoutMs ?? DEFAULT_TIMEOUT_MS,
 		userAgent: flags.userAgent ?? DEFAULT_USER_AGENT,
 		render: flags.render !== false,
+		playwrightWsEndpoint: flags.playwrightWs,
 	};
 }
 
@@ -2179,33 +2199,24 @@ function validateDeepRun(runDirectory, options = {}) {
 
 async function commandDoctor(options) {
 	const playwright = await loadPlaywright();
-	let chromiumPath = null;
-	let chromiumAvailable = false;
-	if (playwright) {
-		try {
-			chromiumPath = playwright.chromium.executablePath();
-			chromiumAvailable = chromiumPath !== null && existsSync(chromiumPath);
-		} catch {
-			chromiumAvailable = false;
-		}
-	}
+	const playwrightEndpoint = playwrightWsEndpoint(options.playwrightWs);
 	const searxng = await pingSearxng(searxngBase(options.searxng), DEFAULT_USER_AGENT, 5000);
 	const tools = {
 		fetch: { available: typeof fetch === "function", version: process.version },
 		playwright: { available: Boolean(playwright), version: playwright ? "importable" : null },
-		chromium: { available: chromiumAvailable, version: chromiumAvailable ? chromiumPath : null },
+		playwrightEndpoint: { available: Boolean(playwrightEndpoint), version: playwrightEndpoint || null },
 	};
 	const capabilities = {
 		search: searxng.configured && searxng.reachable,
-		extraction: tools.playwright.available && tools.chromium.available,
+		extraction: tools.playwright.available && tools.playwrightEndpoint.available,
 		httpFallback: tools.fetch.available,
 	};
 	const remediation = [];
-	if (!searxng.configured) remediation.push("Set FORGE_SEARXNG_URL or --searxng to enable search.");
+	if (!searxng.configured) remediation.push("Set connectedServices.searxng.baseUrl, FORGE_SEARXNG_URL, or --searxng to enable search.");
 	else if (!searxng.reachable) remediation.push(`SearXNG unreachable: ${searxng.detail}`);
 	if (!tools.playwright.available) remediation.push("Install Playwright for rendered page extraction.");
-	if (tools.playwright.available && !tools.chromium.available) {
-		remediation.push("Install Chromium: node_modules/.bin/playwright install chromium.");
+	if (tools.playwright.available && !tools.playwrightEndpoint.available) {
+		remediation.push("Set connectedServices.playwright.wsEndpoint or FORGE_PLAYWRIGHT_WS_ENDPOINT for rendered browsing.");
 	}
 	const report = { tools, capabilities, searxng, remediation };
 	if (options.json) {
@@ -2229,7 +2240,7 @@ async function commandSearch(positionals, flags) {
 	if (!flags.output) fail("search requires --output <new-directory>");
 	const query = positionals.join(" ");
 	const base = searxngBase(flags.searxng);
-	if (!base) fail("search requires a SearXNG instance; set FORGE_SEARXNG_URL or pass --searxng <url>");
+	if (!base) fail("search requires a SearXNG instance; set connectedServices.searxng.baseUrl, FORGE_SEARXNG_URL, or --searxng <url>");
 
 	const autoParams = autoSelectParams(query);
 	const searchParams = {
@@ -2301,6 +2312,7 @@ async function commandRead(positionals, flags) {
 		timeoutMs: flags.timeoutMs ?? DEFAULT_TIMEOUT_MS,
 		render: flags.render !== false, // default to true
 		delayMs: flags.delayMs ?? 500,
+		playwrightWsEndpoint: flags.playwrightWs,
 	};
 
 	const runDirectory = resolve(flags.output);
@@ -2351,7 +2363,7 @@ async function commandResearch(positionals, flags) {
 	if (!flags.output) fail("research requires --output <new-directory>");
 	const query = positionals.join(" ");
 	const base = searxngBase(flags.searxng);
-	if (!base) fail("research requires a SearXNG instance; set FORGE_SEARXNG_URL or pass --searxng <url>");
+	if (!base) fail("research requires a SearXNG instance; set connectedServices.searxng.baseUrl, FORGE_SEARXNG_URL, or --searxng <url>");
 
 	const autoParams = autoSelectParams(query);
 	const searchParams = {
@@ -2394,6 +2406,7 @@ async function commandResearch(positionals, flags) {
 		timeoutMs: flags.timeoutMs ?? DEFAULT_TIMEOUT_MS,
 		render: flags.render !== false,
 		delayMs: flags.delayMs ?? 500,
+		playwrightWsEndpoint: flags.playwrightWs,
 	};
 
 	const readings = [];
@@ -2451,7 +2464,7 @@ async function commandDeep(positionals, flags) {
 	if (uniqueSeedQueries.length === 0) fail("deep requires a query, --query, or --query-file");
 	const question = flags.question || positionalQuestion || uniqueSeedQueries.join("; ");
 	const base = searxngBase(flags.searxng);
-	if (!base) fail("deep requires a SearXNG instance; set FORGE_SEARXNG_URL or pass --searxng <url>");
+	if (!base) fail("deep requires a SearXNG instance; set connectedServices.searxng.baseUrl, FORGE_SEARXNG_URL, or --searxng <url>");
 	const runDirectory = resolve(flags.output);
 	if (existsSync(runDirectory)) fail(`output directory already exists: ${runDirectory}`);
 	mkdirSync(runDirectory, { recursive: true });
@@ -2737,6 +2750,7 @@ const FLAG_SPECS = {
 	"--question": { key: "question", value: true },
 	"--user-agent": { key: "userAgent", value: true },
 	"--searxng": { key: "searxng", value: true },
+	"--playwright-ws": { key: "playwrightWs", value: true },
 	"--limit": { key: "limit", value: true, integer: true },
 	"--read-count": { key: "readCount", value: true, integer: true },
 	"--max-iterations": { key: "maxIterations", value: true, integer: true },
@@ -2789,18 +2803,18 @@ function parseArguments(args) {
 
 function usage() {
 	process.stdout.write(`Usage:
-  web-research.mjs doctor [--json] [--searxng <url>]
+  web-research.mjs doctor [--json] [--searxng <url>] [--playwright-ws <ws-endpoint>]
   web-research.mjs search <query...> --output <dir> [--searxng <url>] [--limit N]
       [--categories <cats>] [--engines <engines>] [--language <lang>]
       [--safesearch <0|1|2>] [--time-range <day|week|month|year>] [--pageno N]
-  web-research.mjs read <url...> --output <dir> [--input-file <path>]
+  web-research.mjs read <url...> --output <dir> [--input-file <path>] [--playwright-ws <ws-endpoint>]
       [--render] [--no-render] [--delay-ms N] [--timeout-ms N]
   web-research.mjs research <query...> --output <dir> [--searxng <url>]
-      [--limit N] [--read-count N] [--render] [--no-render] [--delay-ms N]
+      [--limit N] [--read-count N] [--render] [--no-render] [--delay-ms N] [--playwright-ws <ws-endpoint>]
       [--categories <cats>] [--engines <engines>] [--language <lang>]
       [--safesearch <0|1|2>] [--time-range <day|week|month|year>] [--pageno N]
   web-research.mjs deep <query...> --output <dir> [--question <text>] [--query <query>] [--query-file <path>]
-      [--max-iterations N] [--limit N] [--read-count N] [--render] [--no-render]
+      [--max-iterations N] [--limit N] [--read-count N] [--render] [--no-render] [--playwright-ws <ws-endpoint>]
       [--categories <cats>] [--engines <engines>] [--language <lang>]
       [--safesearch <0|1|2>] [--time-range <day|week|month|year>] [--pageno N]
   web-research.mjs academic <query...> --output <dir> [--limit N]

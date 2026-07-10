@@ -15,9 +15,11 @@ queries, iterative follow-up searching, source-backed synthesis, or strict
 provenance. Read [references/deep-research-contract.md](references/deep-research-contract.md)
 before relying on deep research artifacts.
 
-The search backend is **SearXNG** (default: `http://llms/searxng`). Page
-extraction uses **Playwright + Chromium** for rendered pages with an HTTP
-fallback for simple pages.
+The search backend is **SearXNG** from `connectedServices.searxng` in
+`~/.pi-forge/agent/settings.json` (default: `http://llms/searxng`). Page
+extraction uses the configured **Playwright WebSocket endpoint** from
+`connectedServices.playwright` (default: `ws://llms/playwright`) for rendered
+pages, with an HTTP fallback for simple pages.
 
 ## Workflow
 
@@ -28,8 +30,8 @@ fallback for simple pages.
    node <skill-directory>/scripts/web-research.mjs doctor [--json]
    ```
 
-   `doctor` reports SearXNG connectivity, Playwright availability, and
-   remediation steps.
+   `doctor` reports SearXNG connectivity, Playwright availability, the
+   configured browser endpoint, and remediation steps.
 
 2. Choose a command:
 

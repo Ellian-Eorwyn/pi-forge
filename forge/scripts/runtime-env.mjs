@@ -15,6 +15,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveConnectedServices } from "../lib/connected-services.mjs";
 
 export const PACKAGE_NAME = "@ellian-eorwyn/pi-forge";
 export const PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
@@ -42,10 +43,16 @@ export function getForgePaths() {
 
 export function applyRuntimeEnvironment() {
 	const paths = getForgePaths();
+	const services = resolveConnectedServices({ env: process.env });
 	process.env.PI_CODING_AGENT_DIR = process.env.PI_CODING_AGENT_DIR || paths.agentDir;
 	process.env.PI_SKIP_VERSION_CHECK = process.env.PI_SKIP_VERSION_CHECK || "1";
 	process.env.PLAYWRIGHT_BROWSERS_PATH = process.env.PLAYWRIGHT_BROWSERS_PATH || paths.playwrightBrowsersDir;
-	process.env.FORGE_SEARXNG_URL = process.env.FORGE_SEARXNG_URL || "http://llms/searxng";
+	if (process.env.FORGE_SEARXNG_URL === undefined) {
+		process.env.FORGE_SEARXNG_URL = services.searxng.enabled ? services.searxng.baseUrl : "";
+	}
+	if (process.env.FORGE_PLAYWRIGHT_WS_ENDPOINT === undefined) {
+		process.env.FORGE_PLAYWRIGHT_WS_ENDPOINT = services.playwright.enabled ? services.playwright.wsEndpoint : "";
+	}
 	return paths;
 }
 

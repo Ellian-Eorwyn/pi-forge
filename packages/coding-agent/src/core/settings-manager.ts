@@ -77,6 +77,43 @@ export interface WarningSettings {
 	anthropicExtraUsage?: boolean; // default: true
 }
 
+export interface SearxngServiceSettings {
+	enabled?: boolean;
+	baseUrl?: string;
+}
+
+export interface PlaywrightServiceSettings {
+	enabled?: boolean;
+	wsEndpoint?: string;
+}
+
+export interface ConnectedServicesSettings {
+	searxng?: SearxngServiceSettings;
+	playwright?: PlaywrightServiceSettings;
+}
+
+export interface ResolvedConnectedServices {
+	searxng: {
+		enabled: boolean;
+		baseUrl: string;
+	};
+	playwright: {
+		enabled: boolean;
+		wsEndpoint: string;
+	};
+}
+
+export const DEFAULT_CONNECTED_SERVICES: ResolvedConnectedServices = {
+	searxng: {
+		enabled: true,
+		baseUrl: "http://llms/searxng",
+	},
+	playwright: {
+		enabled: true,
+		wsEndpoint: "ws://llms/playwright",
+	},
+};
+
 export type DefaultProjectTrust = "ask" | "always" | "never";
 
 export type TransportSetting = Transport;
@@ -141,6 +178,7 @@ export interface Settings {
 	httpProxy?: string; // Proxy URL applied as HTTP_PROXY and HTTPS_PROXY for Pi-managed HTTP clients
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
 	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
+	connectedServices?: ConnectedServicesSettings; // Local backend services surfaced in the launch prompt
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
@@ -183,6 +221,48 @@ function parseTimeoutSetting(value: unknown, settingName: string): number | unde
 		throw new Error(`Invalid ${settingName} setting: ${String(value)}`);
 	}
 	return undefined;
+}
+
+function normalizeOptionalString(value: unknown): string | undefined {
+	if (typeof value !== "string") {
+		return undefined;
+	}
+	const trimmed = value.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function normalizeBaseUrl(value: unknown): string | undefined {
+	return normalizeOptionalString(value)?.replace(/\/+$/, "");
+}
+
+function resolveConnectedServicesSettings(
+	settings: Settings,
+	env: NodeJS.ProcessEnv = process.env,
+): ResolvedConnectedServices {
+	const services = settings.connectedServices ?? {};
+	const searxng = services.searxng ?? {};
+	const playwright = services.playwright ?? {};
+	const searxngEnv = normalizeBaseUrl(env.FORGE_SEARXNG_URL);
+	const playwrightEnv = normalizeBaseUrl(env.FORGE_PLAYWRIGHT_WS_ENDPOINT);
+	const searxngEnvPresent = Object.hasOwn(env, "FORGE_SEARXNG_URL");
+	const playwrightEnvPresent = Object.hasOwn(env, "FORGE_PLAYWRIGHT_WS_ENDPOINT");
+	return {
+		searxng: {
+			enabled: searxngEnvPresent
+				? Boolean(searxngEnv)
+				: (searxng.enabled ?? DEFAULT_CONNECTED_SERVICES.searxng.enabled),
+			baseUrl: searxngEnv ?? normalizeBaseUrl(searxng.baseUrl) ?? DEFAULT_CONNECTED_SERVICES.searxng.baseUrl,
+		},
+		playwright: {
+			enabled: playwrightEnvPresent
+				? Boolean(playwrightEnv)
+				: (playwright.enabled ?? DEFAULT_CONNECTED_SERVICES.playwright.enabled),
+			wsEndpoint:
+				playwrightEnv ??
+				normalizeBaseUrl(playwright.wsEndpoint) ??
+				DEFAULT_CONNECTED_SERVICES.playwright.wsEndpoint,
+		},
+	};
 }
 
 export type SettingsScope = "global" | "project";
@@ -807,6 +887,14 @@ export class SettingsManager {
 
 	getContextBudgetSettings(): ContextBudgetSettings {
 		return { ...(this.settings.contextBudget ?? {}) };
+	}
+
+	getConnectedServicesSettings(): ConnectedServicesSettings {
+		return structuredClone(this.settings.connectedServices ?? {});
+	}
+
+	getResolvedConnectedServices(env: NodeJS.ProcessEnv = process.env): ResolvedConnectedServices {
+		return resolveConnectedServicesSettings(this.settings, env);
 	}
 
 	getBranchSummarySettings(): { reserveTokens: number; skipPrompt: boolean } {

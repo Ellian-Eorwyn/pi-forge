@@ -432,6 +432,34 @@ Project skill content`,
 
 			expect(loader.getAppendSystemPrompt()).toContain("Additional instructions.");
 		});
+
+		it("should append connected service settings to the launch prompt", async () => {
+			const previousSearxng = process.env.FORGE_SEARXNG_URL;
+			const previousPlaywright = process.env.FORGE_PLAYWRIGHT_WS_ENDPOINT;
+			delete process.env.FORGE_SEARXNG_URL;
+			delete process.env.FORGE_PLAYWRIGHT_WS_ENDPOINT;
+			try {
+				const settingsManager = SettingsManager.inMemory({
+					connectedServices: {
+						searxng: { enabled: true, baseUrl: "http://search.example/searxng" },
+						playwright: { enabled: true, wsEndpoint: "ws://browser.example/playwright" },
+					},
+				});
+				const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+				await loader.reload();
+
+				const appendPrompt = loader.getAppendSystemPrompt().join("\n\n");
+				expect(appendPrompt).toContain("# Connected Services");
+				expect(appendPrompt).toContain("http://search.example/searxng");
+				expect(appendPrompt).toContain("ws://browser.example/playwright");
+				expect(appendPrompt).toContain("time_range");
+			} finally {
+				if (previousSearxng === undefined) delete process.env.FORGE_SEARXNG_URL;
+				else process.env.FORGE_SEARXNG_URL = previousSearxng;
+				if (previousPlaywright === undefined) delete process.env.FORGE_PLAYWRIGHT_WS_ENDPOINT;
+				else process.env.FORGE_PLAYWRIGHT_WS_ENDPOINT = previousPlaywright;
+			}
+		});
 	});
 
 	describe("extendResources", () => {

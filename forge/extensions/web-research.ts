@@ -1,8 +1,32 @@
 import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+
+interface WebSearchParams {
+	query: string;
+	output?: string;
+	limit?: number;
+	searxng?: string;
+	categories?: string;
+	engines?: string;
+	language?: string;
+	safesearch?: number;
+	timeRange?: string;
+	pageNo?: number;
+}
+
+interface WebReadParams {
+	urls: string[];
+	output?: string;
+	render?: boolean;
+	playwrightWsEndpoint?: string;
+	delayMs?: number;
+	timeoutMs?: number;
+}
 
 interface DeepWebResearchParams {
 	question?: string;
@@ -33,6 +57,82 @@ const extensionDirectory = dirname(fileURLToPath(import.meta.url));
 const webResearchScript = join(extensionDirectory, "..", "skills", "web-research", "scripts", "web-research.mjs");
 
 export default function webResearchExtension(pi: ExtensionAPI) {
+	pi.registerTool({
+		name: "forge_web_search",
+		label: "Forge web search",
+		description: "Run a quick SearXNG web search and return ranked result metadata.",
+		promptSnippet: "Use forge_web_search for quick current-information lookups through the configured SearXNG service.",
+		promptGuidelines: [
+			"Use forge_web_search for quick web lookups before loading web-research skills.",
+			"For current events use news categories or a time range; for developer topics use it categories or code-focused engines.",
+		],
+		parameters: Type.Object({
+			query: Type.String({ description: "Search query." }),
+			output: Type.Optional(Type.String({ description: "Optional new output directory. Defaults under forge-output/web-research." })),
+			limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum ranked results to return." })),
+			searxng: Type.Optional(Type.String({ description: "One-run SearXNG base URL override." })),
+			categories: Type.Optional(Type.String({ description: "Comma-separated SearXNG categories." })),
+			engines: Type.Optional(Type.String({ description: "Comma-separated SearXNG engines." })),
+			language: Type.Optional(Type.String({ description: "SearXNG language code." })),
+			safesearch: Type.Optional(Type.Integer({ minimum: 0, maximum: 2, description: "SearXNG safesearch setting." })),
+			timeRange: Type.Optional(Type.String({ description: "SearXNG time range: day, week, month, or year." })),
+			pageNo: Type.Optional(Type.Integer({ minimum: 1, description: "SearXNG page number." })),
+		}),
+		executionMode: "sequential",
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			const input = params as WebSearchParams;
+			const output = input.output ?? defaultOutputDirectory(ctx.cwd, "search", input.query);
+			const result = await runNode(buildWebSearchArgs({ ...input, output }), signal);
+			const data = readResearchReport(output);
+			const details = {
+				runDirectory: output,
+				query: data.query,
+				params: data.params,
+				results: data.results,
+				stderr: result.stderr,
+			};
+			return {
+				content: [{ type: "text", text: JSON.stringify(details, null, 2) }],
+				details,
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "forge_web_read",
+		label: "Forge web read",
+		description: "Read known URLs with rendered Playwright extraction when enabled, falling back to HTTP extraction.",
+		promptSnippet: "Use forge_web_read to extract readable text from specific URLs through the configured Playwright service.",
+		promptGuidelines: [
+			"Use forge_web_read when you already have URLs to inspect.",
+			"Use the returned full text and warnings; load web-collection only when the user needs archived source files or manifests.",
+		],
+		parameters: Type.Object({
+			urls: Type.Array(Type.String(), { minItems: 1, description: "URLs to read." }),
+			output: Type.Optional(Type.String({ description: "Optional new output directory. Defaults under forge-output/web-research." })),
+			render: Type.Optional(Type.Boolean({ description: "Use rendered Playwright extraction. Defaults to true." })),
+			playwrightWsEndpoint: Type.Optional(Type.String({ description: "One-run Playwright WebSocket endpoint override." })),
+			delayMs: Type.Optional(Type.Integer({ minimum: 0, description: "Delay between URL reads in milliseconds." })),
+			timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Request/navigation timeout in milliseconds." })),
+		}),
+		executionMode: "sequential",
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			const input = params as WebReadParams;
+			const output = input.output ?? defaultOutputDirectory(ctx.cwd, "read", input.urls.join(" "));
+			const result = await runNode(buildWebReadArgs({ ...input, output }), signal);
+			const data = readResearchReport(output);
+			const details = {
+				runDirectory: output,
+				readings: data.readings,
+				stderr: result.stderr,
+			};
+			return {
+				content: [{ type: "text", text: JSON.stringify(details, null, 2) }],
+				details,
+			};
+		},
+	});
+
 	pi.registerTool({
 		name: "forge_deep_web_research",
 		label: "Deep web research",
@@ -103,6 +203,29 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 	});
 }
 
+function buildWebSearchArgs(input: WebSearchParams & { output: string }): string[] {
+	const args = [webResearchScript, "search", input.query, "--output", input.output];
+	if (input.limit !== undefined) args.push("--limit", String(input.limit));
+	if (input.searxng) args.push("--searxng", input.searxng);
+	if (input.categories) args.push("--categories", input.categories);
+	if (input.engines) args.push("--engines", input.engines);
+	if (input.language) args.push("--language", input.language);
+	if (input.safesearch !== undefined) args.push("--safesearch", String(input.safesearch));
+	if (input.timeRange) args.push("--time-range", input.timeRange);
+	if (input.pageNo !== undefined) args.push("--pageno", String(input.pageNo));
+	return args;
+}
+
+function buildWebReadArgs(input: WebReadParams & { output: string }): string[] {
+	const args = [webResearchScript, "read", ...input.urls, "--output", input.output];
+	if (input.render === false) args.push("--no-render");
+	else if (input.render === true) args.push("--render");
+	if (input.playwrightWsEndpoint) args.push("--playwright-ws", input.playwrightWsEndpoint);
+	if (input.delayMs !== undefined) args.push("--delay-ms", String(input.delayMs));
+	if (input.timeoutMs !== undefined) args.push("--timeout-ms", String(input.timeoutMs));
+	return args;
+}
+
 function buildDeepResearchArgs(input: DeepWebResearchParams): string[] {
 	const args = [webResearchScript, "deep", "--output", input.output];
 	const queries = input.queries ?? [];
@@ -130,6 +253,36 @@ function buildAcademicResearchArgs(input: AcademicWebResearchParams): string[] {
 	if (input.contactEmail) args.push("--contact-email", input.contactEmail);
 	if (input.timeoutMs !== undefined) args.push("--timeout-ms", String(input.timeoutMs));
 	return args;
+}
+
+function readResearchReport(output: string): { query: unknown; params: unknown; results: unknown[]; readings: unknown[] } {
+	return JSON.parse(readFileSync(join(output, "research_report.json"), "utf8")) as {
+		query: unknown;
+		params: unknown;
+		results: unknown[];
+		readings: unknown[];
+	};
+}
+
+function defaultOutputDirectory(cwd: string, command: string, seed: string): string {
+	const root = join(cwd, "forge-output", "web-research");
+	mkdirSync(root, { recursive: true });
+	const hash = createHash("sha256").update(seed).digest("hex").slice(0, 8);
+	const stem = safeStem(`${command}-${seed}`).slice(0, 48) || command;
+	for (let index = 1; index <= 1000; index += 1) {
+		const suffix = index === 1 ? "" : `-${index}`;
+		const candidate = join(root, `${stem}-${hash}${suffix}`);
+		if (!existsSync(candidate)) return candidate;
+	}
+	throw new Error(`Could not allocate output directory under ${root}`);
+}
+
+function safeStem(value: string): string {
+	return value
+		.normalize("NFKC")
+		.trim()
+		.replace(/[^a-zA-Z0-9._-]+/g, "-")
+		.replace(/^-+|-+$/g, "");
 }
 
 function runNode(args: string[], signal: AbortSignal): Promise<{ stdout: string; stderr: string }> {

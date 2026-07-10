@@ -1792,7 +1792,7 @@ test("document ingest, coding, and web collection expose review and safety bound
 		const doctor = jsonOutput(run("node", [script("web-collection", "web-collection.mjs"), "doctor", "--json"]));
 		assert.equal(doctor.capabilities.httpCollect, true);
 		assert.equal(doctor.capabilities.searxngSearch, false);
-		assert.match(doctor.searxng.detail, /FORGE_SEARXNG_URL is not set/);
+		assert.match(doctor.searxng.detail, /no SearXNG URL configured/);
 		const rejectedWebRun = join(workspace, "web-rejected");
 		const rejected = jsonOutput(
 			run("node", [
@@ -1894,6 +1894,61 @@ test("web-research deep creates validated provenance-backed artifacts", async ()
 			claimRows[0].sourceIds = [];
 			writeFileSync(claimsPath, claimRows.map((row) => JSON.stringify(row)).join("\n") + "\n");
 			runFailure("node", [script("web-research", "web-research.mjs"), "validate", deepRun], /has no sourceIds/);
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("web-research quick search and read produce report artifacts", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startDeepResearchFixture();
+		try {
+			const searchRun = join(workspace, "quick-search");
+			const search = jsonOutput(
+				await runAsyncWithEnvironment(
+					"node",
+					[
+						script("web-research", "web-research.mjs"),
+						"search",
+						"seed alpha",
+						"--output",
+						searchRun,
+						"--searxng",
+						fixture.searxng,
+						"--limit",
+						"2",
+						"--categories",
+						"general",
+					],
+					{},
+				),
+			);
+			assert.equal(search.results, 2);
+			const searchReport = JSON.parse(readFileSync(join(searchRun, "research_report.json"), "utf8"));
+			assert.equal(searchReport.query, "seed alpha");
+			assert.equal(searchReport.results[0].title, "Alpha Source");
+			assert.equal(searchReport.params.categories, "general");
+
+			const readRun = join(workspace, "quick-read");
+			const read = jsonOutput(
+				await runAsyncWithEnvironment(
+					"node",
+					[
+						script("web-research", "web-research.mjs"),
+						"read",
+						`${fixture.origin}/page-alpha`,
+						"--output",
+						readRun,
+						"--no-render",
+					],
+					{ FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1" },
+				),
+			);
+			assert.equal(read.success, 1);
+			const readReport = JSON.parse(readFileSync(join(readRun, "research_report.json"), "utf8"));
+			assert.match(readReport.readings[0].text, /Alpha evidence quote/);
+			assert.equal(readReport.readings[0].extractionMethod, "http");
 		} finally {
 			await fixture.close();
 		}
@@ -2793,7 +2848,7 @@ test("installed launcher symlinks resolve their source checkout", () => {
 		copyFileSync(join(repositoryRoot, "scripts", "pi-forge-run.sh"), join(scriptsDirectory, "pi-forge-run.sh"));
 		copyFileSync(join(repositoryRoot, "update.sh"), join(repository, "update.sh"));
 		writeFileSync(join(repository, "packages", "coding-agent", "dist", "cli.js"), "");
-		writeFileSync(join(fakeBin, "node"), "#!/usr/bin/env bash\nprintf '%s\\n' \"$FORGE_SEARXNG_URL\" \"$@\"\n");
+		writeFileSync(join(fakeBin, "node"), "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\"\n");
 		chmodSync(join(fakeBin, "node"), 0o755);
 		symlinkSync(join(scriptsDirectory, "pi-forge-run.sh"), join(binaryDirectory, "pi-forge"));
 		symlinkSync(join(repository, "update.sh"), join(binaryDirectory, "pi-forge-update"));
@@ -2805,7 +2860,7 @@ test("installed launcher symlinks resolve their source checkout", () => {
 		assert.equal(launcher.status, 0, launcher.stderr);
 		assert.equal(
 			launcher.stdout.trim(),
-			`http://llms/searxng\n${join(realpathSync(repository), "packages", "coding-agent", "dist", "cli.js")}\n--version`,
+			`${join(realpathSync(repository), "packages", "coding-agent", "dist", "cli.js")}\n--version`,
 		);
 
 		const updater = runFailure(join(binaryDirectory, "pi-forge-update"), [], /legacy updater requires a git checkout/);
@@ -2851,6 +2906,16 @@ test("profile configuration installs local service defaults without dropping use
 			softRatio: 0.75,
 			useTaskModel: false,
 		});
+		assert.deepEqual(settings.connectedServices, {
+			searxng: {
+				enabled: true,
+				baseUrl: "http://llms/searxng",
+			},
+			playwright: {
+				enabled: true,
+				wsEndpoint: "ws://llms/playwright",
+			},
+		});
 		assert.deepEqual(settings.packages, [join(repositoryRoot, "forge"), "/user/package"]);
 
 		const models = JSON.parse(readFileSync(join(agentDirectory, "models.json"), "utf8"));
@@ -2862,6 +2927,35 @@ test("profile configuration installs local service defaults without dropping use
 		assert.equal(localModel.maxTokens, 32768);
 		assert.equal(models.providers["forge-local"].compat.supportsDeveloperRole, false);
 		assert.equal("forge-task-local" in models.providers, false);
+	});
+});
+
+test("profile configuration preserves connected service overrides", () => {
+	withWorkspace((workspace) => {
+		const agentDirectory = join(workspace, "agent");
+		mkdirSync(agentDirectory);
+		writeFileSync(
+			join(agentDirectory, "settings.json"),
+			`${JSON.stringify({
+				connectedServices: {
+					searxng: { enabled: true, baseUrl: "http://search.local/custom/" },
+					playwright: { enabled: false, wsEndpoint: "ws://browser.local/custom/" },
+				},
+			})}\n`,
+		);
+		run("node", [join(repositoryRoot, "scripts", "configure-pi-forge.mjs"), agentDirectory, join(repositoryRoot, "forge")]);
+
+		const settings = JSON.parse(readFileSync(join(agentDirectory, "settings.json"), "utf8"));
+		assert.deepEqual(settings.connectedServices, {
+			searxng: {
+				enabled: true,
+				baseUrl: "http://search.local/custom",
+			},
+			playwright: {
+				enabled: false,
+				wsEndpoint: "ws://browser.local/custom",
+			},
+		});
 	});
 });
 

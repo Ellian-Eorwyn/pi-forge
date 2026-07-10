@@ -116,6 +116,29 @@ export function loadProjectContextFiles(options: {
 	return contextFiles;
 }
 
+function formatConnectedServicesPrompt(settingsManager: SettingsManager): string {
+	const services = settingsManager.getResolvedConnectedServices();
+	const lines = ["# Connected Services", ""];
+	if (services.searxng.enabled) {
+		lines.push(
+			`- SearXNG web search: ${services.searxng.baseUrl}`,
+			"  Use the quick web search tool for current information. The SearXNG JSON API is `<base>/search?format=json&q=<query>` and supports `categories`, `engines`, `language`, `safesearch`, `time_range`, and `pageno`.",
+			"  Use `<base>/config` when you need to inspect enabled engines, categories, and locales.",
+		);
+	} else {
+		lines.push("- SearXNG web search: disabled in settings.");
+	}
+	if (services.playwright.enabled) {
+		lines.push(
+			`- Playwright rendered browsing: ${services.playwright.wsEndpoint}`,
+			"  Use quick page-read tools for rendered pages and downloads that need browser execution. Load `web-research` or `web-collection` skills only for deep research, full archiving, provenance manifests, or complex collection workflows.",
+		);
+	} else {
+		lines.push("- Playwright rendered browsing: disabled in settings.");
+	}
+	return lines.join("\n");
+}
+
 export interface DefaultResourceLoaderOptions {
 	cwd: string;
 	agentDir: string;
@@ -472,9 +495,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const baseAppend = appendSources
 			.map((s) => resolvePromptInput(s, "append system prompt"))
 			.filter((s): s is string => s !== undefined);
-		this.appendSystemPrompt = this.appendSystemPromptOverride
-			? this.appendSystemPromptOverride(baseAppend)
-			: baseAppend;
+		const resolvedAppend = this.appendSystemPromptOverride ? this.appendSystemPromptOverride(baseAppend) : baseAppend;
+		this.appendSystemPrompt = [...resolvedAppend, formatConnectedServicesPrompt(this.settingsManager)];
 	}
 
 	private async loadCurrentExtensionSet(options: { includeInlineFactories: boolean }): Promise<LoadExtensionsResult> {

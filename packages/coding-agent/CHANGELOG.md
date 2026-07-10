@@ -5,6 +5,7 @@
 ### Added
 
 - Added the pi-forge profile's restricted pi-vault MCP handoff extension and pending-review skill.
+- Added connected service settings so launch prompts can include configured local backend services.
 
 ### Fixed
 

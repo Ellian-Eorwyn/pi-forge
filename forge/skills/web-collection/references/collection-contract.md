@@ -67,8 +67,9 @@ failure is recorded as a warning.
 
 ## Search
 
-The search command requires a SearXNG instance located by `--searxng <url>` or
-the `FORGE_SEARXNG_URL` environment variable. It requests
+The search command requires a SearXNG instance from `connectedServices.searxng`
+in `~/.pi-forge/agent/settings.json`, `--searxng <url>`, or the
+`FORGE_SEARXNG_URL` environment variable. It requests
 `<base>/search?q=<query>&format=json` and writes the ranked results to
 `search_results.json` and the report's `## Search` section. Search does not
 download result pages unless `--collect` is given, which feeds the result URLs

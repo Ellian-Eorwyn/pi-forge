@@ -216,6 +216,55 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("connected services", () => {
+		it("uses defaults when connectedServices is not configured", () => {
+			const manager = SettingsManager.inMemory({});
+
+			expect(manager.getResolvedConnectedServices({})).toEqual({
+				searxng: { enabled: true, baseUrl: "http://llms/searxng" },
+				playwright: { enabled: true, wsEndpoint: "ws://llms/playwright" },
+			});
+		});
+
+		it("preserves settings while allowing launch env overrides", () => {
+			const manager = SettingsManager.inMemory({
+				connectedServices: {
+					searxng: { enabled: true, baseUrl: "http://search.local/searxng/" },
+					playwright: { enabled: true, wsEndpoint: "ws://browser.local/playwright/" },
+				},
+			});
+
+			expect(
+				manager.getResolvedConnectedServices({
+					FORGE_SEARXNG_URL: "http://override.local/searxng/",
+					FORGE_PLAYWRIGHT_WS_ENDPOINT: "ws://override.local/playwright/",
+				}),
+			).toEqual({
+				searxng: { enabled: true, baseUrl: "http://override.local/searxng" },
+				playwright: { enabled: true, wsEndpoint: "ws://override.local/playwright" },
+			});
+
+			expect(manager.getConnectedServicesSettings()).toEqual({
+				searxng: { enabled: true, baseUrl: "http://search.local/searxng/" },
+				playwright: { enabled: true, wsEndpoint: "ws://browser.local/playwright/" },
+			});
+		});
+
+		it("treats empty launch env vars as one-run disables", () => {
+			const manager = SettingsManager.inMemory({});
+
+			expect(
+				manager.getResolvedConnectedServices({
+					FORGE_SEARXNG_URL: "",
+					FORGE_PLAYWRIGHT_WS_ENDPOINT: "",
+				}),
+			).toEqual({
+				searxng: { enabled: false, baseUrl: "http://llms/searxng" },
+				playwright: { enabled: false, wsEndpoint: "ws://llms/playwright" },
+			});
+		});
+	});
+
 	describe("error tracking", () => {
 		it("should collect and clear load errors via drainErrors", () => {
 			const globalSettingsPath = join(agentDir, "settings.json");

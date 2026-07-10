@@ -5,13 +5,13 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { basename, extname, join, resolve, sep } from "node:path";
 import * as readline from "node:readline/promises";
+import { resolveConnectedServices } from "../../../lib/connected-services.mjs";
 import { htmlToCleanMarkdown } from "../../../lib/html-cleaner.mjs";
 
 const DEFAULT_USER_AGENT = "pi-forge-web-collection/1 (+https://github.com/pi-forge)";
 const DEFAULT_DELAY_MS = 500;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BYTES = 100 * 1024 * 1024;
-const DEFAULT_SEARXNG_URL = "";
 const MAX_REDIRECTS = 10;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const CAPTURE_ARTIFACTS = ["rendered.html", "snapshot.mhtml", "screenshot.png", "page.pdf"];
@@ -304,13 +304,26 @@ async function loadPlaywright() {
 	}
 }
 
+function playwrightWsEndpoint(explicit) {
+	const services = resolveConnectedServices({ playwrightWsEndpoint: explicit });
+	return services.playwright.enabled ? services.playwright.wsEndpoint : "";
+}
+
+async function connectPlaywrightBrowser(playwright, timeoutMs, explicitEndpoint) {
+	const wsEndpoint = playwrightWsEndpoint(explicitEndpoint);
+	if (!wsEndpoint) {
+		throw new Error("Playwright rendered browsing is disabled in settings");
+	}
+	return playwright.chromium.connect(wsEndpoint, { timeout: timeoutMs });
+}
+
 function searxngBase(explicit) {
-	const base = explicit || process.env.FORGE_SEARXNG_URL || DEFAULT_SEARXNG_URL;
-	return base.trim().replace(/\/+$/, "");
+	const services = resolveConnectedServices({ searxngUrl: explicit });
+	return services.searxng.enabled ? services.searxng.baseUrl : "";
 }
 
 async function pingSearxng(base, userAgent, timeoutMs) {
-	if (!base) return { configured: false, reachable: false, detail: "FORGE_SEARXNG_URL is not set" };
+	if (!base) return { configured: false, reachable: false, detail: "no SearXNG URL configured" };
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
 	try {
@@ -328,36 +341,27 @@ async function pingSearxng(base, userAgent, timeoutMs) {
 
 async function doctor(options) {
 	const playwright = await loadPlaywright();
-	let chromiumPath = null;
-	let chromiumAvailable = false;
-	if (playwright) {
-		try {
-			chromiumPath = playwright.chromium.executablePath();
-			chromiumAvailable = chromiumPath !== null && existsSync(chromiumPath);
-		} catch {
-			chromiumAvailable = false;
-		}
-	}
+	const playwrightEndpoint = playwrightWsEndpoint(options.playwrightWs);
 	const searxng = await pingSearxng(searxngBase(options.searxng), DEFAULT_USER_AGENT, 5000);
 	const tools = {
 		fetch: { available: typeof fetch === "function", version: process.version },
 		curl: run("curl"),
 		wget: run("wget"),
 		playwright: { available: Boolean(playwright), version: playwright ? "importable" : null },
-		chromium: { available: chromiumAvailable, version: chromiumAvailable ? chromiumPath : null },
+		playwrightEndpoint: { available: Boolean(playwrightEndpoint), version: playwrightEndpoint || null },
 	};
 	const capabilities = {
 		httpCollect: tools.fetch.available,
-		renderedCapture: tools.playwright.available && tools.chromium.available,
+		renderedCapture: tools.playwright.available && tools.playwrightEndpoint.available,
 		searxngSearch: searxng.configured && searxng.reachable,
 	};
 	const remediation = [];
 	if (!tools.fetch.available) remediation.push("Node 22.19+ with global fetch is required.");
 	if (!tools.playwright.available) remediation.push("Install Playwright (bundled with pi-forge; run pi-forge-update to refresh the installed package).");
-	if (tools.playwright.available && !tools.chromium.available) {
-		remediation.push("Install the Chromium browser: node_modules/.bin/playwright install chromium.");
+	if (tools.playwright.available && !tools.playwrightEndpoint.available) {
+		remediation.push("Set connectedServices.playwright.wsEndpoint or FORGE_PLAYWRIGHT_WS_ENDPOINT for rendered capture.");
 	}
-	if (!searxng.configured) remediation.push("Set FORGE_SEARXNG_URL or --searxng to enable search.");
+	if (!searxng.configured) remediation.push("Set connectedServices.searxng.baseUrl, FORGE_SEARXNG_URL, or --searxng to enable search.");
 	else if (!searxng.reachable) remediation.push(`SearXNG is configured but not reachable: ${searxng.detail}`);
 	const report = { tools, capabilities, searxng, remediation };
 	if (options.json) {
@@ -445,7 +449,7 @@ function uniqueFilename(state, stem, extension) {
 
 async function capturePage(playwright, url, captureDir, options) {
 	mkdirSync(captureDir, { recursive: true });
-	const browser = await playwright.chromium.launch({ headless: true });
+	const browser = await connectPlaywrightBrowser(playwright, options.timeoutMs, options.playwrightWsEndpoint);
 	const result = { artifacts: [], title: null, finalUrl: url, consoleErrors: 0, warnings: [] };
 	try {
 		const context = await browser.newContext({ userAgent: options.userAgent });
@@ -750,6 +754,7 @@ function commonOptions(flags) {
 		maxBytes: flags.maxBytes ?? DEFAULT_MAX_BYTES,
 		render: Boolean(flags.render),
 		cleanMarkdown: Boolean(flags.clean),
+		playwrightWsEndpoint: flags.playwrightWs,
 	};
 }
 
@@ -919,7 +924,7 @@ async function commandSearch(positionals, flags) {
 	if (!flags.output) fail("search requires --output <new-directory>");
 	const query = positionals.join(" ");
 	const base = searxngBase(flags.searxng);
-	if (!base) fail("search requires a SearXNG instance; set FORGE_SEARXNG_URL or pass --searxng <url>");
+	if (!base) fail("search requires a SearXNG instance; set connectedServices.searxng.baseUrl, FORGE_SEARXNG_URL, or --searxng <url>");
 	const options = commonOptions(flags);
 	const limit = flags.limit ?? 25;
 
@@ -1048,6 +1053,7 @@ const FLAG_SPECS = {
 	"--input-file": { key: "inputFile", value: true },
 	"--user-agent": { key: "userAgent", value: true },
 	"--searxng": { key: "searxng", value: true },
+	"--playwright-ws": { key: "playwrightWs", value: true },
 	"--match": { key: "match", value: true },
 	"--ext": { key: "ext", value: true },
 	"--delay-ms": { key: "delayMs", value: true, integer: true },
@@ -1098,12 +1104,12 @@ function parseArguments(args) {
 
 function usage() {
 	process.stdout.write(`Usage:
-  web-collection.mjs doctor [--json] [--searxng <url>]
-  web-collection.mjs collect <url...> --output <dir> [--input-file <path>] [--render] [--clean]
+  web-collection.mjs doctor [--json] [--searxng <url>] [--playwright-ws <ws-endpoint>]
+  web-collection.mjs collect <url...> --output <dir> [--input-file <path>] [--render] [--playwright-ws <ws-endpoint>] [--clean]
       [--user-agent <ua>] [--delay-ms N] [--timeout-ms N] [--max-bytes N]
   web-collection.mjs harvest <page-url> --output <dir> [--match <regex>] [--ext csv]
-      [--same-host] [--limit N] [--render] [--clean] [--ignore-robots]
-  web-collection.mjs spider <page-url> --output <dir> [--limit N] [--render] [--clean] [--ignore-robots]
+      [--same-host] [--limit N] [--render] [--playwright-ws <ws-endpoint>] [--clean] [--ignore-robots]
+  web-collection.mjs spider <page-url> --output <dir> [--limit N] [--render] [--playwright-ws <ws-endpoint>] [--clean] [--ignore-robots]
   web-collection.mjs search <query...> --output <dir> [--searxng <url>] [--limit N] [--collect]
       [--categories <cats>] [--engines <engines>] [--language <lang>]
       [--safesearch <0|1|2>] [--time-range <day|week|month|year>] [--pageno N]

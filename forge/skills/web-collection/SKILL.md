@@ -18,9 +18,10 @@ the original sources; produce new files only.
    node <skill-directory>/scripts/web-collection.mjs doctor --json
    ```
 
-   Rendered capture needs Playwright and the Chromium browser. Search uses
-   the default SearXNG instance (`http://llms/searxng`) unless overridden
-   by `FORGE_SEARXNG_URL` or `--searxng <url>`.
+   Rendered capture uses the Playwright WebSocket endpoint configured in
+   `~/.pi-forge/agent/settings.json`. Search uses the configured SearXNG
+   instance unless overridden for one run by `FORGE_SEARXNG_URL` or
+   `--searxng <url>`.
 2. Choose a new output directory under
    `forge-output/web-collection/<source-stem>/`. If it exists, use the next
    numbered suffix. The script refuses to write into an existing directory.
@@ -48,7 +49,7 @@ the original sources; produce new files only.
 
      This command interactively prompts you to choose which links to follow (e.g. all links, pricing/services, about/contact, or custom instruction). It extracts same-host links and uses the local LLM to intelligently filter down to the most relevant URLs before collecting them.
 
-   - **search** through a local SearXNG instance (default: `http://llms/searxng`):
+   - **search** through the configured local SearXNG instance:
 
      ```bash
      node <skill-directory>/scripts/web-collection.mjs search <query...> \
@@ -128,8 +129,10 @@ task needs one repeatable operation rather than the full collection workflow.
 
 ## Configuration
 
-- **Default SearXNG URL**: `http://llms/searxng`. Override with
-  `FORGE_SEARXNG_URL` environment variable or `--searxng <url>` flag.
+- **Persistent service settings**: edit `connectedServices` in
+  `~/.pi-forge/agent/settings.json`.
+- **One-run overrides**: use `FORGE_SEARXNG_URL`, `FORGE_PLAYWRIGHT_WS_ENDPOINT`,
+  `--searxng <url>`, or `--playwright-ws <ws-endpoint>`.
 - Run `doctor` to verify connectivity and see available capabilities.
 - The SearXNG instance exposes its full configuration at `<base>/config`;
   use it to inspect enabled engines, categories, and locales.

@@ -28,10 +28,6 @@ if ([string]::IsNullOrEmpty($env:PLAYWRIGHT_BROWSERS_PATH)) {
     }
 }
 
-if ([string]::IsNullOrEmpty($env:FORGE_SEARXNG_URL)) {
-    $env:FORGE_SEARXNG_URL = "http://llms/searxng"
-}
-
 $cliPath = Join-Path $SourceDir "packages\coding-agent\dist\cli.js"
 & node $cliPath @args
 exit $LASTEXITCODE
