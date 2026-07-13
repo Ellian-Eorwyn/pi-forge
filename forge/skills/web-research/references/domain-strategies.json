@@ -1,0 +1,28 @@
+{
+	"schemaVersion": 1,
+	"updatedAt": "2026-07-13",
+	"domains": [
+		{
+			"domain": "doi.org",
+			"subdomains": [],
+			"preferred_strategy": "direct_http",
+			"fallback_strategy": "static_readability",
+			"requires_browser_bootstrap": false,
+			"requires_cookies": false,
+			"main_selectors": [
+				"main",
+				"article"
+			],
+			"api_patterns": [],
+			"blocked_resource_overrides": [],
+			"rate_limit": {
+				"requests_per_second": 1
+			},
+			"failure_patterns": [],
+			"last_verified": "2026-07-13",
+			"notes": [
+				"Normalize DOI URLs and prefer direct publisher/API redirects before browser fallback."
+			]
+		}
+	]
+}

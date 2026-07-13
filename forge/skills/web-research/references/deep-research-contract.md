@@ -16,6 +16,17 @@ extraction, and claim registration.
   claim_register.jsonl       # final claim records with evidence/source ids
   gap_log.jsonl              # unresolved gaps and limits
   model_calls.jsonl          # every model prompt, response, status, and error
+  normalized_urls.jsonl      # requested/final/canonical URL records
+  strategy_decisions.jsonl   # fetch strategy decisions and fallback plan
+  acquisition_log.jsonl      # one record per acquisition attempt
+  extraction_log.jsonl       # extraction method, text size, locator metadata
+  cache_log.jsonl            # stage-cache hit/miss records
+  metrics.json               # timing, strategy, bytes, and context counters
+  discovery_reports/*.json   # only when discover/network inspection runs
+  archive/raw/*              # raw HTTP response bodies or rendered HTML
+  archive/rendered/*         # browser-rendered HTML when used
+  archive/extracted/*        # extracted document JSON
+  archive/chunks/*           # reserved for chunk/index artifacts
   web_manifest.csv           # web-collection-style provenance rows
   web_manifest.json          # provenance manifest and source metadata
   downloads/<source-id>.txt  # archived extracted source text
@@ -31,14 +42,33 @@ The output directory must not already exist. Source web pages are never modified
 The internal model is inspired by W3C PROV but remains JSON/CSV:
 
 - A source page is an entity with a `sourceId`, requested URL, final URL, access
-  date, extraction method, SHA-256 hash, and search origins.
+  date, canonical URL, acquisition strategy, extraction method, SHA-256 hash,
+  raw artifact path, extracted artifact path, acquisition validation result,
+  and search origins.
 - A search, read, extraction, or claim-registration step is an activity recorded
-  in `query_log.jsonl` or `model_calls.jsonl`.
+  in `query_log.jsonl`, `strategy_decisions.jsonl`, `acquisition_log.jsonl`,
+  `extraction_log.jsonl`, or `model_calls.jsonl`.
 - Evidence and claims are derived entities that cite their upstream source and
   evidence ids directly.
 
 Do not add RDF, PROV-N, or WARC export for the v1 workflow. `web_manifest.*`
 and the JSONL files are the source of truth.
+
+## Acquisition Model
+
+The acquisition ladder must prefer deterministic work before browser work:
+
+1. Known domain strategy or official provider adapter.
+2. Direct HTTP.
+3. Embedded structured data such as JSON-LD, citation metadata, OpenGraph,
+   `__NEXT_DATA__`, or application JSON script tags.
+4. Static main-content extraction with Readability and HTML text fallback.
+5. Internal JSON/API endpoint discovery and replay where available.
+6. Playwright network discovery.
+7. Playwright DOM extraction.
+
+Validation decides fallback. A page should not use Playwright merely because it
+contains JavaScript if direct HTTP produced good text and metadata.
 
 ## Evidence Items
 
@@ -105,6 +135,13 @@ disagreement; record conflicting evidence and surface the limit in the report.
 
 The report is generated from `claim_register.jsonl` and `evidence_items.jsonl`.
 Do not hand-author unsupported findings directly in the report.
+
+## Acquisition Metrics
+
+`metrics.json` should make performance visible. It records counts for discovered
+search results, unique canonical URLs, direct HTTP successes, structured-data
+successes, Playwright DOM fallbacks, failed sources, cache hits/misses, raw bytes
+downloaded, extracted characters, and evidence characters sent to the model.
 
 ## Academic Research Output Contract
 

@@ -243,9 +243,9 @@ function startDeepResearchFixture() {
 	const requests = [];
 	const server = createServer((request, response) => {
 		const url = new URL(request.url, "http://127.0.0.1");
+		const origin = `http://127.0.0.1:${server.address().port}`;
 		if (url.pathname === "/searxng/search") {
 			const query = url.searchParams.get("q") ?? "";
-			const origin = `http://127.0.0.1:${server.address().port}`;
 			const results = [];
 			if (/alpha/i.test(query)) {
 				results.push(
@@ -270,6 +270,26 @@ function startDeepResearchFixture() {
 				results.push({ title: "Mismatch Source", url: `${origin}/page-mismatch`, content: "Mismatch snippet", engine: "fixture", score: 1 });
 			} else if (/checkpoint/i.test(query)) {
 				results.push({ title: "Checkpoint Source", url: `${origin}/page-checkpoint`, content: "Checkpoint snippet", engine: "fixture", score: 1 });
+			} else if (/structured/i.test(query)) {
+				results.push(
+					{
+						title: "Structured Source",
+						url: `${origin}/page-structured?utm_source=tracker&utm_medium=test#fragment`,
+						content: "Structured snippet",
+						engine: "fixture",
+						score: 1,
+						publishedDate: "2026-07-01",
+					},
+					{
+						title: "Structured Source Duplicate",
+						url: `${origin}/page-structured`,
+						content: "Duplicate structured snippet",
+						engine: "fixture",
+						score: 0.8,
+					},
+				);
+			} else if (/binary/i.test(query)) {
+				results.push({ title: "Binary Source", url: `${origin}/paper.pdf`, content: "PDF snippet", engine: "fixture", score: 1 });
 			} else if (/unsafe/i.test(query)) {
 				results.push({ title: "Unsafe Source", url: "http://127.0.0.1:9/unsafe", content: "Unsafe snippet", engine: "fixture", score: 1 });
 			}
@@ -352,6 +372,33 @@ function startDeepResearchFixture() {
 			response.end(
 				`<!doctype html><title>Many Source ${index}</title><main><h1>Many Source ${index}</h1><p>Many evidence quote ${index} for ${query}. Budgeted research should preserve this source.</p></main>`,
 			);
+			return;
+		}
+		if (url.pathname === "/page-structured") {
+			response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+			response.end(`<!doctype html>
+<html>
+<head>
+  <title>Structured Source</title>
+  <link rel="canonical" href="${origin}/page-structured" />
+  <meta property="og:title" content="Structured Source" />
+  <meta name="citation_publication_date" content="2026/07/01" />
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Structured Source","datePublished":"2026-07-01"}</script>
+  <script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"article":{"title":"Structured Source","body":"Structured acquisition evidence from Next data."}}}}</script>
+  <script src="/api/structured-data"></script>
+</head>
+<body><main><article><h1>Structured Source</h1><p>Structured acquisition evidence appears in static HTML and should be extracted without browser rendering.</p></article></main></body>
+</html>`);
+			return;
+		}
+		if (url.pathname === "/api/structured-data") {
+			response.writeHead(200, { "Content-Type": "application/json" });
+			response.end(JSON.stringify({ title: "Structured API", body: "Structured endpoint payload." }));
+			return;
+		}
+		if (url.pathname === "/paper.pdf") {
+			response.writeHead(200, { "Content-Type": "application/pdf" });
+			response.end("%PDF-1.4\nsynthetic pdf fixture\n");
 			return;
 		}
 		response.writeHead(404, { "Content-Type": "text/plain" });
@@ -2115,6 +2162,141 @@ test("web-research quick search and read produce report artifacts", async () => 
 			const readReport = JSON.parse(readFileSync(join(readRun, "research_report.json"), "utf8"));
 			assert.match(readReport.readings[0].text, /Alpha evidence quote/);
 			assert.equal(readReport.readings[0].extractionMethod, "http");
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("web-research acquisition writes stage artifacts, cache records, and discovery reports", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startDeepResearchFixture();
+		try {
+			const cacheDirectory = join(workspace, "cache");
+			const searchRun = join(workspace, "structured-search");
+			const search = jsonOutput(
+				await runAsyncWithEnvironment(
+					"node",
+					[
+						script("web-research", "web-research.mjs"),
+						"search",
+						"structured acquisition",
+						"--output",
+						searchRun,
+						"--searxng",
+						fixture.searxng,
+						"--limit",
+						"2",
+					],
+					{},
+				),
+			);
+			assert.equal(search.results, 2);
+			const normalizedSearchUrls = readFileSync(join(searchRun, "normalized_urls.jsonl"), "utf8")
+				.trim()
+				.split(/\r?\n/)
+				.map((line) => JSON.parse(line));
+			assert.equal(new Set(normalizedSearchUrls.map((record) => record.canonicalUrl)).size, 1);
+			assert.equal(normalizedSearchUrls[0].canonicalUrl, `${fixture.origin}/page-structured`);
+
+			const firstReadRun = join(workspace, "structured-read-1");
+			const firstRead = jsonOutput(
+				await runAsyncWithEnvironment(
+					"node",
+					[
+						script("web-research", "web-research.mjs"),
+						"read",
+						`${fixture.origin}/page-structured?utm_source=tracker#fragment`,
+						"--output",
+						firstReadRun,
+						"--cache-dir",
+						cacheDirectory,
+						"--mode",
+						"standard",
+					],
+					{ FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1" },
+				),
+			);
+			assert.equal(firstRead.success, 1);
+			const firstReport = JSON.parse(readFileSync(join(firstReadRun, "research_report.json"), "utf8"));
+			const firstReading = firstReport.readings[0];
+			assert.equal(firstReading.extractionMethod, "http");
+			assert.match(firstReading.text, /Structured acquisition evidence/);
+			assert.equal(firstReading.canonicalUrl, `${fixture.origin}/page-structured`);
+			assert.equal(firstReading.metadata.structured.jsonLd[0].headline, "Structured Source");
+			assert.equal(firstReading.metadata.structured.nextData.props.pageProps.article.title, "Structured Source");
+			assert.equal(existsSync(join(firstReadRun, firstReading.rawArtifact)), true);
+			assert.equal(existsSync(join(firstReadRun, firstReading.extractedArtifact)), true);
+			const firstMetrics = JSON.parse(readFileSync(join(firstReadRun, "metrics.json"), "utf8"));
+			assert.equal(firstMetrics.directHttpSuccesses, 1);
+			assert.equal(firstMetrics.playwrightDomFallbacks, 0);
+			const firstCacheLog = readFileSync(join(firstReadRun, "cache_log.jsonl"), "utf8");
+			assert.match(firstCacheLog, /"status":"miss"/);
+
+			const secondReadRun = join(workspace, "structured-read-2");
+			jsonOutput(
+				await runAsyncWithEnvironment(
+					"node",
+					[
+						script("web-research", "web-research.mjs"),
+						"read",
+						`${fixture.origin}/page-structured`,
+						"--output",
+						secondReadRun,
+						"--cache-dir",
+						cacheDirectory,
+						"--mode",
+						"standard",
+					],
+					{ FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1" },
+				),
+			);
+			assert.match(readFileSync(join(secondReadRun, "cache_log.jsonl"), "utf8"), /"status":"hit"/);
+
+			const discoverRun = join(workspace, "structured-discover");
+			const discovered = jsonOutput(
+				await runAsyncWithEnvironment(
+					"node",
+					[
+						script("web-research", "web-research.mjs"),
+						"discover",
+						`${fixture.origin}/page-structured`,
+						"--output",
+						discoverRun,
+						"--no-browser",
+						"--cache-dir",
+						cacheDirectory,
+					],
+					{ FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1" },
+				),
+			);
+			assert.equal(discovered.candidateEndpoints, 1);
+			assert.equal(discovered.recommendedStrategy, "structured_static");
+			const reports = readFileSync(join(discoverRun, "discovery_reports", `${discovered.domain}-${createHash("sha256").update(`${discovered.domain}:${fixture.origin}/page-structured`).digest("hex").slice(0, 12)}.json`), "utf8");
+			assert.match(reports, /api\/structured-data/);
+
+			const binaryRun = join(workspace, "binary-read");
+			const binary = jsonOutput(
+				await runAsyncWithEnvironment(
+					"node",
+					[
+						script("web-research", "web-research.mjs"),
+						"read",
+						`${fixture.origin}/paper.pdf`,
+						"--output",
+						binaryRun,
+						"--no-browser",
+					],
+					{ FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1" },
+				),
+			);
+			assert.equal(binary.success, 0);
+			const acquisitionLog = readFileSync(join(binaryRun, "acquisition_log.jsonl"), "utf8")
+				.trim()
+				.split(/\r?\n/)
+				.map((line) => JSON.parse(line));
+			assert.equal(acquisitionLog[0].status, "failed");
+			assert.equal(acquisitionLog[0].failureType, "unsupported_format");
 		} finally {
 			await fixture.close();
 		}

@@ -7,9 +7,21 @@ import { basename, join, resolve, sep } from "node:path";
 import { JSDOM, VirtualConsole } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import { resolveConnectedServices } from "../../../lib/connected-services.mjs";
+import {
+	DEFAULT_TIMEOUT_MS as ACQUISITION_DEFAULT_TIMEOUT_MS,
+	DEFAULT_USER_AGENT as ACQUISITION_DEFAULT_USER_AGENT,
+	acquireUrl,
+	closeAcquisitionContext,
+	createAcquisitionContext,
+	discoverUrl,
+	modeDefaults,
+	normalizeUrl as normalizeAcquisitionUrl,
+	sourceIdForUrl as acquisitionSourceIdForUrl,
+	writeAcquisitionArtifacts,
+} from "./acquisition.mjs";
 
-const DEFAULT_USER_AGENT = "pi-forge-web-research/1 (+https://github.com/pi-forge)";
-const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_USER_AGENT = ACQUISITION_DEFAULT_USER_AGENT;
+const DEFAULT_TIMEOUT_MS = ACQUISITION_DEFAULT_TIMEOUT_MS;
 const DEFAULT_LIMIT = 10;
 const DEFAULT_READ_COUNT = 5;
 const DEFAULT_DEEP_ITERATIONS = 2;
@@ -128,17 +140,7 @@ function safeStem(value) {
 }
 
 function normalizeUrl(url) {
-	try {
-		const parsed = new URL(url);
-		parsed.hash = "";
-		parsed.hostname = parsed.hostname.toLowerCase();
-		if ((parsed.protocol === "http:" && parsed.port === "80") || (parsed.protocol === "https:" && parsed.port === "443")) {
-			parsed.port = "";
-		}
-		return parsed.toString();
-	} catch {
-		return url;
-	}
+	return normalizeAcquisitionUrl(url);
 }
 
 function isLoopbackOrMetadataHost(hostname) {
@@ -211,7 +213,7 @@ function parseCsv(value) {
 }
 
 function sourceIdForUrl(url) {
-	return `src-${sha256(normalizeUrl(url)).slice(0, 12)}`;
+	return acquisitionSourceIdForUrl(url);
 }
 
 function nextId(prefix, index) {
@@ -1489,6 +1491,47 @@ async function searchSearxng(base, query, options) {
 	}
 }
 
+function domainFromUrl(url) {
+	try {
+		return new URL(url).hostname.toLowerCase();
+	} catch {
+		return null;
+	}
+}
+
+function searchResultRecord(result, index, query, retrievedAt) {
+	const url = result.url ?? null;
+	return {
+		query,
+		rank: index + 1,
+		title: result.title ?? null,
+		url,
+		canonicalUrl: url ? normalizeUrl(url) : null,
+		domain: url ? domainFromUrl(url) : null,
+		content: result.content ?? null,
+		snippet: result.content ?? null,
+		engine: result.engine ?? (Array.isArray(result.engines) ? result.engines.join(",") : null),
+		score: result.score ?? null,
+		publishedAt: result.publishedDate ?? result.published_at ?? result.publishedAt ?? null,
+		retrievedAt,
+	};
+}
+
+function recordSearchNormalizedUrls(context, results) {
+	for (const result of results) {
+		if (!result.url) continue;
+		context.normalizedUrls.push({
+			requestedUrl: result.url,
+			finalUrl: result.url,
+			canonicalUrl: result.canonicalUrl ?? normalizeUrl(result.url),
+			title: result.title,
+			domain: result.domain,
+			searchRank: result.rank,
+			normalizedAt: nowIso(),
+		});
+	}
+}
+
 // --- Playwright extraction -------------------------------------------------
 
 async function loadPlaywright() {
@@ -1635,34 +1678,32 @@ async function extractWithHttp(url, timeoutMs, userAgent) {
 	};
 }
 
-async function readPage(url, options) {
+async function readPage(url, options, acquisitionContext = null) {
 	assertFetchableUrl(url);
-	const playwright = options.render ? await loadPlaywright() : null;
-	let extraction;
-	if (playwright && options.render) {
-		try {
-			extraction = await extractWithPlaywright(
-				playwright,
-				url,
-				options.timeoutMs,
-				options.userAgent,
-				options.playwrightWsEndpoint,
-			);
-		} catch (error) {
-			extraction = await extractWithHttp(url, options.timeoutMs, options.userAgent);
-			extraction.warnings.push(`Playwright extraction failed (${error.message}); fell back to HTTP`);
-		}
-	} else {
-		extraction = await extractWithHttp(url, options.timeoutMs, options.userAgent);
+	const context = acquisitionContext ?? createAcquisitionContext({ ...options, mode: options.mode ?? "standard", allowBrowser: options.render !== false });
+	const acquisition = await acquireUrl(url, context);
+	if (!acquisitionContext) {
+		writeAcquisitionArtifacts(context);
+		await closeAcquisitionContext(context);
 	}
 	return {
-		url: extraction.finalUrl,
-		title: extraction.title,
-		text: extraction.text,
-		charCount: extraction.text.length,
-		extractionMethod: extraction.warnings.some((w) => w.includes("HTTP")) ? "http" : "playwright",
-		metadata: extraction.metadata ?? {},
-		warnings: extraction.warnings,
+		url: acquisition.finalUrl,
+		sourceId: acquisition.sourceId,
+		requestedUrl: acquisition.requestedUrl,
+		canonicalUrl: acquisition.canonicalUrl,
+		title: acquisition.title,
+		text: acquisition.text,
+		charCount: acquisition.text.length,
+		extractionMethod: acquisition.extractionMethod,
+		strategy: acquisition.strategy,
+		contentType: acquisition.contentType,
+		httpStatus: acquisition.httpStatus,
+		rawArtifact: acquisition.rawArtifact,
+		renderedArtifact: acquisition.renderedArtifact,
+		extractedArtifact: acquisition.extractedArtifact,
+		validation: acquisition.validation,
+		metadata: acquisition.metadata ?? {},
+		warnings: acquisition.warnings,
 		extractedAt: nowIso(),
 	};
 }
@@ -2364,6 +2405,23 @@ function validateDeepRun(runDirectory, options = {}) {
 
 // --- Commands ---------------------------------------------------------------
 
+function acquisitionOptions(flags, defaults = {}) {
+	const mode = flags.mode ?? defaults.mode ?? "standard";
+	const modeConfig = modeDefaults(mode);
+	return {
+		mode,
+		userAgent: flags.userAgent ?? defaults.userAgent ?? DEFAULT_USER_AGENT,
+		timeoutMs: flags.timeoutMs ?? defaults.timeoutMs ?? modeConfig.timeoutMs,
+		cacheDir: flags.cacheDir,
+		forceRefresh: Boolean(flags.forceRefresh),
+		forceStrategy: flags.forceStrategy ?? null,
+		allowBrowser: flags.noBrowser ? false : (defaults.allowBrowser ?? flags.render ?? modeConfig.allowBrowser),
+		playwrightWsEndpoint: flags.playwrightWs,
+		maxConcurrency: flags.maxConcurrency ?? defaults.maxConcurrency ?? modeConfig.maxConcurrency,
+		perDomainConcurrency: flags.perDomainConcurrency ?? defaults.perDomainConcurrency ?? modeConfig.perDomainConcurrency,
+	};
+}
+
 async function commandDoctor(options) {
 	const playwright = await loadPlaywright();
 	const playwrightEndpoint = playwrightWsEndpoint(options.playwrightWs);
@@ -2428,27 +2486,25 @@ async function commandSearch(positionals, flags) {
 		fail(error.message);
 	}
 
+	const retrievedAt = nowIso();
 	const limit = flags.limit ?? DEFAULT_LIMIT;
 	const results = (Array.isArray(payload.results) ? payload.results : [])
 		.slice(0, limit)
-		.map((result, index) => ({
-			rank: index + 1,
-			title: result.title ?? null,
-			url: result.url ?? null,
-			content: result.content ?? null,
-			engine: result.engine ?? null,
-			score: result.score ?? null,
-		}));
+		.map((result, index) => searchResultRecord(result, index, query, retrievedAt));
 
 	const runDirectory = resolve(flags.output);
 	if (existsSync(runDirectory)) fail(`output directory already exists: ${runDirectory}`);
 	mkdirSync(runDirectory, { recursive: true });
+	const acquisitionContext = createAcquisitionContext({ ...acquisitionOptions(flags), runDirectory, mode: flags.mode ?? "fast" });
+	recordSearchNormalizedUrls(acquisitionContext, results);
+	acquisitionContext.metrics.searchResultsDiscovered = results.length;
+	writeAcquisitionArtifacts(acquisitionContext);
 
 	const data = {
 		query,
 		searchBase: base,
 		params: searchParams,
-		retrievedAt: nowIso(),
+		retrievedAt,
 		results,
 		readings: [],
 	};
@@ -2480,6 +2536,7 @@ async function commandRead(positionals, flags) {
 		render: flags.render !== false, // default to true
 		delayMs: flags.delayMs ?? 500,
 		playwrightWsEndpoint: flags.playwrightWs,
+		mode: flags.mode ?? "standard",
 	};
 
 	const runDirectory = resolve(flags.output);
@@ -2487,23 +2544,29 @@ async function commandRead(positionals, flags) {
 	mkdirSync(runDirectory, { recursive: true });
 
 	const readings = [];
-	for (const [index, url] of urls.entries()) {
-		if (index > 0 && options.delayMs > 0) await sleep(options.delayMs);
-		try {
-			process.stderr.write(`Reading ${url}...\n`);
-			const reading = await readPage(url, options);
-			readings.push(reading);
-		} catch (error) {
-			readings.push({
-				url,
-				title: null,
-				text: "",
-				charCount: 0,
-				extractionMethod: "failed",
-				warnings: [error.message],
-				extractedAt: nowIso(),
-			});
+	const acquisitionContext = createAcquisitionContext({ ...acquisitionOptions(flags, options), runDirectory });
+	try {
+		for (const [index, url] of urls.entries()) {
+			if (index > 0 && options.delayMs > 0) await sleep(options.delayMs);
+			try {
+				process.stderr.write(`Reading ${url}...\n`);
+				const reading = await readPage(url, options, acquisitionContext);
+				readings.push(reading);
+			} catch (error) {
+				readings.push({
+					url,
+					title: null,
+					text: "",
+					charCount: 0,
+					extractionMethod: "failed",
+					warnings: [error.message],
+					extractedAt: nowIso(),
+				});
+			}
 		}
+	} finally {
+		writeAcquisitionArtifacts(acquisitionContext);
+		await closeAcquisitionContext(acquisitionContext);
 	}
 
 	const data = {
@@ -2552,17 +2615,11 @@ async function commandResearch(positionals, flags) {
 		fail(error.message);
 	}
 
+	const retrievedAt = nowIso();
 	const limit = flags.limit ?? DEFAULT_LIMIT;
 	const results = (Array.isArray(payload.results) ? payload.results : [])
 		.slice(0, limit)
-		.map((result, index) => ({
-			rank: index + 1,
-			title: result.title ?? null,
-			url: result.url ?? null,
-			content: result.content ?? null,
-			engine: result.engine ?? null,
-			score: result.score ?? null,
-		}));
+		.map((result, index) => searchResultRecord(result, index, query, retrievedAt));
 
 	// Step 2: Read top N results
 	const readCount = flags.readCount ?? DEFAULT_READ_COUNT;
@@ -2574,38 +2631,46 @@ async function commandResearch(positionals, flags) {
 		render: flags.render !== false,
 		delayMs: flags.delayMs ?? 500,
 		playwrightWsEndpoint: flags.playwrightWs,
+		mode: flags.mode ?? "standard",
 	};
 
-	const readings = [];
-	for (const [index, url] of urlsToRead.entries()) {
-		if (index > 0 && readOptions.delayMs > 0) await sleep(readOptions.delayMs);
-		try {
-			process.stderr.write(`Reading ${url}...\n`);
-			const reading = await readPage(url, readOptions);
-			readings.push(reading);
-		} catch (error) {
-			readings.push({
-				url,
-				title: null,
-				text: "",
-				charCount: 0,
-				extractionMethod: "failed",
-				warnings: [error.message],
-				extractedAt: nowIso(),
-			});
-		}
-	}
-
-	// Step 3: Write report
 	const runDirectory = resolve(flags.output);
 	if (existsSync(runDirectory)) fail(`output directory already exists: ${runDirectory}`);
 	mkdirSync(runDirectory, { recursive: true });
+	const acquisitionContext = createAcquisitionContext({ ...acquisitionOptions(flags, readOptions), runDirectory });
+	recordSearchNormalizedUrls(acquisitionContext, results);
+	acquisitionContext.metrics.searchResultsDiscovered = results.length;
+	const readings = [];
+	try {
+		for (const [index, url] of urlsToRead.entries()) {
+			if (index > 0 && readOptions.delayMs > 0) await sleep(readOptions.delayMs);
+			try {
+				process.stderr.write(`Reading ${url}...\n`);
+				const reading = await readPage(url, readOptions, acquisitionContext);
+				readings.push(reading);
+			} catch (error) {
+				readings.push({
+					url,
+					title: null,
+					text: "",
+					charCount: 0,
+					extractionMethod: "failed",
+					warnings: [error.message],
+					extractedAt: nowIso(),
+				});
+			}
+		}
+	} finally {
+		writeAcquisitionArtifacts(acquisitionContext);
+		await closeAcquisitionContext(acquisitionContext);
+	}
 
+	// Step 3: Write report
 	const data = {
 		query,
 		searchBase: base,
 		params: searchParams,
-		retrievedAt: nowIso(),
+		retrievedAt,
 		results,
 		readings,
 	};
@@ -2637,6 +2702,13 @@ async function commandDeep(positionals, flags) {
 	mkdirSync(runDirectory, { recursive: true });
 
 	const options = deepDefaults(flags);
+	options.mode = flags.mode ?? "deep";
+	options.cacheDir = flags.cacheDir ?? null;
+	options.forceRefresh = Boolean(flags.forceRefresh);
+	options.forceStrategy = flags.forceStrategy ?? null;
+	options.noBrowser = Boolean(flags.noBrowser);
+	options.maxConcurrency = flags.maxConcurrency ?? modeDefaults("deep").maxConcurrency;
+	options.perDomainConcurrency = flags.perDomainConcurrency ?? modeDefaults("deep").perDomainConcurrency;
 	const state = {
 		question,
 		startedAt: nowIso(),
@@ -2651,6 +2723,10 @@ async function commandDeep(positionals, flags) {
 		modelCalls: [],
 		budgetEvents: [],
 	};
+	const acquisitionContext = createAcquisitionContext({
+		...acquisitionOptions(flags, { ...options, allowBrowser: options.render && !options.noBrowser }),
+		runDirectory,
+	});
 	const seenQueries = new Set();
 	const queuedQueries = [...uniqueSeedQueries];
 	const seenUrls = new Map();
@@ -2684,17 +2760,13 @@ async function commandDeep(positionals, flags) {
 			let results = [];
 			let error = null;
 			try {
+				const retrievedAt = nowIso();
 				const payload = await searchSearxng(base, query, searchParams);
 				results = (Array.isArray(payload.results) ? payload.results : [])
 					.slice(0, options.limit)
-					.map((result, index) => ({
-						rank: index + 1,
-						title: result.title ?? null,
-						url: result.url ?? null,
-						content: result.content ?? null,
-						engine: result.engine ?? null,
-						score: result.score ?? null,
-					}));
+					.map((result, index) => searchResultRecord(result, index, query, retrievedAt));
+				recordSearchNormalizedUrls(acquisitionContext, results);
+				acquisitionContext.metrics.searchResultsDiscovered += results.length;
 			} catch (searchError) {
 				error = searchError instanceof Error ? searchError.message : String(searchError);
 			}
@@ -2720,6 +2792,7 @@ async function commandDeep(positionals, flags) {
 					sourceId: sourceIdForUrl(result.url),
 					sourceUrl: result.url,
 					finalUrl: result.url,
+					canonicalUrl: normalizeUrl(result.url),
 					accessDate: nowIso(),
 					status: "failed",
 					httpStatus: null,
@@ -2731,6 +2804,11 @@ async function commandDeep(positionals, flags) {
 					byteSize: null,
 					resourceId: null,
 					extractionMethod: "failed",
+					strategy: "pending",
+					rawArtifact: null,
+					renderedArtifact: null,
+					extractedArtifact: null,
+					acquisitionValidation: null,
 					extractedAt: null,
 					charCount: 0,
 					metadata: {},
@@ -2742,13 +2820,22 @@ async function commandDeep(positionals, flags) {
 				state.sources.push(source);
 				try {
 					process.stderr.write(`Deep reading ${result.url}...\n`);
-					const reading = await readPage(result.url, options);
+					const reading = await readPage(result.url, options, acquisitionContext);
+					source.sourceId = reading.sourceId || source.sourceId;
 					source.finalUrl = reading.url;
+					source.canonicalUrl = reading.canonicalUrl ?? normalizeUrl(reading.url);
 					source.title = reading.title || result.title || null;
 					source.status = reading.text.trim() ? "success" : "needs_review";
 					source.extractionMethod = reading.extractionMethod;
+					source.strategy = reading.strategy;
 					source.extractedAt = reading.extractedAt;
 					source.charCount = reading.charCount;
+					source.httpStatus = reading.httpStatus ?? null;
+					source.contentType = reading.contentType ?? "text/plain; charset=utf-8";
+					source.rawArtifact = reading.rawArtifact ?? null;
+					source.renderedArtifact = reading.renderedArtifact ?? null;
+					source.extractedArtifact = reading.extractedArtifact ?? null;
+					source.acquisitionValidation = reading.validation ?? null;
 					source.metadata = reading.metadata ?? {};
 					source.warnings = reading.warnings ?? [];
 					source.text = reading.text;
@@ -2809,6 +2896,8 @@ async function commandDeep(positionals, flags) {
 	state.claims = claims;
 	state.gaps = appendBudgetGaps(state, gaps);
 	writeDeepArtifacts(runDirectory, state);
+	writeAcquisitionArtifacts(acquisitionContext);
+	await closeAcquisitionContext(acquisitionContext);
 	const validation = validateDeepRun(runDirectory, { emit: false });
 	process.stdout.write(
 		`${JSON.stringify(
@@ -2830,6 +2919,37 @@ async function commandDeep(positionals, flags) {
 		)}\n`,
 	);
 	if (!validation.valid) process.exit(1);
+}
+
+async function commandDiscover(positionals, flags) {
+	if (positionals.length !== 1) fail("discover requires exactly one URL");
+	if (!flags.output) fail("discover requires --output <new-directory>");
+	const runDirectory = resolve(flags.output);
+	if (existsSync(runDirectory)) fail(`output directory already exists: ${runDirectory}`);
+	mkdirSync(runDirectory, { recursive: true });
+	const context = createAcquisitionContext({
+		...acquisitionOptions(flags, { mode: flags.mode ?? "standard", allowBrowser: !flags.noBrowser && flags.render !== false }),
+		runDirectory,
+	});
+	try {
+		const report = await discoverUrl(positionals[0], context);
+		writeAcquisitionArtifacts(context);
+		process.stdout.write(
+			`${JSON.stringify(
+				{
+					runDirectory,
+					domain: report.domain,
+					candidateEndpoints: report.candidate_endpoints.length,
+					recommendedStrategy: report.recommended_strategy,
+					warnings: report.warnings,
+				},
+				null,
+				2,
+			)}\n`,
+		);
+	} finally {
+		await closeAcquisitionContext(context);
+	}
 }
 
 async function commandAcademic(positionals, flags) {
@@ -2958,9 +3078,12 @@ const FLAG_SPECS = {
 	"--query-file": { key: "queryFile", value: true },
 	"--query": { key: "query", value: true, repeat: true },
 	"--question": { key: "question", value: true },
+	"--mode": { key: "mode", value: true },
 	"--user-agent": { key: "userAgent", value: true },
 	"--searxng": { key: "searxng", value: true },
 	"--playwright-ws": { key: "playwrightWs", value: true },
+	"--force-strategy": { key: "forceStrategy", value: true },
+	"--cache-dir": { key: "cacheDir", value: true },
 	"--limit": { key: "limit", value: true, integer: true },
 	"--read-count": { key: "readCount", value: true, integer: true },
 	"--max-iterations": { key: "maxIterations", value: true, integer: true },
@@ -2973,6 +3096,8 @@ const FLAG_SPECS = {
 	"--max-claim-evidence-items": { key: "maxClaimEvidenceItems", value: true, integer: true },
 	"--delay-ms": { key: "delayMs", value: true, integer: true },
 	"--timeout-ms": { key: "timeoutMs", value: true, integer: true },
+	"--max-concurrency": { key: "maxConcurrency", value: true, integer: true },
+	"--per-domain-concurrency": { key: "perDomainConcurrency", value: true, integer: true },
 	"--categories": { key: "categories", value: true },
 	"--engines": { key: "engines", value: true },
 	"--language": { key: "language", value: true },
@@ -2983,6 +3108,8 @@ const FLAG_SPECS = {
 	"--contact-email": { key: "contactEmail", value: true },
 	"--render": { key: "render", value: false },
 	"--no-render": { key: "noRender", value: false },
+	"--no-browser": { key: "noBrowser", value: false },
+	"--force-refresh": { key: "forceRefresh", value: false },
 	"--json": { key: "json", value: false },
 };
 
@@ -3015,6 +3142,8 @@ function parseArguments(args) {
 	}
 	// Handle --no-render as render=false
 	if (flags.noRender) flags.render = false;
+	if (flags.noBrowser) flags.render = false;
+	if (flags.mode && !["fast", "standard", "deep"].includes(flags.mode)) fail("--mode must be fast, standard, or deep");
 	return { positionals, flags };
 }
 
@@ -3025,17 +3154,22 @@ function usage() {
       [--categories <cats>] [--engines <engines>] [--language <lang>]
       [--safesearch <0|1|2>] [--time-range <day|week|month|year>] [--pageno N]
   web-research.mjs read <url...> --output <dir> [--input-file <path>] [--playwright-ws <ws-endpoint>]
-      [--render] [--no-render] [--delay-ms N] [--timeout-ms N]
+      [--mode fast|standard|deep] [--render] [--no-render] [--no-browser] [--force-strategy <name>]
+      [--cache-dir <dir>] [--force-refresh] [--delay-ms N] [--timeout-ms N]
   web-research.mjs research <query...> --output <dir> [--searxng <url>]
-      [--limit N] [--read-count N] [--render] [--no-render] [--delay-ms N] [--playwright-ws <ws-endpoint>]
+      [--limit N] [--read-count N] [--mode fast|standard|deep] [--render] [--no-render] [--no-browser]
+      [--force-strategy <name>] [--cache-dir <dir>] [--force-refresh] [--delay-ms N] [--playwright-ws <ws-endpoint>]
       [--categories <cats>] [--engines <engines>] [--language <lang>]
       [--safesearch <0|1|2>] [--time-range <day|week|month|year>] [--pageno N]
   web-research.mjs deep <query...> --output <dir> [--question <text>] [--query <query>] [--query-file <path>]
-      [--max-iterations N] [--limit N] [--read-count N] [--render] [--no-render] [--playwright-ws <ws-endpoint>]
+      [--max-iterations N] [--limit N] [--read-count N] [--render] [--no-render] [--no-browser] [--playwright-ws <ws-endpoint>]
+      [--mode fast|standard|deep] [--force-strategy <name>] [--cache-dir <dir>] [--force-refresh]
       [--max-queries N] [--max-sources N] [--max-followup-queries N] [--max-model-calls N]
       [--max-runtime-ms N] [--max-evidence-chars N] [--max-claim-evidence-items N]
       [--categories <cats>] [--engines <engines>] [--language <lang>]
       [--safesearch <0|1|2>] [--time-range <day|week|month|year>] [--pageno N]
+  web-research.mjs discover <url> --output <dir> [--mode fast|standard|deep] [--render] [--no-browser]
+      [--cache-dir <dir>] [--force-refresh] [--playwright-ws <ws-endpoint>] [--timeout-ms N]
   web-research.mjs academic <query...> --output <dir> [--limit N]
       [--providers <comma-separated>] [--contact-email <email>] [--timeout-ms N]
   web-research.mjs validate <run-directory>
@@ -3054,6 +3188,7 @@ async function main() {
 	else if (command === "read") await commandRead(positionals, flags);
 	else if (command === "research") await commandResearch(positionals, flags);
 	else if (command === "deep") await commandDeep(positionals, flags);
+	else if (command === "discover") await commandDiscover(positionals, flags);
 	else if (command === "academic") await commandAcademic(positionals, flags);
 	else if (command === "validate") {
 		if (positionals.length !== 1) fail("validate requires exactly one run directory");

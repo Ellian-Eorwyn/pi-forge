@@ -25,6 +25,12 @@
 			"description": "Search scholarly metadata providers, dedupe canonical works, preserve provenance, and export RIS citations.",
 			"command": "node scripts/web-research.mjs academic",
 			"destructive": false
+		},
+		{
+			"name": "web_discover",
+			"description": "Inspect a URL for embedded structured data and reusable JSON/API endpoints.",
+			"command": "node scripts/web-research.mjs discover",
+			"destructive": false
 		}
 	],
 	"safety": {

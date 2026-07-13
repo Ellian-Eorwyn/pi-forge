@@ -16,10 +16,16 @@ provenance. Read [references/deep-research-contract.md](references/deep-research
 before relying on deep research artifacts.
 
 The search backend is **SearXNG** from `connectedServices.searxng` in
-`~/.pi-forge/agent/settings.json` (default: `http://llms/searxng`). Page
-extraction uses the configured **Playwright WebSocket endpoint** from
-`connectedServices.playwright` (default: `ws://llms/playwright`) for rendered
-pages, with an HTTP fallback for simple pages.
+`~/.pi-forge/agent/settings.json` (default: `http://llms/searxng`). SearXNG is
+used for discovery only. Page acquisition uses the cheapest reliable strategy
+first: domain registry knowledge, direct HTTP, embedded structured data,
+Readability/static extraction, then Playwright network discovery or DOM
+extraction only when validation indicates a browser is needed.
+
+The configured **Playwright WebSocket endpoint** from
+`connectedServices.playwright` (default: `ws://llms/playwright`) is a fallback
+and discovery aid, not the default fetcher. Use `--no-browser` or `--mode fast`
+when speed matters more than JavaScript-heavy coverage.
 
 ## Workflow
 
@@ -40,12 +46,13 @@ pages, with an HTTP fallback for simple pages.
 
      ```bash
      node <skill-directory>/scripts/web-research.mjs research <query...> \
-       --output <new-directory> [--limit N] [--read-count N] [--render]
+       --output <new-directory> [--limit N] [--read-count N] [--mode fast|standard|deep]
      ```
 
-     This searches SearXNG, fetches the top N results (default 5), extracts
-     clean text from each, and writes `research_report.md` and
-     `research_report.json`.
+     This searches SearXNG, normalizes and deduplicates URLs, fetches the top N
+     results (default 5) through the acquisition ladder, extracts clean text
+     from each, and writes `research_report.md`, `research_report.json`, stage
+     logs, and `metrics.json`.
 
    - **`search`** — Search only, no page fetching:
 
@@ -60,7 +67,7 @@ pages, with an HTTP fallback for simple pages.
 
      ```bash
      node <skill-directory>/scripts/web-research.mjs read <url...> \
-       --output <new-directory> [--input-file <list>] [--render]
+       --output <new-directory> [--input-file <list>] [--mode fast|standard|deep]
      ```
 
      Extracts clean readable text from each URL. Use when you already know
@@ -72,13 +79,25 @@ pages, with an HTTP fallback for simple pages.
      ```bash
      node <skill-directory>/scripts/web-research.mjs deep <query...> \
        --output <new-directory> [--query <query>] [--query-file <list>] \
-       [--max-iterations N] [--limit N] [--read-count N] [--render]
+       [--max-iterations N] [--limit N] [--read-count N] [--mode fast|standard|deep]
      ```
 
      This writes `research_run.json`, `query_log.jsonl`, `source_index.json`,
      `evidence_items.jsonl`, `claim_register.jsonl`, `gap_log.jsonl`,
      `model_calls.jsonl`, `web_manifest.*`, `sources.md`,
      `deep_research_report.md`, and `validation_report.json`.
+
+   - **`discover`** — Inspect one URL for embedded structured data, framework
+     state, and reusable JSON/API endpoints:
+
+     ```bash
+     node <skill-directory>/scripts/web-research.mjs discover <url> \
+       --output <new-directory> [--render] [--no-browser]
+     ```
+
+     This writes `discovery_reports/*.json`, `strategy_decisions.jsonl`,
+     `acquisition_log.jsonl`, `cache_log.jsonl`, and `metrics.json`. Use it
+     before repeatedly scraping a JavaScript-heavy domain.
 
    - **`academic`** — Scholarly metadata search with canonical works,
      provider provenance, deduplication, and RIS export:
@@ -109,7 +128,11 @@ pages, with an HTTP fallback for simple pages.
 
 3. Read the output. `research_report.md` is human-readable with extracted
    content excerpts. `research_report.json` has the full structured data
-   including all extracted text (not truncated).
+   including all extracted text (not truncated). Acquisition runs also write
+   `normalized_urls.jsonl`, `strategy_decisions.jsonl`,
+   `acquisition_log.jsonl`, `extraction_log.jsonl`, `cache_log.jsonl`,
+   `metrics.json`, `archive/raw/`, `archive/rendered/`, `archive/extracted/`,
+   and `archive/chunks/`.
 
 4. Synthesize findings. For quick `research` runs, use the extracted text to
    answer the user's question, write a summary, or feed into downstream skills.
@@ -163,11 +186,21 @@ When parameters are omitted, the script detects query type:
   source triangulation, and gap/contradiction tracking.
 - **`academic`** — Use for scholarly article discovery, DOI/PubMed/arXiv
   metadata, deduped canonical works, and citation-manager-ready RIS exports.
+- **`discover`** — Use for unknown JavaScript-heavy sites and adapter planning.
 - **`search`** — When you only need result metadata (titles, URLs, snippets)
   to decide what to read next.
 - **`read`** — When you already have specific URLs to extract text from.
-- **`--no-render`** — Skip Playwright for faster extraction of simple HTML
-  pages (uses HTTP fallback).
+- **`--mode fast`** — Direct acquisition, strict timeouts, no browser fallback
+  unless explicitly forced.
+- **`--mode standard`** — Direct acquisition with validation-triggered browser
+  fallback.
+- **`--mode deep`** — Standard acquisition plus deeper provenance and source
+  archiving defaults.
+- **`--no-browser` / `--no-render`** — Skip Playwright for faster extraction of
+  simple HTML pages.
+- **`--force-strategy`** — Force one acquisition strategy for diagnosis.
+- **`--cache-dir` / `--force-refresh`** — Override or bypass the reusable cache
+  at `~/.pi-forge/cache/web-research`.
 
 ### When to Use web-collection Instead
 
@@ -189,7 +222,10 @@ Use `web-research` when you need:
 - Only `http` and `https` URLs are fetched. Loopback and cloud-metadata hosts
   are refused.
 - Extraction failures are recorded with warnings; the run continues.
-- Playwright extraction falls back to HTTP stripping if the browser fails.
+- Direct HTTP extraction is attempted before browser extraction. Browser
+  fallback is triggered by validation failure or an explicit strategy.
+- Playwright uses a run-scoped browser connection and avoids `networkidle` as
+  the default wait condition.
 - Extracted text is truncated to 3000 characters in the Markdown report; the
   full text is in `research_report.json`.
 - Do not install browsers or system packages. Report missing capabilities

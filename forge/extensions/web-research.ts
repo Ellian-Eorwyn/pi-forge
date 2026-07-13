@@ -22,16 +22,24 @@ interface WebSearchParams {
 interface WebReadParams {
 	urls: string[];
 	output?: string;
+	mode?: string;
 	render?: boolean;
+	noBrowser?: boolean;
+	forceStrategy?: string;
+	cacheDir?: string;
+	forceRefresh?: boolean;
 	playwrightWsEndpoint?: string;
 	delayMs?: number;
 	timeoutMs?: number;
+	maxConcurrency?: number;
+	perDomainConcurrency?: number;
 }
 
 interface DeepWebResearchParams {
 	question?: string;
 	queries?: string[];
 	output: string;
+	mode?: string;
 	maxIterations?: number;
 	limit?: number;
 	readCount?: number;
@@ -44,6 +52,12 @@ interface DeepWebResearchParams {
 	maxClaimEvidenceItems?: number;
 	timeoutMs?: number;
 	delayMs?: number;
+	cacheDir?: string;
+	forceRefresh?: boolean;
+	forceStrategy?: string;
+	noBrowser?: boolean;
+	maxConcurrency?: number;
+	perDomainConcurrency?: number;
 	playwrightWsEndpoint?: string;
 	searxng?: string;
 	categories?: string;
@@ -52,6 +66,18 @@ interface DeepWebResearchParams {
 	safesearch?: number;
 	timeRange?: string;
 	render?: boolean;
+}
+
+interface WebDiscoverParams {
+	url: string;
+	output?: string;
+	mode?: string;
+	render?: boolean;
+	noBrowser?: boolean;
+	cacheDir?: string;
+	forceRefresh?: boolean;
+	playwrightWsEndpoint?: string;
+	timeoutMs?: number;
 }
 
 interface AcademicWebResearchParams {
@@ -139,10 +165,17 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 		parameters: Type.Object({
 			urls: Type.Array(Type.String(), { minItems: 1, description: "URLs to read." }),
 			output: Type.Optional(Type.String({ description: "Optional new output directory. Defaults under forge-output/web-research." })),
+			mode: Type.Optional(Type.String({ description: "Acquisition preset: fast, standard, or deep. Defaults to standard." })),
 			render: Type.Optional(Type.Boolean({ description: "Use rendered Playwright extraction. Defaults to true." })),
+			noBrowser: Type.Optional(Type.Boolean({ description: "Disable browser fallback for this run." })),
+			forceStrategy: Type.Optional(Type.String({ description: "Force an acquisition strategy such as direct_http or playwright_dom." })),
+			cacheDir: Type.Optional(Type.String({ description: "Override the reusable web-research cache directory." })),
+			forceRefresh: Type.Optional(Type.Boolean({ description: "Ignore existing cache entries." })),
 			playwrightWsEndpoint: Type.Optional(Type.String({ description: "One-run Playwright WebSocket endpoint override." })),
 			delayMs: Type.Optional(Type.Integer({ minimum: 0, description: "Delay between URL reads in milliseconds." })),
 			timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Request/navigation timeout in milliseconds." })),
+			maxConcurrency: Type.Optional(Type.Integer({ minimum: 1, description: "Global acquisition concurrency budget." })),
+			perDomainConcurrency: Type.Optional(Type.Integer({ minimum: 1, description: "Per-domain acquisition concurrency budget." })),
 		}),
 		executionMode: "sequential",
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
@@ -176,6 +209,7 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 			question: Type.Optional(Type.String({ description: "Research question or synthesis objective." })),
 			queries: Type.Optional(Type.Array(Type.String(), { description: "Seed queries. If omitted, question is used as the seed query." })),
 			output: Type.String({ description: "New output directory. The CLI refuses to overwrite existing directories." }),
+			mode: Type.Optional(Type.String({ description: "Acquisition preset: fast, standard, or deep. Defaults to deep." })),
 			maxIterations: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum search/read/refine iterations." })),
 			limit: Type.Optional(Type.Integer({ minimum: 1, description: "Search results per query." })),
 			readCount: Type.Optional(Type.Integer({ minimum: 1, description: "Results to read per query." })),
@@ -188,6 +222,12 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 			maxClaimEvidenceItems: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum evidence items sent to claim registration." })),
 			timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Request/navigation timeout in milliseconds." })),
 			delayMs: Type.Optional(Type.Integer({ minimum: 0, description: "Delay between URL reads in milliseconds." })),
+			cacheDir: Type.Optional(Type.String({ description: "Override the reusable web-research cache directory." })),
+			forceRefresh: Type.Optional(Type.Boolean({ description: "Ignore existing cache entries." })),
+			forceStrategy: Type.Optional(Type.String({ description: "Force an acquisition strategy such as direct_http or playwright_dom." })),
+			noBrowser: Type.Optional(Type.Boolean({ description: "Disable browser fallback for this run." })),
+			maxConcurrency: Type.Optional(Type.Integer({ minimum: 1, description: "Global acquisition concurrency budget." })),
+			perDomainConcurrency: Type.Optional(Type.Integer({ minimum: 1, description: "Per-domain acquisition concurrency budget." })),
 			playwrightWsEndpoint: Type.Optional(Type.String({ description: "One-run Playwright WebSocket endpoint override." })),
 			searxng: Type.Optional(Type.String({ description: "Override SearXNG base URL." })),
 			categories: Type.Optional(Type.String({ description: "Comma-separated SearXNG categories." })),
@@ -202,6 +242,39 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 			const input = params as DeepWebResearchParams;
 			const args = buildDeepResearchArgs(input);
 			const result = await runNode(args, signal);
+			const summary = JSON.parse(result.stdout);
+			return {
+				content: [{ type: "text", text: JSON.stringify(summary, null, 2) }],
+				details: { ...summary, stderr: result.stderr },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "forge_web_discover",
+		label: "Forge web discover",
+		description: "Inspect a URL for embedded structured data and reusable JSON/API endpoints.",
+		promptSnippet: "Use forge_web_discover before scraping an unknown JavaScript-heavy site; prefer reusable endpoints over DOM scraping.",
+		promptGuidelines: [
+			"Use this tool when a page appears JavaScript-heavy or when a reusable domain adapter/API might be created.",
+			"Treat discovery reports as inspectable evidence; do not promote endpoints permanently without verifying stability.",
+		],
+		parameters: Type.Object({
+			url: Type.String({ description: "URL to inspect." }),
+			output: Type.Optional(Type.String({ description: "Optional new output directory. Defaults under forge-output/web-research." })),
+			mode: Type.Optional(Type.String({ description: "Acquisition preset: fast, standard, or deep. Defaults to standard." })),
+			render: Type.Optional(Type.Boolean({ description: "Use Playwright network observation when available." })),
+			noBrowser: Type.Optional(Type.Boolean({ description: "Disable Playwright and inspect static HTML only." })),
+			cacheDir: Type.Optional(Type.String({ description: "Override the reusable web-research cache directory." })),
+			forceRefresh: Type.Optional(Type.Boolean({ description: "Ignore existing cache entries." })),
+			playwrightWsEndpoint: Type.Optional(Type.String({ description: "One-run Playwright WebSocket endpoint override." })),
+			timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Request/navigation timeout in milliseconds." })),
+		}),
+		executionMode: "sequential",
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			const input = params as WebDiscoverParams;
+			const output = input.output ?? defaultOutputDirectory(ctx.cwd, "discover", input.url);
+			const result = await runNode(buildWebDiscoverArgs({ ...input, output }), signal);
 			const summary = JSON.parse(result.stdout);
 			return {
 				content: [{ type: "text", text: JSON.stringify(summary, null, 2) }],
@@ -259,9 +332,16 @@ function buildWebReadArgs(input: WebReadParams & { output: string }): string[] {
 	const args = [webResearchScript, "read", ...input.urls, "--output", input.output];
 	if (input.render === false) args.push("--no-render");
 	else if (input.render === true) args.push("--render");
+	if (input.mode) args.push("--mode", input.mode);
+	if (input.noBrowser) args.push("--no-browser");
+	if (input.forceStrategy) args.push("--force-strategy", input.forceStrategy);
+	if (input.cacheDir) args.push("--cache-dir", input.cacheDir);
+	if (input.forceRefresh) args.push("--force-refresh");
 	if (input.playwrightWsEndpoint) args.push("--playwright-ws", input.playwrightWsEndpoint);
 	if (input.delayMs !== undefined) args.push("--delay-ms", String(input.delayMs));
 	if (input.timeoutMs !== undefined) args.push("--timeout-ms", String(input.timeoutMs));
+	if (input.maxConcurrency !== undefined) args.push("--max-concurrency", String(input.maxConcurrency));
+	if (input.perDomainConcurrency !== undefined) args.push("--per-domain-concurrency", String(input.perDomainConcurrency));
 	return args;
 }
 
@@ -271,6 +351,7 @@ function buildDeepResearchArgs(input: DeepWebResearchParams): string[] {
 	if (input.question && queries.length === 0) args.push(input.question);
 	else if (input.question) args.push("--question", input.question);
 	for (const query of queries) args.push("--query", query);
+	if (input.mode) args.push("--mode", input.mode);
 	if (input.maxIterations !== undefined) args.push("--max-iterations", String(input.maxIterations));
 	if (input.limit !== undefined) args.push("--limit", String(input.limit));
 	if (input.readCount !== undefined) args.push("--read-count", String(input.readCount));
@@ -283,6 +364,12 @@ function buildDeepResearchArgs(input: DeepWebResearchParams): string[] {
 	if (input.maxClaimEvidenceItems !== undefined) args.push("--max-claim-evidence-items", String(input.maxClaimEvidenceItems));
 	if (input.timeoutMs !== undefined) args.push("--timeout-ms", String(input.timeoutMs));
 	if (input.delayMs !== undefined) args.push("--delay-ms", String(input.delayMs));
+	if (input.cacheDir) args.push("--cache-dir", input.cacheDir);
+	if (input.forceRefresh) args.push("--force-refresh");
+	if (input.forceStrategy) args.push("--force-strategy", input.forceStrategy);
+	if (input.noBrowser) args.push("--no-browser");
+	if (input.maxConcurrency !== undefined) args.push("--max-concurrency", String(input.maxConcurrency));
+	if (input.perDomainConcurrency !== undefined) args.push("--per-domain-concurrency", String(input.perDomainConcurrency));
 	if (input.playwrightWsEndpoint) args.push("--playwright-ws", input.playwrightWsEndpoint);
 	if (input.searxng) args.push("--searxng", input.searxng);
 	if (input.categories) args.push("--categories", input.categories);
@@ -292,6 +379,19 @@ function buildDeepResearchArgs(input: DeepWebResearchParams): string[] {
 	if (input.timeRange) args.push("--time-range", input.timeRange);
 	if (input.render === false) args.push("--no-render");
 	else if (input.render === true) args.push("--render");
+	return args;
+}
+
+function buildWebDiscoverArgs(input: WebDiscoverParams & { output: string }): string[] {
+	const args = [webResearchScript, "discover", input.url, "--output", input.output];
+	if (input.mode) args.push("--mode", input.mode);
+	if (input.render === false) args.push("--no-render");
+	else if (input.render === true) args.push("--render");
+	if (input.noBrowser) args.push("--no-browser");
+	if (input.cacheDir) args.push("--cache-dir", input.cacheDir);
+	if (input.forceRefresh) args.push("--force-refresh");
+	if (input.playwrightWsEndpoint) args.push("--playwright-ws", input.playwrightWsEndpoint);
+	if (input.timeoutMs !== undefined) args.push("--timeout-ms", String(input.timeoutMs));
 	return args;
 }
 
