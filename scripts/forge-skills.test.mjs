@@ -1808,6 +1808,10 @@ test("extracted organize-folder and spreadsheet tools expose structured executio
 	});
 });
 
+test("vault-organizer Python tests pass", () => {
+	run(python, [join(skillsRoot, "vault-organizer", "tests", "test_vault_organizer.py")]);
+});
+
 test("document ingest, coding, and web collection expose review and safety boundaries", () => {
 	withWorkspace((workspace) => {
 		const document = join(workspace, "document.md");

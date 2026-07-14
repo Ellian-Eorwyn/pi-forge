@@ -21,5 +21,6 @@ Prefer deterministic scripts/tools for mechanical work such as parsing, conversi
 - `transcript-cleanup`: Clean raw transcripts into readable, structured documents.
 - `transcription`: Transcribe audio/video, then correct and clean the transcript.
 - `vault-handoff`: Prepare completed artifacts for pi-vault or Obsidian review.
+- `vault-organizer`: Classify and organize Obsidian notes from a human-maintained vault schema note.
 - `web-collection`: Archive, organize, and preserve web sources.
 - `web-research`: Perform quick or deep web research with direct-first acquisition, local-first scheduling, embedding-ranked source triage, browser fallback/discovery, provenance, evidence, claims, and validation.

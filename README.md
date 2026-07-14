@@ -40,6 +40,7 @@ The `forge` profile provides agents with the following built-in skills:
 - **`transcript-cleanup`**: Clean and structure raw transcripts
 - **`transcription`**: Transcribe audio or video, then correct and clean it
 - **`vault-handoff`**: Send completed text artifacts to pi-vault review
+- **`vault-organizer`**: Classify and organize Obsidian notes from a schema note
 - **`web-collection`**: Archive and organize web sources
 - **`web-research`**: Quick or deep web research with provenance and validation
 

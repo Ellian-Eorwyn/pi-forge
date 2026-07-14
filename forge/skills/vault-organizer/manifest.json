@@ -1,0 +1,22 @@
+{
+	"name": "vault-organizer",
+	"type": "pi-forge-skill",
+	"version": "0.1.0",
+	"description": "Classify and organize Obsidian vault notes from a schema note.",
+	"skill_file": "SKILL.md",
+	"scripts_dir": "scripts",
+	"references_dir": "references",
+	"tools": [
+		{
+			"name": "vault_organizer",
+			"description": "Classify Obsidian notes against the vault schema, produce a dry-run plan, and apply approved frontmatter/move changes.",
+			"command": "python3 scripts/vault-organizer.py",
+			"destructive": true
+		}
+	],
+	"safety": {
+		"destructive_by_default": false,
+		"requires_review_for_filesystem_changes": true,
+		"preserve_provenance_when_applicable": true
+	}
+}
