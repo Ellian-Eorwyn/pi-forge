@@ -5,6 +5,11 @@ owns search, page reading, source archiving, hashing, manifests, and validation.
 The local model only returns bounded JSON for query expansion, evidence
 extraction, and claim registration.
 
+Deep research is optimized for a local single-model runtime. Search and model
+calls are serialized, direct page acquisition is bounded separately, Playwright
+is capped independently, and embedding batches rank source chunks before LLM
+evidence extraction.
+
 ## Run Layout
 
 ```text
@@ -16,6 +21,11 @@ extraction, and claim registration.
   claim_register.jsonl       # final claim records with evidence/source ids
   gap_log.jsonl              # unresolved gaps and limits
   model_calls.jsonl          # every model prompt, response, status, and error
+  scheduler_log.jsonl        # FIFO queue wait/start/end records
+  search_cache_log.jsonl     # SearXNG cache hit/miss records
+  chunks.jsonl               # extracted source chunks and locators
+  embedding_log.jsonl        # embedding batch/cache status
+  source_rankings.jsonl      # lexical and embedding relevance scores
   normalized_urls.jsonl      # requested/final/canonical URL records
   strategy_decisions.jsonl   # fetch strategy decisions and fallback plan
   acquisition_log.jsonl      # one record per acquisition attempt
@@ -26,7 +36,7 @@ extraction, and claim registration.
   archive/raw/*              # raw HTTP response bodies or rendered HTML
   archive/rendered/*         # browser-rendered HTML when used
   archive/extracted/*        # extracted document JSON
-  archive/chunks/*           # reserved for chunk/index artifacts
+  archive/chunks/*           # selected chunk text artifacts
   web_manifest.csv           # web-collection-style provenance rows
   web_manifest.json          # provenance manifest and source metadata
   downloads/<source-id>.txt  # archived extracted source text
@@ -50,6 +60,11 @@ The internal model is inspired by W3C PROV but remains JSON/CSV:
   `extraction_log.jsonl`, or `model_calls.jsonl`.
 - Evidence and claims are derived entities that cite their upstream source and
   evidence ids directly.
+
+Evidence extraction may be batched across ranked source packs. A batch can
+include multiple sources, but every returned evidence item must still identify
+the source id it came from and direct quotes are verified against that source's
+archived text.
 
 Do not add RDF, PROV-N, or WARC export for the v1 workflow. `web_manifest.*`
 and the JSONL files are the source of truth.
@@ -141,7 +156,8 @@ Do not hand-author unsupported findings directly in the report.
 `metrics.json` should make performance visible. It records counts for discovered
 search results, unique canonical URLs, direct HTTP successes, structured-data
 successes, Playwright DOM fallbacks, failed sources, cache hits/misses, raw bytes
-downloaded, extracted characters, and evidence characters sent to the model.
+downloaded, extracted characters, queue wait/duration totals, embedding counts,
+selected chunks, and evidence characters sent to the model.
 
 ## Academic Research Output Contract
 

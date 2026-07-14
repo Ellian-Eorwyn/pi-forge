@@ -27,6 +27,11 @@ The configured **Playwright WebSocket endpoint** from
 and discovery aid, not the default fetcher. Use `--no-browser` or `--mode fast`
 when speed matters more than JavaScript-heavy coverage.
 
+Deep research assumes a local single-model runtime by default: model calls are
+serialized through one FIFO queue, SearXNG searches are serialized and cached,
+direct HTTP acquisition is bounded, Playwright is capped separately, and the
+local embeddings endpoint ranks chunks before evidence extraction.
+
 ## Workflow
 
 1. Resolve this skill directory from the loaded `SKILL.md` path. Check
@@ -84,8 +89,10 @@ when speed matters more than JavaScript-heavy coverage.
 
      This writes `research_run.json`, `query_log.jsonl`, `source_index.json`,
      `evidence_items.jsonl`, `claim_register.jsonl`, `gap_log.jsonl`,
-     `model_calls.jsonl`, `web_manifest.*`, `sources.md`,
-     `deep_research_report.md`, and `validation_report.json`.
+     `model_calls.jsonl`, `chunks.jsonl`, `embedding_log.jsonl`,
+     `source_rankings.jsonl`, `scheduler_log.jsonl`, `search_cache_log.jsonl`,
+     `web_manifest.*`, `sources.md`, `deep_research_report.md`, and
+     `validation_report.json`.
 
    - **`discover`** — Inspect one URL for embedded structured data, framework
      state, and reusable JSON/API endpoints:
@@ -201,6 +208,15 @@ When parameters are omitted, the script detects query type:
 - **`--force-strategy`** — Force one acquisition strategy for diagnosis.
 - **`--cache-dir` / `--force-refresh`** — Override or bypass the reusable cache
   at `~/.pi-forge/cache/web-research`.
+- **`--embedding-url` / `--embedding-model`** — Override the local embeddings
+  endpoint used for source/chunk triage.
+- **`--no-embeddings`** — Fall back to lexical ranking only.
+- **`--embedding-batch-size`** — Batch size for embedding requests (default
+  16).
+- **`--evidence-batch-sources` / `--evidence-batch-chars`** — Cap the number of
+  sources and selected characters sent to each evidence extraction model call.
+- **`--playwright-concurrency`** — Cap browser fallback/discovery page work
+  separately from direct HTTP acquisition (default 1).
 
 ### When to Use web-collection Instead
 

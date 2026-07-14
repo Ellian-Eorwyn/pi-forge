@@ -2025,6 +2025,105 @@ test("web-research deep applies whole-run budgets and records budget gaps", asyn
 	});
 });
 
+test("web-research deep batches local model work and records local-first scheduler artifacts", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startDeepResearchFixture();
+		const embeddings = await startEmbeddingsFixture(workspace);
+		try {
+			const cacheDirectory = join(workspace, "cache");
+			const firstRun = join(workspace, "local-first-1");
+			const first = jsonOutput(
+				await runAsyncWithEnvironment(
+					"node",
+					[
+						script("web-research", "web-research.mjs"),
+						"deep",
+						"many local first efficiency",
+						"--output",
+						firstRun,
+						"--searxng",
+						fixture.searxng,
+						"--limit",
+						"5",
+						"--read-count",
+						"5",
+						"--max-iterations",
+						"1",
+						"--no-render",
+						"--cache-dir",
+						cacheDirectory,
+						"--embedding-url",
+						embeddings.url,
+						"--embedding-model",
+						"stub",
+						"--evidence-batch-sources",
+						"3",
+					],
+					{
+						FORGE_BASE_CHAT_URL: fixture.chat,
+						FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1",
+					},
+				),
+			);
+			assert.equal(first.valid, true);
+			assert.equal(first.sources, 5);
+			assert.ok(first.modelCalls < first.sources, "batched evidence extraction should use fewer model calls than sources");
+			assert.equal(existsSync(join(firstRun, "chunks.jsonl")), true);
+			assert.equal(existsSync(join(firstRun, "embedding_log.jsonl")), true);
+			assert.equal(existsSync(join(firstRun, "source_rankings.jsonl")), true);
+			assert.equal(existsSync(join(firstRun, "scheduler_log.jsonl")), true);
+			assert.match(readFileSync(join(firstRun, "embedding_log.jsonl"), "utf8"), /"status":"miss"/);
+			const modelRows = readFileSync(join(firstRun, "scheduler_log.jsonl"), "utf8")
+				.trim()
+				.split(/\r?\n/)
+				.map((line) => JSON.parse(line))
+				.filter((row) => row.queue === "model");
+			assert.ok(modelRows.length >= 2);
+			for (let index = 1; index < modelRows.length; index += 1) {
+				assert.ok(Date.parse(modelRows[index].startedAt) >= Date.parse(modelRows[index - 1].endedAt));
+			}
+
+			const secondRun = join(workspace, "local-first-2");
+			jsonOutput(
+				await runAsyncWithEnvironment(
+					"node",
+					[
+						script("web-research", "web-research.mjs"),
+						"deep",
+						"many local first efficiency",
+						"--output",
+						secondRun,
+						"--searxng",
+						fixture.searxng,
+						"--limit",
+						"5",
+						"--read-count",
+						"5",
+						"--max-iterations",
+						"1",
+						"--no-render",
+						"--cache-dir",
+						cacheDirectory,
+						"--embedding-url",
+						embeddings.url,
+						"--embedding-model",
+						"stub",
+					],
+					{
+						FORGE_BASE_CHAT_URL: fixture.chat,
+						FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1",
+					},
+				),
+			);
+			assert.match(readFileSync(join(secondRun, "search_cache_log.jsonl"), "utf8"), /"status":"hit"/);
+			assert.match(readFileSync(join(secondRun, "embedding_log.jsonl"), "utf8"), /"status":"hit"/);
+		} finally {
+			await embeddings.close();
+			await fixture.close();
+		}
+	});
+});
+
 test("web-research deep repairs invalid direct quote candidates and skips checkpoints", async () => {
 	await withAsyncWorkspace(async (workspace) => {
 		const fixture = await startDeepResearchFixture();
@@ -3263,6 +3362,16 @@ test("profile configuration installs local service defaults without dropping use
 				enabled: true,
 				wsEndpoint: "ws://llms/playwright",
 			},
+			chat: {
+				enabled: true,
+				baseUrl: "http://llms:8008/v1/chat/completions",
+				model: "code",
+			},
+			embeddings: {
+				enabled: true,
+				url: "http://llms:8005/v1/embeddings",
+				model: "embed",
+			},
 		});
 		assert.deepEqual(settings.packages, [join(repositoryRoot, "forge"), "/user/package"]);
 
@@ -3302,6 +3411,16 @@ test("profile configuration preserves connected service overrides", () => {
 			playwright: {
 				enabled: false,
 				wsEndpoint: "ws://browser.local/custom",
+			},
+			chat: {
+				enabled: true,
+				baseUrl: "http://llms:8008/v1/chat/completions",
+				model: "code",
+			},
+			embeddings: {
+				enabled: true,
+				url: "http://llms:8005/v1/embeddings",
+				model: "embed",
 			},
 		});
 	});

@@ -50,6 +50,13 @@ interface DeepWebResearchParams {
 	maxRuntimeMs?: number;
 	maxEvidenceChars?: number;
 	maxClaimEvidenceItems?: number;
+	embeddingUrl?: string;
+	embeddingModel?: string;
+	noEmbeddings?: boolean;
+	embeddingBatchSize?: number;
+	evidenceBatchSources?: number;
+	evidenceBatchChars?: number;
+	playwrightConcurrency?: number;
 	timeoutMs?: number;
 	delayMs?: number;
 	cacheDir?: string;
@@ -220,6 +227,13 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 			maxRuntimeMs: Type.Optional(Type.Integer({ minimum: 1, description: "Approximate whole-run runtime budget in milliseconds." })),
 			maxEvidenceChars: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum source-text characters sent to evidence extraction." })),
 			maxClaimEvidenceItems: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum evidence items sent to claim registration." })),
+			embeddingUrl: Type.Optional(Type.String({ description: "One-run embeddings endpoint override." })),
+			embeddingModel: Type.Optional(Type.String({ description: "One-run embeddings model override." })),
+			noEmbeddings: Type.Optional(Type.Boolean({ description: "Disable embedding-based source ranking." })),
+			embeddingBatchSize: Type.Optional(Type.Integer({ minimum: 1, description: "Embedding batch size. Defaults to 16." })),
+			evidenceBatchSources: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum sources per evidence extraction model call. Defaults to 3." })),
+			evidenceBatchChars: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum selected source characters per evidence batch. Defaults to 24000." })),
+			playwrightConcurrency: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum concurrent Playwright page/context tasks. Defaults to 1." })),
 			timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Request/navigation timeout in milliseconds." })),
 			delayMs: Type.Optional(Type.Integer({ minimum: 0, description: "Delay between URL reads in milliseconds." })),
 			cacheDir: Type.Optional(Type.String({ description: "Override the reusable web-research cache directory." })),
@@ -362,6 +376,13 @@ function buildDeepResearchArgs(input: DeepWebResearchParams): string[] {
 	if (input.maxRuntimeMs !== undefined) args.push("--max-runtime-ms", String(input.maxRuntimeMs));
 	if (input.maxEvidenceChars !== undefined) args.push("--max-evidence-chars", String(input.maxEvidenceChars));
 	if (input.maxClaimEvidenceItems !== undefined) args.push("--max-claim-evidence-items", String(input.maxClaimEvidenceItems));
+	if (input.embeddingUrl) args.push("--embedding-url", input.embeddingUrl);
+	if (input.embeddingModel) args.push("--embedding-model", input.embeddingModel);
+	if (input.noEmbeddings) args.push("--no-embeddings");
+	if (input.embeddingBatchSize !== undefined) args.push("--embedding-batch-size", String(input.embeddingBatchSize));
+	if (input.evidenceBatchSources !== undefined) args.push("--evidence-batch-sources", String(input.evidenceBatchSources));
+	if (input.evidenceBatchChars !== undefined) args.push("--evidence-batch-chars", String(input.evidenceBatchChars));
+	if (input.playwrightConcurrency !== undefined) args.push("--playwright-concurrency", String(input.playwrightConcurrency));
 	if (input.timeoutMs !== undefined) args.push("--timeout-ms", String(input.timeoutMs));
 	if (input.delayMs !== undefined) args.push("--delay-ms", String(input.delayMs));
 	if (input.cacheDir) args.push("--cache-dir", input.cacheDir);

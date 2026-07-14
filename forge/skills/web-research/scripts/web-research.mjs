@@ -3,7 +3,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { JSDOM, VirtualConsole } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import { resolveConnectedServices } from "../../../lib/connected-services.mjs";
@@ -34,6 +34,9 @@ const DEFAULT_DEEP_MAX_MODEL_CALLS = 16;
 const DEFAULT_DEEP_MAX_RUNTIME_MS = 600_000;
 const DEFAULT_DEEP_MAX_EVIDENCE_CHARS = 12_000;
 const DEFAULT_DEEP_MAX_CLAIM_EVIDENCE_ITEMS = 48;
+const DEFAULT_EMBEDDING_BATCH_SIZE = 16;
+const DEFAULT_EVIDENCE_BATCH_SOURCES = 3;
+const DEFAULT_EVIDENCE_BATCH_CHARS = 24_000;
 const DEEP_SCHEMA_VERSION = 1;
 const ACADEMIC_SCHEMA_VERSION = 1;
 const DEEP_MANIFEST_COLUMNS = [
@@ -113,10 +116,12 @@ function run(command, args = ["--version"]) {
 }
 
 function writeJson(filePath, value) {
+	mkdirSync(dirname(filePath), { recursive: true });
 	writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 function writeJsonl(filePath, rows) {
+	mkdirSync(dirname(filePath), { recursive: true });
 	writeFileSync(filePath, rows.map((row) => JSON.stringify(row)).join("\n") + (rows.length > 0 ? "\n" : ""));
 }
 
@@ -131,6 +136,67 @@ function readJsonl(filePath) {
 
 function sha256(value) {
 	return createHash("sha256").update(value).digest("hex");
+}
+
+function createTaskQueue(name, concurrency, schedulerLog) {
+	let active = 0;
+	const pending = [];
+	const runNext = () => {
+		while (active < concurrency && pending.length > 0) {
+			const task = pending.shift();
+			active += 1;
+			task.start();
+		}
+	};
+	return {
+		run(taskName, fn, metadata = {}) {
+			const enqueuedAtMs = Date.now();
+			const enqueuedAt = nowIso();
+			return new Promise((resolveTask, rejectTask) => {
+				pending.push({
+					start: async () => {
+						const startedAtMs = Date.now();
+						const startedAt = nowIso();
+						try {
+							const value = await fn();
+							const endedAtMs = Date.now();
+							schedulerLog.push({
+								queue: name,
+								task: taskName,
+								status: "success",
+								enqueuedAt,
+								startedAt,
+								endedAt: nowIso(),
+								waitMs: startedAtMs - enqueuedAtMs,
+								durationMs: endedAtMs - startedAtMs,
+								...metadata,
+							});
+							resolveTask(value);
+						} catch (error) {
+							const endedAtMs = Date.now();
+							schedulerLog.push({
+								queue: name,
+								task: taskName,
+								status: "failed",
+								enqueuedAt,
+								startedAt,
+								endedAt: nowIso(),
+								waitMs: startedAtMs - enqueuedAtMs,
+								durationMs: endedAtMs - startedAtMs,
+								error: error instanceof Error ? error.message : String(error),
+								...metadata,
+							});
+							rejectTask(error);
+						} finally {
+							active -= 1;
+							runNext();
+						}
+					},
+				});
+				runNext();
+			});
+		},
+	};
 }
 
 function safeStem(value) {
@@ -1491,6 +1557,33 @@ async function searchSearxng(base, query, options) {
 	}
 }
 
+function searchCacheKey(base, query, options) {
+	const params = {
+		base,
+		query,
+		categories: options.categories ?? null,
+		engines: options.engines ?? null,
+		language: options.language ?? null,
+		safesearch: options.safesearch ?? null,
+		timeRange: options.timeRange ?? null,
+		pageNo: options.pageNo ?? null,
+	};
+	return sha256(JSON.stringify(params));
+}
+
+async function cachedSearchSearxng(base, query, options, context) {
+	const key = searchCacheKey(base, query, options);
+	const cachePath = join(context.cacheDirectory, "search", `${key}.json`);
+	if (!context.forceRefresh && existsSync(cachePath)) {
+		context.searchCacheLog.push({ key, query, status: "hit", path: cachePath, recordedAt: nowIso() });
+		return JSON.parse(readFileSync(cachePath, "utf8"));
+	}
+	context.searchCacheLog.push({ key, query, status: "miss", path: cachePath, recordedAt: nowIso() });
+	const payload = await context.searchQueue.run("searxng", () => searchSearxng(base, query, options), { query });
+	writeJson(cachePath, payload);
+	return payload;
+}
+
 function domainFromUrl(url) {
 	try {
 		return new URL(url).hostname.toLowerCase();
@@ -1546,6 +1639,16 @@ async function loadPlaywright() {
 function playwrightWsEndpoint(explicit) {
 	const services = resolveConnectedServices({ playwrightWsEndpoint: explicit });
 	return services.playwright.enabled ? services.playwright.wsEndpoint : "";
+}
+
+function chatService(flags = {}) {
+	const services = resolveConnectedServices({ chatUrl: flags.chatUrl, chatModel: flags.chatModel });
+	return services.chat;
+}
+
+function embeddingsService(flags = {}) {
+	const services = resolveConnectedServices({ embeddingsUrl: flags.embeddingUrl, embeddingsModel: flags.embeddingModel });
+	return services.embeddings;
 }
 
 async function connectPlaywrightBrowser(playwright, timeoutMs, explicitEndpoint) {
@@ -1836,6 +1939,13 @@ function deepDefaults(flags) {
 		userAgent: flags.userAgent ?? DEFAULT_USER_AGENT,
 		render: flags.render !== false,
 		playwrightWsEndpoint: flags.playwrightWs,
+		embeddingUrl: flags.embeddingUrl ?? null,
+		embeddingModel: flags.embeddingModel ?? null,
+		noEmbeddings: Boolean(flags.noEmbeddings),
+		embeddingBatchSize: flags.embeddingBatchSize ?? DEFAULT_EMBEDDING_BATCH_SIZE,
+		evidenceBatchSources: flags.evidenceBatchSources ?? DEFAULT_EVIDENCE_BATCH_SOURCES,
+		evidenceBatchChars: flags.evidenceBatchChars ?? DEFAULT_EVIDENCE_BATCH_CHARS,
+		playwrightConcurrency: flags.playwrightConcurrency ?? 1,
 	};
 }
 
@@ -1888,11 +1998,12 @@ function searchParamsForQuery(query, flags, defaults) {
 	};
 }
 
-async function callLocalJsonModel(runDirectory, task, prompt, fallback) {
+async function callLocalJsonModel(runDirectory, task, prompt, fallback, runtime = null) {
 	const startedAt = nowIso();
 	const callId = `${task}-${sha256(`${startedAt}\n${prompt}`).slice(0, 12)}`;
-	const baseChatUrl = process.env.FORGE_BASE_CHAT_URL || process.env.FORGE_CHAT_URL || "http://llms:8008/v1/chat/completions";
-	const model = process.env.FORGE_BASE_MODEL || "code";
+	const chat = runtime?.chat ?? chatService();
+	const baseChatUrl = chat.baseUrl;
+	const model = chat.model;
 	const request = {
 		model,
 		messages: [
@@ -1906,7 +2017,7 @@ async function callLocalJsonModel(runDirectory, task, prompt, fallback) {
 		temperature: 0.1,
 	};
 	const record = { id: callId, task, startedAt, endedAt: null, endpoint: baseChatUrl, model, request, response: null, status: "failed", error: null };
-	try {
+	const execute = async () => {
 		const response = await fetch(baseChatUrl, {
 			method: "POST",
 			headers: { "Content-Type": "application/json", Authorization: "Bearer local" },
@@ -1919,6 +2030,10 @@ async function callLocalJsonModel(runDirectory, task, prompt, fallback) {
 		record.status = "success";
 		const text = payload.choices?.[0]?.message?.content ?? "";
 		return { value: extractJsonFromText(text, fallback), record };
+	};
+	try {
+		if (runtime?.modelQueue) return await runtime.modelQueue.run(task, execute, { model, endpoint: baseChatUrl });
+		return await execute();
 	} catch (error) {
 		record.endedAt = nowIso();
 		record.error = error instanceof Error ? error.message : String(error);
@@ -1958,6 +2073,227 @@ Use only the provided source text. If nothing supports the question, return {"ev
 
 Source text:
 ${text}`;
+}
+
+function evidenceBatchPrompt(sources, question, maxChars) {
+	const blocks = [];
+	let used = 0;
+	for (const source of sources) {
+		const remaining = Math.max(0, maxChars - used);
+		if (remaining <= 0) break;
+		const selected = source.selectedText ?? selectRelevantText(source.text, question, Math.min(remaining, source.maxEvidenceChars ?? remaining));
+		if (!selected.trim()) continue;
+		used += selected.length;
+		blocks.push(`Source:
+- source_id: ${source.sourceId}
+- title: ${source.title || "Untitled"}
+- url: ${source.finalUrl}
+- extracted_at: ${source.extractedAt}
+
+Source text:
+${selected}`);
+	}
+	return `Extract source-backed evidence for this research question.
+
+Question:
+${question}
+
+Return JSON with this shape:
+{
+  "evidence": [
+    {
+      "source_id": "src-...",
+      "text": "faithful extracted statement",
+      "direct_quote": "short exact quote from that source text or null",
+      "locator": "heading/section/URL fragment or null",
+      "interpretation": "explicit|inferred|unclear",
+      "confidence": "high|medium|low",
+      "notes": "optional note or null"
+    }
+  ]
+}
+
+Use only the provided source text. Each evidence item must include the source_id it came from. If nothing supports the question, return {"evidence":[]}.
+
+${blocks.join("\n\n---\n\n")}`;
+}
+
+function chunkSource(source, maxChars = 1_600) {
+	const paragraphs = String(source.text ?? "")
+		.split(/\n{2,}/)
+		.map((chunk) => chunk.trim())
+		.filter(Boolean);
+	const chunks = [];
+	let buffer = "";
+	let index = 1;
+	const flush = () => {
+		const text = buffer.trim();
+		if (!text) return;
+		const hash = sha256(text);
+		chunks.push({
+			chunkId: `chunk-${sha256(`${source.sourceId}:${index}:${hash}`).slice(0, 12)}`,
+			sourceId: source.sourceId,
+			index: index++,
+			hash,
+			locator: source.finalUrl,
+			charCount: text.length,
+			text,
+		});
+		buffer = "";
+	};
+	for (const paragraph of paragraphs.length > 0 ? paragraphs : [source.text]) {
+		if (buffer && buffer.length + paragraph.length + 2 > maxChars) flush();
+		if (paragraph.length > maxChars) {
+			for (let offset = 0; offset < paragraph.length; offset += maxChars) {
+				if (buffer) flush();
+				buffer = paragraph.slice(offset, offset + maxChars);
+				flush();
+			}
+		} else {
+			buffer = buffer ? `${buffer}\n\n${paragraph}` : paragraph;
+		}
+	}
+	flush();
+	return chunks;
+}
+
+function lexicalScore(text, question) {
+	const words = new Set(normalizedWords(question));
+	if (words.size === 0) return 0;
+	const lower = normalizeTitleKey(text);
+	let hits = 0;
+	for (const word of words) {
+		if (lower.includes(word)) hits += 1;
+	}
+	return Number((hits / words.size).toFixed(4));
+}
+
+function normalizeVector(vector) {
+	const magnitude = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0));
+	return magnitude > 0 ? vector.map((value) => value / magnitude) : vector;
+}
+
+function cosine(left, right) {
+	const length = Math.min(left.length, right.length);
+	let score = 0;
+	for (let index = 0; index < length; index += 1) score += left[index] * right[index];
+	return score;
+}
+
+async function embedTexts(texts, runtime, options) {
+	if (options.noEmbeddings || !runtime.embeddings?.enabled || texts.length === 0) return { vectors: null, reason: "embeddings disabled" };
+	const request = {
+		model: runtime.embeddings.model,
+		input: texts,
+	};
+	try {
+		const response = await runtime.embeddingQueue.run(
+			"embed",
+			() =>
+				fetch(runtime.embeddings.url, {
+					method: "POST",
+					headers: { "Content-Type": "application/json", Authorization: "Bearer local" },
+					body: JSON.stringify(request),
+				}),
+			{ model: runtime.embeddings.model, endpoint: runtime.embeddings.url, items: texts.length },
+		);
+		if (!response.ok) throw new Error(`embeddings returned HTTP ${response.status}`);
+		const payload = await response.json();
+		const data = Array.isArray(payload.data) ? payload.data : [];
+		if (data.length !== texts.length) throw new Error("embeddings response did not return one vector per input");
+		return { vectors: data.map((item) => normalizeVector(item.embedding ?? [])), reason: null };
+	} catch (error) {
+		return { vectors: null, reason: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+async function embedChunks(chunks, runtime, options) {
+	if (options.noEmbeddings) return;
+	const cacheRoot = join(runtime.cacheDirectory, "embeddings");
+	const model = runtime.embeddings.model;
+	for (let offset = 0; offset < chunks.length; offset += options.embeddingBatchSize) {
+		const batch = chunks.slice(offset, offset + options.embeddingBatchSize);
+		const pending = [];
+		for (const chunk of batch) {
+			const key = sha256(`${model}:${chunk.hash}`);
+			const path = join(cacheRoot, `${key}.json`);
+			if (!options.forceRefresh && existsSync(path)) {
+				const cached = JSON.parse(readFileSync(path, "utf8"));
+				chunk.embedding = normalizeVector(cached.embedding ?? []);
+				runtime.embeddingLog.push({ chunkId: chunk.chunkId, sourceId: chunk.sourceId, key, status: "hit", path, model, recordedAt: nowIso() });
+			} else {
+				pending.push({ chunk, key, path });
+				runtime.embeddingLog.push({ chunkId: chunk.chunkId, sourceId: chunk.sourceId, key, status: "miss", path, model, recordedAt: nowIso() });
+			}
+		}
+		if (pending.length === 0) continue;
+		const result = await embedTexts(pending.map((item) => item.chunk.text), runtime, options);
+		if (!result.vectors) {
+			for (const item of pending) {
+				runtime.embeddingLog.push({
+					chunkId: item.chunk.chunkId,
+					sourceId: item.chunk.sourceId,
+					key: item.key,
+					status: "failed",
+					model,
+					error: result.reason,
+					recordedAt: nowIso(),
+				});
+			}
+			continue;
+		}
+		for (const [index, item] of pending.entries()) {
+			const embedding = result.vectors[index];
+			item.chunk.embedding = embedding;
+			writeJson(item.path, { model, chunkId: item.chunk.chunkId, sourceId: item.chunk.sourceId, contentHash: item.chunk.hash, embedding });
+		}
+	}
+}
+
+async function rankSourcesForQuestion(sources, question, runtime, options) {
+	const chunks = sources.flatMap((source) => chunkSource(source));
+	for (const chunk of chunks) {
+		chunk.lexicalScore = lexicalScore(chunk.text, question);
+	}
+	await embedChunks(chunks, runtime, options);
+	let queryEmbedding = null;
+	if (!options.noEmbeddings && chunks.some((chunk) => chunk.embedding)) {
+		const embedded = await embedTexts([question], runtime, options);
+		queryEmbedding = embedded.vectors?.[0] ?? null;
+	}
+	for (const chunk of chunks) {
+		chunk.embeddingScore = queryEmbedding && chunk.embedding ? cosine(queryEmbedding, chunk.embedding) : null;
+		chunk.score = Number(((chunk.embeddingScore ?? 0) * 0.75 + chunk.lexicalScore * 0.25).toFixed(4));
+	}
+	const bySource = new Map();
+	for (const source of sources) bySource.set(source.sourceId, { source, chunks: [], score: 0, lexicalScore: 0, embeddingScore: null });
+	for (const chunk of chunks.sort((a, b) => b.score - a.score || b.lexicalScore - a.lexicalScore)) {
+		const ranked = bySource.get(chunk.sourceId);
+		if (!ranked) continue;
+		ranked.chunks.push(chunk);
+		ranked.score = Math.max(ranked.score, chunk.score);
+		ranked.lexicalScore = Math.max(ranked.lexicalScore, chunk.lexicalScore);
+		if (chunk.embeddingScore !== null) ranked.embeddingScore = Math.max(ranked.embeddingScore ?? -1, chunk.embeddingScore);
+	}
+	const rankings = [...bySource.values()]
+		.map((entry) => ({
+			sourceId: entry.source.sourceId,
+			title: entry.source.title,
+			finalUrl: entry.source.finalUrl,
+			score: entry.score,
+			lexicalScore: entry.lexicalScore,
+			embeddingScore: entry.embeddingScore,
+			selectedChunkIds: entry.chunks.slice(0, 4).map((chunk) => chunk.chunkId),
+			skipped: entry.score === 0 && chunks.some((chunk) => chunk.embedding) ? "low_relevance" : null,
+		}))
+		.sort((a, b) => b.score - a.score || b.lexicalScore - a.lexicalScore);
+	for (const ranking of rankings) {
+		const source = sources.find((candidate) => candidate.sourceId === ranking.sourceId);
+		const selectedChunks = chunks.filter((chunk) => ranking.selectedChunkIds.includes(chunk.chunkId));
+		source.selectedText = selectedChunks.map((chunk) => chunk.text).join("\n\n") || selectRelevantText(source.text, question, options.maxEvidenceChars);
+		source.rankingScore = ranking.score;
+	}
+	return { chunks, rankings };
 }
 
 function queryExpansionPrompt(question, queries, evidenceItems, gaps, iteration) {
@@ -2098,6 +2434,42 @@ function sanitizeEvidence(rawEvidence, source, startIndex) {
 	return items;
 }
 
+function sanitizeBatchedEvidence(rawEvidence, sources, startIndex) {
+	const sourceById = new Map(sources.map((source) => [source.sourceId, source]));
+	const fallbackSource = sources.length === 1 ? sources[0] : null;
+	const rows = Array.isArray(rawEvidence?.evidence) ? rawEvidence.evidence : Array.isArray(rawEvidence) ? rawEvidence : [];
+	const items = [];
+	let index = startIndex;
+	for (const row of rows) {
+		if (typeof row !== "object" || row === null) continue;
+		const source = sourceById.get(row.source_id) ?? fallbackSource;
+		if (!source) continue;
+		const text = typeof row.text === "string" ? row.text.trim() : "";
+		if (!text) continue;
+		const directQuote =
+			typeof row.direct_quote === "string" && row.direct_quote.trim() ? verifiedDirectQuote(row.direct_quote, source.text) : null;
+		items.push({
+			evidenceId: nextId("ev", index++),
+			sourceId: source.sourceId,
+			text,
+			directQuote,
+			locator: typeof row.locator === "string" && row.locator.trim() ? row.locator.trim() : null,
+			interpretation: ["explicit", "inferred", "unclear"].includes(row.interpretation) ? row.interpretation : "unclear",
+			confidence: ["high", "medium", "low"].includes(row.confidence) ? row.confidence : "low",
+			notes: typeof row.notes === "string" && row.notes.trim() ? row.notes.trim() : null,
+			extractedAt: nowIso(),
+		});
+	}
+	if (items.length === 0) {
+		for (const source of sources) {
+			if (!source.text.trim()) continue;
+			items.push(...sanitizeEvidence({ evidence: [] }, source, index));
+			index = startIndex + items.length;
+		}
+	}
+	return items;
+}
+
 function sanitizeClaims(rawClaims, evidenceItems) {
 	const evidenceById = new Map(evidenceItems.map((item) => [item.evidenceId, item]));
 	const claims = [];
@@ -2191,6 +2563,12 @@ function deepManifestRows(sources) {
 }
 
 function writeDeepArtifacts(runDirectory, state) {
+	mkdirSync(join(runDirectory, "archive", "chunks"), { recursive: true });
+	for (const chunk of state.chunks) {
+		const chunkPath = join(runDirectory, "archive", "chunks", `${chunk.chunkId}.txt`);
+		if (!existsSync(chunkPath)) writeFileSync(chunkPath, chunk.text);
+		chunk.outputPath = `archive/chunks/${chunk.chunkId}.txt`;
+	}
 	writeJson(join(runDirectory, "research_run.json"), {
 		schemaVersion: DEEP_SCHEMA_VERSION,
 		question: state.question,
@@ -2206,18 +2584,26 @@ function writeDeepArtifacts(runDirectory, state) {
 			gaps: state.gaps.length,
 			modelCalls: state.modelCalls.length,
 			budgetEvents: state.budgetEvents.length,
+			chunks: state.chunks.length,
+			rankings: state.sourceRankings.length,
+			embeddingEvents: state.embeddingLog.length,
 		},
 		budgetEvents: state.budgetEvents,
 	});
 	writeJsonl(join(runDirectory, "query_log.jsonl"), state.queryLog);
 	writeJson(join(runDirectory, "source_index.json"), {
 		schemaVersion: DEEP_SCHEMA_VERSION,
-		sources: state.sources.map(({ text, ...source }) => source),
+		sources: state.sources.map(({ text, selectedText, evidenceExtracted, ...source }) => source),
 	});
 	writeJsonl(join(runDirectory, "evidence_items.jsonl"), state.evidenceItems);
 	writeJsonl(join(runDirectory, "claim_register.jsonl"), state.claims);
 	writeJsonl(join(runDirectory, "gap_log.jsonl"), state.gaps);
 	writeJsonl(join(runDirectory, "model_calls.jsonl"), state.modelCalls);
+	writeJsonl(join(runDirectory, "chunks.jsonl"), state.chunks.map(({ text, embedding, ...chunk }) => chunk));
+	writeJsonl(join(runDirectory, "embedding_log.jsonl"), state.embeddingLog);
+	writeJsonl(join(runDirectory, "source_rankings.jsonl"), state.sourceRankings);
+	writeJsonl(join(runDirectory, "search_cache_log.jsonl"), state.searchCacheLog);
+	writeJsonl(join(runDirectory, "scheduler_log.jsonl"), state.schedulerLog);
 	writeCsv(join(runDirectory, "web_manifest.csv"), DEEP_MANIFEST_COLUMNS, deepManifestRows(state.sources));
 	writeJson(join(runDirectory, "web_manifest.json"), {
 		schemaVersion: 1,
@@ -2315,6 +2701,11 @@ function validateDeepRun(runDirectory, options = {}) {
 		"claim_register.jsonl",
 		"gap_log.jsonl",
 		"model_calls.jsonl",
+		"chunks.jsonl",
+		"embedding_log.jsonl",
+		"source_rankings.jsonl",
+		"search_cache_log.jsonl",
+		"scheduler_log.jsonl",
 		"deep_research_report.md",
 		"sources.md",
 		"web_manifest.csv",
@@ -2419,6 +2810,7 @@ function acquisitionOptions(flags, defaults = {}) {
 		playwrightWsEndpoint: flags.playwrightWs,
 		maxConcurrency: flags.maxConcurrency ?? defaults.maxConcurrency ?? modeConfig.maxConcurrency,
 		perDomainConcurrency: flags.perDomainConcurrency ?? defaults.perDomainConcurrency ?? modeConfig.perDomainConcurrency,
+		playwrightConcurrency: flags.playwrightConcurrency ?? defaults.playwrightConcurrency ?? 1,
 	};
 }
 
@@ -2426,15 +2818,21 @@ async function commandDoctor(options) {
 	const playwright = await loadPlaywright();
 	const playwrightEndpoint = playwrightWsEndpoint(options.playwrightWs);
 	const searxng = await pingSearxng(searxngBase(options.searxng), DEFAULT_USER_AGENT, 5000);
+	const chat = chatService(options);
+	const embeddings = embeddingsService({ embeddingUrl: options.embeddingUrl, embeddingModel: options.embeddingModel });
 	const tools = {
 		fetch: { available: typeof fetch === "function", version: process.version },
 		playwright: { available: Boolean(playwright), version: playwright ? "importable" : null },
 		playwrightEndpoint: { available: Boolean(playwrightEndpoint), version: playwrightEndpoint || null },
+		chat: { available: Boolean(chat.enabled && chat.baseUrl), version: chat.model },
+		embeddings: { available: Boolean(embeddings.enabled && embeddings.url), version: embeddings.model },
 	};
 	const capabilities = {
 		search: searxng.configured && searxng.reachable,
 		extraction: tools.playwright.available && tools.playwrightEndpoint.available,
 		httpFallback: tools.fetch.available,
+		localChat: tools.chat.available,
+		embeddings: tools.embeddings.available,
 	};
 	const remediation = [];
 	if (!searxng.configured) remediation.push("Set connectedServices.searxng.baseUrl, FORGE_SEARXNG_URL, or --searxng to enable search.");
@@ -2443,7 +2841,9 @@ async function commandDoctor(options) {
 	if (tools.playwright.available && !tools.playwrightEndpoint.available) {
 		remediation.push("Set connectedServices.playwright.wsEndpoint or FORGE_PLAYWRIGHT_WS_ENDPOINT for rendered browsing.");
 	}
-	const report = { tools, capabilities, searxng, remediation };
+	if (!tools.chat.available) remediation.push("Set connectedServices.chat.baseUrl or FORGE_BASE_CHAT_URL for local model calls.");
+	if (!tools.embeddings.available) remediation.push("Set connectedServices.embeddings.url or FORGE_EMBEDDINGS_URL for source ranking.");
+	const report = { tools, capabilities, searxng, chat, embeddings, remediation };
 	if (options.json) {
 		process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 		return;
@@ -2456,6 +2856,10 @@ async function commandDoctor(options) {
 	process.stdout.write(`Page extraction: ${capabilities.extraction ? "available (Playwright)" : capabilities.httpFallback ? "available (HTTP fallback)" : "unavailable"}
 `);
 	process.stdout.write(`SearXNG URL: ${searxngBase(options.searxng)}
+`);
+	process.stdout.write(`Chat URL: ${chat.baseUrl} (${chat.model})
+`);
+	process.stdout.write(`Embeddings URL: ${embeddings.url} (${embeddings.model})
 `);
 	for (const item of remediation) process.stdout.write(`Action: ${item}\n`);
 }
@@ -2685,6 +3089,129 @@ async function commandResearch(positionals, flags) {
 	);
 }
 
+function createDeepSource(result, iteration, query) {
+	return {
+		sourceId: sourceIdForUrl(result.url),
+		sourceUrl: result.url,
+		finalUrl: result.url,
+		canonicalUrl: normalizeUrl(result.url),
+		accessDate: nowIso(),
+		status: "failed",
+		httpStatus: null,
+		contentType: "text/plain; charset=utf-8",
+		title: result.title ?? null,
+		filename: null,
+		outputPath: null,
+		sha256: null,
+		byteSize: null,
+		resourceId: null,
+		extractionMethod: "failed",
+		strategy: "pending",
+		rawArtifact: null,
+		renderedArtifact: null,
+		extractedArtifact: null,
+		acquisitionValidation: null,
+		extractedAt: null,
+		charCount: 0,
+		metadata: {},
+		searchOrigins: [{ iteration, query, rank: result.rank, engine: result.engine, score: result.score }],
+		warnings: [],
+		text: "",
+		evidenceExtracted: false,
+	};
+}
+
+function applyDeepReadingToSource(runDirectory, source, result, reading) {
+	source.sourceId = reading.sourceId || source.sourceId;
+	source.finalUrl = reading.url;
+	source.canonicalUrl = reading.canonicalUrl ?? normalizeUrl(reading.url);
+	source.title = reading.title || result.title || null;
+	source.status = reading.text.trim() ? "success" : "needs_review";
+	source.extractionMethod = reading.extractionMethod;
+	source.strategy = reading.strategy;
+	source.extractedAt = reading.extractedAt;
+	source.charCount = reading.charCount;
+	source.httpStatus = reading.httpStatus ?? null;
+	source.contentType = reading.contentType ?? "text/plain; charset=utf-8";
+	source.rawArtifact = reading.rawArtifact ?? null;
+	source.renderedArtifact = reading.renderedArtifact ?? null;
+	source.extractedArtifact = reading.extractedArtifact ?? null;
+	source.acquisitionValidation = reading.validation ?? null;
+	source.metadata = reading.metadata ?? {};
+	source.warnings = reading.warnings ?? [];
+	source.text = reading.text;
+	if (isLowValueReading(reading)) {
+		source.status = "needs_review";
+		source.warnings.push("skipped evidence extraction because the page looked like a security checkpoint or low-value response");
+	}
+	const archived = writeDeepSource(runDirectory, source);
+	Object.assign(source, archived);
+}
+
+async function acquireDeepSources(runDirectory, sources, options, acquisitionContext, state) {
+	const pending = sources.filter((source) => source.status === "failed" && source.strategy === "pending");
+	await Promise.all(
+		pending.map(async (source, index) => {
+			if (runtimeBudgetExceeded(state, options)) {
+				addBudgetEvent(state, "maxRuntimeMs", "Stopped before reading another source.");
+				return;
+			}
+			if (index > 0 && options.delayMs > 0) await sleep(Math.min(options.delayMs, 50));
+			try {
+				process.stderr.write(`Deep reading ${source.sourceUrl}...\n`);
+				const result = source.searchOrigins[0] ?? {};
+				const reading = await readPage(source.sourceUrl, options, acquisitionContext);
+				applyDeepReadingToSource(runDirectory, source, result, reading);
+			} catch (readError) {
+				source.warnings.push(readError instanceof Error ? readError.message : String(readError));
+			}
+		}),
+	);
+}
+
+function evidenceSourceBatches(sources, options) {
+	const batches = [];
+	let current = [];
+	let currentChars = 0;
+	for (const source of sources) {
+		const selectedText = source.selectedText ?? selectRelevantText(source.text, "", options.maxEvidenceChars);
+		const sourceChars = selectedText.length;
+		if (
+			current.length > 0 &&
+			(current.length >= options.evidenceBatchSources || currentChars + sourceChars > options.evidenceBatchChars)
+		) {
+			batches.push(current);
+			current = [];
+			currentChars = 0;
+		}
+		source.selectedText = selectedText.slice(0, options.evidenceBatchChars);
+		source.maxEvidenceChars = Math.min(options.maxEvidenceChars, options.evidenceBatchChars);
+		current.push(source);
+		currentChars += source.selectedText.length;
+	}
+	if (current.length > 0) batches.push(current);
+	return batches;
+}
+
+async function extractEvidenceBatches(runDirectory, sources, state, options, runtime) {
+	for (const batch of evidenceSourceBatches(sources, options)) {
+		if (!canCallDeepModel(state, options, "extract-evidence")) {
+			for (const source of batch) source.warnings.push("skipped evidence extraction because the model-call budget was reached");
+			continue;
+		}
+		const { value, record } = await callLocalJsonModel(
+			runDirectory,
+			"extract-evidence",
+			evidenceBatchPrompt(batch, state.question, options.evidenceBatchChars),
+			{ evidence: [] },
+			runtime,
+		);
+		state.modelCalls.push(record);
+		state.evidenceItems.push(...sanitizeBatchedEvidence(value, batch, state.evidenceItems.length + 1));
+		for (const source of batch) source.evidenceExtracted = true;
+	}
+}
+
 async function commandDeep(positionals, flags) {
 	if (!flags.output) fail("deep requires --output <new-directory>");
 	const positionalQuestion = positionals.join(" ").trim();
@@ -2709,6 +3236,8 @@ async function commandDeep(positionals, flags) {
 	options.noBrowser = Boolean(flags.noBrowser);
 	options.maxConcurrency = flags.maxConcurrency ?? modeDefaults("deep").maxConcurrency;
 	options.perDomainConcurrency = flags.perDomainConcurrency ?? modeDefaults("deep").perDomainConcurrency;
+	options.embeddingUrl = flags.embeddingUrl ?? null;
+	options.embeddingModel = flags.embeddingModel ?? null;
 	const state = {
 		question,
 		startedAt: nowIso(),
@@ -2722,11 +3251,27 @@ async function commandDeep(positionals, flags) {
 		gaps: [],
 		modelCalls: [],
 		budgetEvents: [],
+		chunks: [],
+		embeddingLog: [],
+		sourceRankings: [],
+		searchCacheLog: [],
+		schedulerLog: [],
 	};
 	const acquisitionContext = createAcquisitionContext({
 		...acquisitionOptions(flags, { ...options, allowBrowser: options.render && !options.noBrowser }),
 		runDirectory,
 	});
+	const runtime = {
+		cacheDirectory: acquisitionContext.cacheDirectory,
+		searchQueue: createTaskQueue("search", 1, acquisitionContext.schedulerLog),
+		modelQueue: createTaskQueue("model", 1, acquisitionContext.schedulerLog),
+		embeddingQueue: createTaskQueue("embedding", 1, acquisitionContext.schedulerLog),
+		chat: chatService(flags),
+		embeddings: embeddingsService(flags),
+		embeddingLog: state.embeddingLog,
+		searchCacheLog: state.searchCacheLog,
+	};
+	state.schedulerLog = acquisitionContext.schedulerLog;
 	const seenQueries = new Set();
 	const queuedQueries = [...uniqueSeedQueries];
 	const seenUrls = new Map();
@@ -2751,6 +3296,7 @@ async function commandDeep(positionals, flags) {
 		}
 		if (iterationQueries.length === 0) break;
 
+		const newSources = [];
 		for (const query of iterationQueries) {
 			if (runtimeBudgetExceeded(state, options)) {
 				addBudgetEvent(state, "maxRuntimeMs", "Stopped before searching another query.");
@@ -2761,7 +3307,12 @@ async function commandDeep(positionals, flags) {
 			let error = null;
 			try {
 				const retrievedAt = nowIso();
-				const payload = await searchSearxng(base, query, searchParams);
+				const payload = await cachedSearchSearxng(base, query, searchParams, {
+					cacheDirectory: acquisitionContext.cacheDirectory,
+					forceRefresh: options.forceRefresh,
+					searchQueue: runtime.searchQueue,
+					searchCacheLog: state.searchCacheLog,
+				});
 				results = (Array.isArray(payload.results) ? payload.results : [])
 					.slice(0, options.limit)
 					.map((result, index) => searchResultRecord(result, index, query, retrievedAt));
@@ -2772,12 +3323,11 @@ async function commandDeep(positionals, flags) {
 			}
 			state.queryLog.push({ iteration, query, params: searchParams, searchedAt: nowIso(), results, error });
 			const urlsToRead = results.slice(0, options.readCount).filter((result) => result.url);
-			for (const [index, result] of urlsToRead.entries()) {
+			for (const result of urlsToRead) {
 				if (runtimeBudgetExceeded(state, options)) {
 					addBudgetEvent(state, "maxRuntimeMs", "Stopped before reading another source.");
 					break;
 				}
-				if (index > 0 && options.delayMs > 0) await sleep(options.delayMs);
 				const normalized = normalizeUrl(result.url);
 				if (seenUrls.has(normalized)) {
 					const source = seenUrls.get(normalized);
@@ -2788,77 +3338,28 @@ async function commandDeep(positionals, flags) {
 					addBudgetEvent(state, "maxSources", "Stopped before reading another unique source.");
 					break;
 				}
-				const source = {
-					sourceId: sourceIdForUrl(result.url),
-					sourceUrl: result.url,
-					finalUrl: result.url,
-					canonicalUrl: normalizeUrl(result.url),
-					accessDate: nowIso(),
-					status: "failed",
-					httpStatus: null,
-					contentType: "text/plain; charset=utf-8",
-					title: result.title ?? null,
-					filename: null,
-					outputPath: null,
-					sha256: null,
-					byteSize: null,
-					resourceId: null,
-					extractionMethod: "failed",
-					strategy: "pending",
-					rawArtifact: null,
-					renderedArtifact: null,
-					extractedArtifact: null,
-					acquisitionValidation: null,
-					extractedAt: null,
-					charCount: 0,
-					metadata: {},
-					searchOrigins: [{ iteration, query, rank: result.rank, engine: result.engine, score: result.score }],
-					warnings: [],
-					text: "",
-				};
+				const source = createDeepSource(result, iteration, query);
 				seenUrls.set(normalized, source);
 				state.sources.push(source);
-				try {
-					process.stderr.write(`Deep reading ${result.url}...\n`);
-					const reading = await readPage(result.url, options, acquisitionContext);
-					source.sourceId = reading.sourceId || source.sourceId;
-					source.finalUrl = reading.url;
-					source.canonicalUrl = reading.canonicalUrl ?? normalizeUrl(reading.url);
-					source.title = reading.title || result.title || null;
-					source.status = reading.text.trim() ? "success" : "needs_review";
-					source.extractionMethod = reading.extractionMethod;
-					source.strategy = reading.strategy;
-					source.extractedAt = reading.extractedAt;
-					source.charCount = reading.charCount;
-					source.httpStatus = reading.httpStatus ?? null;
-					source.contentType = reading.contentType ?? "text/plain; charset=utf-8";
-					source.rawArtifact = reading.rawArtifact ?? null;
-					source.renderedArtifact = reading.renderedArtifact ?? null;
-					source.extractedArtifact = reading.extractedArtifact ?? null;
-					source.acquisitionValidation = reading.validation ?? null;
-					source.metadata = reading.metadata ?? {};
-					source.warnings = reading.warnings ?? [];
-					source.text = reading.text;
-					if (isLowValueReading(reading)) {
-						source.status = "needs_review";
-						source.warnings.push("skipped evidence extraction because the page looked like a security checkpoint or low-value response");
-					}
-					const archived = writeDeepSource(runDirectory, source);
-					Object.assign(source, archived);
-					if (source.status !== "success") continue;
-					if (!canCallDeepModel(state, options, "extract-evidence")) {
-						source.warnings.push("skipped evidence extraction because the model-call budget was reached");
-						continue;
-					}
-					const { value, record } = await callLocalJsonModel(runDirectory, "extract-evidence", evidencePrompt(source, question, options.maxEvidenceChars), {
-						evidence: [],
-					});
-					state.modelCalls.push(record);
-					state.evidenceItems.push(...sanitizeEvidence(value, source, state.evidenceItems.length + 1));
-				} catch (readError) {
-					source.warnings.push(readError instanceof Error ? readError.message : String(readError));
-				}
+				newSources.push(source);
 			}
+		}
+
+		await acquireDeepSources(runDirectory, newSources, options, acquisitionContext, state);
+		const successful = newSources.filter((source) => source.status === "success" && !source.evidenceExtracted);
+		if (successful.length > 0) {
+			const ranked = await rankSourcesForQuestion(successful, question, runtime, options);
+			state.chunks.push(...ranked.chunks);
+			state.sourceRankings.push(...ranked.rankings.map((ranking) => ({ ...ranking, iteration, recordedAt: nowIso() })));
+			const hasPositiveScore = ranked.rankings.some((ranking) => ranking.score > 0 || ranking.lexicalScore > 0);
+			const orderedSources = ranked.rankings
+				.filter((ranking) => !hasPositiveScore || ranking.score > 0 || ranking.lexicalScore > 0)
+				.map((ranking) => successful.find((source) => source.sourceId === ranking.sourceId))
+				.filter(Boolean);
+			for (const source of successful) {
+				if (!orderedSources.includes(source)) source.warnings.push("skipped evidence extraction because source ranking was low");
+			}
+			await extractEvidenceBatches(runDirectory, orderedSources, state, options, runtime);
 		}
 
 		if (iteration < options.maxIterations) {
@@ -2868,6 +3369,7 @@ async function commandDeep(positionals, flags) {
 				"expand-queries",
 				queryExpansionPrompt(question, [...seenQueries], state.evidenceItems, state.gaps, iteration + 1),
 				{ queries: [] },
+				runtime,
 			);
 			state.modelCalls.push(record);
 			const followUps = Array.isArray(value?.queries) ? value.queries.slice(0, options.maxFollowupQueries) : [];
@@ -2888,13 +3390,20 @@ async function commandDeep(positionals, flags) {
 		const claimResult = await callLocalJsonModel(runDirectory, "register-claims", claimPrompt(question, state.evidenceItems, options.maxClaimEvidenceItems), {
 			claims: [],
 			gaps: [],
-		});
+		}, runtime);
 		claimValue = claimResult.value;
 		state.modelCalls.push(claimResult.record);
 	}
 	const { claims, gaps } = sanitizeClaims(claimValue, state.evidenceItems);
 	state.claims = claims;
 	state.gaps = appendBudgetGaps(state, gaps);
+	acquisitionContext.metrics.embeddingEvents = state.embeddingLog.length;
+	acquisitionContext.metrics.embeddingCacheHits = state.embeddingLog.filter((event) => event.status === "hit").length;
+	acquisitionContext.metrics.embeddingCacheMisses = state.embeddingLog.filter((event) => event.status === "miss").length;
+	acquisitionContext.metrics.selectedChunks = state.sourceRankings.reduce((sum, ranking) => sum + (ranking.selectedChunkIds?.length ?? 0), 0);
+	acquisitionContext.metrics.modelCalls = state.modelCalls.length;
+	acquisitionContext.metrics.searchCacheHits = state.searchCacheLog.filter((event) => event.status === "hit").length;
+	acquisitionContext.metrics.searchCacheMisses = state.searchCacheLog.filter((event) => event.status === "miss").length;
 	writeDeepArtifacts(runDirectory, state);
 	writeAcquisitionArtifacts(acquisitionContext);
 	await closeAcquisitionContext(acquisitionContext);
@@ -3082,6 +3591,8 @@ const FLAG_SPECS = {
 	"--user-agent": { key: "userAgent", value: true },
 	"--searxng": { key: "searxng", value: true },
 	"--playwright-ws": { key: "playwrightWs", value: true },
+	"--embedding-url": { key: "embeddingUrl", value: true },
+	"--embedding-model": { key: "embeddingModel", value: true },
 	"--force-strategy": { key: "forceStrategy", value: true },
 	"--cache-dir": { key: "cacheDir", value: true },
 	"--limit": { key: "limit", value: true, integer: true },
@@ -3094,6 +3605,10 @@ const FLAG_SPECS = {
 	"--max-runtime-ms": { key: "maxRuntimeMs", value: true, integer: true },
 	"--max-evidence-chars": { key: "maxEvidenceChars", value: true, integer: true },
 	"--max-claim-evidence-items": { key: "maxClaimEvidenceItems", value: true, integer: true },
+	"--embedding-batch-size": { key: "embeddingBatchSize", value: true, integer: true },
+	"--evidence-batch-sources": { key: "evidenceBatchSources", value: true, integer: true },
+	"--evidence-batch-chars": { key: "evidenceBatchChars", value: true, integer: true },
+	"--playwright-concurrency": { key: "playwrightConcurrency", value: true, integer: true },
 	"--delay-ms": { key: "delayMs", value: true, integer: true },
 	"--timeout-ms": { key: "timeoutMs", value: true, integer: true },
 	"--max-concurrency": { key: "maxConcurrency", value: true, integer: true },
@@ -3109,6 +3624,7 @@ const FLAG_SPECS = {
 	"--render": { key: "render", value: false },
 	"--no-render": { key: "noRender", value: false },
 	"--no-browser": { key: "noBrowser", value: false },
+	"--no-embeddings": { key: "noEmbeddings", value: false },
 	"--force-refresh": { key: "forceRefresh", value: false },
 	"--json": { key: "json", value: false },
 };
@@ -3144,12 +3660,16 @@ function parseArguments(args) {
 	if (flags.noRender) flags.render = false;
 	if (flags.noBrowser) flags.render = false;
 	if (flags.mode && !["fast", "standard", "deep"].includes(flags.mode)) fail("--mode must be fast, standard, or deep");
+	for (const key of ["embeddingBatchSize", "evidenceBatchSources", "evidenceBatchChars", "playwrightConcurrency"]) {
+		if (flags[key] !== undefined && flags[key] < 1) fail(`--${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)} requires a positive integer`);
+	}
 	return { positionals, flags };
 }
 
 function usage() {
 	process.stdout.write(`Usage:
   web-research.mjs doctor [--json] [--searxng <url>] [--playwright-ws <ws-endpoint>]
+      [--embedding-url <url>] [--embedding-model <name>]
   web-research.mjs search <query...> --output <dir> [--searxng <url>] [--limit N]
       [--categories <cats>] [--engines <engines>] [--language <lang>]
       [--safesearch <0|1|2>] [--time-range <day|week|month|year>] [--pageno N]
@@ -3166,6 +3686,8 @@ function usage() {
       [--mode fast|standard|deep] [--force-strategy <name>] [--cache-dir <dir>] [--force-refresh]
       [--max-queries N] [--max-sources N] [--max-followup-queries N] [--max-model-calls N]
       [--max-runtime-ms N] [--max-evidence-chars N] [--max-claim-evidence-items N]
+      [--embedding-url <url>] [--embedding-model <name>] [--no-embeddings] [--embedding-batch-size N]
+      [--evidence-batch-sources N] [--evidence-batch-chars N] [--playwright-concurrency N]
       [--categories <cats>] [--engines <engines>] [--language <lang>]
       [--safesearch <0|1|2>] [--time-range <day|week|month|year>] [--pageno N]
   web-research.mjs discover <url> --output <dir> [--mode fast|standard|deep] [--render] [--no-browser]

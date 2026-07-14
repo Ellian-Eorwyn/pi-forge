@@ -180,12 +180,12 @@ export function defaultCacheDirectory() {
 
 export function modeDefaults(mode = "standard") {
 	if (mode === "fast") {
-		return { mode, allowBrowser: false, maxConcurrency: 6, perDomainConcurrency: 2, timeoutMs: 12_000, maxBytes: 6 * 1024 * 1024 };
+		return { mode, allowBrowser: false, maxConcurrency: 3, perDomainConcurrency: 1, timeoutMs: 12_000, maxBytes: 6 * 1024 * 1024 };
 	}
 	if (mode === "deep") {
-		return { mode, allowBrowser: true, maxConcurrency: 4, perDomainConcurrency: 1, timeoutMs: DEFAULT_TIMEOUT_MS, maxBytes: DEFAULT_MAX_BYTES };
+		return { mode, allowBrowser: true, maxConcurrency: 3, perDomainConcurrency: 1, timeoutMs: DEFAULT_TIMEOUT_MS, maxBytes: DEFAULT_MAX_BYTES };
 	}
-	return { mode: "standard", allowBrowser: true, maxConcurrency: 4, perDomainConcurrency: 1, timeoutMs: DEFAULT_TIMEOUT_MS, maxBytes: DEFAULT_MAX_BYTES };
+	return { mode: "standard", allowBrowser: true, maxConcurrency: 3, perDomainConcurrency: 1, timeoutMs: DEFAULT_TIMEOUT_MS, maxBytes: DEFAULT_MAX_BYTES };
 }
 
 export function readDomainRegistry(registryPath = new URL("../references/domain-strategies.json", import.meta.url)) {
@@ -211,6 +211,77 @@ export function domainRuleForUrl(url, registry = []) {
 			return (rule.subdomains ?? []).some((pattern) => host === pattern.toLowerCase() || host.endsWith(`.${pattern.toLowerCase()}`));
 		}) ?? null
 	);
+}
+
+function hostForUrl(url) {
+	try {
+		return new URL(url).hostname.toLowerCase();
+	} catch {
+		return "unknown";
+	}
+}
+
+function createTaskQueue(name, concurrency, schedulerLog) {
+	let active = 0;
+	const pending = [];
+	const runNext = () => {
+		while (active < concurrency && pending.length > 0) {
+			const task = pending.shift();
+			active += 1;
+			task.start();
+		}
+	};
+	return {
+		name,
+		concurrency,
+		run(taskName, fn, metadata = {}) {
+			const enqueuedAtMs = Date.now();
+			const enqueuedAt = nowIso();
+			return new Promise((resolveTask, rejectTask) => {
+				pending.push({
+					start: async () => {
+						const startedAtMs = Date.now();
+						const startedAt = nowIso();
+						try {
+							const value = await fn();
+							const endedAtMs = Date.now();
+							schedulerLog.push({
+								queue: name,
+								task: taskName,
+								status: "success",
+								enqueuedAt,
+								startedAt,
+								endedAt: nowIso(),
+								waitMs: startedAtMs - enqueuedAtMs,
+								durationMs: endedAtMs - startedAtMs,
+								...metadata,
+							});
+							resolveTask(value);
+						} catch (error) {
+							const endedAtMs = Date.now();
+							schedulerLog.push({
+								queue: name,
+								task: taskName,
+								status: "failed",
+								enqueuedAt,
+								startedAt,
+								endedAt: nowIso(),
+								waitMs: startedAtMs - enqueuedAtMs,
+								durationMs: endedAtMs - startedAtMs,
+								error: error instanceof Error ? error.message : String(error),
+								...metadata,
+							});
+							rejectTask(error);
+						} finally {
+							active -= 1;
+							runNext();
+						}
+					},
+				});
+				runNext();
+			});
+		},
+	};
 }
 
 export function createAcquisitionContext(options = {}) {
@@ -260,7 +331,10 @@ export function createAcquisitionContext(options = {}) {
 		acquisitionLog: [],
 		extractionLog: [],
 		cacheLog: earlyCacheLog,
+		schedulerLog: [],
 		discoveryReports: [],
+		domainNextAllowedAt: new Map(),
+		domainQueues: new Map(),
 		metrics: {
 			searchResultsDiscovered: 0,
 			uniqueCanonicalUrls: 0,
@@ -275,11 +349,16 @@ export function createAcquisitionContext(options = {}) {
 			rawBytesDownloaded: 0,
 			extractedCharacters: 0,
 			evidenceCharactersSentToModel: 0,
+			queueWaitMs: {},
+			queueDurationMs: {},
+			rateLimitWaitMs: 0,
 			startedAt: nowIso(),
 			completedAt: null,
 		},
 		browser: null,
 	};
+	context.acquisitionQueue = createTaskQueue("acquisition", Math.max(1, context.maxConcurrency), context.schedulerLog);
+	context.browserQueue = createTaskQueue("browser", Math.max(1, options.playwrightConcurrency ?? 1), context.schedulerLog);
 	return context;
 }
 
@@ -294,16 +373,29 @@ export function writeAcquisitionArtifacts(context) {
 	if (!context.runDirectory) return;
 	context.metrics.completedAt = nowIso();
 	context.metrics.uniqueCanonicalUrls = new Set(context.normalizedUrls.map((record) => record.canonicalUrl)).size;
+	context.metrics.queueWaitMs = queueMetric(context.schedulerLog, "waitMs");
+	context.metrics.queueDurationMs = queueMetric(context.schedulerLog, "durationMs");
 	writeJsonl(join(context.runDirectory, "normalized_urls.jsonl"), context.normalizedUrls);
 	writeJsonl(join(context.runDirectory, "strategy_decisions.jsonl"), context.strategyDecisions);
 	writeJsonl(join(context.runDirectory, "acquisition_log.jsonl"), context.acquisitionLog);
 	writeJsonl(join(context.runDirectory, "extraction_log.jsonl"), context.extractionLog);
 	writeJsonl(join(context.runDirectory, "cache_log.jsonl"), context.cacheLog);
+	writeJsonl(join(context.runDirectory, "scheduler_log.jsonl"), context.schedulerLog);
 	writeJson(join(context.runDirectory, "metrics.json"), context.metrics);
 	for (const report of context.discoveryReports) {
 		const id = sha256(`${report.domain}:${report.page_url}`).slice(0, 12);
 		writeJson(join(context.runDirectory, "discovery_reports", `${report.domain}-${id}.json`), report);
 	}
+}
+
+function queueMetric(rows, field) {
+	const byQueue = {};
+	for (const row of rows) {
+		if (!row.queue) continue;
+		const value = Number.isFinite(row[field]) ? row[field] : 0;
+		byQueue[row.queue] = (byQueue[row.queue] ?? 0) + value;
+	}
+	return byQueue;
 }
 
 function extensionForContent(contentType, finalUrl) {
@@ -322,6 +414,45 @@ function extensionForContent(contentType, finalUrl) {
 
 function cachePath(context, layer, key, extension) {
 	return join(context.cacheDirectory, layer, `${sha256(key)}.${extension}`);
+}
+
+function sleep(milliseconds) {
+	return new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
+}
+
+async function waitForDomainRateLimit(url, context, domainRule) {
+	const host = hostForUrl(url);
+	const perSecond = domainRule?.rate_limit?.requests_per_second;
+	if (!perSecond || perSecond <= 0) return;
+	const spacingMs = Math.ceil(1000 / perSecond);
+	const now = Date.now();
+	const nextAllowedAt = context.domainNextAllowedAt.get(host) ?? 0;
+	const waitMs = Math.max(0, nextAllowedAt - now);
+	context.domainNextAllowedAt.set(host, Math.max(now, nextAllowedAt) + spacingMs);
+	if (waitMs > 0) {
+		context.metrics.rateLimitWaitMs += waitMs;
+		await sleep(waitMs);
+	}
+}
+
+async function queuedDirectHttpAcquire(url, context, domainRule) {
+	const host = hostForUrl(url);
+	if (!context.domainQueues.has(host)) {
+		context.domainQueues.set(host, createTaskQueue(`domain:${host}`, Math.max(1, context.perDomainConcurrency), context.schedulerLog));
+	}
+	return context.domainQueues.get(host).run(
+		"domain_slot",
+		() =>
+			context.acquisitionQueue.run(
+				"direct_http",
+				async () => {
+					await waitForDomainRateLimit(url, context, domainRule);
+					return directHttpAcquire(url, context);
+				},
+				{ domain: host, url },
+			),
+		{ domain: host, url },
+	);
 }
 
 async function readCappedBody(response, maxBytes) {
@@ -534,6 +665,42 @@ function extractDocument(acquired, context) {
 	return record;
 }
 
+function endpointCandidatesFromHtml(acquired) {
+	const content = acquired.buffer.toString("utf8");
+	if (!HTML_TYPES.test(acquired.contentType ?? "") && !/<html|<!doctype/i.test(content)) return [];
+	let dom = null;
+	try {
+		dom = new JSDOM(content, { url: acquired.finalUrl, virtualConsole: quietJsdomConsole });
+		const candidates = [];
+		for (const link of [...dom.window.document.querySelectorAll("a[href], link[href], script[src]")]) {
+			const raw = link.getAttribute("href") || link.getAttribute("src");
+			if (!raw) continue;
+			const absolute = new URL(raw, acquired.finalUrl).toString();
+			if (/\/(?:api|graphql|json|search|data)\b/i.test(absolute)) candidates.push(absolute);
+		}
+		return [...new Set(candidates)].slice(0, 4);
+	} finally {
+		dom?.window.close();
+	}
+}
+
+async function tryEndpointReplay(acquired, context, domainRule) {
+	for (const endpoint of endpointCandidatesFromHtml(acquired)) {
+		try {
+			const replayed = await queuedDirectHttpAcquire(endpoint, context, domainRule);
+			replayed.strategy = "endpoint_replay";
+			const extracted = extractDocument(replayed, context);
+			const validation = validateAcquisition(replayed, extracted);
+			if (!validation.success || !extracted.text || extracted.text.length < 120) continue;
+			context.metrics.internalApiSuccesses += 1;
+			return { acquired: replayed, extracted, validation };
+		} catch {
+			// Try the next candidate endpoint.
+		}
+	}
+	return null;
+}
+
 function validationFailureType(warnings) {
 	if (warnings.some((warning) => /captcha|checkpoint|checking your browser|cloudflare|bot challenge/i.test(warning))) return "blocked_request";
 	if (warnings.some((warning) => /login|authentication/i.test(warning))) return "authentication_required";
@@ -655,6 +822,10 @@ function shouldBlockResource(url, resourceType) {
 }
 
 async function extractWithPlaywright(url, context, domainRule) {
+	return context.browserQueue.run("playwright_dom", () => extractWithPlaywrightUnqueued(url, context, domainRule), { domain: hostForUrl(url), url });
+}
+
+async function extractWithPlaywrightUnqueued(url, context, domainRule) {
 	const startedAt = Date.now();
 	const activeBrowser = await getBrowser(context);
 	const pageWarnings = [];
@@ -765,11 +936,21 @@ export async function acquireUrl(url, context) {
 	let strategy = selectedStrategy;
 	try {
 		if (selectedStrategy !== "playwright_dom" && selectedStrategy !== "playwright_network_discovery") {
-			acquired = await directHttpAcquire(url, context);
+			acquired = await queuedDirectHttpAcquire(url, context, domainRule);
 			acquired.strategy = "direct_http";
 			rawArtifact = archiveBuffer(context, acquired);
 			extracted = extractDocument(acquired, context);
 			validation = validateAcquisition(acquired, extracted);
+			if (validation.fallback_recommended && selectedStrategy !== "direct_http_only") {
+				const replayed = await tryEndpointReplay(acquired, context, domainRule);
+				if (replayed) {
+					strategy = "endpoint_replay";
+					acquired = replayed.acquired;
+					extracted = replayed.extracted;
+					validation = replayed.validation;
+					rawArtifact = archiveBuffer(context, acquired);
+				}
+			}
 			if (
 				validation.fallback_recommended &&
 				allowBrowser &&
@@ -928,7 +1109,7 @@ export async function discoverUrl(url, context) {
 		warnings: [],
 	};
 	try {
-		const acquired = await directHttpAcquire(url, context);
+		const acquired = await queuedDirectHttpAcquire(url, context, domainRule);
 		const content = acquired.buffer.toString("utf8");
 		if (HTML_TYPES.test(acquired.contentType ?? "") || /<html|<!doctype/i.test(content)) {
 			let dom = null;
@@ -959,33 +1140,35 @@ export async function discoverUrl(url, context) {
 	}
 	if (context.allowBrowser) {
 		try {
-			const activeBrowser = await getBrowser(context);
-			const browserContext = await activeBrowser.newContext({ userAgent: context.userAgent });
-			try {
-				await browserContext.route("**/*", async (route) => {
-					const request = route.request();
-					if (shouldBlockResource(request.url(), request.resourceType())) await route.abort();
-					else await route.continue();
-				});
-				const page = await browserContext.newPage();
-				page.on("response", async (response) => {
-					const contentType = response.headers()["content-type"] ?? "";
-					if (!/(json|graphql)/i.test(contentType)) return;
-					report.candidate_endpoints.push({
-						url_pattern: new URL(response.url()).pathname,
-						method: response.request().method(),
-						content_type: contentType,
-						status: response.status(),
-						contains_primary_content: true,
-						requires_cookies: false,
+			await context.browserQueue.run("playwright_network_discovery", async () => {
+				const activeBrowser = await getBrowser(context);
+				const browserContext = await activeBrowser.newContext({ userAgent: context.userAgent });
+				try {
+					await browserContext.route("**/*", async (route) => {
+						const request = route.request();
+						if (shouldBlockResource(request.url(), request.resourceType())) await route.abort();
+						else await route.continue();
 					});
-				});
-				await page.goto(url, { waitUntil: "domcontentloaded", timeout: context.timeoutMs });
-				await page.waitForTimeout(1000);
-				report.recommended_strategy = report.candidate_endpoints.length > 0 ? "direct_api" : report.recommended_strategy;
-			} finally {
-				await browserContext.close();
-			}
+					const page = await browserContext.newPage();
+					page.on("response", async (response) => {
+						const contentType = response.headers()["content-type"] ?? "";
+						if (!/(json|graphql)/i.test(contentType)) return;
+						report.candidate_endpoints.push({
+							url_pattern: new URL(response.url()).pathname,
+							method: response.request().method(),
+							content_type: contentType,
+							status: response.status(),
+							contains_primary_content: true,
+							requires_cookies: false,
+						});
+					});
+					await page.goto(url, { waitUntil: "domcontentloaded", timeout: context.timeoutMs });
+					await page.waitForTimeout(1000);
+					report.recommended_strategy = report.candidate_endpoints.length > 0 ? "direct_api" : report.recommended_strategy;
+				} finally {
+					await browserContext.close();
+				}
+			}, { domain: hostForUrl(url), url });
 		} catch (error) {
 			report.warnings.push(`Playwright discovery failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
