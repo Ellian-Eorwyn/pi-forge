@@ -1,0 +1,22 @@
+{
+	"name": "skill-builder",
+	"type": "pi-forge-skill",
+	"version": "0.1.0",
+	"description": "Create, validate, and audit portable Agent Skills.",
+	"skill_file": "SKILL.md",
+	"scripts_dir": "scripts",
+	"references_dir": "references",
+	"tools": [
+		{
+			"name": "skill_builder",
+			"description": "Inventory, scaffold, validate, and trigger-check Agent Skill directories.",
+			"command": "node scripts/skill-builder.mjs",
+			"destructive": false
+		}
+	],
+	"safety": {
+		"destructive_by_default": false,
+		"requires_review_for_filesystem_changes": true,
+		"preserve_provenance_when_applicable": true
+	}
+}

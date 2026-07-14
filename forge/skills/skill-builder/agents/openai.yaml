@@ -1,0 +1,4 @@
+interface:
+  display_name: "Skill Builder"
+  short_description: "Create and validate portable Agent Skills"
+  default_prompt: "Use $skill-builder to design, scaffold, validate, or improve an Agent Skill."

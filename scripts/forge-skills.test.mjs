@@ -1902,6 +1902,140 @@ test("document ingest, coding, and web collection expose review and safety bound
 	});
 });
 
+test("skill builder scaffolds, validates, and checks trigger overlap", () => {
+	withWorkspace((workspace) => {
+		const builder = script("skill-builder", "skill-builder.mjs");
+		const doctor = jsonOutput(run("node", [builder, "doctor", "--json"]));
+		assert.equal(doctor.status, "ok");
+		assert.match(doctor.defaults.project, /\.agents\/skills/);
+
+		const projectRoot = join(workspace, "project");
+		mkdirSync(projectRoot);
+		const scaffolded = jsonOutput(
+			run("node", [
+				builder,
+				"scaffold",
+				"example-skill",
+				"--target",
+				"project",
+				"--root",
+				projectRoot,
+				"--resources",
+				"scripts,references,tests",
+				"--json",
+			]),
+		);
+		assert.equal(scaffolded.skillDirectory, join(projectRoot, ".agents", "skills", "example-skill"));
+		assert.equal(existsSync(join(scaffolded.skillDirectory, "SKILL.md")), true);
+		assert.equal(existsSync(join(scaffolded.skillDirectory, "scripts")), true);
+		assert.equal(existsSync(join(scaffolded.skillDirectory, "references")), true);
+		assert.equal(existsSync(join(scaffolded.skillDirectory, "tests", "triggers.json")), true);
+		assert.equal(jsonOutput(run("node", [builder, "validate", scaffolded.skillDirectory, "--json"])).valid, true);
+		runFailure("node", [
+			builder,
+			"scaffold",
+			"example-skill",
+			"--target",
+			"project",
+			"--root",
+			projectRoot,
+		], /skill already exists/);
+
+		const forgeRoot = join(workspace, "forge-repo");
+		const forgeSkill = jsonOutput(
+			run("node", [
+				builder,
+				"scaffold",
+				"forge-skill",
+				"--target",
+				"forge",
+				"--root",
+				forgeRoot,
+				"--resources",
+				"scripts",
+				"--json",
+			]),
+		);
+		assert.equal(forgeSkill.skillDirectory, join(forgeRoot, "forge", "skills", "forge-skill"));
+		assert.equal(existsSync(join(forgeSkill.skillDirectory, "manifest.json")), true);
+		assert.equal(existsSync(join(forgeSkill.skillDirectory, "agents", "openai.yaml")), true);
+
+		const minimal = join(workspace, "minimal-skill");
+		mkdirSync(join(minimal, "tests"), { recursive: true });
+		writeFileSync(
+			join(minimal, "SKILL.md"),
+			"---\nname: minimal-skill\ndescription: Minimal Skill workflow. Use when the user asks to validate a minimal skill fixture. Do not use for unrelated work.\n---\n\n# Minimal Skill\n\nRun validation.\n",
+		);
+		writeFileSync(
+			join(minimal, "tests", "triggers.json"),
+			'{"positive":["Validate this minimal skill."],"negative":["Convert this PDF."]}\n',
+		);
+		assert.equal(jsonOutput(run("node", [builder, "validate", minimal, "--json"])).valid, true);
+
+		const missingDescription = join(workspace, "missing-description");
+		mkdirSync(missingDescription);
+		writeFileSync(join(missingDescription, "SKILL.md"), "---\nname: missing-description\n---\n\n# Missing\n");
+		runFailure("node", [builder, "validate", missingDescription], /description is required/);
+
+		const badName = join(workspace, "bad-name");
+		mkdirSync(badName);
+		writeFileSync(join(badName, "SKILL.md"), "---\nname: Bad--Name\ndescription: Bad name fixture.\n---\n");
+		runFailure("node", [builder, "validate", badName], /name must use lowercase/);
+
+		const mismatch = join(workspace, "mismatch-directory");
+		mkdirSync(mismatch);
+		writeFileSync(
+			join(mismatch, "SKILL.md"),
+			"---\nname: other-name\ndescription: Mismatch fixture. Use when validating bad names.\n---\n",
+		);
+		runFailure("node", [builder, "validate", mismatch], /must match directory/);
+
+		const broken = join(workspace, "broken-reference");
+		mkdirSync(broken);
+		writeFileSync(
+			join(broken, "SKILL.md"),
+			"---\nname: broken-reference\ndescription: Broken Reference workflow. Use when validating broken local references. Do not use elsewhere.\n---\n\n# Broken\n\nSee [missing](references/missing.md).\n",
+		);
+		runFailure("node", [builder, "validate", broken], /referenced file does not exist/);
+
+		const escape = join(workspace, "escape-reference");
+		mkdirSync(escape);
+		writeFileSync(
+			join(escape, "SKILL.md"),
+			"---\nname: escape-reference\ndescription: Escape Reference workflow. Use when validating unsafe local references. Do not use elsewhere.\n---\n\n# Escape\n\nSee [outside](../outside.md).\n",
+		);
+		runFailure("node", [builder, "validate", escape], /escapes skill directory/);
+
+		const overlapRoot = join(workspace, "overlap-skills");
+		const broad = join(overlapRoot, "broad-research");
+		const neighbor = join(overlapRoot, "source-research");
+		mkdirSync(join(broad, "tests"), { recursive: true });
+		mkdirSync(neighbor, { recursive: true });
+		writeFileSync(
+			join(broad, "SKILL.md"),
+			"---\nname: broad-research\ndescription: Helps with research.\n---\n\n# Broad Research\n",
+		);
+		writeFileSync(
+			join(broad, "tests", "triggers.json"),
+			'{"positive":["Research this topic."],"negative":["Rename this file."]}\n',
+		);
+		writeFileSync(
+			join(neighbor, "SKILL.md"),
+			"---\nname: source-research\ndescription: Research sources, source evidence, and research reports. Use when the user asks for source research.\n---\n",
+		);
+		const triggerReport = jsonOutput(run("node", [builder, "check-triggers", broad, "--against", overlapRoot, "--json"]));
+		assert.equal(triggerReport.valid, true);
+		assert.match(triggerReport.warnings.join("\n"), /broad|vague|overlaps/);
+		assert.ok(triggerReport.overlaps.some((overlap) => overlap.name === "source-research"));
+
+		const inventory = jsonOutput(run("node", [builder, "inventory", "--root", overlapRoot, "--json"]));
+		assert.deepEqual(
+			inventory.skills.map((skill) => skill.name).sort(),
+			["broad-research", "source-research"],
+		);
+	});
+});
+
 test("web-research deep creates validated provenance-backed artifacts", async () => {
 	await withAsyncWorkspace(async (workspace) => {
 		const fixture = await startDeepResearchFixture();
@@ -2539,6 +2673,7 @@ test("extracted web and document tools expose metadata and conversion boundaries
 		const requiredTools = {
 			"web-collection": ["fetch_url", "archive_page", "html_to_markdown", "extract_metadata"],
 			"document-ingest": ["pdf_to_markdown", "docx_to_markdown", "extract_metadata"],
+			"skill-builder": ["skill_builder"],
 		};
 		for (const [skill, names] of Object.entries(requiredTools)) {
 			const manifest = JSON.parse(readFileSync(join(skillsRoot, skill, "manifest.json"), "utf8"));

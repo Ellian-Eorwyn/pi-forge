@@ -1,0 +1,12 @@
+{
+	"positive": [
+		"Build a new Agent Skill for release management.",
+		"Validate this SKILL.md against the Agent Skills standard.",
+		"Create trigger tests for this .agents/skills workflow."
+	],
+	"negative": [
+		"Research the current evidence on this public policy question.",
+		"Convert this PDF to Markdown.",
+		"Build a static website from this folder."
+	]
+}

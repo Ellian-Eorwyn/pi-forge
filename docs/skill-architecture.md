@@ -15,6 +15,12 @@ standards apply, how to handle ambiguity, and what final output should look
 like. `SKILL.md` files should hold routing, review points, evidence standards,
 provenance expectations, citation rules, output formats, and safety rules.
 
+Forge-bundled skills live in `forge/skills/<name>/` so the npm package can ship
+them through `forge/package.json`. Newly generated project or user skills should
+prefer the agent-agnostic `.agents/skills/<name>/SKILL.md` or
+`~/.agents/skills/<name>/SKILL.md` layout unless the goal is to add another
+Forge-bundled capability.
+
 ## 3. Script/tool layer
 
 Mechanical execution: parsing, conversion, fetching, archiving, validation,

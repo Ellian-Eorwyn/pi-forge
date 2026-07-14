@@ -4,12 +4,12 @@
 
 ## Launch Context Summary
 
-- Available skills: 14
-- Model-visible skills at launch: 14
-- Managed instructions (`AGENTS.md` with its `<project_context>` wrapper): 550 tokens
-- Skills menu (metadata for all skills): 2343 tokens
-- **Total forge launch context (always processed): 2893 tokens**
-- **Maximum if every `SKILL.md` body is also loaded at once: 24104 tokens**
+- Available skills: 15
+- Model-visible skills at launch: 15
+- Managed instructions (`AGENTS.md` with its `<project_context>` wrapper): 600 tokens
+- Skills menu (metadata for all skills): 2535 tokens
+- **Total forge launch context (always processed): 3135 tokens**
+- **Maximum if every `SKILL.md` body is also loaded at once: 25254 tokens**
 
 Of the skills menu above, the shared wrapper (instructions and XML envelope, independent of skill count) is ~92 tokens; the rest scales with the number of skills.
 
@@ -29,6 +29,7 @@ Still excluded, because they are owned by the Pi harness rather than this profil
 | [`personal-admin`](forge/skills/personal-admin/SKILL.md) | Summarize personal documents into action plans | 206 | 768 | 948 | Model-visible |
 | [`report-output`](forge/skills/report-output/SKILL.md) | Assemble polished deliverables from processed outputs | 181 | 729 | 884 | Model-visible |
 | [`site-builder`](forge/skills/site-builder/SKILL.md) | Build a static website from a content folder | 190 | 1320 | 1484 | Model-visible |
+| [`skill-builder`](forge/skills/skill-builder/SKILL.md) | Create and validate portable Agent Skills | 192 | 742 | 908 | Model-visible |
 | [`spreadsheet-analysis`](forge/skills/spreadsheet-analysis/SKILL.md) | Analyze and enrich tabular datasets | 161 | 1705 | 1839 | Model-visible |
 | [`transcript-cleanup`](forge/skills/transcript-cleanup/SKILL.md) | Clean and structure raw transcripts | 144 | 1127 | 1244 | Model-visible |
 | [`transcription`](forge/skills/transcription/SKILL.md) | Transcribe audio or video, then correct and clean it | 185 | 1407 | 1566 | Model-visible |
