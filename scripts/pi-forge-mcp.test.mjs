@@ -573,13 +573,14 @@ function makeFakePiPackageTarball(root) {
 }
 
 function makeSourceArchive(root, source) {
-	const archive = join(root, "pi-forge-source.tar.gz");
+	const archive = join(root, `${basename(source)}.tar.gz`);
 	const pack = spawnSync("tar", ["-czf", archive, "-C", dirname(source), basename(source)], { encoding: "utf8" });
 	assert.equal(pack.status, 0, pack.stderr);
 	return archive;
 }
 
-function makeFakeNpmWrapper(root, sourceRootName) {
+function makeFakeNpmWrapper(root, sourceRootNames) {
+	const rootNames = Array.isArray(sourceRootNames) ? sourceRootNames : [sourceRootNames];
 	const fakeBin = join(root, "fake-bin");
 	const npmLog = join(root, "npm.log");
 	const realNpm = spawnSync("which", ["npm"], { encoding: "utf8" }).stdout.trim();
@@ -597,7 +598,10 @@ if [[ "$1" == "--prefix" ]]; then
 	command="$3"
 	subcommand="$4"
 fi
-if [[ "$(basename "$target")" == "$SOURCE_ROOT_NAME" ]]; then
+source_root_names_value="\${SOURCE_ROOT_NAMES:-$SOURCE_ROOT_NAME}"
+IFS=: read -r -a source_root_names <<< "$source_root_names_value"
+for source_root_name in "\${source_root_names[@]}"; do
+if [[ "$(basename "$target")" == "$source_root_name" ]]; then
 	if [[ "$command" == "ci" ]]; then
 		exit 0
 	fi
@@ -605,6 +609,7 @@ if [[ "$(basename "$target")" == "$SOURCE_ROOT_NAME" ]]; then
 		exit 0
 	fi
 fi
+done
 case " $* " in
 	*" @ellian-eorwyn/pi-forge@latest "*|*" @earendil-works/pi-coding-agent@latest "*) echo "npm error code E404" >&2; exit 1 ;;
 esac
@@ -612,7 +617,7 @@ exec "$REAL_NPM" "$@"
 `,
 	);
 	chmodSync(join(fakeBin, "npm"), 0o755);
-	return { fakeBin, npmLog, realNpm };
+	return { fakeBin, npmLog, realNpm, sourceRootNames: rootNames.join(":") };
 }
 
 function cleanPiForgeEnvironment() {
@@ -721,12 +726,18 @@ test("installer uses the GitHub source archive when no package spec is configure
 	assert.match(npmCalls, /install --omit=dev --ignore-scripts file:/);
 });
 
-test("installer packs Pi runtime packages from the GitHub source archive by default", () => {
+test("installer packs Pi runtime packages from the upstream source archive by default", () => {
 	const root = workspace();
 	const source = join(root, "source");
-	makeFakeInstallSource(source);
+	const upstreamSource = join(root, "upstream-source");
+	makeFakeInstallSource(source, "0.0.0-forge");
+	makeFakeInstallSource(upstreamSource, "0.0.1-upstream");
 	const sourceArchive = makeSourceArchive(root, source);
-	const { fakeBin, npmLog, realNpm } = makeFakeNpmWrapper(root, basename(source));
+	const upstreamSourceArchive = makeSourceArchive(root, upstreamSource);
+	const { fakeBin, npmLog, realNpm, sourceRootNames } = makeFakeNpmWrapper(root, [
+		basename(source),
+		basename(upstreamSource),
+	]);
 
 	const install = spawnSync("bash", [join(repositoryRoot, "scripts", "pi-forge-install.sh")], {
 		encoding: "utf8",
@@ -735,9 +746,10 @@ test("installer packs Pi runtime packages from the GitHub source archive by defa
 			HOME: root,
 			NPM_LOG: npmLog,
 			PATH: `${fakeBin}:${process.env.PATH}`,
+			PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL: `file://${upstreamSourceArchive}`,
 			PI_FORGE_SOURCE_ARCHIVE_URL: `file://${sourceArchive}`,
 			REAL_NPM: realNpm,
-			SOURCE_ROOT_NAME: basename(source),
+			SOURCE_ROOT_NAMES: sourceRootNames,
 			SHELL: "/bin/zsh",
 		},
 	});
@@ -754,6 +766,10 @@ test("installer packs Pi runtime packages from the GitHub source archive by defa
 	]) {
 		assert.match(appPackage.dependencies[packageName], /^file:/);
 	}
+	const installedPiPackage = JSON.parse(
+		readFileSync(join(appRoot, "node_modules", "@earendil-works", "pi-coding-agent", "package.json"), "utf8"),
+	);
+	assert.equal(installedPiPackage.version, "0.0.1-upstream");
 	assert.equal(
 		existsSync(join(appRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "source-runtime-marker.js")),
 		true,
@@ -770,9 +786,15 @@ test("packaged updater refreshes pi-forge from the GitHub source archive by defa
 	const initialTarball = makeFakePackageTarball(root);
 	const piTarball = makeFakePiPackageTarball(root);
 	const updatedSource = join(root, "updated-source");
+	const upstreamSource = join(root, "upstream-source");
 	makeFakeInstallSource(updatedSource, "0.0.1-source");
+	makeFakeInstallSource(upstreamSource, "0.0.2-upstream");
 	const sourceArchive = makeSourceArchive(root, updatedSource);
-	const { fakeBin, npmLog, realNpm } = makeFakeNpmWrapper(root, basename(updatedSource));
+	const upstreamSourceArchive = makeSourceArchive(root, upstreamSource);
+	const { fakeBin, npmLog, realNpm, sourceRootNames } = makeFakeNpmWrapper(root, [
+		basename(updatedSource),
+		basename(upstreamSource),
+	]);
 	const environment = cleanPiForgeEnvironment();
 	const install = spawnSync("bash", [join(repositoryRoot, "scripts", "pi-forge-install.sh")], {
 		encoding: "utf8",
@@ -795,12 +817,17 @@ test("packaged updater refreshes pi-forge from the GitHub source archive by defa
 			PATH: `${fakeBin}:${process.env.PATH}`,
 			REAL_NPM: realNpm,
 			SHELL: "/bin/zsh",
+			PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL: `file://${upstreamSourceArchive}`,
 			PI_FORGE_SOURCE_ARCHIVE_URL: `file://${sourceArchive}`,
-			SOURCE_ROOT_NAME: basename(updatedSource),
+			SOURCE_ROOT_NAMES: sourceRootNames,
 		},
 	});
 	assert.equal(update.status, 0, update.stderr);
 	assert.match(update.stderr, /pi-forge-update: installing pi-forge from file:/);
+	assert.match(
+		update.stderr,
+		new RegExp(`pi-forge-update: installing Pi runtime from file://${upstreamSourceArchive.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
+	);
 	assert.match(update.stdout, /Pi package: runtime packages from file:/);
 	const packageJson = JSON.parse(
 		readFileSync(join(root, ".pi-forge", "app", "node_modules", "@ellian-eorwyn", "pi-forge", "package.json"), "utf8"),
@@ -809,6 +836,10 @@ test("packaged updater refreshes pi-forge from the GitHub source archive by defa
 	const appRoot = join(root, ".pi-forge", "app");
 	const appPackage = JSON.parse(readFileSync(join(appRoot, "package.json"), "utf8"));
 	assert.match(appPackage.dependencies["@earendil-works/pi-coding-agent"], /^file:/);
+	const installedPiPackage = JSON.parse(
+		readFileSync(join(appRoot, "node_modules", "@earendil-works", "pi-coding-agent", "package.json"), "utf8"),
+	);
+	assert.equal(installedPiPackage.version, "0.0.2-upstream");
 	assert.equal(
 		existsSync(join(appRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "source-runtime-marker.js")),
 		true,

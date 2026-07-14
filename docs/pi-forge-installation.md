@@ -39,13 +39,16 @@ split layout. `PI_FORGE_NPM_CACHE` overrides the isolated npm cache under the
 agent directory. By default, the macOS/Linux installer downloads
 `PI_FORGE_SOURCE_ARCHIVE_URL` (default:
 `https://github.com/Ellian-Eorwyn/pi-forge/archive/refs/heads/main.tar.gz`),
-packs `forge/` plus the bundled Pi runtime packages locally, and installs those
-packages into the npm app layout.
+packs `forge/` locally, packs the Pi runtime packages from the upstream Pi
+source archive, and installs those packages into the npm app layout.
 `PI_FORGE_PACKAGE_SPEC` overrides that source archive package and can point at
 `file:<packed-tarball>` for tests and local release smoke tests, or at
 `@ellian-eorwyn/pi-forge@latest` if a registry package is intentionally used.
+`PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL` overrides the upstream Pi source archive
+used for default runtime package installs (default:
+`https://github.com/earendil-works/pi/archive/refs/heads/main.tar.gz`).
 `PI_FORGE_PI_PACKAGE_SPEC` overrides the bundled Pi runtime package install;
-when unset, pi-forge packs the runtime packages from the same source archive.
+when unset, pi-forge packs the runtime packages from the upstream Pi archive.
 The installer adds `~/.pi-forge/bin` to the user profile/PATH when possible;
 open a new shell before relying on `pi-forge` from `PATH`.
 
@@ -61,12 +64,14 @@ pi-forge-update
 ```
 *(On Windows: `pi-forge-update.ps1` or just `pi-forge-update`)*
 
-The updater downloads the configured GitHub source archive, packs pi-forge plus
-the bundled Pi runtime packages locally, installs those tarballs into
+The updater downloads the configured pi-forge GitHub source archive, packs
+pi-forge locally, packs the bundled Pi runtime packages from the upstream Pi
+source archive, installs those tarballs into
 `~/.pi-forge/app` with `npm install --omit=dev --ignore-scripts`, refreshes
 managed settings, and rewrites launchers. `PI_FORGE_PACKAGE_SPEC` overrides the
 pi-forge package source when set; `PI_FORGE_PI_PACKAGE_SPEC` overrides the
-bundled runtime package source when set. Credentials, sessions, and unrelated
+bundled runtime package source when set. `PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL`
+overrides the upstream Pi archive when set. Credentials, sessions, and unrelated
 settings are preserved. Existing
 clone-based installs run one final
 fast-forward-only Git pull, migrate to the npm app layout, then remove the

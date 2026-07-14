@@ -4,6 +4,7 @@ set -euo pipefail
 PI_PACKAGE_NAME="@earendil-works/pi-coding-agent"
 DEFAULT_PI_PACKAGE_SPEC="GitHub source archive runtime packages"
 DEFAULT_SOURCE_ARCHIVE_URL="https://github.com/Ellian-Eorwyn/pi-forge/archive/refs/heads/main.tar.gz"
+DEFAULT_UPSTREAM_SOURCE_ARCHIVE_URL="https://github.com/earendil-works/pi/archive/refs/heads/main.tar.gz"
 
 SOURCE_DIR=""
 OLD_HEAD=""
@@ -17,7 +18,9 @@ AGENT_DIR="${PI_FORGE_AGENT_DIR:-}"
 NPM_CACHE_DIR="${PI_FORGE_NPM_CACHE:-}"
 PLAYWRIGHT_BROWSERS_DIR="${PI_FORGE_PLAYWRIGHT_BROWSERS:-}"
 SOURCE_ARCHIVE_URL="${PI_FORGE_SOURCE_ARCHIVE_URL:-$DEFAULT_SOURCE_ARCHIVE_URL}"
+UPSTREAM_SOURCE_ARCHIVE_URL="${PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL:-$DEFAULT_UPSTREAM_SOURCE_ARCHIVE_URL}"
 SOURCE_ARCHIVE_CHECKOUT=""
+UPSTREAM_SOURCE_ARCHIVE_CHECKOUT=""
 PACKAGE_SPEC_EXPLICIT=false
 if [[ -n "${PI_FORGE_PACKAGE_SPEC:-}" ]]; then
 	PACKAGE_SPEC="$PI_FORGE_PACKAGE_SPEC"
@@ -57,7 +60,8 @@ Options:
 Environment:
   PI_FORGE_PACKAGE_SPEC      pi-forge package spec override (default: packed GitHub source archive)
   PI_FORGE_PI_PACKAGE_SPEC   Pi CLI package spec override (default: GitHub source archive runtime packages)
-  PI_FORGE_SOURCE_ARCHIVE_URL GitHub source archive used for default pi-forge and runtime installs
+  PI_FORGE_SOURCE_ARCHIVE_URL GitHub source archive used for default pi-forge installs
+  PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL GitHub source archive used for default Pi runtime installs
 EOF
 }
 
@@ -275,6 +279,7 @@ download_file() {
 }
 
 download_source_archive() {
+	local source_archive_url="$1"
 	command -v tar >/dev/null 2>&1 || {
 		echo "pi-forge install requires tar to unpack the source archive." >&2
 		return 1
@@ -285,18 +290,18 @@ download_source_archive() {
 	local archive="$temp_dir/pi-forge.tar.gz"
 	local extract_dir="$temp_dir/source"
 	mkdir -p "$extract_dir"
-	download_file "$SOURCE_ARCHIVE_URL" "$archive"
+	download_file "$source_archive_url" "$archive"
 	tar -xzf "$archive" -C "$extract_dir"
 	local source=""
 	local entry
 	for entry in "$extract_dir"/*; do
-		if [[ -d "$entry" && -f "$entry/forge/package.json" ]]; then
+		if [[ -d "$entry" && ( -f "$entry/forge/package.json" || -f "$entry/packages/coding-agent/package.json" ) ]]; then
 			source="$entry"
 			break
 		fi
 	done
 	if [[ -z "$source" ]]; then
-		echo "Source archive did not contain a pi-forge checkout: $SOURCE_ARCHIVE_URL" >&2
+		echo "Source archive did not contain a pi or pi-forge checkout: $source_archive_url" >&2
 		return 1
 	fi
 	printf '%s\n' "$source"
@@ -304,9 +309,16 @@ download_source_archive() {
 
 source_archive_checkout() {
 	if [[ -z "$SOURCE_ARCHIVE_CHECKOUT" ]]; then
-		SOURCE_ARCHIVE_CHECKOUT="$(download_source_archive)"
+		SOURCE_ARCHIVE_CHECKOUT="$(download_source_archive "$SOURCE_ARCHIVE_URL")"
 	fi
 	printf '%s\n' "$SOURCE_ARCHIVE_CHECKOUT"
+}
+
+upstream_source_archive_checkout() {
+	if [[ -z "$UPSTREAM_SOURCE_ARCHIVE_CHECKOUT" ]]; then
+		UPSTREAM_SOURCE_ARCHIVE_CHECKOUT="$(download_source_archive "$UPSTREAM_SOURCE_ARCHIVE_URL")"
+	fi
+	printf '%s\n' "$UPSTREAM_SOURCE_ARCHIVE_CHECKOUT"
 }
 
 pack_source_archive_package_spec() {
@@ -341,8 +353,8 @@ install_pi_runtime_packages() {
 		return 0
 	fi
 	local source
-	source="$(source_archive_checkout)"
-	echo "Installing Pi runtime packages from $SOURCE_ARCHIVE_URL." >&2
+	source="$(upstream_source_archive_checkout)"
+	echo "Installing Pi runtime packages from $UPSTREAM_SOURCE_ARCHIVE_URL." >&2
 	local package_specs_output
 	package_specs_output="$(pack_source_runtime_package_specs "$source")"
 	local pi_package_specs=()
