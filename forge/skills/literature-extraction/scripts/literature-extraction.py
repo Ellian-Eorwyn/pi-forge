@@ -17,6 +17,14 @@ import forge_embeddings
 
 
 RUN_SCHEMA_VERSION = 1
+META_SCHEMA_VERSION = 1
+MAX_ALLOWED_META_CONTEXT = 256000
+DEFAULT_META_TARGET_CONTEXT = 128000
+DEFAULT_META_MAX_CONTEXT = 256000
+DEFAULT_META_BRIDGE_THRESHOLD = 0.78
+META_CLUSTER_ITEM_TYPES = ("claim", "finding", "definition", "connection")
+META_BRIDGE_ITEM_TYPES = ("claim", "finding", "definition", "connection", "quoted_evidence")
+META_ITEM_TEXT_CHARS = 2000
 
 # Cross-document claim clustering groups semantically similar claims and findings
 # across sources so the model can author agreement/disagreement synthesis with
@@ -119,6 +127,55 @@ DOCUMENTS_COLUMNS = [
     "item_count",
     "note",
 ]
+SOURCE_PROFILE_COLUMNS = [
+    "document_id",
+    "source_path",
+    "source_title",
+    "status",
+    "item_count",
+    "claim_count",
+    "finding_count",
+    "definition_count",
+    "connection_count",
+    "method_count",
+    "limitation_count",
+    "research_gap_count",
+]
+META_SOURCE_COLUMNS = [
+    "meta_source_id",
+    "corpus_label",
+    "run_directory",
+    "source_run_id",
+    "document_count",
+    "item_count",
+    "authored_deliverables",
+    "warnings",
+]
+META_BRIDGE_COLUMNS = [
+    "bridge_id",
+    "similarity",
+    "left_item_id",
+    "left_corpus_label",
+    "left_document_title",
+    "left_item_type",
+    "right_item_id",
+    "right_corpus_label",
+    "right_document_title",
+    "right_item_type",
+    "review_note",
+]
+META_TOPIC_COLUMNS = [
+    "cluster_id",
+    "cluster_size",
+    "corpus_count",
+    "is_representative",
+    "similarity_to_representative",
+    "item_id",
+    "corpus_label",
+    "source_title",
+    "item_type",
+    "item_text",
+]
 
 MARKDOWN_DELIVERABLES = {
     "literature_summary.md": [
@@ -186,6 +243,68 @@ MARKDOWN_DELIVERABLES = {
         "",
         "<!-- One entry per source document: full reference where available, plus a",
         "short annotation of scope, methods, and relevance. -->",
+        "",
+    ],
+}
+
+META_MARKDOWN_DELIVERABLES = {
+    "meta_synthesis.md": [
+        "# Meta Literature Synthesis",
+        "",
+        PLACEHOLDER,
+        "",
+        "<!-- Author from packet memos, bridge_candidates.csv, topic_clusters.csv, and meta_items.jsonl.",
+        "Every substantive claim needs item ids, source titles, corpus labels, and locators when available.",
+        "Keep primary evidence, secondary interpretation, and generated synthesis distinct. -->",
+        "",
+        "## Research Question",
+        "",
+        "## Cross-Corpus Findings",
+        "",
+        "## Agreements, Tensions, and Silences",
+        "",
+        "## Interpretive Limits",
+        "",
+    ],
+    "primary_secondary_matrix.md": [
+        "# Primary / Secondary Matrix",
+        "",
+        PLACEHOLDER,
+        "",
+        "<!-- Link primary-source evidence to secondary-source concepts. Cite item ids and locators.",
+        "If corpus labels are not literally primary/secondary, use the labels recorded in meta_sources.csv. -->",
+        "",
+        "| Primary evidence | Secondary concept | Relationship | Item ids | Locators |",
+        "|---|---|---|---|---|",
+        "",
+    ],
+    "concept_register.md": [
+        "# Concept Register",
+        "",
+        PLACEHOLDER,
+        "",
+        "<!-- Separate source-native terms from analyst/theory terms. Cite item ids and corpus labels. -->",
+        "",
+        "| Concept | Emic / etic / unclear | Definition or use | Source role | Item ids |",
+        "|---|---|---|---|---|",
+        "",
+    ],
+    "negative_cases.md": [
+        "# Negative Cases",
+        "",
+        PLACEHOLDER,
+        "",
+        "<!-- Surface contradictions, absences, failed fits, and cases that complicate the main pattern.",
+        "Do not smooth disagreements into consensus. Cite item ids. -->",
+        "",
+    ],
+    "methods_and_limits.md": [
+        "# Methods and Limits",
+        "",
+        PLACEHOLDER,
+        "",
+        "<!-- Describe corpus coverage, extraction limits, missing sources, OCR/locator limits inherited from",
+        "document-ingest, and how packeted synthesis shaped the result. Cite run and item ids where useful. -->",
         "",
     ],
 }
@@ -629,6 +748,72 @@ def write_methods_matrix(run_directory, run, results_by_id):
     return len(rows)
 
 
+def normalized_item_id(prefix, index):
+    return f"{prefix}{index:06d}"
+
+
+def estimate_tokens(text):
+    return (len(text) + 3) // 4
+
+
+def write_item_index(run_directory, run, results_by_id):
+    path = run_directory / "item_index.jsonl"
+    count = 0
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        for document in run["documents"]:
+            result = results_by_id.get(document["documentId"])
+            if not result or result.get("status") != "success":
+                continue
+            for item in result.get("items") or []:
+                count += 1
+                row = {
+                    "itemId": normalized_item_id("i", count),
+                    "documentId": document["documentId"],
+                    "sourcePath": document["sourcePath"],
+                    "sourceSha256": document["sha256"],
+                    "sourceTitle": document["title"] or "",
+                    "itemType": item["item_type"],
+                    "itemText": item["text"],
+                    "directQuotes": item.get("direct_quotes"),
+                    "locator": item.get("locator"),
+                    "interpretation": item["interpretation"],
+                    "confidence": item["confidence"],
+                    "notes": item.get("notes"),
+                }
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return count
+
+
+def write_source_profile(run_directory, run, results_by_id):
+    rows = []
+    for document in run["documents"]:
+        result = results_by_id.get(document["documentId"])
+        status = result.get("status", "pending") if result else "pending"
+        items = result.get("items") if result and result.get("status") == "success" else []
+        counts = Counter(item["item_type"] for item in items or [])
+        rows.append(
+            [
+                document["documentId"],
+                document["sourcePath"],
+                document["title"] or "",
+                status,
+                len(items or []),
+                counts["claim"],
+                counts["finding"],
+                counts["definition"],
+                counts["connection"],
+                counts["method"],
+                counts["limitation"],
+                counts["research_gap"],
+            ]
+        )
+    with (run_directory / "source_profile.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(SOURCE_PROFILE_COLUMNS)
+        writer.writerows(rows)
+    return len(rows)
+
+
 def scaffold_markdown(run_directory):
     created = []
     for name, lines in MARKDOWN_DELIVERABLES.items():
@@ -827,6 +1012,733 @@ def compute_claim_clusters(run_directory, run, results_by_id, args):
     return info
 
 
+def is_literature_run_directory(path):
+    return (
+        path.is_dir()
+        and (path / "run_config.json").is_file()
+        and (path / "extraction_results.jsonl").is_file()
+        and (path / "evidence_table.csv").is_file()
+    )
+
+
+def discover_literature_runs(path):
+    root = Path(path).expanduser().resolve()
+    if not root.exists():
+        fail(f"meta input does not exist: {root}")
+    if is_literature_run_directory(root):
+        return [root]
+    if not root.is_dir():
+        fail(f"meta input is not a literature run or directory: {root}")
+    runs = []
+    for config_path in sorted(root.rglob("run_config.json")):
+        candidate = config_path.parent
+        if is_literature_run_directory(candidate):
+            runs.append(candidate)
+    if not runs:
+        fail(f"no completed literature-extraction runs found under {root}")
+    return runs
+
+
+def infer_corpus_label(path):
+    resolved = Path(path).expanduser().resolve()
+    if resolved.name == "Literature-Extraction" and resolved.parent.name:
+        return resolved.parent.name
+    if resolved.name.startswith("literature") and resolved.parent.name:
+        return resolved.parent.name
+    return resolved.name or "corpus"
+
+
+def parse_group_specs(raw_groups):
+    groups = []
+    for raw in raw_groups or []:
+        if "=" not in raw:
+            fail("--group must use label=path")
+        label, raw_path = raw.split("=", 1)
+        label = label.strip()
+        if not label:
+            fail("--group requires a nonblank label")
+        groups.append((label, raw_path.strip()))
+    return groups
+
+
+def read_research_question(raw_value):
+    candidate = Path(raw_value).expanduser()
+    if candidate.is_file():
+        return read_text(candidate).strip()
+    return raw_value.strip()
+
+
+def authored_deliverable_count(run_directory):
+    count = 0
+    for name in MARKDOWN_DELIVERABLES:
+        path = run_directory / name
+        if path.is_file() and PLACEHOLDER not in path.read_text(encoding="utf-8"):
+            count += 1
+    return count
+
+
+def quote_probe(source_path, direct_quotes):
+    if blank(source_path):
+        return {"sourceAvailable": False, "sourceHashStatus": "missing", "quoteVerified": "", "sourceSnippet": None}
+    source = Path(source_path)
+    if not source.is_file():
+        return {"sourceAvailable": False, "sourceHashStatus": "missing", "quoteVerified": "", "sourceSnippet": None}
+    if blank(direct_quotes):
+        return {"sourceAvailable": True, "sourceHashStatus": "unchecked", "quoteVerified": "", "sourceSnippet": None}
+    try:
+        text = source.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return {"sourceAvailable": True, "sourceHashStatus": "unreadable", "quoteVerified": "false", "sourceSnippet": None}
+    needle = str(direct_quotes).strip().splitlines()[0].strip()
+    if len(needle) > 240:
+        needle = needle[:240]
+    if not needle:
+        return {"sourceAvailable": True, "sourceHashStatus": "unchecked", "quoteVerified": "", "sourceSnippet": None}
+    position = text.find(needle)
+    if position < 0:
+        return {"sourceAvailable": True, "sourceHashStatus": "unchecked", "quoteVerified": "false", "sourceSnippet": None}
+    start = max(0, position - 240)
+    end = min(len(text), position + len(needle) + 240)
+    snippet = text[start:end].replace("\n", " ").strip()
+    return {"sourceAvailable": True, "sourceHashStatus": "unchecked", "quoteVerified": "true", "sourceSnippet": snippet}
+
+
+def run_source_id(run_directory):
+    digest = hashlib.sha256(str(run_directory).encode("utf-8")).hexdigest()
+    return f"run-{digest[:12]}"
+
+
+def collect_meta_source(run_directory, corpus_label, meta_source_id, item_start):
+    run = load_run(run_directory)
+    results = load_results(run_directory, strict=False)
+    results_by_id = {result.get("documentId"): result for result in results}
+    warnings = []
+    order = document_order(run)
+    missing = [document_id for document_id in order if document_id not in results_by_id]
+    if missing:
+        warnings.append(f"incomplete run: {len(missing)} documents missing dispositions")
+    authored_count = authored_deliverable_count(run_directory)
+    if authored_count < len(MARKDOWN_DELIVERABLES):
+        warnings.append("not all first-pass Markdown deliverables are authored")
+
+    source_run_id = run_source_id(run_directory)
+    items = []
+    item_index = item_start
+    for document in run["documents"]:
+        result = results_by_id.get(document["documentId"])
+        if not result or result.get("status") != "success":
+            continue
+        for item in result.get("items") or []:
+            item_index += 1
+            probe = quote_probe(document["sourcePath"], item.get("direct_quotes"))
+            if not probe["sourceAvailable"]:
+                warnings.append(f"source missing for {document['documentId']}: {document['sourcePath']}")
+            items.append(
+                {
+                    "itemId": normalized_item_id("m", item_index),
+                    "metaSourceId": meta_source_id,
+                    "sourceRunId": source_run_id,
+                    "runDirectory": str(run_directory),
+                    "corpusLabel": corpus_label,
+                    "documentId": document["documentId"],
+                    "sourcePath": document["sourcePath"],
+                    "sourceSha256": document.get("sha256", ""),
+                    "sourceTitle": document.get("title") or Path(document["sourcePath"]).stem,
+                    "itemType": item.get("item_type"),
+                    "itemText": item.get("text") or "",
+                    "directQuotes": item.get("direct_quotes"),
+                    "locator": item.get("locator"),
+                    "interpretation": item.get("interpretation"),
+                    "confidence": item.get("confidence"),
+                    "notes": item.get("notes"),
+                    "quoteVerified": probe["quoteVerified"],
+                    "sourceAvailable": probe["sourceAvailable"],
+                    "sourceSnippet": probe["sourceSnippet"],
+                    "questionScore": "",
+                }
+            )
+    source = {
+        "metaSourceId": meta_source_id,
+        "corpusLabel": corpus_label,
+        "runDirectory": str(run_directory),
+        "sourceRunId": source_run_id,
+        "documentCount": len(run["documents"]),
+        "itemCount": len(items),
+        "authoredDeliverables": authored_count,
+        "warnings": sorted(set(warnings)),
+    }
+    return source, items
+
+
+def write_meta_sources_csv(run_directory, sources):
+    with (run_directory / "meta_sources.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(META_SOURCE_COLUMNS)
+        for source in sources:
+            writer.writerow(
+                [
+                    source["metaSourceId"],
+                    source["corpusLabel"],
+                    source["runDirectory"],
+                    source["sourceRunId"],
+                    source["documentCount"],
+                    source["itemCount"],
+                    source["authoredDeliverables"],
+                    "; ".join(source["warnings"]),
+                ]
+            )
+
+
+def write_meta_items(run_directory, items):
+    with (run_directory / "meta_items.jsonl").open("w", encoding="utf-8", newline="") as handle:
+        for item in items:
+            handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+
+def load_meta_items(run_directory):
+    path = run_directory / "meta_items.jsonl"
+    if not path.is_file():
+        fail(f"meta_items.jsonl is missing: {path}")
+    items = []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            items.append(json.loads(line))
+        except json.JSONDecodeError as error:
+            fail(f"invalid JSON on meta_items.jsonl line {line_number}: {error}")
+    return items
+
+
+def write_empty_meta_embedding_artifacts(run_directory):
+    with (run_directory / "bridge_candidates.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(META_BRIDGE_COLUMNS)
+    with (run_directory / "topic_clusters.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(META_TOPIC_COLUMNS)
+
+
+def compute_meta_embedding_artifacts(run_directory, research_question, items, embeddings_url):
+    info = {
+        "enabled": False,
+        "reason": None,
+        "embeddedItems": 0,
+        "topicClusters": 0,
+        "bridgeCandidates": 0,
+    }
+    embeddable = [
+        item
+        for item in items
+        if item.get("itemType") in META_CLUSTER_ITEM_TYPES and not blank(item.get("itemText"))
+    ]
+    if not embeddable:
+        info["reason"] = "no embeddable meta items"
+        write_empty_meta_embedding_artifacts(run_directory)
+        return info
+    result = forge_embeddings.embed_texts(
+        [research_question] + [item["itemText"][:META_ITEM_TEXT_CHARS] for item in embeddable],
+        url=embeddings_url,
+    )
+    if not result["ok"]:
+        info["reason"] = f"embeddings endpoint unavailable: {result['reason']}"
+        write_empty_meta_embedding_artifacts(run_directory)
+        return info
+    vectors = [forge_embeddings.normalize(vector) for vector in result["vectors"]]
+    question_vector = vectors[0]
+    item_vectors = vectors[1:]
+    vector_by_item = {}
+    for item, vector in zip(embeddable, item_vectors):
+        item["questionScore"] = f"{forge_embeddings.cosine(question_vector, vector):.3f}"
+        vector_by_item[item["itemId"]] = vector
+
+    components = forge_embeddings.cluster_components(item_vectors, DEFAULT_CLAIM_CLUSTER_THRESHOLD)
+    topic_rows = []
+    for cluster_index, component in enumerate(sorted(components, key=lambda part: min(part)), start=1):
+        cluster_id = f"t{cluster_index}"
+        representative_position = min(component)
+        representative_vector = item_vectors[representative_position]
+        corpus_count = len({embeddable[position]["corpusLabel"] for position in component})
+        for position in sorted(component, key=lambda value: (embeddable[value]["corpusLabel"], embeddable[value]["itemId"])):
+            item = embeddable[position]
+            topic_rows.append(
+                {
+                    "cluster_id": cluster_id,
+                    "cluster_size": len(component),
+                    "corpus_count": corpus_count,
+                    "is_representative": "true" if position == representative_position else "false",
+                    "similarity_to_representative": f"{forge_embeddings.cosine(item_vectors[position], representative_vector):.3f}",
+                    "item_id": item["itemId"],
+                    "corpus_label": item["corpusLabel"],
+                    "source_title": item["sourceTitle"],
+                    "item_type": item["itemType"],
+                    "item_text": item["itemText"],
+                }
+            )
+    with (run_directory / "topic_clusters.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=META_TOPIC_COLUMNS)
+        writer.writeheader()
+        writer.writerows(topic_rows)
+
+    bridge_rows = []
+    bridge_index = 0
+    for left_index, left in enumerate(embeddable):
+        if left.get("itemType") not in META_BRIDGE_ITEM_TYPES:
+            continue
+        for right in embeddable[left_index + 1 :]:
+            if right.get("itemType") not in META_BRIDGE_ITEM_TYPES:
+                continue
+            if left["corpusLabel"] == right["corpusLabel"]:
+                continue
+            similarity = forge_embeddings.cosine(vector_by_item[left["itemId"]], vector_by_item[right["itemId"]])
+            if similarity < DEFAULT_META_BRIDGE_THRESHOLD:
+                continue
+            bridge_index += 1
+            bridge_rows.append(
+                {
+                    "bridge_id": f"b{bridge_index:04d}",
+                    "similarity": f"{similarity:.3f}",
+                    "left_item_id": left["itemId"],
+                    "left_corpus_label": left["corpusLabel"],
+                    "left_document_title": left["sourceTitle"],
+                    "left_item_type": left["itemType"],
+                    "right_item_id": right["itemId"],
+                    "right_corpus_label": right["corpusLabel"],
+                    "right_document_title": right["sourceTitle"],
+                    "right_item_type": right["itemType"],
+                    "review_note": "candidate cross-corpus connection; verify against evidence before synthesis",
+                }
+            )
+    bridge_rows.sort(key=lambda row: (-float(row["similarity"]), row["left_item_id"], row["right_item_id"]))
+    bridge_rows = bridge_rows[:200]
+    with (run_directory / "bridge_candidates.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=META_BRIDGE_COLUMNS)
+        writer.writeheader()
+        writer.writerows(bridge_rows)
+
+    cache_directory = run_directory / "working"
+    cache_directory.mkdir(exist_ok=True)
+    cache = {
+        "model": result["model"],
+        "url": result["url"],
+        "dimensions": result["dimensions"],
+        "items": [
+            {"itemId": item["itemId"], "vector": vector_by_item[item["itemId"]]}
+            for item in embeddable
+        ],
+    }
+    (cache_directory / "embedding_cache.json").write_text(json.dumps(cache, ensure_ascii=False) + "\n", encoding="utf-8")
+    info.update(
+        {
+            "enabled": True,
+            "embeddedItems": len(embeddable),
+            "topicClusters": len(components),
+            "bridgeCandidates": len(bridge_rows),
+            "model": result["model"],
+            "url": result["url"],
+        }
+    )
+    return info
+
+
+def balanced_meta_items(items):
+    type_order = list(META_BRIDGE_ITEM_TYPES) + [
+        "method",
+        "data_source",
+        "limitation",
+        "research_gap",
+        "author",
+        "citation",
+        "variable",
+        "population",
+        "technology",
+        "policy",
+    ]
+    buckets = defaultdict(list)
+    for item in items:
+        buckets[(item["corpusLabel"], item.get("itemType") or "")].append(item)
+    for key in buckets:
+        buckets[key].sort(key=lambda item: (-(float(item["questionScore"]) if item.get("questionScore") else 0.0), item["itemId"]))
+    ordered = []
+    labels = sorted({item["corpusLabel"] for item in items})
+    remaining = sum(len(values) for values in buckets.values())
+    while remaining:
+        progressed = False
+        for label in labels:
+            seen_types = set(type_order)
+            item_types = type_order + sorted({key[1] for key in buckets if key[0] == label and key[1] not in seen_types})
+            for item_type in item_types:
+                bucket = buckets.get((label, item_type))
+                if not bucket:
+                    continue
+                ordered.append(bucket.pop(0))
+                remaining -= 1
+                progressed = True
+        if not progressed:
+            break
+    return ordered
+
+
+def render_meta_item(item):
+    text = (item.get("itemText") or "").replace("\n", " ").strip()
+    quote = (item.get("directQuotes") or item.get("sourceSnippet") or "").replace("\n", " ").strip()
+    if len(text) > 1000:
+        text = text[:997] + "..."
+    if len(quote) > 500:
+        quote = quote[:497] + "..."
+    parts = [
+        f"- item:{item['itemId']}",
+        f"corpus:{item['corpusLabel']}",
+        f"type:{item.get('itemType')}",
+        f"source:{item.get('sourceTitle') or item.get('documentId')}",
+        f"locator:{item.get('locator') or 'unknown'}",
+        f"interpretation:{item.get('interpretation')}",
+        f"confidence:{item.get('confidence')}",
+        f"text:{text}",
+    ]
+    if quote:
+        parts.append(f"quote_or_snippet:{quote}")
+    if item.get("quoteVerified"):
+        parts.append(f"quote_verified:{item['quoteVerified']}")
+    return " | ".join(parts)
+
+
+def write_meta_packets(run_directory, research_question, items, target_context, max_context):
+    packets_directory = run_directory / "packets"
+    packets_directory.mkdir()
+    header = "\n".join(
+        [
+            "# Meta Literature Extraction Packet",
+            "",
+            f"Research question: {research_question}",
+            "",
+            "Use this bounded packet with meta_items.jsonl, bridge_candidates.csv, and topic_clusters.csv.",
+            "Write a memo that cites item ids for every substantive analytic claim.",
+            "Preserve corpus roles, disagreements, silences, and limits; do not reconcile conflicts silently.",
+            "",
+            "## Evidence Items",
+            "",
+        ]
+    )
+    ordered = balanced_meta_items(items)
+    packets = []
+    current_lines = [header]
+    current_items = []
+
+    def flush_packet():
+        if not current_items:
+            return
+        packet_id = f"packet-{len(packets) + 1:04d}"
+        content = "\n".join(current_lines).rstrip() + "\n"
+        token_count = estimate_tokens(content)
+        if token_count > max_context:
+            fail(f"{packet_id} exceeds --max-context after truncation estimate: {token_count}")
+        path = packets_directory / f"{packet_id}.md"
+        path.write_text(content, encoding="utf-8")
+        packets.append(
+            {
+                "packetId": packet_id,
+                "path": str(path),
+                "itemCount": len(current_items),
+                "estimatedTokens": token_count,
+                "itemIds": list(current_items),
+            }
+        )
+
+    for item in ordered:
+        line = render_meta_item(item)
+        candidate = "\n".join(current_lines + [line]).rstrip() + "\n"
+        if current_items and estimate_tokens(candidate) > target_context:
+            flush_packet()
+            current_lines = [header]
+            current_items = []
+        current_lines.append(line)
+        current_items.append(item["itemId"])
+    flush_packet()
+    if not packets:
+        fail("no meta packets were generated")
+    return packets
+
+
+def load_meta_config(run_directory):
+    try:
+        config = json.loads((run_directory / "meta_config.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"could not read meta_config.json: {error}")
+    if config.get("schemaVersion") != META_SCHEMA_VERSION:
+        fail(f"unsupported meta schema version: {config.get('schemaVersion')}")
+    return config
+
+
+def require_meta_run_directory(raw_path):
+    path = Path(raw_path).expanduser().resolve()
+    if not path.is_dir():
+        fail(f"meta run directory does not exist: {path}")
+    if not (path / "meta_config.json").is_file():
+        fail(f"meta_config.json is missing: {path}")
+    return path
+
+
+def load_packet_memos(run_directory, strict=True):
+    path = run_directory / "packet_memos.jsonl"
+    if not path.is_file():
+        fail(f"packet_memos.jsonl is missing: {path}")
+    memos = []
+    seen = set()
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            memo = json.loads(line)
+        except json.JSONDecodeError as error:
+            fail(f"invalid JSON on packet_memos.jsonl line {line_number}: {error}")
+        packet_id = memo.get("packetId")
+        if strict and packet_id in seen:
+            fail(f"duplicate memo for packet {packet_id}")
+        seen.add(packet_id)
+        memos.append(memo)
+    return memos
+
+
+def next_pending_packet(config, memos):
+    recorded = {memo.get("packetId") for memo in memos}
+    for packet in config.get("packets", []):
+        if packet["packetId"] not in recorded:
+            return packet
+    return None
+
+
+def command_meta_init(args):
+    if args.max_context > MAX_ALLOWED_META_CONTEXT:
+        fail(f"--max-context cannot exceed {MAX_ALLOWED_META_CONTEXT}")
+    if args.target_context > args.max_context:
+        fail("--target-context must be less than or equal to --max-context")
+    research_question = read_research_question(args.research_question)
+    if not research_question:
+        fail("--research-question is required and cannot be blank")
+    output = require_new_directory(args.output)
+    (output / "working").mkdir()
+    groups = parse_group_specs(args.group)
+    for raw_input in args.inputs:
+        groups.append((infer_corpus_label(raw_input), raw_input))
+    if not groups:
+        fail("meta-init requires at least one input path or --group label=path")
+
+    sources = []
+    items = []
+    source_index = 0
+    for corpus_label, raw_path in groups:
+        for run_directory in discover_literature_runs(raw_path):
+            source_index += 1
+            source, source_items = collect_meta_source(
+                run_directory,
+                corpus_label,
+                f"s{source_index:04d}",
+                len(items),
+            )
+            sources.append(source)
+            items.extend(source_items)
+    if not items:
+        fail("meta-init found no successful extracted items in the supplied runs")
+
+    embedding_info = compute_meta_embedding_artifacts(output, research_question, items, args.embeddings_url)
+    write_meta_items(output, items)
+    write_meta_sources_csv(output, sources)
+    packets = write_meta_packets(output, research_question, items, args.target_context, args.max_context)
+    warnings = sorted({warning for source in sources for warning in source["warnings"]})
+    if embedding_info.get("reason"):
+        warnings.append(embedding_info["reason"])
+    context_budget = {
+        "targetContext": args.target_context,
+        "maxContext": args.max_context,
+        "estimatedTokensMethod": "ceil(characters / 4)",
+        "packetCount": len(packets),
+        "packets": packets,
+        "warnings": warnings,
+    }
+    (output / "context_budget.json").write_text(json.dumps(context_budget, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    config = {
+        "schemaVersion": META_SCHEMA_VERSION,
+        "createdAt": utc_now(),
+        "researchQuestion": research_question,
+        "targetContext": args.target_context,
+        "maxContext": args.max_context,
+        "sources": sources,
+        "packets": packets,
+        "embeddingInfo": embedding_info,
+    }
+    (output / "meta_config.json").write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    (output / "packet_memos.jsonl").write_text("", encoding="utf-8")
+    print(
+        json.dumps(
+            {
+                "metaRunDirectory": str(output),
+                "sources": len(sources),
+                "items": len(items),
+                "packets": len(packets),
+                "embeddingInfo": embedding_info,
+                "warnings": warnings,
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+def command_meta_next(args):
+    run_directory = require_meta_run_directory(args.run_directory)
+    config = load_meta_config(run_directory)
+    memos = load_packet_memos(run_directory)
+    packet = next_pending_packet(config, memos)
+    total = len(config.get("packets", []))
+    if packet is None:
+        print(json.dumps({"complete": True, "processed": len(memos), "total": total}))
+        return
+    print(
+        json.dumps(
+            {
+                "complete": False,
+                "packetId": packet["packetId"],
+                "packetPath": packet["path"],
+                "estimatedTokens": packet["estimatedTokens"],
+                "itemCount": packet["itemCount"],
+                "researchQuestion": config["researchQuestion"],
+                "progress": {"processed": len(memos), "total": total},
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+def command_meta_record(args):
+    run_directory = require_meta_run_directory(args.run_directory)
+    config = load_meta_config(run_directory)
+    memos = load_packet_memos(run_directory)
+    expected = next_pending_packet(config, memos)
+    if expected is None:
+        fail("the meta run is already complete")
+    if args.packet_id != expected["packetId"]:
+        fail(f"packets must be recorded sequentially; expected {expected['packetId']}, received {args.packet_id}")
+    memo_path = Path(args.memo_file).expanduser().resolve()
+    if not memo_path.is_file():
+        fail(f"memo file does not exist: {memo_path}")
+    memo_text = read_text(memo_path).strip()
+    if not memo_text:
+        fail("memo file cannot be blank")
+    record = {
+        "packetId": args.packet_id,
+        "memoPath": str(memo_path),
+        "memoText": memo_text,
+        "recordedAt": utc_now(),
+    }
+    with (run_directory / "packet_memos.jsonl").open("a", encoding="utf-8", newline="") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    remaining = len(config.get("packets", [])) - len(memos) - 1
+    print(json.dumps({"recorded": args.packet_id, "remaining": remaining}))
+
+
+def scaffold_meta_markdown(run_directory):
+    created = []
+    for name, lines in META_MARKDOWN_DELIVERABLES.items():
+        path = run_directory / name
+        if path.exists():
+            continue
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        created.append(name)
+    return created
+
+
+def command_meta_build(args):
+    run_directory = require_meta_run_directory(args.run_directory)
+    config = load_meta_config(run_directory)
+    memos = load_packet_memos(run_directory)
+    pending = next_pending_packet(config, memos)
+    if pending is not None:
+        fail(f"meta run is incomplete; next pending packet is {pending['packetId']}")
+    created = scaffold_meta_markdown(run_directory)
+    print(json.dumps({"packetMemos": len(memos), "scaffolded": created}))
+
+
+def command_meta_validate(args):
+    run_directory = require_meta_run_directory(args.run_directory)
+    config = load_meta_config(run_directory)
+    items = load_meta_items(run_directory)
+    memos = load_packet_memos(run_directory, strict=False)
+    errors = []
+    warnings = []
+    item_ids = {item["itemId"] for item in items}
+    packet_ids = [packet["packetId"] for packet in config.get("packets", [])]
+    memo_ids = [memo.get("packetId") for memo in memos]
+    valid_packet_ids = set(packet_ids)
+    for memo_id in memo_ids:
+        if memo_id not in valid_packet_ids:
+            errors.append(f"memo references unknown packet {memo_id}")
+    duplicates = sorted(value for value, count in Counter(memo_ids).items() if count > 1)
+    if duplicates:
+        errors.append(f"duplicate memos for packets: {', '.join(str(value) for value in duplicates)}")
+    if memo_ids != packet_ids[: len(memo_ids)]:
+        errors.append("packet memos are not in packet order")
+    missing = [packet_id for packet_id in packet_ids if packet_id not in set(memo_ids)]
+    if missing:
+        errors.append(f"meta run is incomplete; {len(missing)} packets remain, beginning with {missing[0]}")
+    for required in ("meta_sources.csv", "meta_items.jsonl", "context_budget.json", "bridge_candidates.csv", "topic_clusters.csv"):
+        if not (run_directory / required).is_file():
+            errors.append(f"meta artifact is missing: {required}")
+    for source in config.get("sources", []):
+        for warning in source.get("warnings", []):
+            warnings.append(f"{source['metaSourceId']}: {warning}")
+    for item in items:
+        if not item.get("sourceAvailable", True):
+            warnings.append(f"source unavailable for {item['itemId']}: {item.get('sourcePath')}")
+    if not missing:
+        for required in META_MARKDOWN_DELIVERABLES:
+            path = run_directory / required
+            if not path.is_file():
+                errors.append(f"meta deliverable is missing: {required}; run meta-build")
+                continue
+            text = path.read_text(encoding="utf-8")
+            if PLACEHOLDER in text:
+                errors.append(f"meta deliverable still has an unresolved placeholder: {required}")
+            elif item_ids and not any(re.search(r"\b" + re.escape(item_id) + r"\b", text) for item_id in item_ids):
+                errors.append(f"meta deliverable has no item citation: {required}")
+    result = {
+        "valid": not errors,
+        "complete": not missing,
+        "packets": {"total": len(packet_ids), "recorded": len(memos)},
+        "items": len(items),
+        "errors": errors,
+        "warnings": sorted(set(warnings)),
+    }
+    if args.fix_hints:
+        result["issues"] = [meta_validation_issue(error) for error in errors]
+    print(json.dumps(result, indent=2))
+    if errors:
+        raise SystemExit(1)
+
+
+def meta_validation_issue(message):
+    if "unresolved placeholder" in message:
+        return {
+            "code": "meta_deliverable_unreviewed",
+            "message": message,
+            "command": "Author the scaffolded meta Markdown from packet memos, bridge candidates, topic clusters, and meta items.",
+        }
+    if "no item citation" in message:
+        return {
+            "code": "meta_deliverable_uncited",
+            "message": message,
+            "command": "Cite item ids such as m000001 in every substantive meta synthesis deliverable.",
+        }
+    if "incomplete" in message:
+        return {
+            "code": "meta_packets_incomplete",
+            "message": message,
+            "command": "Call meta-next, author a packet memo, then record it with meta-record until complete.",
+        }
+    return {"code": "meta_validation_error", "message": message}
+
+
 def command_build(args):
     run_directory = require_run_directory(args.run_directory)
     run = load_run(run_directory)
@@ -840,6 +1752,8 @@ def command_build(args):
     results_by_id = {result["documentId"]: result for result in results}
     evidence_rows = write_evidence_table(run_directory, run, results_by_id)
     method_rows = write_methods_matrix(run_directory, run, results_by_id)
+    indexed_items = write_item_index(run_directory, run, results_by_id)
+    profiled_sources = write_source_profile(run_directory, run, results_by_id)
     claim_clusters = compute_claim_clusters(run_directory, run, results_by_id, args)
     created = scaffold_markdown(run_directory)
     write_documents_csv(run_directory, run["documents"], results_by_id)
@@ -849,6 +1763,8 @@ def command_build(args):
             {
                 "evidenceItems": evidence_rows,
                 "methodsRows": method_rows,
+                "indexedItems": indexed_items,
+                "profiledSources": profiled_sources,
                 "scaffolded": created,
                 "claimClusters": claim_clusters,
                 "success": counts["success"],
@@ -1022,6 +1938,54 @@ def parser():
     validate.add_argument("--fix-hints", action="store_true", help="Include machine-readable repair hints.")
     validate.add_argument("--json", action="store_true", help="Accepted for symmetry; output is always JSON.")
     validate.set_defaults(handler=command_validate)
+
+    meta_init = subparsers.add_parser("meta-init", help="Initialize a context-bounded meta extraction run over prior literature runs.")
+    meta_init.add_argument("inputs", nargs="*", help="Prior literature run directories or parent folders containing prior runs.")
+    meta_init.add_argument("--output", required=True)
+    meta_init.add_argument("--research-question", required=True, help="Research question text, or a path to a UTF-8 text file.")
+    meta_init.add_argument(
+        "--group",
+        action="append",
+        default=[],
+        help="Explicit corpus label and path as label=path. May be repeated.",
+    )
+    meta_init.add_argument(
+        "--target-context",
+        type=int,
+        default=DEFAULT_META_TARGET_CONTEXT,
+        help="Target maximum estimated tokens per packet using ceil(characters / 4).",
+    )
+    meta_init.add_argument(
+        "--max-context",
+        type=int,
+        default=DEFAULT_META_MAX_CONTEXT,
+        help=f"Hard packet ceiling. Must be <= {MAX_ALLOWED_META_CONTEXT}.",
+    )
+    meta_init.add_argument(
+        "--embeddings-url",
+        help="Override the embeddings endpoint (default FORGE_EMBEDDINGS_URL or http://llms:8005/v1/embeddings).",
+    )
+    meta_init.set_defaults(handler=command_meta_init)
+
+    meta_next = subparsers.add_parser("meta-next", help="Return exactly one pending meta packet as JSON.")
+    meta_next.add_argument("run_directory")
+    meta_next.set_defaults(handler=command_meta_next)
+
+    meta_record = subparsers.add_parser("meta-record", help="Append one model-authored packet memo.")
+    meta_record.add_argument("run_directory")
+    meta_record.add_argument("--packet-id", required=True)
+    meta_record.add_argument("--memo-file", required=True)
+    meta_record.set_defaults(handler=command_meta_record)
+
+    meta_build = subparsers.add_parser("meta-build", help="Scaffold meta synthesis deliverables after all packet memos are recorded.")
+    meta_build.add_argument("run_directory")
+    meta_build.set_defaults(handler=command_meta_build)
+
+    meta_validate = subparsers.add_parser("meta-validate", help="Validate meta run state, packet memos, provenance warnings, and authored deliverables.")
+    meta_validate.add_argument("run_directory")
+    meta_validate.add_argument("--fix-hints", action="store_true", help="Include machine-readable repair hints.")
+    meta_validate.add_argument("--json", action="store_true", help="Accepted for symmetry; output is always JSON.")
+    meta_validate.set_defaults(handler=command_meta_validate)
     return root
 
 

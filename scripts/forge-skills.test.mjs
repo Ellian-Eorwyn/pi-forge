@@ -1406,6 +1406,8 @@ test("literature extraction rejects scaffolds and accepts authored deliverables"
 		assert.match(readFileSync(join(runDirectory, "evidence_table.csv"), "utf8"), /connection/);
 		assert.match(readFileSync(join(runDirectory, "evidence_table.csv"), "utf8"), /author/);
 		assert.equal(existsSync(join(runDirectory, "evidence_table.xlsx")), false);
+		assert.match(readFileSync(join(runDirectory, "item_index.jsonl"), "utf8"), /"itemId": "i000001"/);
+		assert.match(readFileSync(join(runDirectory, "source_profile.csv"), "utf8"), /claim_count,finding_count,definition_count/);
 		assert.equal(existsSync(join(runDirectory, "key_terms.md")), true);
 		runFailure(
 			python,
@@ -1537,6 +1539,146 @@ test("literature extraction clusters claims across documents", async () => {
 				jsonOutput(run(python, [script("literature-extraction", "literature-extraction.py"), "validate", runDirectory])).valid,
 				true,
 			);
+		} finally {
+			await server.close();
+		}
+	});
+});
+
+test("literature meta extraction packets completed prior runs", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const server = await startEmbeddingsFixture(workspace);
+
+		function createCompletedLiteratureRun(label, sourceText, items) {
+			const sourceDirectory = join(workspace, `${label}-sources`);
+			mkdirSync(sourceDirectory);
+			const sourcePath = join(sourceDirectory, `${label}.md`);
+			writeFileSync(sourcePath, `# ${label}\n\n${sourceText}\n`);
+			const runDirectory = join(workspace, `${label}-run`);
+			run(python, [script("literature-extraction", "literature-extraction.py"), "init", sourceDirectory, "--output", runDirectory]);
+			const pending = jsonOutput(run(python, [script("literature-extraction", "literature-extraction.py"), "next", runDirectory]));
+			const extractionPath = join(runDirectory, "working", `${label}-items.json`);
+			writeFileSync(extractionPath, `${JSON.stringify(items)}\n`);
+			run(python, [
+				script("literature-extraction", "literature-extraction.py"),
+				"record",
+				runDirectory,
+				"--doc-id",
+				pending.documentId,
+				"--extraction-file",
+				extractionPath,
+			]);
+			run(python, [script("literature-extraction", "literature-extraction.py"), "build", runDirectory, "--no-claim-clusters"]);
+			authorFiles(runDirectory, ["literature_summary.md", "claims_matrix.md", "key_terms.md", "research_gaps.md", "citation_notes.md"]);
+			assert.equal(jsonOutput(run(python, [script("literature-extraction", "literature-extraction.py"), "validate", runDirectory])).valid, true);
+			return { runDirectory, sourcePath };
+		}
+
+		try {
+			const primary = createCompletedLiteratureRun("primary", "Archive labor shapes memory through daily record keeping.", [
+				{
+					item_type: "claim",
+					text: "Archive labor shapes memory through daily record keeping.",
+					direct_quotes: "Archive labor shapes memory",
+					locator: "primary",
+					interpretation: "explicit",
+					confidence: "high",
+					notes: null,
+				},
+				{
+					item_type: "quoted_evidence",
+					text: "Daily record keeping is described as archive labor.",
+					direct_quotes: "daily record keeping",
+					locator: "primary",
+					interpretation: "explicit",
+					confidence: "high",
+					notes: null,
+				},
+			]);
+			const secondary = createCompletedLiteratureRun("secondary", "Archive labor shapes memory as a theory of record keeping.", [
+				{
+					item_type: "definition",
+					text: "Archive labor is a theory for how record keeping shapes memory.",
+					direct_quotes: "Archive labor shapes memory",
+					locator: "secondary",
+					interpretation: "explicit",
+					confidence: "high",
+					notes: null,
+				},
+				{
+					item_type: "claim",
+					text: "Archive labor shapes memory through record keeping concepts.",
+					direct_quotes: "record keeping",
+					locator: "secondary",
+					interpretation: "explicit",
+					confidence: "high",
+					notes: null,
+				},
+			]);
+			rmSync(primary.sourcePath);
+
+			const metaRun = join(workspace, "meta-run");
+			const initialized = jsonOutput(
+				runWithEnvironment(
+					python,
+					[
+						script("literature-extraction", "literature-extraction.py"),
+						"meta-init",
+						"--group",
+						`primary=${primary.runDirectory}`,
+						"--group",
+						`secondary=${secondary.runDirectory}`,
+						"--research-question",
+						"How do secondary concepts explain primary archive labor?",
+						"--target-context",
+						"220",
+						"--max-context",
+						"1000",
+						"--output",
+						metaRun,
+					],
+					{ FORGE_EMBEDDINGS_URL: server.url, FORGE_EMBEDDINGS_MODEL: "stub" },
+				),
+			);
+			assert.equal(initialized.sources, 2);
+			assert.equal(initialized.items, 4);
+			assert.equal(initialized.embeddingInfo.enabled, true);
+			assert.match(readFileSync(join(metaRun, "bridge_candidates.csv"), "utf8"), /b0001/);
+			assert.match(readFileSync(join(metaRun, "topic_clusters.csv"), "utf8"), /m000001/);
+			assert.equal(existsSync(join(metaRun, "working", "embedding_cache.json")), true);
+			const budget = JSON.parse(readFileSync(join(metaRun, "context_budget.json"), "utf8"));
+			assert.ok(budget.packets.length > 1);
+			assert.ok(budget.packets.every((packet) => packet.estimatedTokens <= 220));
+
+			while (true) {
+				const next = jsonOutput(run(python, [script("literature-extraction", "literature-extraction.py"), "meta-next", metaRun]));
+				if (next.complete) break;
+				const memoPath = join(metaRun, "working", `${next.packetId}-memo.md`);
+				writeFileSync(memoPath, `Memo for ${next.packetId}. Cites m000001 and m000003 for the analytic link.\n`);
+				run(python, [
+					script("literature-extraction", "literature-extraction.py"),
+					"meta-record",
+					metaRun,
+					"--packet-id",
+					next.packetId,
+					"--memo-file",
+					memoPath,
+				]);
+			}
+			run(python, [script("literature-extraction", "literature-extraction.py"), "meta-build", metaRun]);
+			runFailure(python, [script("literature-extraction", "literature-extraction.py"), "meta-validate", metaRun], /unresolved placeholder/);
+			for (const name of ["meta_synthesis.md", "primary_secondary_matrix.md", "concept_register.md", "negative_cases.md", "methods_and_limits.md"]) {
+				const path = join(metaRun, name);
+				writeFileSync(path, readFileSync(path, "utf8").replace(placeholder, "Authored synthesis without item support."));
+			}
+			runFailure(python, [script("literature-extraction", "literature-extraction.py"), "meta-validate", metaRun], /no item citation/);
+			for (const name of ["meta_synthesis.md", "primary_secondary_matrix.md", "concept_register.md", "negative_cases.md", "methods_and_limits.md"]) {
+				const path = join(metaRun, name);
+				writeFileSync(path, readFileSync(path, "utf8").replace("Authored synthesis without item support.", "Authored synthesis citing m000001 and m000003."));
+			}
+			const validation = jsonOutput(run(python, [script("literature-extraction", "literature-extraction.py"), "meta-validate", metaRun]));
+			assert.equal(validation.valid, true);
+			assert.match(validation.warnings.join("\n"), /source unavailable for m000001/);
 		} finally {
 			await server.close();
 		}

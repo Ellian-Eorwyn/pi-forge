@@ -10,6 +10,10 @@ documents do not support.
   document, plus the synthesis Markdown framed around it.
 - **Folder / corpus**: every supported source under the folder is processed one
   at a time, and the synthesis deliverables compare across documents.
+- **Meta corpus**: one or more completed literature-extraction runs are treated
+  as source corpora. The meta run consumes prior structured artifacts first,
+  prepares context-bounded packets, and produces cross-corpus synthesis guided
+  by a research question.
 
 This skill consumes text sources: `document.md` (from `document-ingest`),
 `.md`/`.markdown`, and `.txt`. Convert PDF, DOCX, HTML, and RTF with
@@ -27,6 +31,8 @@ established.
   methods_matrix.csv
   claim_clusters.csv         # advisory; only when embeddings ran and >=2 claims/findings
   claim_clusters.md          # advisory worksheet; same condition
+  item_index.jsonl           # normalized item index for downstream/meta use
+  source_profile.csv         # per-source item counts for downstream/meta use
   literature_summary.md      # model-authored
   claims_matrix.md           # model-authored
   key_terms.md               # model-authored
@@ -38,6 +44,34 @@ established.
 `run_config.json`, `documents.csv`, and `extraction_results.jsonl` are managed
 by the script. Do not hand-edit them. The Markdown deliverables are
 scaffolded by `build` only when absent, then authored by the model.
+
+## Meta Run Layout
+
+```text
+<meta-run-dir>/
+  meta_config.json           # schema version, research question, corpus sources, packets
+  meta_sources.csv           # prior runs and inferred/explicit corpus labels
+  meta_items.jsonl           # normalized extracted items across prior runs
+  context_budget.json        # packet token estimates and warnings
+  bridge_candidates.csv      # advisory cross-corpus embedding matches
+  topic_clusters.csv         # advisory topic/claim/definition clusters
+  packets/
+    packet-####.md           # bounded model work packets
+  packet_memos.jsonl         # append-only, one model-authored memo per packet
+  working/
+    embedding_cache.json     # per-run embedding cache when embeddings ran
+  meta_synthesis.md          # model-authored
+  primary_secondary_matrix.md
+  concept_register.md
+  negative_cases.md
+  methods_and_limits.md
+```
+
+`meta_config.json`, `meta_sources.csv`, `meta_items.jsonl`,
+`context_budget.json`, `bridge_candidates.csv`, `topic_clusters.csv`,
+`packets/`, and `packet_memos.jsonl` are managed by the script. The Markdown
+deliverables are scaffolded by `meta-build` only when absent, then authored by
+the model.
 
 ## Extraction Schema
 
@@ -130,6 +164,29 @@ This worksheet is advisory and is not a deliverable:
 - `report-output` can ingest `claim_clusters.md` and `claim_clusters.csv` from the
   run directory like any other input when assembling synthesis.
 
+## Meta Extraction Discipline
+
+The meta workflow is for cross-run analysis, not re-extraction. It must preserve
+the difference between first-pass evidence and generated synthesis:
+
+- Treat `meta_items.jsonl` as the source of extracted evidence. Every row keeps
+  item id, corpus label, prior run id, document id, source title, source path,
+  item type, item text, quote support, locator, interpretation, confidence, and
+  source availability.
+- Use `bridge_candidates.csv` and `topic_clusters.csv` as retrieval aids. They
+  can suggest conceptual links and tensions, but they never prove a connection
+  or contradiction.
+- Meta packets must remain under the configured context budget. The default
+  target is `128000` estimated tokens, with a hard maximum of `256000`, using
+  `ceil(characters / 4)`.
+- Missing original source files are warnings, not fatal errors, when prior
+  structured artifacts are intact. Quote verification and snippets degrade to
+  artifact-only provenance.
+- Final meta deliverables must cite item ids. Uncited synthesis is invalid.
+- For social sciences and humanities work, keep primary evidence, secondary
+  interpretation, source-native terms, analyst/theory terms, negative cases,
+  silences, uncertainty, and methodological limits visible.
+
 ## Markdown Deliverables
 
 - `literature_summary.md`: scope, key cross-source findings, agreement and
@@ -140,6 +197,15 @@ This worksheet is advisory and is not a deliverable:
   interpretation, and direct quote support.
 - `research_gaps.md`: explicitly stated gaps and inferred gaps, kept distinct.
 - `citation_notes.md`: one annotated entry per document.
+- Meta deliverables:
+  - `meta_synthesis.md`: research-question-guided cross-corpus synthesis.
+  - `primary_secondary_matrix.md`: primary-source evidence linked to
+    secondary-source concepts or other explicit corpus roles.
+  - `concept_register.md`: emic/etic/unclear concepts with item-id support.
+  - `negative_cases.md`: contradictions, absences, failed fits, and limits to
+    the main interpretation.
+  - `methods_and_limits.md`: corpus coverage, extraction limits, packeting
+    limits, missing source warnings, and inherited OCR/locator limits.
 
 Keep verbatim quotes and extracted facts traceable to the evidence table. Keep
 generated synthesis, assumptions, and judgment clearly marked as such.

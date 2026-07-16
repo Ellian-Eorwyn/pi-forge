@@ -36,6 +36,12 @@ surface.
 - `record <run-directory> --doc-id <id> --extraction-file <items.json>`: append one model-approved extraction.
 - `build <run-directory>`: build tables, claim clusters, and Markdown scaffolds.
 - `validate <run-directory> --fix-hints --json`: machine-readable quality gate with repair hints.
+- `meta-init <folder-or-run...> --output <run-directory> --research-question <text|file>`: discover completed prior literature runs and create context-bounded meta packets.
+- `meta-init --group primary=<path> --group secondary=<path> ...`: explicitly label corpora instead of inferring labels from folder names.
+- `meta-next <run-directory>`: one pending meta packet with budget and progress.
+- `meta-record <run-directory> --packet-id <id> --memo-file <memo.md>`: append one model-authored packet memo.
+- `meta-build <run-directory>`: scaffold cross-corpus meta deliverables.
+- `meta-validate <run-directory> --fix-hints --json`: validate packet memos, citations, and provenance warnings.
 
 ## Workflow
 
@@ -111,7 +117,9 @@ surface.
    extracted facts separate from generated synthesis, and judge every flagged
    contradiction against the evidence rather than trusting the lexical hint.
    Re-running `build` refreshes the tables and worksheet without overwriting
-   authored Markdown.
+   authored Markdown. `build` also writes `item_index.jsonl` and
+   `source_profile.csv`, which are lightweight machine-readable inputs for
+   future meta runs.
 6. Validate the completed run and report outcomes:
 
    ```bash
@@ -120,6 +128,64 @@ surface.
 
    Resolve every error before completion. Report skipped, failed, and
    review-needed documents rather than concealing incomplete coverage.
+
+## Meta Literature Extraction
+
+Use the meta workflow when the user points pi-forge at one or more folders that
+already contain completed literature-extraction runs and asks for cross-corpus
+analysis, for example primary sources analyzed through secondary-source
+concepts.
+
+1. Initialize a meta run with an explicit research question. Use `--group` when
+   source roles matter:
+
+   ```bash
+   python3 <skill-directory>/scripts/literature-extraction.py meta-init \
+     --group primary=<primary-literature-run-or-parent> \
+     --group secondary=<secondary-literature-run-or-parent> \
+     --research-question "<question>" \
+     --output <new-meta-run-directory>
+   ```
+
+   The default packet target is `128000` estimated tokens with a hard
+   `256000` maximum using Pi's conservative `ceil(characters / 4)` heuristic.
+   The script uses prior structured artifacts first and only reopens source
+   text for targeted quote/snippet checks when the source files still exist.
+2. Process one packet at a time:
+
+   ```bash
+   python3 <skill-directory>/scripts/literature-extraction.py meta-next <meta-run>
+   ```
+
+   Read the returned packet, `meta_items.jsonl`, `bridge_candidates.csv`, and
+   `topic_clusters.csv` as needed. Write a memo that cites item ids such as
+   `m000001` for every substantive analytic claim, then record it:
+
+   ```bash
+   python3 <skill-directory>/scripts/literature-extraction.py meta-record <meta-run> \
+     --packet-id <packet-id> --memo-file <memo.md>
+   ```
+3. After every packet has a memo, scaffold the final cross-corpus deliverables:
+
+   ```bash
+   python3 <skill-directory>/scripts/literature-extraction.py meta-build <meta-run>
+   ```
+
+   Author `meta_synthesis.md`, `primary_secondary_matrix.md`,
+   `concept_register.md`, `negative_cases.md`, and `methods_and_limits.md`.
+   Preserve source roles, separate primary evidence from secondary
+   interpretation, distinguish emic and etic concepts, and surface disagreement,
+   silence, uncertainty, and source limits rather than smoothing them into
+   consensus.
+4. Validate before completion:
+
+   ```bash
+   python3 <skill-directory>/scripts/literature-extraction.py meta-validate <meta-run> --fix-hints --json
+   ```
+
+   Missing original source files are reported as warnings; the meta run remains
+   valid when the prior structured artifacts are intact. Unresolved placeholders
+   or uncited meta deliverables are errors.
 
 ## Safety and Output Rules
 
@@ -134,4 +200,7 @@ surface.
 - Keep `evidence_table.csv` and `methods_matrix.csv` machine-readable and
   traceable. Use the `direct_quotes` column for quote support. Keep the
   Markdown deliverables interpretive and clearly marked as generated synthesis.
+- In meta runs, treat `bridge_candidates.csv` and `topic_clusters.csv` as
+  advisory retrieval aids, not conclusions. Judge every proposed connection
+  against item ids, source titles, corpus labels, locators, and quotes/snippets.
 - Do not assume Obsidian schemas or frontmatter unless the user requests them.
