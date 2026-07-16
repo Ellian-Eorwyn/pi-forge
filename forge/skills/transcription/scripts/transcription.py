@@ -16,6 +16,7 @@ import argparse
 import csv
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import platform
@@ -25,6 +26,9 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
+import run_state
 
 
 # Per-backend engine configuration. Models download to the managed cache on
@@ -682,20 +686,54 @@ def write_srt(segments, path):
         lines.append(f"{format_timestamp(segment['start'])} --> {format_timestamp(segment['end'])}")
         lines.append(segment["text"])
         lines.append("")
-    path.write_text("\n".join(lines), encoding="utf-8")
+    run_state.atomic_write_text(path, "\n".join(lines))
 
 
-def unique_run_directory(path):
-    path = Path(path)
-    if not path.exists():
-        return path
-    parent, stem = path.parent, path.name
-    index = 2
-    while True:
-        candidate = parent / f"{stem}-{index}"
-        if not candidate.exists():
-            return candidate
-        index += 1
+def atomic_write_csv(path, fieldnames, rows):
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(rows)
+    run_state.atomic_write_text(path, buffer.getvalue())
+
+
+def mark_chunk_started(state, item_id, attempt):
+    item = next(value for value in state["items"] if value["id"] == item_id)
+    item.update({"status": "in_progress", "attempts": attempt, "error": None})
+    state.update({"status": "running", "phase": "transcribing", "nextAction": item_id})
+    return state
+
+
+def mark_chunk_complete(state, item_id, result_path):
+    item = next(value for value in state["items"] if value["id"] == item_id)
+    item.update({"status": "completed", "transient": False, "error": None, "resultPath": result_path})
+    remaining = next((value["id"] for value in state["items"] if run_state.retryable_item(value)), None)
+    state["nextAction"] = remaining or "assemble"
+    return state
+
+
+def mark_chunk_failed(state, item_id, error, transient):
+    item = next(value for value in state["items"] if value["id"] == item_id)
+    item.update({"status": "failed", "transient": transient, "error": error})
+    state["nextAction"] = item_id if transient and item["attempts"] < run_state.DEFAULT_MAX_ATTEMPTS else "retry"
+    return state
+
+
+def complete_transcription(state, result):
+    state.update({"status": "complete", "phase": "complete", "nextAction": None, "completion": result})
+    return state
+
+
+def assemble_chunk_segments(state):
+    segments = []
+    for item in state["items"]:
+        if item.get("status") != "completed" or not item.get("resultPath"):
+            raise ValueError(f"chunk is not committed: {item['id']}")
+        result = json.loads(Path(item["resultPath"]).read_text(encoding="utf-8"))
+        if result.get("sha256") != item["sha256"]:
+            raise ValueError(f"chunk result hash mismatch: {item['id']}")
+        segments.extend(result.get("segments", []))
+    return segments
 
 
 def command_transcribe(args):
@@ -711,60 +749,131 @@ def command_transcribe(args):
     if tool_version("ffmpeg", ["-version"]) is None or tool_version("ffprobe", ["-version"]) is None:
         fail("ffmpeg and ffprobe are required. Install with: brew install ffmpeg  /  apt install ffmpeg")
 
-    run_directory = unique_run_directory(Path(args.output).expanduser().resolve())
+    source_hash = sha256(source)
+    run_directory = Path(args.output).expanduser().resolve()
+    configuration = {
+        "workflow": "transcription",
+        "command": "transcribe",
+        "input": {"path": str(source), "sha256": source_hash},
+        "options": {
+            "backend": backend,
+            "type": args.type,
+            "language": args.language,
+            "chunkThreshold": args.chunk_threshold,
+            "chunkSeconds": args.chunk_seconds,
+            "projectDictionary": str(Path(args.project_dictionary).expanduser().resolve()) if args.project_dictionary else None,
+            "noDictionary": args.no_dictionary,
+        },
+    }
+    if run_directory.exists():
+        try:
+            state = run_state.load_run_state(run_directory, "transcription")
+            run_state.assert_compatible_run(state, configuration)
+        except (OSError, ValueError) as error:
+            fail(str(error))
+        if state.get("status") == "complete" and state.get("completion"):
+            print(json.dumps(state["completion"], indent=2))
+            return
+    else:
+        run_directory.mkdir(parents=True)
+        state = run_state.create_run_state("transcription", "transcribe", configuration["input"], configuration["options"], phase="normalizing", next_action="transcribe")
+        run_state.initialize_run_state(run_directory, state)
     audio_dir = run_directory / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
 
-    warnings = []
-    source_hash = sha256(source)
+    warnings = list(state.get("warnings", []))
 
     wav_path = audio_dir / "normalized.wav"
-    print("Normalizing audio with ffmpeg...", file=sys.stderr)
-    extract_audio(source, wav_path)
+    if not wav_path.is_file():
+        print("Normalizing audio with ffmpeg...", file=sys.stderr)
+        temporary_wav = audio_dir / ".normalized.wav.tmp"
+        extract_audio(source, temporary_wav)
+        os.replace(temporary_wav, wav_path)
     duration = probe_duration(wav_path)
 
-    if duration and duration > args.chunk_threshold:
+    if state.get("items"):
+        chunks = [(Path(item["path"]), item["offset"]) for item in state["items"]]
+    elif duration and duration > args.chunk_threshold:
         print(f"Audio is {duration:.0f}s; splitting into {args.chunk_seconds}s windows...", file=sys.stderr)
         chunks = split_audio(wav_path, audio_dir / "chunks", args.chunk_seconds)
-        warnings.append(
+        warning = (
             f"Audio exceeded {args.chunk_threshold}s and was split into {len(chunks)} non-overlapping "
             f"{args.chunk_seconds}s windows; review wording at window boundaries."
         )
+        if warning not in warnings:
+            warnings.append(warning)
     else:
         chunks = [(wav_path, 0.0)]
+
+    if not state.get("items"):
+        def initialize_chunks(draft):
+            draft["items"] = [
+                {"id": f"chunk-{index:04d}", "path": str(path), "sha256": sha256(path), "offset": offset, "status": "pending", "attempts": 0, "transient": False, "error": None}
+                for index, (path, offset) in enumerate(chunks, 1)
+            ]
+            draft["warnings"] = warnings
+            draft["phase"] = "transcribing"
+            draft["nextAction"] = "transcribe"
+            return draft
+        state = run_state.update_run_state(run_directory, initialize_chunks, {"type": "chunks_initialized", "chunks": len(chunks)})
 
     device = backend_device(backend)
     if backend == "nemo" and device == "cpu":
         warnings.append("Running NeMo on CPU (no CUDA GPU); transcription is correct but slow.")
 
-    model = load_model(backend)
-    print(f"Transcribing {len(chunks)} segment file(s) with {backend}...", file=sys.stderr)
-    segments = transcribe_chunks(backend, model, chunks)
+    pending = [item for item in state["items"] if run_state.retryable_item(item)]
+    model = load_model(backend) if pending else None
+    if pending:
+        print(f"Transcribing {len(pending)} remaining segment file(s) with {backend}...", file=sys.stderr)
+    results_dir = run_directory / "chunk_results"
+    results_dir.mkdir(exist_ok=True)
+    with run_state.run_lock(run_directory):
+        for snapshot in pending:
+            item = snapshot
+            while run_state.retryable_item(item):
+                attempt = item.get("attempts", 0) + 1
+                state = run_state.update_run_state(run_directory, lambda draft, item_id=item["id"], attempt=attempt: mark_chunk_started(draft, item_id, attempt), {"type": "item_started", "itemId": item["id"], "attempt": attempt})
+                item = next(value for value in state["items"] if value["id"] == item["id"])
+                try:
+                    chunk_segments = transcribe_chunks(backend, model, [(Path(item["path"]), item["offset"])])
+                    result_path = results_dir / f"{item['id']}.json"
+                    run_state.atomic_write_json(result_path, {"chunkId": item["id"], "sha256": item["sha256"], "offset": item["offset"], "segments": chunk_segments})
+                    state = run_state.update_run_state(run_directory, lambda draft, item_id=item["id"], path=str(result_path): mark_chunk_complete(draft, item_id, path), {"type": "item_completed", "itemId": item["id"], "attempt": attempt})
+                    break
+                except Exception as error:
+                    transient = run_state.is_transient_failure(error)
+                    state = run_state.update_run_state(run_directory, lambda draft, item_id=item["id"], error=str(error), transient=transient: mark_chunk_failed(draft, item_id, error, transient), {"type": "item_failed", "itemId": item["id"], "attempt": attempt, "transient": transient, "error": str(error)})
+                    item = next(value for value in state["items"] if value["id"] == item["id"])
+                    if not transient or attempt >= run_state.DEFAULT_MAX_ATTEMPTS:
+                        break
+    state = run_state.load_run_state(run_directory, "transcription")
+    failed = [item for item in state["items"] if item["status"] == "failed"]
+    if failed:
+        fail(f"transcription has failed chunks; run retry: {', '.join(item['id'] for item in failed)}")
+    try:
+        segments = assemble_chunk_segments(state)
+    except ValueError as error:
+        fail(str(error))
     if not segments:
         warnings.append("The model produced no transcript text; the audio may be silent or unintelligible.")
 
     raw_text = "\n\n".join(segment["text"] for segment in segments).strip() + ("\n" if segments else "")
-    (run_directory / "raw_transcript.txt").write_text(raw_text, encoding="utf-8")
-    (run_directory / "raw_segments.json").write_text(
-        json.dumps(segments, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    run_state.atomic_write_text(run_directory / "raw_transcript.txt", raw_text)
+    run_state.atomic_write_json(run_directory / "raw_segments.json", segments)
     write_srt(segments, run_directory / "raw_transcript.srt")
 
     entries, dictionary_sources = resolve_dictionary(args)
     corrected_text, correction_log = apply_corrections(raw_text, entries)
     correction_count = sum(row["count"] for row in correction_log)
 
-    with (run_directory / "corrections_log.csv").open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=CORRECTIONS_LOG_COLUMNS)
-        writer.writeheader()
-        writer.writerows(correction_log)
+    atomic_write_csv(run_directory / "corrections_log.csv", CORRECTIONS_LOG_COLUMNS, correction_log)
 
     track = TYPE_TRACKS.get(args.type, "faithful")
     markdown = f"# {source.stem}\n\n" + "\n\n".join(segment["text"] for segment in segments)
     markdown, _ = apply_corrections(markdown, entries)
     corrected_md_path = run_directory / "corrected_transcript.md"
-    corrected_md_path.write_text(markdown.strip() + "\n", encoding="utf-8")
-    (run_directory / "corrected_transcript.txt").write_text(corrected_text.strip() + "\n", encoding="utf-8")
+    run_state.atomic_write_text(corrected_md_path, markdown.strip() + "\n")
+    run_state.atomic_write_text(run_directory / "corrected_transcript.txt", corrected_text.strip() + "\n")
 
     manifest_row = {
         "source_path": str(source),
@@ -782,14 +891,11 @@ def command_transcribe(args):
         "recommended_track": track,
         "warning_count": len(warnings),
     }
-    with (run_directory / "transcription_manifest.csv").open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=MANIFEST_COLUMNS)
-        writer.writeheader()
-        writer.writerow(manifest_row)
+    atomic_write_csv(run_directory / "transcription_manifest.csv", MANIFEST_COLUMNS, [manifest_row])
 
     warning_lines = "\n".join(f"- {warning}" for warning in warnings) or "- None."
-    (run_directory / "warnings.md").write_text(
-        f"# Transcription Warnings\n\nGenerated {utc_now()}\n\n{warning_lines}\n", encoding="utf-8"
+    run_state.atomic_write_text(
+        run_directory / "warnings.md", f"# Transcription Warnings\n\nGenerated {utc_now()}\n\n{warning_lines}\n"
     )
 
     result = {
@@ -819,7 +925,127 @@ def command_transcribe(args):
         "next_step": f"Run the transcript-cleanup skill on corrected_transcript.md using the '{track}' track.",
         "warnings": warnings,
     }
+    run_state.update_run_state(
+        run_directory,
+        lambda draft: complete_transcription(draft, result),
+        {"type": "run_completed", "chunks": len(chunks), "segments": len(segments)},
+    )
     print(json.dumps(result, indent=2))
+
+
+def command_status(args):
+    run_directory = Path(args.run).expanduser().resolve()
+    try:
+        state = run_state.load_run_state(run_directory, "transcription")
+    except (OSError, ValueError) as error:
+        fail(str(error))
+    source = Path(state["input"]["path"])
+    current_hash = sha256(source) if source.is_file() else None
+    counts = {status: sum(item.get("status") == status for item in state["items"]) for status in ("pending", "in_progress", "completed", "failed")}
+    report = {
+        "run": str(run_directory),
+        "status": state["status"],
+        "phase": state["phase"],
+        "nextAction": state.get("nextAction"),
+        "items": counts,
+        "inputDrift": {"changed": current_hash is not None and current_hash != state["input"]["sha256"], "removed": current_hash is None},
+    }
+    print(json.dumps(report, indent=2))
+
+
+def command_retry(args):
+    run_directory = Path(args.run).expanduser().resolve()
+    try:
+        state = run_state.load_run_state(run_directory, "transcription")
+    except (OSError, ValueError) as error:
+        fail(str(error))
+    targets = {args.item} if args.item else {item["id"] for item in state["items"] if item.get("status") == "failed"}
+    if not targets:
+        fail("no failed chunks selected")
+    known = {item["id"] for item in state["items"]}
+    unknown = targets - known
+    if unknown:
+        fail(f"unknown chunk id(s): {', '.join(sorted(unknown))}")
+
+    def retry_items(draft):
+        for item in draft["items"]:
+            if item["id"] in targets:
+                item.update({"status": "pending", "attempts": 0, "transient": False, "error": None})
+        draft.update({"status": "running", "phase": "transcribing", "nextAction": sorted(targets)[0]})
+        draft.pop("completion", None)
+        return draft
+
+    run_state.update_run_state(run_directory, retry_items, {"type": "items_retried", "itemIds": sorted(targets)})
+    print(json.dumps({"run": str(run_directory), "retried": sorted(targets)}, indent=2))
+
+
+def command_refresh(args):
+    run_directory = Path(args.run).expanduser().resolve()
+    try:
+        state = run_state.load_run_state(run_directory, "transcription")
+    except (OSError, ValueError) as error:
+        fail(str(error))
+    source = Path(state["input"]["path"])
+    if not source.is_file():
+        fail(f"source media is missing: {source}")
+    current_hash = sha256(source)
+    plan = state.get("refreshPlan")
+    if not plan and current_hash == state["input"]["sha256"]:
+        print(json.dumps({"run": str(run_directory), "refreshed": False}, indent=2))
+        return
+    if not plan:
+        revision = len(state.get("history", [])) + 1
+        revision_directory = run_directory / "revisions" / f"revision-{revision:04d}"
+        names = [
+            "audio", "chunk_results", "raw_transcript.txt", "raw_segments.json", "raw_transcript.srt",
+            "corrected_transcript.md", "corrected_transcript.txt", "corrections_log.csv",
+            "transcription_manifest.csv", "warnings.md",
+        ]
+        plan = {
+            "revision": revision,
+            "newSha256": current_hash,
+            "revisionDirectory": str(revision_directory),
+            "operations": [
+                {"source": str(run_directory / name), "destination": str(revision_directory / name)}
+                for name in names
+                if (run_directory / name).exists()
+            ],
+        }
+        state = run_state.update_run_state(
+            run_directory,
+            lambda draft: {**draft, "status": "running", "phase": "refreshing", "nextAction": "refresh", "refreshPlan": plan},
+            {"type": "refresh_planned", "revision": revision, "newSha256": current_hash},
+        )
+    Path(plan["revisionDirectory"]).mkdir(parents=True, exist_ok=True)
+    for operation in plan["operations"]:
+        source_path = Path(operation["source"])
+        destination = Path(operation["destination"])
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            continue
+        if source_path.exists():
+            os.replace(source_path, destination)
+
+    def finish_refresh(draft):
+        old_input = draft["input"]
+        draft.setdefault("history", []).append({
+            "input": old_input,
+            "items": draft["items"],
+            "revisionDirectory": plan["revisionDirectory"],
+        })
+        draft["input"] = {**old_input, "sha256": plan["newSha256"]}
+        draft["currentRevision"] = plan["revision"] + 1
+        draft["items"] = []
+        draft["optionsFingerprint"] = run_state.configuration_fingerprint({
+            "workflow": draft["workflow"], "command": draft["command"], "input": draft["input"], "options": draft["options"]
+        })
+        draft.update({"status": "running", "phase": "normalizing", "nextAction": "transcribe"})
+        draft.pop("completion", None)
+        draft.pop("refreshPlan", None)
+        return draft
+
+    updated = run_state.update_run_state(run_directory, finish_refresh, {"type": "input_refreshed", "revision": plan["revision"], "newSha256": plan["newSha256"]})
+    print(json.dumps({"run": str(run_directory), "refreshed": True, "revision": plan["revision"], "nextAction": updated["nextAction"]}, indent=2))
 
 
 # ---------------------------------------------------------------------------
@@ -953,6 +1179,22 @@ def parser():
                             help="Window length (s) when chunking.")
     add_dictionary_arguments(transcribe)
     transcribe.set_defaults(handler=command_transcribe)
+
+    status = subparsers.add_parser("status", help="Report resumable transcription state and input drift.")
+    status.add_argument("run")
+    status.add_argument("--json", action="store_true", help="Accepted for the shared run-state interface.")
+    status.set_defaults(handler=command_status)
+
+    retry = subparsers.add_parser("retry", help="Explicitly retry failed transcription chunks.")
+    retry.add_argument("run")
+    retry_group = retry.add_mutually_exclusive_group(required=True)
+    retry_group.add_argument("--item", help="Chunk id to retry.")
+    retry_group.add_argument("--all-failed", action="store_true", help="Retry all failed chunks.")
+    retry.set_defaults(handler=command_retry)
+
+    refresh = subparsers.add_parser("refresh", help="Adopt a changed source media revision while preserving prior artifacts.")
+    refresh.add_argument("run")
+    refresh.set_defaults(handler=command_refresh)
 
     dictionary = subparsers.add_parser("dict", help="Manage the user correction dictionary.")
     dict_sub = dictionary.add_subparsers(dest="dict_command", required=True)

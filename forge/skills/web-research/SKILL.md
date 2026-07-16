@@ -51,7 +51,7 @@ local embeddings endpoint ranks chunks before evidence extraction.
 
      ```bash
      node <skill-directory>/scripts/web-research.mjs research <query...> \
-       --output <new-directory> [--limit N] [--read-count N] [--mode fast|standard|deep]
+       --output <run-directory> [--limit N] [--read-count N] [--mode fast|standard|deep]
      ```
 
      This searches SearXNG, normalizes and deduplicates URLs, fetches the top N
@@ -63,7 +63,7 @@ local embeddings endpoint ranks chunks before evidence extraction.
 
      ```bash
      node <skill-directory>/scripts/web-research.mjs search <query...> \
-       --output <new-directory> [--limit N]
+       --output <run-directory> [--limit N]
      ```
 
      Returns ranked results with title, URL, snippet, engine, and score.
@@ -72,7 +72,7 @@ local embeddings endpoint ranks chunks before evidence extraction.
 
      ```bash
      node <skill-directory>/scripts/web-research.mjs read <url...> \
-       --output <new-directory> [--input-file <list>] [--mode fast|standard|deep]
+       --output <run-directory> [--input-file <list>] [--mode fast|standard|deep]
      ```
 
      Extracts clean readable text from each URL. Use when you already know
@@ -83,7 +83,7 @@ local embeddings endpoint ranks chunks before evidence extraction.
 
      ```bash
      node <skill-directory>/scripts/web-research.mjs deep <query...> \
-       --output <new-directory> [--query <query>] [--query-file <list>] \
+       --output <run-directory> [--query <query>] [--query-file <list>] \
        [--max-iterations N] [--limit N] [--read-count N] [--mode fast|standard|deep]
      ```
 
@@ -99,7 +99,7 @@ local embeddings endpoint ranks chunks before evidence extraction.
 
      ```bash
      node <skill-directory>/scripts/web-research.mjs discover <url> \
-       --output <new-directory> [--render] [--no-browser]
+       --output <run-directory> [--render] [--no-browser]
      ```
 
      This writes `discovery_reports/*.json`, `strategy_decisions.jsonl`,
@@ -111,7 +111,7 @@ local embeddings endpoint ranks chunks before evidence extraction.
 
      ```bash
      node <skill-directory>/scripts/web-research.mjs academic <query...> \
-       --output <new-directory> [--limit N] [--providers crossref,semantic-scholar,pubmed,arxiv] \
+       --output <run-directory> [--limit N] [--providers crossref,semantic-scholar,pubmed,arxiv] \
        [--contact-email <email>]
      ```
 
@@ -140,6 +140,13 @@ local embeddings endpoint ranks chunks before evidence extraction.
    `acquisition_log.jsonl`, `extraction_log.jsonl`, `cache_log.jsonl`,
    `metrics.json`, `archive/raw/`, `archive/rendered/`, `archive/extracted/`,
    and `archive/chunks/`.
+
+   Repeating a command with the same output directory resumes compatible work.
+   URL reads, academic providers, and deep-research iterations are committed
+   separately. Inspect with `status <run-directory> --json`, reconcile a
+   changed `read --input-file` with `refresh <run-directory>`, and explicitly
+   retry permanent failures with `retry <run-directory> --item <id>` or
+   `--all-failed`. Use a numbered directory only for an independent run.
 
 4. Synthesize findings. For quick `research` runs, use the extracted text to
    answer the user's question, write a summary, or feed into downstream skills.

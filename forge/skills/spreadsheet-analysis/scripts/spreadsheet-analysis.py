@@ -19,6 +19,7 @@ from pathlib import Path
 # forge/skills/spreadsheet-analysis/scripts/spreadsheet-analysis.py.
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import forge_embeddings
+import run_state
 
 
 SUPPORTED_EXTENSIONS = {".csv", ".tsv", ".xlsx"}
@@ -483,7 +484,6 @@ def command_row_init(args):
             continue
         eligible.append(row_number)
         row_data[str(row_number)] = {header: json_value(row[header_indexes[header]]) for header in selected}
-    output = require_new_directory(output)
     source_info = {
         "path": str(source),
         "basename": source.name,
@@ -491,6 +491,27 @@ def command_row_init(args):
         "sha256": sha256(source),
         "sizeBytes": source.stat().st_size,
     }
+    configuration = {
+        "workflow": "spreadsheet-row-enrichment",
+        "command": "row-init",
+        "input": {"path": str(source)},
+        "options": {
+            "sheet": table["name"],
+            "column": args.column,
+            "inputColumns": selected,
+            "startRow": start_row,
+            "endRow": end_row,
+        },
+    }
+    if output.exists():
+        try:
+            state = run_state.load_run_state(output, "spreadsheet-row-enrichment")
+            run_state.assert_compatible_run(state, configuration)
+        except (OSError, ValueError) as error:
+            fail(str(error))
+        print(json.dumps({"runDirectory": str(output), "resumed": True, "status": state["status"], "phase": state["phase"], "nextAction": state.get("nextAction")}))
+        return
+    output.mkdir(parents=True)
     run = {
         "schemaVersion": RUN_SCHEMA_VERSION,
         "createdAt": utc_now(),
@@ -505,10 +526,20 @@ def command_row_init(args):
         "blankRows": blank_rows,
         "rows": row_data,
     }
-    (output / "run.json").write_text(json.dumps(run, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    (output / "source_manifest.json").write_text(json.dumps(source_info, indent=2) + "\n", encoding="utf-8")
-    (output / "row_results.jsonl").write_text("", encoding="utf-8")
-    print(json.dumps({"runDirectory": str(output), "sheet": table["name"], "eligibleRows": len(eligible), "blankRows": len(blank_rows)}))
+    run_state.atomic_write_json(output / "run.json", run)
+    run_state.atomic_write_json(output / "source_manifest.json", source_info)
+    run_state.atomic_write_text(output / "row_results.jsonl", "")
+    state = run_state.create_run_state(
+        "spreadsheet-row-enrichment",
+        "row-init",
+        configuration["input"],
+        configuration["options"],
+        items=[{"id": row_id, "status": "pending", "attempts": 0, "transient": False} for row_id in eligible],
+        phase="enriching",
+        next_action="row-next",
+    )
+    run_state.initialize_run_state(output, state)
+    print(json.dumps({"runDirectory": str(output), "resumed": False, "sheet": table["name"], "eligibleRows": len(eligible), "blankRows": len(blank_rows)}))
 
 
 def load_run(run_directory):
@@ -525,20 +556,18 @@ def load_results(run_directory, strict=True):
     path = run_directory / "row_results.jsonl"
     if not path.is_file():
         fail(f"row_results.jsonl is missing: {path}")
-    results = []
+    try:
+        results, warnings = run_state.read_jsonl_recover_tail(path, repair=True)
+    except ValueError as error:
+        fail(str(error))
+    for warning in warnings:
+        print(f"Warning: {warning}", file=sys.stderr)
     seen = set()
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        if not line.strip():
-            continue
-        try:
-            result = json.loads(line)
-        except json.JSONDecodeError as error:
-            fail(f"invalid JSON on row_results.jsonl line {line_number}: {error}")
+    for result in results:
         row_id = result.get("rowId")
         if strict and row_id in seen:
             fail(f"duplicate result for row {row_id}")
         seen.add(row_id)
-        results.append(result)
     return results
 
 
@@ -572,6 +601,45 @@ def command_row_next(args):
             ensure_ascii=False,
         )
     )
+
+
+def command_row_status(args):
+    run_directory = require_run_directory(args.run_directory)
+    run = load_run(run_directory)
+    try:
+        state = run_state.load_run_state(run_directory, "spreadsheet-row-enrichment")
+    except ValueError as error:
+        fail(str(error))
+    results = load_results(run_directory)
+    source = Path(run["source"]["path"])
+    changed = not source.is_file() or sha256(source) != run["source"]["sha256"]
+    print(json.dumps({"runDirectory": str(run_directory), "status": state["status"], "phase": state["phase"], "nextAction": state.get("nextAction"), "processed": len(results), "total": len(run["eligibleRows"]), "inputChanged": changed, "refreshRequired": changed}, indent=2))
+
+
+def command_row_retry(args):
+    run_directory = require_run_directory(args.run_directory)
+    run = load_run(run_directory)
+    results = load_results(run_directory)
+    targets = {
+        result["rowId"]
+        for result in results
+        if result["status"] == "failed" and (args.all_failed or result["rowId"] == args.item)
+    }
+    if not targets:
+        fail(f"failed row not found: {args.item}" if args.item else "run has no failed rows")
+    retained = [result for result in results if result["rowId"] not in targets]
+    retained.sort(key=lambda value: run["eligibleRows"].index(value["rowId"]))
+    run_state.atomic_write_text(run_directory / "row_results.jsonl", "" if not retained else "\n".join(json.dumps(value, ensure_ascii=False) for value in retained) + "\n")
+    def retried(state):
+        for item in state["items"]:
+            if item["id"] in targets:
+                item.update({"status": "pending", "attempts": 0, "error": None, "transient": False})
+        state["status"] = "running"
+        state["phase"] = "enriching"
+        state["nextAction"] = "row-next"
+        return state
+    run_state.update_run_state(run_directory, retried, {"type": "items_retried", "itemIds": sorted(targets)})
+    print(json.dumps({"runDirectory": str(run_directory), "retried": len(targets), "nextAction": "row-next"}))
 
 
 def command_row_record(args):
@@ -608,10 +676,18 @@ def command_row_record(args):
         "note": args.note,
         "recordedAt": utc_now(),
     }
-    with (run_directory / "row_results.jsonl").open("a", encoding="utf-8", newline="") as handle:
-        handle.write(json.dumps(result, ensure_ascii=False) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+    combined = [*results, result]
+    ordered = sorted(combined, key=lambda value: run["eligibleRows"].index(value["rowId"]))
+    run_state.atomic_write_text(run_directory / "row_results.jsonl", "\n".join(json.dumps(value, ensure_ascii=False) for value in ordered) + "\n")
+    def recorded(state):
+        for item in state["items"]:
+            if item["id"] == args.row_id:
+                item.update({"status": args.status, "attempts": item.get("attempts", 0) + 1, "error": args.note if args.status == "failed" else None})
+        if all(item["status"] != "pending" for item in state["items"]):
+            state["phase"] = "finalizing"
+            state["nextAction"] = "row-finalize"
+        return state
+    run_state.update_run_state(run_directory, recorded, {"type": "item_recorded", "itemId": args.row_id, "status": args.status})
     print(json.dumps({"recorded": args.row_id, "status": args.status, "remaining": len(run["eligibleRows"]) - len(results) - 1}))
 
 
@@ -729,7 +805,11 @@ def command_row_finalize(args):
     extension = source.suffix.lower()
     output = run_directory / f"enriched{extension}"
     if output.exists():
-        fail(f"output already exists: {output}")
+        state = run_state.load_run_state(run_directory, "spreadsheet-row-enrichment")
+        if state.get("status") == "complete":
+            print(json.dumps({"output": str(output), "resumed": True, "complete": True}))
+            return
+        fail(f"output already exists without a completed run state: {output}")
     if extension == ".xlsx":
         write_xlsx_output(source, output, run, results)
     else:
@@ -758,6 +838,11 @@ def command_row_finalize(args):
             ]
         ),
         encoding="utf-8",
+    )
+    run_state.update_run_state(
+        run_directory,
+        lambda state: {**state, "status": "complete", "phase": "complete", "nextAction": None},
+        {"type": "run_completed", "output": str(output)},
     )
     print(json.dumps({"output": str(output), "completed": counts["completed"], "skipped": counts["skipped"], "failed": counts["failed"], "needsReview": counts["needs_review"]}))
 
@@ -1077,6 +1162,18 @@ def parser():
     row_next = subparsers.add_parser("row-next", help="Return exactly one pending row as JSON.")
     row_next.add_argument("run_directory")
     row_next.set_defaults(handler=command_row_next)
+
+    row_status = subparsers.add_parser("row-status", help="Report durable row progress and source drift.")
+    row_status.add_argument("run_directory")
+    row_status.add_argument("--json", action="store_true")
+    row_status.set_defaults(handler=command_row_status)
+
+    row_retry = subparsers.add_parser("row-retry", help="Explicitly requeue failed rows.")
+    row_retry.add_argument("run_directory")
+    retry_group = row_retry.add_mutually_exclusive_group(required=True)
+    retry_group.add_argument("--item", type=int)
+    retry_group.add_argument("--all-failed", action="store_true")
+    row_retry.set_defaults(handler=command_row_retry)
 
     row_record = subparsers.add_parser("row-record", help="Append one generated value or explicit disposition.")
     row_record.add_argument("run_directory")

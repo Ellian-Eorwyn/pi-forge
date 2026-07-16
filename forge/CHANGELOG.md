@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added a packaged restart-safe batch run contract and shared Python/JavaScript state helpers, with resumable document ingestion, file conversion, web collection/research, transcription chunks, transactional finalization, input refresh/retry controls, and context-bounded literature synthesis and deliverable queues.
 - Added a refreshable `project-extraction` skill with source-backed evidence, reconciled control registers, a human-maintained status overlay, project-aware document routing, and PPTX OOXML ingestion.
 - Added direct-first web research acquisition with stage artifacts, cache metadata, structured extraction, and explicit endpoint discovery.
 - Added local-first deep web research scheduling with serialized model calls, cached SearXNG searches, embedding-ranked chunks, batched evidence extraction, and scheduler/ranking artifacts.

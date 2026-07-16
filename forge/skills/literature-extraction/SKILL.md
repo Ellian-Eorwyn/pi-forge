@@ -32,13 +32,19 @@ surface.
 - `doctor --json`: capability check and embeddings availability.
 - `init <input> --output <run-directory>`: discover finalized Markdown/text sources; skips `Ingest/`, `Originals/`, and `Generated/` folders by default.
 - `init <input> --output <run-directory> --include-reserved`: opt in to processing reserved workspace folders.
+- `status <run-directory> --json`: report durable progress and frozen-snapshot input drift.
+- `refresh <run-directory>`: explicitly queue additions, supersede changed revisions, and retire removals.
+- `retry <run-directory> --item <id>|--all-failed`: requeue permanent failures.
 - `next <run-directory>`: one pending source with item types and progress.
 - `record <run-directory> --doc-id <id> --extraction-file <items.json>`: append one model-approved extraction.
 - `build <run-directory>`: build tables, claim clusters, and Markdown scaffolds.
+- `synthesis-next` / `synthesis-record`: return and atomically commit one context-bounded packet memo.
+- `next-output` / `record-output`: return and atomically commit one authored deliverable.
 - `validate <run-directory> --fix-hints --json`: machine-readable quality gate with repair hints.
 - `meta-init <folder-or-run...> --output <run-directory> --research-question <text|file>`: discover completed prior literature runs and create context-bounded meta packets.
 - `meta-init --group primary=<path> --group secondary=<path> ...`: explicitly label corpora instead of inferring labels from folder names.
 - `meta-next <run-directory>`: one pending meta packet with budget and progress.
+- `meta-status <run-directory> --json`: report durable meta-run progress.
 - `meta-record <run-directory> --packet-id <id> --memo-file <memo.md>`: append one model-authored packet memo.
 - `meta-build <run-directory>`: scaffold cross-corpus meta deliverables.
 - `meta-validate <run-directory> --fix-hints --json`: validate packet memos, citations, and provenance warnings.
@@ -55,16 +61,19 @@ surface.
    This skill consumes `document.md`, `.md`, and `.txt`. Convert PDF, DOCX,
    HTML, and RTF sources with `document-ingest` first so provenance and hashes
    already exist.
-2. Create a new output directory under
-   `forge-output/literature-extraction/<input-stem>/`. If it exists, use a
-   numbered suffix. When invoked from `document-ingest`, instead use
+2. Use an output directory under
+   `forge-output/literature-extraction/<input-stem>/`. If it contains a
+   compatible run, resume it; use a numbered suffix only for an independent
+   run. When invoked from `document-ingest`, instead use
    `<input-folder>/Generated/Literature-Extraction`. Then initialize the run:
 
    ```bash
    python3 <skill-directory>/scripts/literature-extraction.py init <input> --output <new-directory>
    ```
 
-   The `init` command will interactively prompt you to select an extraction schema (Academic, Products & Services, or Custom). The chosen `itemTypes` and any `customInstructions` will be saved to `run_config.json`.
+   The run records `run_state.json`, an append-only fsynced
+   `run_events.jsonl`, and its frozen source snapshot. Repeating `init` with the
+   same options resumes; changed inputs are only reported until `refresh`.
    
    `<input>` is a single file or a folder; folders are discovered recursively,
    skipping hidden paths, symlinks, and finalized ingest workspace folders
@@ -108,8 +117,12 @@ surface.
    endpoint is unavailable; pass `--no-claim-clusters` to skip it or
    `--claim-cluster-threshold` to tune grouping.
 
-   Then author `literature_summary.md`, `claims_matrix.md`, `key_terms.md`,
-   `research_gaps.md`, and `citation_notes.md` from the evidence table, using
+   Process `synthesis-next` packets and commit each memo with
+   `synthesis-record`. The default packet target is 128,000 estimated tokens
+   using `ceil(characters / 4)`; oversized corpora are reduced through
+   hierarchical memo levels. Then use `next-output` and `record-output` to
+   author `literature_summary.md`, `claims_matrix.md`, `key_terms.md`,
+   `research_gaps.md`, and `citation_notes.md` one deliverable at a time, using
    `claim_clusters.md` when present to find cross-source agreement and
    disagreement with better recall. Prioritize key terms and definitions,
    connections between readings, claims and arguments, source-grounded author
@@ -189,8 +202,9 @@ concepts.
 
 ## Safety and Output Rules
 
-- Preserve source files. Hashes recorded at `init` must still match at `build`
-  and `validate`; a changed source aborts the run.
+- Preserve source files. Hashes recorded at `init` remain frozen until explicit
+  `refresh`; normal resume reports added, changed, and removed sources without
+  processing them.
 - Attribute every extracted item to its document and locator. Never claim
   page-level precision for a format that does not expose pages.
 - Distinguish what a source states explicitly, what you infer, and what is

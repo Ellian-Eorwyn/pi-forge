@@ -3,11 +3,15 @@
 import argparse
 import csv
 import hashlib
+import io
 import json
 import re
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
+import run_state
 
 
 RUN_SCHEMA_VERSION = 1
@@ -283,34 +287,30 @@ def stable_id(prefix, value, length=12):
 
 
 def write_json(path, value):
-    path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    run_state.atomic_write_json(path, value)
 
 
 def append_jsonl(path, value):
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n")
+    run_state.append_jsonl_fsync(path, value)
 
 
 def read_jsonl(path):
-    if not path.exists():
-        return []
-    rows = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        if not line.strip():
-            continue
-        try:
-            rows.append(json.loads(line))
-        except json.JSONDecodeError as error:
-            fail(f"invalid JSONL at {path}:{line_number}: {error}")
+    try:
+        rows, warnings = run_state.read_jsonl_recover_tail(path, repair=True)
+    except ValueError as error:
+        fail(str(error))
+    for warning in warnings:
+        print(f"Warning: {warning}", file=sys.stderr)
     return rows
 
 
 def write_csv(path, columns, rows):
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({column: csv_value(row.get(column)) for column in columns})
+    handle = io.StringIO(newline="")
+    writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore", lineterminator="\n")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({column: csv_value(row.get(column)) for column in columns})
+    run_state.atomic_write_text(path, handle.getvalue())
 
 
 def csv_value(value):
@@ -326,14 +326,6 @@ def read_csv(path):
         return []
     with path.open(encoding="utf-8", newline="") as handle:
         return list(csv.DictReader(handle))
-
-
-def require_new_directory(raw_path):
-    path = Path(raw_path).expanduser().resolve()
-    if path.exists():
-        fail(f"output already exists: {path}")
-    path.mkdir(parents=True)
-    return path
 
 
 def require_run_directory(raw_path):
@@ -705,16 +697,58 @@ def command_doctor(args):
         print(f"Source formats: {', '.join(result['sourceExtensions'])}")
 
 
+def project_configuration(inputs, title, packet_characters):
+    return {
+        "workflow": "project-extraction",
+        "command": "init",
+        "input": {"roots": [str(Path(value).expanduser().resolve()) for value in inputs]},
+        "options": {"title": title, "packetCharacters": packet_characters},
+    }
+
+
+def project_items(manifest, results=None):
+    results = results or {}
+    return [
+        {
+            "id": packet["packetId"],
+            "path": packet["path"],
+            "sha256": packet["sha256"],
+            "status": results.get(packet["packetId"], {}).get("status", "pending"),
+            "attempts": 1 if packet["packetId"] in results else 0,
+            "transient": False,
+        }
+        for packet in active_packets(manifest)
+    ]
+
+
+def project_input_drift(config, manifest):
+    current = discover_sources(config["inputs"])
+    before = [{"path": source["path"], "sha256": source["sha256"]} for source in active_sources(manifest)]
+    after = [{"path": source["path"], "sha256": source["sha256"]} for source in current]
+    return run_state.input_drift(before, after)
+
+
 def command_init(args):
     if args.packet_chars < 1_000:
         fail("--packet-chars must be at least 1000")
-    run_directory = require_new_directory(args.output)
+    title = args.title or Path(args.inputs[0]).expanduser().stem or "Project"
+    configuration = project_configuration(args.inputs, title, args.packet_chars)
+    run_directory = Path(args.output).expanduser().resolve()
+    if run_directory.exists():
+        try:
+            state = run_state.load_run_state(run_directory, "project-extraction")
+            run_state.assert_compatible_run(state, configuration)
+        except (OSError, ValueError) as error:
+            fail(str(error))
+        print(json.dumps({"runDirectory": str(run_directory), "resumed": True, "status": state["status"], "phase": state["phase"], "nextAction": state.get("nextAction")}, indent=2))
+        return
+    run_directory.mkdir(parents=True)
     (run_directory / "working").mkdir()
     sources = discover_sources(args.inputs)
     manifest = initialize_manifest(run_directory, sources, args.packet_chars)
     config = {
         "schemaVersion": RUN_SCHEMA_VERSION,
-        "title": args.title or Path(args.inputs[0]).expanduser().stem or "Project",
+        "title": title,
         "inputs": [str(Path(value).expanduser().resolve()) for value in args.inputs],
         "packetCharacters": args.packet_chars,
         "createdAt": utc_now(),
@@ -723,6 +757,16 @@ def command_init(args):
     }
     write_json(run_directory / "run_config.json", config)
     write_json(run_directory / "source_manifest.json", manifest)
+    state = run_state.create_run_state(
+        "project-extraction",
+        "init",
+        configuration["input"],
+        configuration["options"],
+        items=project_items(manifest),
+        phase="extracting",
+        next_action="next",
+    )
+    run_state.initialize_run_state(run_directory, state)
     append_source_changes(run_directory, None, manifest)
     print(json.dumps({"runDirectory": str(run_directory), "sources": len(sources), "packets": len(active_packets(manifest))}, indent=2))
 
@@ -817,6 +861,15 @@ def command_record(args):
             "note": args.note,
         }
     append_jsonl(run_directory / "extraction_results.jsonl", result)
+    def recorded(state):
+        for item in state["items"]:
+            if item["id"] == args.packet_id:
+                item.update({"status": result["status"], "attempts": item.get("attempts", 0) + 1, "error": result.get("note") if result["status"] == "failed" else None})
+        if all(item["status"] != "pending" for item in state["items"]):
+            state["phase"] = "reconciling"
+            state["nextAction"] = "reconcile"
+        return state
+    run_state.update_run_state(run_directory, recorded, {"type": "item_recorded", "itemId": args.packet_id, "status": result["status"]})
     print(json.dumps({"packetId": args.packet_id, "status": result["status"], "items": len(result["items"])}, indent=2))
 
 
@@ -1255,7 +1308,69 @@ def command_refresh(args):
             counts["changed"] += 1
         else:
             counts["unchanged"] += 1
+    results = current_results(run_directory, manifest)
+    def refreshed(state):
+        state["items"] = project_items(manifest, results)
+        state["status"] = "running"
+        state["phase"] = "extracting"
+        state["nextAction"] = "next"
+        return state
+    run_state.update_run_state(run_directory, refreshed, {"type": "input_refreshed", **counts})
     print(json.dumps({"runDirectory": str(run_directory), **counts, "pendingPackets": len(active_packets(manifest)) - len(current_results(run_directory, manifest))}, indent=2))
+
+
+def command_status(args):
+    run_directory = require_run_directory(args.run_directory)
+    config, manifest = load_run(run_directory)
+    try:
+        state = run_state.load_run_state(run_directory, "project-extraction")
+    except ValueError as error:
+        fail(str(error))
+    results = current_results(run_directory, manifest)
+    drift = project_input_drift(config, manifest)
+    print(
+        json.dumps(
+            {
+                "runDirectory": str(run_directory),
+                "status": state["status"],
+                "phase": state["phase"],
+                "nextAction": state.get("nextAction"),
+                "processedPackets": len(results),
+                "totalPackets": len(active_packets(manifest)),
+                "inputDrift": drift,
+                "refreshRequired": any(drift.values()),
+            },
+            indent=2,
+        )
+    )
+
+
+def command_retry(args):
+    run_directory = require_run_directory(args.run_directory)
+    _, manifest = load_run(run_directory)
+    results = current_results(run_directory, manifest)
+    targets = {
+        packet_id
+        for packet_id, result in results.items()
+        if result.get("status") == "failed" and (args.all_failed or packet_id == args.item)
+    }
+    if not targets:
+        fail(f"failed item not found: {args.item}" if args.item else "run has no failed items")
+    retained = [result for result in read_jsonl(run_directory / "extraction_results.jsonl") if result.get("packetId") not in targets]
+    run_state.atomic_write_text(
+        run_directory / "extraction_results.jsonl",
+        "" if not retained else "\n".join(json.dumps(result, ensure_ascii=False, sort_keys=True) for result in retained) + "\n",
+    )
+    def retried(state):
+        for item in state["items"]:
+            if item["id"] in targets:
+                item.update({"status": "pending", "attempts": 0, "error": None, "transient": False})
+        state["status"] = "running"
+        state["phase"] = "extracting"
+        state["nextAction"] = "next"
+        return state
+    run_state.update_run_state(run_directory, retried, {"type": "items_retried", "itemIds": sorted(targets)})
+    print(json.dumps({"runDirectory": str(run_directory), "retried": len(targets), "nextAction": "next"}, indent=2))
 
 
 def validation_issue(code, message, fix=None):
@@ -1406,6 +1521,18 @@ def parser():
     refresh = commands.add_parser("refresh", help="Rescan inputs and queue only new or changed source revisions.")
     refresh.add_argument("run_directory")
     refresh.set_defaults(handler=command_refresh)
+
+    status = commands.add_parser("status", help="Report durable progress and source drift without changing the run.")
+    status.add_argument("run_directory")
+    status.add_argument("--json", action="store_true")
+    status.set_defaults(handler=command_status)
+
+    retry = commands.add_parser("retry", help="Explicitly requeue permanent packet failures.")
+    retry.add_argument("run_directory")
+    retry_group = retry.add_mutually_exclusive_group(required=True)
+    retry_group.add_argument("--item")
+    retry_group.add_argument("--all-failed", action="store_true")
+    retry.set_defaults(handler=command_retry)
 
     validate = commands.add_parser("validate", help="Validate sources, evidence, controls, status, and authored deliverables.")
     validate.add_argument("run_directory")

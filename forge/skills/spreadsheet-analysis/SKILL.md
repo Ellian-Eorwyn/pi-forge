@@ -82,7 +82,8 @@ Use this mode when each source row requires model judgment, extraction,
 classification, summarization, drafting, or another requested output in one new
 column. A run targets one sheet and stages results before writing a new file.
 
-Initialize a new run. The output column must not already exist:
+Initialize a run. The output column must not already exist. Repeating the same
+command and output resumes a compatible marked run:
 
 ```bash
 python3 <skill-directory>/scripts/spreadsheet-analysis.py row-init <input> \
@@ -122,7 +123,10 @@ Then repeat sequentially:
    to hide a failure.
 
 Resume safely by calling `row-next` again. It derives progress from the
-append-only `row_results.jsonl` file and never returns several rows at once.
+durable run state and `row_results.jsonl`, and never returns several rows at
+once. Use `row-status <run-directory> --json` to inspect progress and source
+drift, or `row-retry <run-directory> --item <row-id>|--all-failed` to explicitly
+retry permanent failures.
 After every eligible row has a disposition, finalize and validate:
 
 ```bash

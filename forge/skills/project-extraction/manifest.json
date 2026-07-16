@@ -6,6 +6,8 @@
 	"skill_file": "SKILL.md",
 	"scripts_dir": "scripts",
 	"references_dir": "references",
+	"run_state_contract": "../../RUN_STATE_CONTRACT.md",
+	"restart_safe": true,
 	"tools": [
 		{
 			"name": "project_extraction",

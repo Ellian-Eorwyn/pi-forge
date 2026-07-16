@@ -2,11 +2,25 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { JSDOM, VirtualConsole } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import { resolveConnectedServices } from "../../../lib/connected-services.mjs";
+import {
+	DEFAULT_MAX_ATTEMPTS,
+	assertCompatibleRun,
+	atomicWriteFile,
+	atomicWriteJson,
+	configurationFingerprint,
+	createRunState,
+	initializeRunState,
+	isTransientFailure,
+	loadRunState,
+	retryableItem,
+	updateRunState,
+	withRunLock,
+} from "../../../lib/run-state.mjs";
 import {
 	DEFAULT_TIMEOUT_MS as ACQUISITION_DEFAULT_TIMEOUT_MS,
 	DEFAULT_USER_AGENT as ACQUISITION_DEFAULT_USER_AGENT,
@@ -116,13 +130,12 @@ function run(command, args = ["--version"]) {
 }
 
 function writeJson(filePath, value) {
-	mkdirSync(dirname(filePath), { recursive: true });
-	writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+	atomicWriteJson(filePath, value);
 }
 
 function writeJsonl(filePath, rows) {
 	mkdirSync(dirname(filePath), { recursive: true });
-	writeFileSync(filePath, rows.map((row) => JSON.stringify(row)).join("\n") + (rows.length > 0 ? "\n" : ""));
+	atomicWriteFile(filePath, rows.map((row) => JSON.stringify(row)).join("\n") + (rows.length > 0 ? "\n" : ""));
 }
 
 function readJsonl(filePath) {
@@ -136,6 +149,177 @@ function readJsonl(filePath) {
 
 function sha256(value) {
 	return createHash("sha256").update(value).digest("hex");
+}
+
+function researchConfiguration(command, input, options) {
+	return { workflow: "web-research", command, input, options };
+}
+
+function openResearchRun(runDirectory, command, input, options, items = [], phase = "processing") {
+	const configuration = researchConfiguration(command, input, options);
+	if (existsSync(runDirectory)) {
+		const state = loadRunState(runDirectory, "web-research");
+		assertCompatibleRun(state, configuration);
+		return state;
+	}
+	mkdirSync(runDirectory, { recursive: true });
+	return initializeRunState(
+		runDirectory,
+		createRunState({ workflow: "web-research", command, input, options, items, phase, nextAction: items[0]?.id ?? command }),
+	);
+}
+
+function workItem(kind, key, data = {}) {
+	return {
+		id: `${kind}:${sha256(key).slice(0, 16)}`,
+		kind,
+		status: "pending",
+		attempts: 0,
+		transient: false,
+		error: null,
+		...data,
+	};
+}
+
+function startResearchItem(state, itemId) {
+	const item = state.items.find((candidate) => candidate.id === itemId);
+	item.status = "in_progress";
+	item.attempts = (item.attempts ?? 0) + 1;
+	item.error = null;
+	state.status = "running";
+	state.nextAction = itemId;
+	return state;
+}
+
+function finishResearchItem(state, itemId, resultPath) {
+	const item = state.items.find((candidate) => candidate.id === itemId);
+	Object.assign(item, { status: "completed", transient: false, error: null, resultPath });
+	state.nextAction = state.items.find((candidate) => retryableItem(candidate))?.id ?? "finalize";
+	return state;
+}
+
+function failResearchItem(state, itemId, error, transient, resultPath = null) {
+	const item = state.items.find((candidate) => candidate.id === itemId);
+	Object.assign(item, { status: "failed", transient, error, resultPath });
+	state.nextAction = transient && item.attempts < DEFAULT_MAX_ATTEMPTS ? itemId : "retry";
+	return state;
+}
+
+function completeResearchRun(state, completion) {
+	Object.assign(state, { status: "complete", phase: "complete", nextAction: null, completion });
+	return state;
+}
+
+function restoreAcquisitionLogs(context) {
+	for (const [property, filename] of [
+		["normalizedUrls", "normalized_urls.jsonl"],
+		["strategyDecisions", "strategy_decisions.jsonl"],
+		["acquisitionLog", "acquisition_log.jsonl"],
+		["extractionLog", "extraction_log.jsonl"],
+		["cacheLog", "cache_log.jsonl"],
+		["schedulerLog", "scheduler_log.jsonl"],
+	]) {
+		const path = join(context.runDirectory, filename);
+		if (existsSync(path)) context[property].push(...readJsonl(path));
+	}
+}
+
+async function processUrlQueue(runDirectory, options, acquisitionContext) {
+	const resultDirectory = join(runDirectory, "item_results");
+	mkdirSync(resultDirectory, { recursive: true });
+	await withRunLock(runDirectory, async () => {
+		let state = loadRunState(runDirectory, "web-research");
+		for (const snapshot of state.items.filter((item) => item.kind === "url" && !item.retired && retryableItem(item))) {
+			let item = snapshot;
+			while (retryableItem(item)) {
+				state = updateRunState(runDirectory, (draft) => startResearchItem(draft, item.id), {
+					type: "item_started",
+					itemId: item.id,
+					attempt: item.attempts + 1,
+				});
+				item = state.items.find((candidate) => candidate.id === item.id);
+				const resultPath = join(resultDirectory, `${item.id.replace(":", "-")}.json`);
+				try {
+					process.stderr.write(`Reading ${item.url}...\n`);
+					const reading = await readPage(item.url, options, acquisitionContext);
+					writeJson(resultPath, reading);
+					writeAcquisitionArtifacts(acquisitionContext);
+					state = updateRunState(runDirectory, (draft) => finishResearchItem(draft, item.id, resultPath), {
+						type: "item_completed",
+						itemId: item.id,
+						attempt: item.attempts,
+					});
+					break;
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					const transient = isTransientFailure(error);
+					const failedReading = { url: item.url, title: null, text: "", charCount: 0, extractionMethod: "failed", warnings: [message], extractedAt: nowIso() };
+					writeJson(resultPath, failedReading);
+					writeAcquisitionArtifacts(acquisitionContext);
+					state = updateRunState(runDirectory, (draft) => failResearchItem(draft, item.id, message, transient, resultPath), {
+						type: "item_failed",
+						itemId: item.id,
+						attempt: item.attempts,
+						transient,
+						error: message,
+					});
+					item = state.items.find((candidate) => candidate.id === item.id);
+					if (!retryableItem(item)) break;
+				}
+			}
+		}
+	});
+	const state = loadRunState(runDirectory, "web-research");
+	return state.items
+		.filter((item) => item.kind === "url" && !item.retired && item.resultPath && existsSync(item.resultPath))
+		.map((item) => JSON.parse(readFileSync(item.resultPath, "utf8")));
+}
+
+async function processSearchItem(runDirectory, base, query, searchParams, limit, readCount = 0) {
+	const resultPath = join(runDirectory, "search_results.json");
+	return withRunLock(runDirectory, async () => {
+		let state = loadRunState(runDirectory, "web-research");
+		let item = state.items.find((candidate) => candidate.kind === "search");
+		if (item?.status === "completed" && existsSync(item.resultPath)) return JSON.parse(readFileSync(item.resultPath, "utf8"));
+		while (item && retryableItem(item)) {
+			state = updateRunState(runDirectory, (draft) => startResearchItem(draft, item.id), { type: "item_started", itemId: item.id, attempt: item.attempts + 1 });
+			item = state.items.find((candidate) => candidate.id === item.id);
+			try {
+				const payload = await searchSearxng(base, query, searchParams);
+				const retrievedAt = nowIso();
+				const results = (Array.isArray(payload.results) ? payload.results : [])
+					.slice(0, limit)
+					.map((result, index) => searchResultRecord(result, index, query, retrievedAt));
+				writeJson(resultPath, { retrievedAt, results });
+				state = updateRunState(
+					runDirectory,
+					(draft) => {
+						finishResearchItem(draft, item.id, resultPath);
+						for (const [index, result] of results.slice(0, readCount).filter((entry) => entry.url).entries()) {
+							const candidate = workItem("url", `${index}:${result.url}`, { url: result.url, index });
+							if (!draft.items.some((existing) => existing.id === candidate.id)) draft.items.push(candidate);
+						}
+						draft.nextAction = draft.items.find((candidate) => retryableItem(candidate))?.id ?? "finalize";
+						return draft;
+					},
+					{ type: "item_completed", itemId: item.id, attempt: item.attempts },
+				);
+				return { retrievedAt, results };
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				const transient = isTransientFailure(error);
+				state = updateRunState(runDirectory, (draft) => failResearchItem(draft, item.id, message, transient), {
+					type: "item_failed",
+					itemId: item.id,
+					attempt: item.attempts,
+					transient,
+					error: message,
+				});
+				item = state.items.find((candidate) => candidate.id === item.id);
+			}
+		}
+		throw new Error(item?.error || "search failed");
+	});
 }
 
 function createTaskQueue(name, concurrency, schedulerLog) {
@@ -244,7 +428,7 @@ function csvValue(value) {
 function writeCsv(filePath, columns, rows) {
 	const lines = [columns.join(",")];
 	for (const row of rows) lines.push(columns.map((column) => csvValue(row[column])).join(","));
-	writeFileSync(filePath, `${lines.join("\n")}\n`);
+	atomicWriteFile(filePath, `${lines.join("\n")}\n`);
 }
 
 function parseCsv(value) {
@@ -887,7 +1071,7 @@ async function providerFetch(runDirectory, provider, url, options, state) {
 		const contentType = response.headers.get("content-type") ?? "";
 		const extension = contentType.includes("xml") || text.trimStart().startsWith("<") ? "xml" : "json";
 		const relativePath = rawResponsePath(runDirectory, provider, requestId, extension);
-		writeFileSync(join(runDirectory, relativePath), text);
+		atomicWriteFile(join(runDirectory, relativePath), text);
 		record.raw_response_path = relativePath;
 		record.raw_hash = hash;
 		if (!response.ok) throw new Error(`${provider} returned HTTP ${response.status}`);
@@ -1405,7 +1589,7 @@ function writeRisArtifacts(runDirectory, works, sourceRecords) {
 	for (const work of works) {
 		const relativePath = `ris/${work.work_id}.ris`;
 		const record = buildRisRecord(work, sourceRecords);
-		writeFileSync(join(runDirectory, relativePath), record);
+		atomicWriteFile(join(runDirectory, relativePath), record);
 		records.push(record.trimEnd());
 		const providers = [
 			...new Set(
@@ -1423,7 +1607,7 @@ function writeRisArtifacts(runDirectory, works, sourceRecords) {
 			dedupeClusterId: work.dedupe_cluster_id,
 		});
 	}
-	writeFileSync(join(runDirectory, "works.ris"), records.length > 0 ? `${records.join("\n\n")}\n` : "");
+	atomicWriteFile(join(runDirectory, "works.ris"), records.length > 0 ? `${records.join("\n\n")}\n` : "");
 	writeJson(join(runDirectory, "ris_manifest.json"), { schemaVersion: ACADEMIC_SCHEMA_VERSION, generatedAt: nowIso(), records: manifest });
 	return manifest;
 }
@@ -2530,8 +2714,10 @@ function sourceTextPath(runDirectory, sourceId) {
 function writeDeepSource(runDirectory, source) {
 	mkdirSync(join(runDirectory, "downloads"), { recursive: true });
 	const outputPath = sourceTextPath(runDirectory, source.sourceId);
-	writeFileSync(outputPath, source.text, { flag: "wx" });
 	const hash = sha256(source.text);
+	if (existsSync(outputPath)) {
+		if (sha256(readFileSync(outputPath)) !== hash) throw new Error(`archived source hash mismatch: ${source.sourceId}`);
+	} else atomicWriteFile(outputPath, source.text);
 	return {
 		filename: basename(outputPath),
 		outputPath: `downloads/${basename(outputPath)}`,
@@ -2566,7 +2752,7 @@ function writeDeepArtifacts(runDirectory, state) {
 	mkdirSync(join(runDirectory, "archive", "chunks"), { recursive: true });
 	for (const chunk of state.chunks) {
 		const chunkPath = join(runDirectory, "archive", "chunks", `${chunk.chunkId}.txt`);
-		if (!existsSync(chunkPath)) writeFileSync(chunkPath, chunk.text);
+		if (!existsSync(chunkPath)) atomicWriteFile(chunkPath, chunk.text);
 		chunk.outputPath = `archive/chunks/${chunk.chunkId}.txt`;
 	}
 	writeJson(join(runDirectory, "research_run.json"), {
@@ -2631,8 +2817,17 @@ function writeDeepArtifacts(runDirectory, state) {
 			readability: source.metadata ?? {},
 		})),
 	});
-	writeFileSync(join(runDirectory, "sources.md"), buildSourcesMarkdown(state));
-	writeFileSync(join(runDirectory, "deep_research_report.md"), buildDeepReport(state));
+	atomicWriteFile(join(runDirectory, "sources.md"), buildSourcesMarkdown(state));
+	atomicWriteFile(join(runDirectory, "deep_research_report.md"), buildDeepReport(state));
+}
+
+function writeDeepCheckpoint(runDirectory, state, control) {
+	atomicWriteJson(join(runDirectory, "deep_checkpoint.json"), { state, control, recordedAt: nowIso() });
+}
+
+function loadDeepCheckpoint(runDirectory) {
+	const path = join(runDirectory, "deep_checkpoint.json");
+	return existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : null;
 }
 
 function buildSourcesMarkdown(state) {
@@ -2883,24 +3078,23 @@ async function commandSearch(positionals, flags) {
 		pageNo: flags.pageNo ?? autoParams.pageNo,
 	};
 
-	let payload;
-	try {
-		payload = await searchSearxng(base, query, searchParams);
-	} catch (error) {
-		fail(error.message);
-	}
-
-	const retrievedAt = nowIso();
 	const limit = flags.limit ?? DEFAULT_LIMIT;
-	const results = (Array.isArray(payload.results) ? payload.results : [])
-		.slice(0, limit)
-		.map((result, index) => searchResultRecord(result, index, query, retrievedAt));
-
 	const runDirectory = resolve(flags.output);
-	if (existsSync(runDirectory)) fail(`output directory already exists: ${runDirectory}`);
-	mkdirSync(runDirectory, { recursive: true });
+	let runState = openResearchRun(runDirectory, "search", { query }, { base, searchParams, limit }, [workItem("search", query, { query })], "searching");
+	if (runState.status === "complete" && runState.completion) {
+		process.stdout.write(`${JSON.stringify(runState.completion, null, 2)}\n`);
+		return;
+	}
+	let searchResult;
+	try {
+		searchResult = await processSearchItem(runDirectory, base, query, searchParams, limit);
+	} catch (error) {
+		fail(error instanceof Error ? error.message : String(error));
+	}
+	const { retrievedAt, results } = searchResult;
 	const acquisitionContext = createAcquisitionContext({ ...acquisitionOptions(flags), runDirectory, mode: flags.mode ?? "fast" });
-	recordSearchNormalizedUrls(acquisitionContext, results);
+	restoreAcquisitionLogs(acquisitionContext);
+	if (acquisitionContext.normalizedUrls.length === 0) recordSearchNormalizedUrls(acquisitionContext, results);
 	acquisitionContext.metrics.searchResultsDiscovered = results.length;
 	writeAcquisitionArtifacts(acquisitionContext);
 
@@ -2915,19 +3109,21 @@ async function commandSearch(positionals, flags) {
 	writeJson(join(runDirectory, "research_report.json"), data);
 
 	const report = buildReport(data);
-	writeFileSync(join(runDirectory, "research_report.md"), report);
+	atomicWriteFile(join(runDirectory, "research_report.md"), report);
 
-	process.stdout.write(
-		`${JSON.stringify({ runDirectory, query, results: results.length, params: searchParams }, null, 2)}\n`,
-	);
+	const completion = { runDirectory, query, results: results.length, params: searchParams };
+	runState = updateRunState(runDirectory, (draft) => completeResearchRun(draft, completion), { type: "run_completed", items: 1 });
+	process.stdout.write(`${JSON.stringify(runState.completion, null, 2)}\n`);
 }
 
 async function commandRead(positionals, flags) {
 	if (positionals.length === 0) fail("read requires at least one URL");
 	if (!flags.output) fail("read requires --output <new-directory>");
-	const urls = [...positionals];
-	if (flags.inputFile) {
-		const list = readFileSync(resolve(flags.inputFile), "utf8")
+	const staticUrls = [...positionals];
+	const inputFile = flags.inputFile ? resolve(flags.inputFile) : null;
+	const urls = [...staticUrls];
+	if (inputFile) {
+		const list = readFileSync(inputFile, "utf8")
 			.split(/\r?\n/)
 			.map((line) => line.trim())
 			.filter((line) => line && !line.startsWith("#"));
@@ -2944,30 +3140,24 @@ async function commandRead(positionals, flags) {
 	};
 
 	const runDirectory = resolve(flags.output);
-	if (existsSync(runDirectory)) fail(`output directory already exists: ${runDirectory}`);
-	mkdirSync(runDirectory, { recursive: true });
+	const runOptions = { ...options, cacheDir: flags.cacheDir ?? null, forceRefresh: Boolean(flags.forceRefresh), forceStrategy: flags.forceStrategy ?? null, noBrowser: Boolean(flags.noBrowser) };
+	let runState = openResearchRun(
+		runDirectory,
+		"read",
+		{ urls, staticUrls, inputFile },
+		runOptions,
+		urls.map((url, index) => workItem("url", `${index}:${url}`, { url, index })),
+	);
+	if (runState.status === "complete" && runState.completion) {
+		process.stdout.write(`${JSON.stringify(runState.completion, null, 2)}\n`);
+		return;
+	}
 
-	const readings = [];
 	const acquisitionContext = createAcquisitionContext({ ...acquisitionOptions(flags, options), runDirectory });
+	restoreAcquisitionLogs(acquisitionContext);
+	let readings = [];
 	try {
-		for (const [index, url] of urls.entries()) {
-			if (index > 0 && options.delayMs > 0) await sleep(options.delayMs);
-			try {
-				process.stderr.write(`Reading ${url}...\n`);
-				const reading = await readPage(url, options, acquisitionContext);
-				readings.push(reading);
-			} catch (error) {
-				readings.push({
-					url,
-					title: null,
-					text: "",
-					charCount: 0,
-					extractionMethod: "failed",
-					warnings: [error.message],
-					extractedAt: nowIso(),
-				});
-			}
-		}
+		readings = await processUrlQueue(runDirectory, options, acquisitionContext);
 	} finally {
 		writeAcquisitionArtifacts(acquisitionContext);
 		await closeAcquisitionContext(acquisitionContext);
@@ -2984,12 +3174,12 @@ async function commandRead(positionals, flags) {
 	writeJson(join(runDirectory, "research_report.json"), data);
 
 	const report = buildReport(data);
-	writeFileSync(join(runDirectory, "research_report.md"), report);
+	atomicWriteFile(join(runDirectory, "research_report.md"), report);
 
 	const successCount = readings.filter((r) => r.extractionMethod !== "failed").length;
-	process.stdout.write(
-		`${JSON.stringify({ runDirectory, urls: urls.length, success: successCount, readings: readings.length }, null, 2)}\n`,
-	);
+	const completion = { runDirectory, urls: urls.length, success: successCount, readings: readings.length };
+	runState = updateRunState(runDirectory, (draft) => completeResearchRun(draft, completion), { type: "run_completed", items: readings.length });
+	process.stdout.write(`${JSON.stringify(runState.completion, null, 2)}\n`);
 }
 
 async function commandResearch(positionals, flags) {
@@ -3011,24 +3201,8 @@ async function commandResearch(positionals, flags) {
 		pageNo: flags.pageNo ?? autoParams.pageNo,
 	};
 
-	// Step 1: Search
-	let payload;
-	try {
-		payload = await searchSearxng(base, query, searchParams);
-	} catch (error) {
-		fail(error.message);
-	}
-
-	const retrievedAt = nowIso();
 	const limit = flags.limit ?? DEFAULT_LIMIT;
-	const results = (Array.isArray(payload.results) ? payload.results : [])
-		.slice(0, limit)
-		.map((result, index) => searchResultRecord(result, index, query, retrievedAt));
-
-	// Step 2: Read top N results
 	const readCount = flags.readCount ?? DEFAULT_READ_COUNT;
-	const urlsToRead = results.slice(0, readCount).map((r) => r.url).filter(Boolean);
-
 	const readOptions = {
 		userAgent: flags.userAgent ?? DEFAULT_USER_AGENT,
 		timeoutMs: flags.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -3039,37 +3213,41 @@ async function commandResearch(positionals, flags) {
 	};
 
 	const runDirectory = resolve(flags.output);
-	if (existsSync(runDirectory)) fail(`output directory already exists: ${runDirectory}`);
-	mkdirSync(runDirectory, { recursive: true });
-	const acquisitionContext = createAcquisitionContext({ ...acquisitionOptions(flags, readOptions), runDirectory });
-	recordSearchNormalizedUrls(acquisitionContext, results);
-	acquisitionContext.metrics.searchResultsDiscovered = results.length;
-	const readings = [];
+	const runOptions = {
+		base,
+		searchParams,
+		limit,
+		readCount,
+		...readOptions,
+		cacheDir: flags.cacheDir ?? null,
+		forceRefresh: Boolean(flags.forceRefresh),
+		forceStrategy: flags.forceStrategy ?? null,
+		noBrowser: Boolean(flags.noBrowser),
+	};
+	let runState = openResearchRun(runDirectory, "research", { query }, runOptions, [workItem("search", query, { query })], "searching");
+	if (runState.status === "complete" && runState.completion) {
+		process.stdout.write(`${JSON.stringify(runState.completion, null, 2)}\n`);
+		return;
+	}
+	let searchResult;
 	try {
-		for (const [index, url] of urlsToRead.entries()) {
-			if (index > 0 && readOptions.delayMs > 0) await sleep(readOptions.delayMs);
-			try {
-				process.stderr.write(`Reading ${url}...\n`);
-				const reading = await readPage(url, readOptions, acquisitionContext);
-				readings.push(reading);
-			} catch (error) {
-				readings.push({
-					url,
-					title: null,
-					text: "",
-					charCount: 0,
-					extractionMethod: "failed",
-					warnings: [error.message],
-					extractedAt: nowIso(),
-				});
-			}
-		}
+		searchResult = await processSearchItem(runDirectory, base, query, searchParams, limit, readCount);
+	} catch (error) {
+		fail(error instanceof Error ? error.message : String(error));
+	}
+	const { retrievedAt, results } = searchResult;
+	const acquisitionContext = createAcquisitionContext({ ...acquisitionOptions(flags, readOptions), runDirectory });
+	restoreAcquisitionLogs(acquisitionContext);
+	if (acquisitionContext.normalizedUrls.length === 0) recordSearchNormalizedUrls(acquisitionContext, results);
+	acquisitionContext.metrics.searchResultsDiscovered = results.length;
+	let readings = [];
+	try {
+		readings = await processUrlQueue(runDirectory, readOptions, acquisitionContext);
 	} finally {
 		writeAcquisitionArtifacts(acquisitionContext);
 		await closeAcquisitionContext(acquisitionContext);
 	}
 
-	// Step 3: Write report
 	const data = {
 		query,
 		searchBase: base,
@@ -3081,12 +3259,12 @@ async function commandResearch(positionals, flags) {
 	writeJson(join(runDirectory, "research_report.json"), data);
 
 	const report = buildReport(data);
-	writeFileSync(join(runDirectory, "research_report.md"), report);
+	atomicWriteFile(join(runDirectory, "research_report.md"), report);
 
 	const successCount = readings.filter((r) => r.extractionMethod !== "failed").length;
-	process.stdout.write(
-		`${JSON.stringify({ runDirectory, query, results: results.length, read: readings.length, success: successCount, params: searchParams }, null, 2)}\n`,
-	);
+	const completion = { runDirectory, query, results: results.length, read: readings.length, success: successCount, params: searchParams };
+	runState = updateRunState(runDirectory, (draft) => completeResearchRun(draft, completion), { type: "run_completed", items: readings.length + 1 });
+	process.stdout.write(`${JSON.stringify(runState.completion, null, 2)}\n`);
 }
 
 function createDeepSource(result, iteration, query) {
@@ -3148,13 +3326,12 @@ function applyDeepReadingToSource(runDirectory, source, result, reading) {
 	Object.assign(source, archived);
 }
 
-async function acquireDeepSources(runDirectory, sources, options, acquisitionContext, state) {
+async function acquireDeepSources(runDirectory, sources, options, acquisitionContext, state, checkpoint = null) {
 	const pending = sources.filter((source) => source.status === "failed" && source.strategy === "pending");
-	await Promise.all(
-		pending.map(async (source, index) => {
+	for (const [index, source] of pending.entries()) {
 			if (runtimeBudgetExceeded(state, options)) {
 				addBudgetEvent(state, "maxRuntimeMs", "Stopped before reading another source.");
-				return;
+				break;
 			}
 			if (index > 0 && options.delayMs > 0) await sleep(Math.min(options.delayMs, 50));
 			try {
@@ -3165,8 +3342,8 @@ async function acquireDeepSources(runDirectory, sources, options, acquisitionCon
 			} catch (readError) {
 				source.warnings.push(readError instanceof Error ? readError.message : String(readError));
 			}
-		}),
-	);
+			if (checkpoint) checkpoint(source);
+	}
 }
 
 function evidenceSourceBatches(sources, options) {
@@ -3225,9 +3402,6 @@ async function commandDeep(positionals, flags) {
 	const base = searxngBase(flags.searxng);
 	if (!base) fail("deep requires a SearXNG instance; set connectedServices.searxng.baseUrl, FORGE_SEARXNG_URL, or --searxng <url>");
 	const runDirectory = resolve(flags.output);
-	if (existsSync(runDirectory)) fail(`output directory already exists: ${runDirectory}`);
-	mkdirSync(runDirectory, { recursive: true });
-
 	const options = deepDefaults(flags);
 	options.mode = flags.mode ?? "deep";
 	options.cacheDir = flags.cacheDir ?? null;
@@ -3238,9 +3412,22 @@ async function commandDeep(positionals, flags) {
 	options.perDomainConcurrency = flags.perDomainConcurrency ?? modeDefaults("deep").perDomainConcurrency;
 	options.embeddingUrl = flags.embeddingUrl ?? null;
 	options.embeddingModel = flags.embeddingModel ?? null;
-	const state = {
+	let runState = openResearchRun(
+		runDirectory,
+		"deep",
+		{ question, seedQueries: uniqueSeedQueries },
+		{ ...options, searxng: base },
+		Array.from({ length: options.maxIterations }, (_, index) => workItem("iteration", String(index + 1), { iteration: index + 1 })),
+		"iterations",
+	);
+	if (runState.status === "complete" && runState.completion) {
+		process.stdout.write(`${JSON.stringify(runState.completion, null, 2)}\n`);
+		return;
+	}
+	const checkpoint = loadDeepCheckpoint(runDirectory);
+	let state = checkpoint?.state ?? {
 		question,
-		startedAt: nowIso(),
+		startedAt: runState.createdAt,
 		startedAtMs: Date.now(),
 		options: { ...options, searxng: base },
 		seedQueries: uniqueSeedQueries,
@@ -3257,10 +3444,13 @@ async function commandDeep(positionals, flags) {
 		searchCacheLog: [],
 		schedulerLog: [],
 	};
+	state.startedAtMs = Date.now();
+	const control = checkpoint?.control ?? { currentIteration: 1, queuedQueries: [...uniqueSeedQueries], seenQueries: [] };
 	const acquisitionContext = createAcquisitionContext({
 		...acquisitionOptions(flags, { ...options, allowBrowser: options.render && !options.noBrowser }),
 		runDirectory,
 	});
+	restoreAcquisitionLogs(acquisitionContext);
 	const runtime = {
 		cacheDirectory: acquisitionContext.cacheDirectory,
 		searchQueue: createTaskQueue("search", 1, acquisitionContext.schedulerLog),
@@ -3272,18 +3462,22 @@ async function commandDeep(positionals, flags) {
 		searchCacheLog: state.searchCacheLog,
 	};
 	state.schedulerLog = acquisitionContext.schedulerLog;
-	const seenQueries = new Set();
-	const queuedQueries = [...uniqueSeedQueries];
-	const seenUrls = new Map();
+	const seenQueries = new Set(control.seenQueries);
+	const queuedQueries = control.queuedQueries;
+	const seenUrls = new Map(state.sources.map((source) => [source.canonicalUrl, source]));
 
-	for (let iteration = 1; iteration <= options.maxIterations; iteration += 1) {
+	for (let iteration = control.currentIteration; iteration <= options.maxIterations; iteration += 1) {
 		if (runtimeBudgetExceeded(state, options)) {
 			addBudgetEvent(state, "maxRuntimeMs", "Stopped before starting another iteration.");
 			break;
 		}
-		const iterationQueries = [];
-		while (queuedQueries.length > 0) {
-			if (seenQueries.size >= options.maxQueries) {
+		const iterationItem = loadRunState(runDirectory, "web-research").items.find((item) => item.iteration === iteration);
+		if (iterationItem && iterationItem.status !== "completed") {
+			runState = updateRunState(runDirectory, (draft) => startResearchItem(draft, iterationItem.id), { type: "item_started", itemId: iterationItem.id, attempt: iterationItem.attempts + 1 });
+		}
+		const iterationQueries = control.activeIteration === iteration ? [...(control.iterationQueries ?? [])] : [];
+		while (control.activeIteration !== iteration && queuedQueries.length > 0) {
+			if (seenQueries.size + iterationQueries.length >= options.maxQueries) {
 				addBudgetEvent(state, "maxQueries", "Stopped before scheduling another query.");
 				queuedQueries.length = 0;
 				break;
@@ -3291,13 +3485,15 @@ async function commandDeep(positionals, flags) {
 			const query = queuedQueries.shift();
 			const key = query.toLowerCase();
 			if (seenQueries.has(key)) continue;
-			seenQueries.add(key);
 			iterationQueries.push(query);
 		}
 		if (iterationQueries.length === 0) break;
+		control.activeIteration = iteration;
+		control.iterationQueries = iterationQueries;
+		writeDeepCheckpoint(runDirectory, state, control);
 
-		const newSources = [];
 		for (const query of iterationQueries) {
+			if (seenQueries.has(query.toLowerCase())) continue;
 			if (runtimeBudgetExceeded(state, options)) {
 				addBudgetEvent(state, "maxRuntimeMs", "Stopped before searching another query.");
 				break;
@@ -3341,12 +3537,15 @@ async function commandDeep(positionals, flags) {
 				const source = createDeepSource(result, iteration, query);
 				seenUrls.set(normalized, source);
 				state.sources.push(source);
-				newSources.push(source);
 			}
+			seenQueries.add(query.toLowerCase());
+			control.seenQueries = [...seenQueries];
+			writeDeepCheckpoint(runDirectory, state, control);
 		}
 
-		await acquireDeepSources(runDirectory, newSources, options, acquisitionContext, state);
-		const successful = newSources.filter((source) => source.status === "success" && !source.evidenceExtracted);
+		const iterationSources = state.sources.filter((source) => source.searchOrigins.some((origin) => origin.iteration === iteration));
+		await acquireDeepSources(runDirectory, iterationSources, options, acquisitionContext, state, () => writeDeepCheckpoint(runDirectory, state, control));
+		const successful = iterationSources.filter((source) => source.status === "success" && !source.evidenceExtracted);
 		if (successful.length > 0) {
 			const ranked = await rankSourcesForQuestion(successful, question, runtime, options);
 			state.chunks.push(...ranked.chunks);
@@ -3360,6 +3559,7 @@ async function commandDeep(positionals, flags) {
 				if (!orderedSources.includes(source)) source.warnings.push("skipped evidence extraction because source ranking was low");
 			}
 			await extractEvidenceBatches(runDirectory, orderedSources, state, options, runtime);
+			writeDeepCheckpoint(runDirectory, state, control);
 		}
 
 		if (iteration < options.maxIterations) {
@@ -3382,6 +3582,16 @@ async function commandDeep(positionals, flags) {
 				const normalized = query.trim().toLowerCase();
 				if (!seenQueries.has(normalized)) queuedQueries.push(query.trim());
 			}
+		}
+		control.currentIteration = iteration + 1;
+		control.activeIteration = null;
+		control.iterationQueries = [];
+		control.queuedQueries = queuedQueries;
+		control.seenQueries = [...seenQueries];
+		writeDeepCheckpoint(runDirectory, state, control);
+		const currentIterationItem = loadRunState(runDirectory, "web-research").items.find((item) => item.iteration === iteration);
+		if (currentIterationItem) {
+			runState = updateRunState(runDirectory, (draft) => finishResearchItem(draft, currentIterationItem.id, "deep_checkpoint.json"), { type: "item_completed", itemId: currentIterationItem.id, attempt: currentIterationItem.attempts });
 		}
 	}
 
@@ -3408,9 +3618,7 @@ async function commandDeep(positionals, flags) {
 	writeAcquisitionArtifacts(acquisitionContext);
 	await closeAcquisitionContext(acquisitionContext);
 	const validation = validateDeepRun(runDirectory, { emit: false });
-	process.stdout.write(
-		`${JSON.stringify(
-			{
+	const completion = {
 				runDirectory,
 				question,
 				queries: state.queryLog.length,
@@ -3422,11 +3630,9 @@ async function commandDeep(positionals, flags) {
 				budgetEvents: state.budgetEvents.length,
 				valid: validation.valid,
 				validationErrors: validation.errors,
-			},
-			null,
-			2,
-		)}\n`,
-	);
+	};
+	runState = updateRunState(runDirectory, (draft) => completeResearchRun(draft, completion), { type: "run_completed", iterations: control.currentIteration - 1 });
+	process.stdout.write(`${JSON.stringify(runState.completion, null, 2)}\n`);
 	if (!validation.valid) process.exit(1);
 }
 
@@ -3466,19 +3672,30 @@ async function commandAcademic(positionals, flags) {
 	if (!flags.output) fail("academic requires --output <new-directory>");
 	const query = positionals.join(" ");
 	const runDirectory = resolve(flags.output);
-	if (existsSync(runDirectory)) fail(`output directory already exists: ${runDirectory}`);
-	mkdirSync(runDirectory, { recursive: true });
-
 	const classification = classifyAcademicQuery(query);
 	const providers = academicProviderList(flags, classification);
 	const contactEmail = flags.contactEmail || process.env.FORGE_ACADEMIC_CONTACT_EMAIL || process.env.UNPAYWALL_EMAIL || null;
+	const limit = flags.limit ?? DEFAULT_LIMIT;
 	const options = {
 		userAgent: flags.userAgent ?? DEFAULT_USER_AGENT,
 		timeoutMs: flags.timeoutMs ?? DEFAULT_TIMEOUT_MS,
 	};
+	const providerBases = Object.fromEntries(providers.map((provider) => [provider, academicProviderBase(provider, flags)]));
+	let runState = openResearchRun(
+		runDirectory,
+		"academic",
+		{ query },
+		{ classification, providers, providerBases, limit, ...options, contactEmailConfigured: Boolean(contactEmail) },
+		providers.map((provider) => workItem("provider", provider, { provider })),
+		"providers",
+	);
+	if (runState.status === "complete" && runState.completion) {
+		process.stdout.write(`${JSON.stringify(runState.completion, null, 2)}\n`);
+		return;
+	}
 	const state = {
 		query,
-		startedAt: nowIso(),
+		startedAt: runState.createdAt,
 		classification,
 		providers,
 		options,
@@ -3488,42 +3705,69 @@ async function commandAcademic(positionals, flags) {
 	};
 	const sourceRecords = [];
 	const normalizedRecords = [];
-	const limit = flags.limit ?? DEFAULT_LIMIT;
-	for (const providerName of providers.filter((provider) => provider !== "unpaywall")) {
-		const provider = ACADEMIC_PROVIDERS[providerName];
-		if (!provider) continue;
-		const context = {
-			query,
-			limit,
-			base: academicProviderBase(providerName, flags),
-			runDirectory,
-			options,
-			state,
-			contactEmail,
-			classification,
-			knownDois: [],
-		};
-		await runAcademicProvider(providerName, context, sourceRecords, normalizedRecords);
-	}
-	const knownDois = normalizedRecords.map((record) => record.identifiers?.doi).filter(Boolean);
-	if (providers.includes("unpaywall") && contactEmail && knownDois.length > 0) {
-		await runAcademicProvider(
-			"unpaywall",
-			{
-				query,
-				limit,
-				base: academicProviderBase("unpaywall", flags),
-				runDirectory,
-				options,
-				state,
-				contactEmail,
-				classification,
-				knownDois,
-			},
-			sourceRecords,
-			normalizedRecords,
-		);
-	}
+	const providerResultDirectory = join(runDirectory, "provider_results");
+	mkdirSync(providerResultDirectory, { recursive: true });
+	await withRunLock(runDirectory, async () => {
+		for (const providerName of providers) {
+			runState = loadRunState(runDirectory, "web-research");
+			let item = runState.items.find((candidate) => candidate.provider === providerName);
+			const resultPath = join(providerResultDirectory, `${safeStem(providerName)}.json`);
+			if (item.status === "completed" && existsSync(resultPath)) {
+				const result = JSON.parse(readFileSync(resultPath, "utf8"));
+				sourceRecords.push(...result.sourceRecords);
+				normalizedRecords.push(...result.normalizedRecords);
+				state.providerRequests.push(...result.providerRequests);
+				state.providerErrors.push(...result.providerErrors);
+				continue;
+			}
+			if (!retryableItem(item)) continue;
+			while (retryableItem(item)) {
+				runState = updateRunState(runDirectory, (draft) => startResearchItem(draft, item.id), { type: "item_started", itemId: item.id, attempt: item.attempts + 1 });
+				item = runState.items.find((candidate) => candidate.id === item.id);
+				const providerState = { providerRequests: [], providerErrors: [] };
+				const providerSources = [];
+				const providerNormalized = [];
+				try {
+					const knownDois = normalizedRecords.map((record) => record.identifiers?.doi).filter(Boolean);
+					if (providerName !== "unpaywall" || (contactEmail && knownDois.length > 0)) {
+						await runAcademicProvider(
+							providerName,
+							{ query, limit, base: providerBases[providerName], runDirectory, options, state: providerState, contactEmail, classification, knownDois },
+							providerSources,
+							providerNormalized,
+						);
+					}
+					if (providerSources.length === 0 && providerState.providerErrors.length > 0) {
+						throw new Error(providerState.providerErrors.map((entry) => entry.error).join("; "));
+					}
+					const result = { provider: providerName, sourceRecords: providerSources, normalizedRecords: providerNormalized, providerRequests: providerState.providerRequests, providerErrors: providerState.providerErrors };
+					writeJson(resultPath, result);
+					sourceRecords.push(...providerSources);
+					normalizedRecords.push(...providerNormalized);
+					state.providerRequests.push(...providerState.providerRequests);
+					state.providerErrors.push(...providerState.providerErrors);
+					runState = updateRunState(runDirectory, (draft) => finishResearchItem(draft, item.id, resultPath), { type: "item_completed", itemId: item.id, attempt: item.attempts });
+					break;
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					const transient = isTransientFailure(error);
+					runState = updateRunState(runDirectory, (draft) => failResearchItem(draft, item.id, message, transient), { type: "item_failed", itemId: item.id, attempt: item.attempts, transient, error: message });
+					item = runState.items.find((candidate) => candidate.id === item.id);
+					if (!retryableItem(item)) {
+						writeJson(resultPath, {
+							provider: providerName,
+							sourceRecords: providerSources,
+							normalizedRecords: providerNormalized,
+							providerRequests: providerState.providerRequests,
+							providerErrors: providerState.providerErrors,
+						});
+						state.providerRequests.push(...providerState.providerRequests);
+						state.providerErrors.push(...providerState.providerErrors);
+					}
+				}
+			}
+		}
+	});
 	const { works, provenanceRows, decisions } = dedupeAcademicRecords(sourceRecords, normalizedRecords);
 	const workBySource = new Map();
 	for (const work of works) {
@@ -3557,11 +3801,9 @@ async function commandAcademic(positionals, flags) {
 	writeJsonl(join(runDirectory, "dedupe_decisions.jsonl"), decisions);
 	writeJsonl(join(runDirectory, "provider_requests.jsonl"), state.providerRequests);
 	writeJsonl(join(runDirectory, "provider_errors.jsonl"), state.providerErrors);
-	writeFileSync(join(runDirectory, "academic_report.md"), buildAcademicReport(state));
+	atomicWriteFile(join(runDirectory, "academic_report.md"), buildAcademicReport(state));
 	const validation = validateAcademicRun(runDirectory, { emit: false });
-	process.stdout.write(
-		`${JSON.stringify(
-			{
+	const completion = {
 				runDirectory,
 				query,
 				providers,
@@ -3571,12 +3813,83 @@ async function commandAcademic(positionals, flags) {
 				risRecords: risManifest.length,
 				valid: validation.valid,
 				validationErrors: validation.errors,
-			},
-			null,
-			2,
-		)}\n`,
-	);
+	};
+	runState = updateRunState(runDirectory, (draft) => completeResearchRun(draft, completion), { type: "run_completed", providers: providers.length });
+	process.stdout.write(`${JSON.stringify(runState.completion, null, 2)}\n`);
 	if (!validation.valid) process.exit(1);
+}
+
+function commandStatus(positionals) {
+	if (positionals.length !== 1) fail("status requires exactly one run directory");
+	const runDirectory = resolve(positionals[0]);
+	const state = loadRunState(runDirectory, "web-research");
+	const counts = Object.fromEntries(["pending", "in_progress", "completed", "failed"].map((status) => [status, state.items.filter((item) => item.status === status).length]));
+	let inputDrift = { added: [], removed: [], changed: [] };
+	if (state.command === "read" && state.input.inputFile) {
+		const listed = readFileSync(state.input.inputFile, "utf8").split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith("#"));
+		const currentUrls = [...state.input.staticUrls, ...listed];
+		const frozen = new Map(state.input.urls.map((url) => [normalizeUrl(url), url]));
+		const current = new Map(currentUrls.map((url) => [normalizeUrl(url), url]));
+		inputDrift = { added: [...current].filter(([key]) => !frozen.has(key)).map(([, url]) => ({ url })), removed: [...frozen].filter(([key]) => !current.has(key)).map(([, url]) => ({ url })), changed: [] };
+	}
+	process.stdout.write(`${JSON.stringify({ runDirectory, command: state.command, status: state.status, phase: state.phase, nextAction: state.nextAction, items: counts, inputDrift, refreshRequired: inputDrift.added.length + inputDrift.removed.length > 0 }, null, 2)}\n`);
+}
+
+function commandRefresh(positionals) {
+	if (positionals.length !== 1) fail("refresh requires exactly one run directory");
+	const runDirectory = resolve(positionals[0]);
+	const state = loadRunState(runDirectory, "web-research");
+	if (state.command !== "read" || !state.input.inputFile) fail("refresh is only applicable to read runs created with --input-file");
+	const listed = readFileSync(state.input.inputFile, "utf8").split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith("#"));
+	const currentUrls = [...state.input.staticUrls, ...listed];
+	const frozen = new Map(state.input.urls.map((url) => [normalizeUrl(url), url]));
+	const current = new Map(currentUrls.map((url) => [normalizeUrl(url), url]));
+	const added = [...current].filter(([key]) => !frozen.has(key)).map(([, url]) => url);
+	const removed = new Set([...frozen].filter(([key]) => !current.has(key)).map(([key]) => key));
+	if (added.length === 0 && removed.size === 0) {
+		process.stdout.write(`${JSON.stringify({ runDirectory, refreshed: false, added: 0, removed: 0 })}\n`);
+		return;
+	}
+	const updated = updateRunState(
+		runDirectory,
+		(draft) => {
+			for (const item of draft.items) if (item.kind === "url" && removed.has(normalizeUrl(item.url))) item.retired = true;
+			for (const [index, url] of added.entries()) draft.items.push(workItem("url", `${draft.items.length + index}:${url}`, { url, index: draft.items.length + index }));
+			draft.input.urls = currentUrls;
+			draft.optionsFingerprint = configurationFingerprint({ workflow: draft.workflow, command: draft.command, input: draft.input, options: draft.options });
+			Object.assign(draft, { status: "running", phase: "processing", nextAction: draft.items.find((item) => retryableItem(item))?.id ?? "finalize" });
+			delete draft.completion;
+			return draft;
+		},
+		{ type: "input_refreshed", added: added.length, removed: removed.size },
+	);
+	process.stdout.write(`${JSON.stringify({ runDirectory, refreshed: true, added: added.length, removed: removed.size, total: updated.items.filter((item) => item.kind === "url" && !item.retired).length })}\n`);
+}
+
+function commandRetry(positionals, flags) {
+	if (positionals.length !== 1) fail("retry requires exactly one run directory");
+	const runDirectory = resolve(positionals[0]);
+	const state = loadRunState(runDirectory, "web-research");
+	const targets = flags.item ? new Set([flags.item]) : new Set(state.items.filter((item) => item.status === "failed" && !item.retired).map((item) => item.id));
+	if (targets.size === 0) fail("no failed items selected");
+	const known = new Set(state.items.map((item) => item.id));
+	const unknown = [...targets].filter((item) => !known.has(item));
+	if (unknown.length > 0) fail(`unknown item id(s): ${unknown.join(", ")}`);
+	const updated = updateRunState(
+		runDirectory,
+		(draft) => {
+			for (const item of draft.items) {
+				if (targets.has(item.id)) Object.assign(item, { status: "pending", attempts: 0, transient: false, error: null });
+			}
+			draft.status = "running";
+			draft.phase = draft.command === "academic" ? "providers" : draft.command === "deep" ? "iterations" : "processing";
+			draft.nextAction = [...targets][0];
+			delete draft.completion;
+			return draft;
+		},
+		{ type: "items_retried", itemIds: [...targets].sort() },
+	);
+	process.stdout.write(`${JSON.stringify({ runDirectory, retried: [...targets].sort(), nextAction: updated.nextAction }, null, 2)}\n`);
 }
 
 // --- Argument parsing -------------------------------------------------------
@@ -3627,6 +3940,8 @@ const FLAG_SPECS = {
 	"--no-embeddings": { key: "noEmbeddings", value: false },
 	"--force-refresh": { key: "forceRefresh", value: false },
 	"--json": { key: "json", value: false },
+	"--item": { key: "item", value: true },
+	"--all-failed": { key: "allFailed", value: false },
 };
 
 function parseArguments(args) {
@@ -3695,6 +4010,9 @@ function usage() {
   web-research.mjs academic <query...> --output <dir> [--limit N]
       [--providers <comma-separated>] [--contact-email <email>] [--timeout-ms N]
   web-research.mjs validate <run-directory>
+  web-research.mjs status <run-directory> [--json]
+  web-research.mjs refresh <run-directory>
+  web-research.mjs retry <run-directory> (--item <id> | --all-failed)
 `);
 }
 
@@ -3712,6 +4030,12 @@ async function main() {
 	else if (command === "deep") await commandDeep(positionals, flags);
 	else if (command === "discover") await commandDiscover(positionals, flags);
 	else if (command === "academic") await commandAcademic(positionals, flags);
+	else if (command === "status") commandStatus(positionals);
+	else if (command === "refresh") commandRefresh(positionals);
+	else if (command === "retry") {
+		if (Boolean(flags.item) === Boolean(flags.allFailed)) fail("retry requires exactly one of --item or --all-failed");
+		commandRetry(positionals, flags);
+	}
 	else if (command === "validate") {
 		if (positionals.length !== 1) fail("validate requires exactly one run directory");
 		const runDirectory = resolve(positionals[0]);

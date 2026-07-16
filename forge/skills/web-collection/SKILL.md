@@ -22,9 +22,10 @@ the original sources; produce new files only.
    `~/.pi-forge/agent/settings.json`. Search uses the configured SearXNG
    instance unless overridden for one run by `FORGE_SEARXNG_URL` or
    `--searxng <url>`.
-2. Choose a new output directory under
-   `forge-output/web-collection/<source-stem>/`. If it exists, use the next
-   numbered suffix. The script refuses to write into an existing directory.
+2. Use an output directory under `forge-output/web-collection/<source-stem>/`.
+   Repeating the same command resumes its compatible incomplete run or returns
+   its completion summary. Use a numbered suffix only for an independent run;
+   unrelated or legacy directories are refused.
 3. Pick a command:
    - **collect** named URLs:
 
@@ -116,6 +117,12 @@ the original sources; produce new files only.
    node <skill-directory>/scripts/web-collection.mjs validate <run-directory>
    ```
 
+   Use `status <run-directory> --json` to inspect the queue, `refresh
+   <run-directory>` to reconcile a changed `--input-file`, and `retry
+   <run-directory> --item <id>` or `--all-failed` for explicit retry. Each URL
+   is committed separately, so a stopped collection returns to the first
+   uncommitted URL.
+
 6. To extract text and metadata from the saved files, hand the `downloads/`
    directory to the document-ingest skill. Do not summarize or analyze inside
    this skill.
@@ -143,7 +150,7 @@ task needs one repeatable operation rather than the full collection workflow.
   are refused.
 - Downloads are sequential with a polite delay and a clear User-Agent. `harvest`
   honors `robots.txt` for User-Agent `*` unless `--ignore-robots` is given.
-- Never overwrite an existing output directory or download. Resources exceeding
+- Never adopt an unrelated or legacy output directory. Resources exceeding
   `--max-bytes` are reported as failures rather than partially saved.
 - Deduplicate by normalized URL, SHA-256, Content-Disposition filename, and page
   title. Duplicates are recorded as `skipped` with the original `resource_id`.

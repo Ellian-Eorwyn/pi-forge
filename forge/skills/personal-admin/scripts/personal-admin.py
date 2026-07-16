@@ -9,6 +9,9 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
+import run_state
+
 
 RUN_SCHEMA_VERSION = 1
 SOURCE_EXTENSIONS = {".md", ".markdown", ".txt"}
@@ -190,7 +193,7 @@ def title_from_metadata(metadata_path):
     return value if isinstance(value, str) and value.strip() else None
 
 
-def discover_sources(raw_inputs):
+def discover_sources(raw_inputs, allow_empty=False):
     seen = set()
     found = []
     for raw in raw_inputs:
@@ -225,7 +228,7 @@ def discover_sources(raw_inputs):
             if resolved not in seen:
                 seen.add(resolved)
                 found.append(resolved)
-    if not found:
+    if not found and not allow_empty:
         fail("no .md, .markdown, or .txt sources found")
     return found
 
@@ -258,6 +261,39 @@ def build_document_records(sources):
             }
         )
     return documents
+
+
+def run_configuration(raw_inputs, title, deliverables, snapshot):
+    return {
+        "workflow": "personal-admin",
+        "command": "init",
+        "input": {
+            "roots": [str(Path(value).expanduser().resolve()) for value in raw_inputs],
+            "snapshot": snapshot,
+        },
+        "options": {"title": title, "deliverables": deliverables},
+    }
+
+
+def item_state(document):
+    return {
+        "id": document["documentId"],
+        "path": document["sourcePath"],
+        "sha256": document["sha256"],
+        "status": "pending",
+        "attempts": 0,
+        "transient": False,
+        "error": None,
+    }
+
+
+def current_drift(state):
+    roots = state.get("input", {}).get("roots", [])
+    current = build_document_records(discover_sources(roots, allow_empty=True))
+    snapshot = state.get("input", {}).get("snapshot", [])
+    before = [{"path": item["sourcePath"], "sha256": item["sha256"]} for item in snapshot]
+    after = [{"path": item["sourcePath"], "sha256": item["sha256"]} for item in current]
+    return run_state.input_drift(before, after), current
 
 
 def write_sources_md(run_directory, title, documents):
@@ -326,10 +362,22 @@ def parse_deliverables(raw):
 
 def command_init(args):
     deliverables = parse_deliverables(args.deliverables)
+    title = args.title or "Personal Admin"
+    output = Path(args.output).expanduser().resolve()
+    if output.exists():
+        try:
+            state = run_state.load_run_state(output, "personal-admin")
+            expected = run_configuration(args.inputs, title, deliverables, state["input"]["snapshot"])
+            run_state.assert_compatible_run(state, expected)
+        except (OSError, ValueError, KeyError) as error:
+            fail(str(error))
+        drift, _ = current_drift(state)
+        print(json.dumps({"runDirectory": str(output), "resumed": True, "complete": state.get("status") == "complete", "phase": state.get("phase"), "nextAction": state.get("nextAction"), "drift": drift}, ensure_ascii=False))
+        return
     sources = discover_sources(args.inputs)
     documents = build_document_records(sources)
-    title = args.title or "Personal Admin"
-    output = require_new_directory(args.output)
+    configuration = run_configuration(args.inputs, title, deliverables, documents)
+    output.mkdir(parents=True)
     (output / "working").mkdir()
     run = {
         "schemaVersion": RUN_SCHEMA_VERSION,
@@ -339,15 +387,25 @@ def command_init(args):
         "factTypes": FACT_TYPES,
         "documents": documents,
     }
-    (output / "run_config.json").write_text(json.dumps(run, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    run_state.atomic_write_json(output / "run_config.json", run)
     manifest = {"schemaVersion": RUN_SCHEMA_VERSION, "createdAt": utc_now(), "documents": documents}
-    (output / "source_manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    (output / "facts_results.jsonl").write_text("", encoding="utf-8")
+    run_state.atomic_write_json(output / "source_manifest.json", manifest)
+    run_state.atomic_write_text(output / "facts_results.jsonl", "")
+    state = run_state.create_run_state(
+        "personal-admin",
+        "init",
+        configuration["input"],
+        configuration["options"],
+        items=[item_state(document) for document in documents],
+        phase="extracting",
+        next_action="next",
+    )
+    run_state.initialize_run_state(output, state)
     write_sources_md(output, title, documents)
     created = scaffold_markdown(output, title, deliverables)
     print(
         json.dumps(
-            {"runDirectory": str(output), "title": title, "documents": len(documents), "deliverables": deliverables, "scaffolded": created},
+            {"runDirectory": str(output), "resumed": False, "title": title, "documents": len(documents), "deliverables": deliverables, "scaffolded": created},
             ensure_ascii=False,
         )
     )
@@ -367,20 +425,18 @@ def load_results(run_directory, strict=True):
     path = run_directory / "facts_results.jsonl"
     if not path.is_file():
         fail(f"facts_results.jsonl is missing: {path}")
-    results = []
+    try:
+        results, warnings = run_state.read_jsonl_recover_tail(path, repair=True)
+    except ValueError as error:
+        fail(str(error))
+    for warning in warnings:
+        print(f"Warning: {warning}", file=sys.stderr)
     seen = set()
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        if not line.strip():
-            continue
-        try:
-            result = json.loads(line)
-        except json.JSONDecodeError as error:
-            fail(f"invalid JSON on facts_results.jsonl line {line_number}: {error}")
+    for result in results:
         document_id = result.get("documentId")
         if strict and document_id in seen:
             fail(f"duplicate result for document {document_id}")
         seen.add(document_id)
-        results.append(result)
     return results
 
 
@@ -427,6 +483,28 @@ def command_next(args):
             ensure_ascii=False,
         )
     )
+
+
+def command_status(args):
+    run_directory = require_run_directory(args.run_directory)
+    try:
+        state = run_state.load_run_state(run_directory, "personal-admin")
+    except ValueError as error:
+        fail(str(error))
+    drift, _ = current_drift(state)
+    results = load_results(run_directory)
+    run = load_run(run_directory)
+    result = {
+        "runDirectory": str(run_directory),
+        "status": state.get("status"),
+        "phase": state.get("phase"),
+        "nextAction": state.get("nextAction"),
+        "processed": len(results),
+        "total": len(run["documents"]),
+        "drift": drift,
+        "refreshRequired": any(drift.values()),
+    }
+    print(json.dumps(result, indent=2 if args.json else None))
 
 
 def normalize_facts(raw):
@@ -499,10 +577,16 @@ def command_record(args):
         "note": note,
         "recordedAt": utc_now(),
     }
-    with (run_directory / "facts_results.jsonl").open("a", encoding="utf-8", newline="") as handle:
-        handle.write(json.dumps(result, ensure_ascii=False) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+    run_state.append_jsonl_fsync(run_directory / "facts_results.jsonl", result)
+    def recorded(state):
+        for item in state["items"]:
+            if item["id"] == args.doc_id:
+                item.update({"status": args.status, "attempts": item.get("attempts", 0) + 1, "error": note if args.status == "failed" else None})
+        remaining_items = [item for item in state["items"] if item["status"] == "pending"]
+        state["phase"] = "authoring" if not remaining_items else "extracting"
+        state["nextAction"] = "build" if not remaining_items else "next"
+        return state
+    run_state.update_run_state(run_directory, recorded, {"type": "item_recorded", "itemId": args.doc_id, "status": args.status})
     remaining = len(run["documents"]) - len(results) - 1
     print(json.dumps({"recorded": args.doc_id, "status": args.status, "facts": len(facts) if facts is not None else 0, "remaining": remaining}))
 
@@ -517,10 +601,14 @@ def verify_hashes(run):
 
 
 def write_csv(path, columns, rows):
-    with path.open("w", encoding="utf-8", newline="") as handle:
+    temporary = path.with_name(f".{path.name}.tmp")
+    with temporary.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, lineterminator="\n")
         writer.writerow(columns)
         writer.writerows(rows)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
 
 
 def due_date_sort_key(value):
@@ -597,6 +685,11 @@ def command_build(args):
         write_csv(run_directory / "contact_list.csv", CONTACT_COLUMNS, contact_rows)
         built.append("contact_list.csv")
     counts = Counter(result["status"] for result in results)
+    def mark_built(state):
+        state["phase"] = "authoring"
+        state["nextAction"] = "validate"
+        return state
+    run_state.update_run_state(run_directory, mark_built, {"type": "derived_outputs_built", "files": built})
     print(
         json.dumps(
             {
@@ -682,6 +775,13 @@ def command_validate(args):
     print(json.dumps(result, indent=2))
     if errors:
         raise SystemExit(1)
+    if result["complete"]:
+        def completed(state):
+            state["status"] = "complete"
+            state["phase"] = "complete"
+            state["nextAction"] = None
+            return state
+        run_state.update_run_state(run_directory, completed, {"type": "run_completed"})
 
 
 def parser():
@@ -702,6 +802,11 @@ def parser():
     next_command = subparsers.add_parser("next", help="Return exactly one pending document as JSON.")
     next_command.add_argument("run_directory")
     next_command.set_defaults(handler=command_next)
+
+    status = subparsers.add_parser("status", help="Report run progress and input drift.")
+    status.add_argument("run_directory")
+    status.add_argument("--json", action="store_true")
+    status.set_defaults(handler=command_status)
 
     record = subparsers.add_parser("record", help="Append one document's facts or an explicit disposition.")
     record.add_argument("run_directory")

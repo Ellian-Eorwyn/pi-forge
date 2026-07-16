@@ -24,6 +24,8 @@ established.
 
 ```text
 <run-dir>/
+  run_state.json             # durable phase, item, synthesis, and deliverable queues
+  run_events.jsonl           # append-only fsynced transition journal
   run_config.json            # schema version, input, item types, document list with hashes
   documents.csv              # per-source manifest with hashes and final disposition
   extraction_results.jsonl   # append-only, one record per document
@@ -33,6 +35,9 @@ established.
   claim_clusters.md          # advisory worksheet; same condition
   item_index.jsonl           # normalized item index for downstream/meta use
   source_profile.csv         # per-source item counts for downstream/meta use
+  synthesis_state.json       # context-bounded hierarchical packet queue
+  synthesis_packets/         # deterministic packet inputs
+  synthesis_memos/           # atomically recorded packet memos
   literature_summary.md      # model-authored
   claims_matrix.md           # model-authored
   key_terms.md               # model-authored
@@ -41,14 +46,19 @@ established.
   working/                   # per-document extraction JSON written before `record`
 ```
 
-`run_config.json`, `documents.csv`, and `extraction_results.jsonl` are managed
-by the script. Do not hand-edit them. The Markdown deliverables are
-scaffolded by `build` only when absent, then authored by the model.
+`run_state.json`, `run_events.jsonl`, `run_config.json`, `documents.csv`, and
+`extraction_results.jsonl` are managed by the script. Do not hand-edit them.
+`documents.csv` is atomically refreshed after every `record`; an incomplete
+final journal record is recoverable without accepting malformed interior
+records. Markdown deliverables are scaffolded by `build` only when absent,
+then committed one at a time with `record-output`.
 
 ## Meta Run Layout
 
 ```text
 <meta-run-dir>/
+  run_state.json
+  run_events.jsonl
   meta_config.json           # schema version, research question, corpus sources, packets
   meta_sources.csv           # prior runs and inferred/explicit corpus labels
   meta_items.jsonl           # normalized extracted items across prior runs
@@ -119,7 +129,8 @@ Use the most precise locator the format exposes. For `document-ingest` output,
 use the page numbers or headings recorded in its `source_map.json`. For plain
 Markdown or text, use headings or section labels. Never claim page-level
 precision for a format that does not expose pages. Hashes recorded at `init`
-must still match at `build` and `validate`; a changed source aborts the run.
+remain the frozen snapshot. `status` reports drift; `refresh` explicitly adds,
+supersedes, or retires source revisions without deleting prior artifacts.
 
 ## Evidence Table
 
@@ -179,6 +190,8 @@ the difference between first-pass evidence and generated synthesis:
 - Meta packets must remain under the configured context budget. The default
   target is `128000` estimated tokens, with a hard maximum of `256000`, using
   `ceil(characters / 4)`.
+- Normal synthesis uses the same 128,000-token target and recursively reduces
+  packet memos into higher levels when the corpus still exceeds the target.
 - Missing original source files are warnings, not fatal errors, when prior
   structured artifacts are intact. Quote verification and snippets degrade to
   artifact-only provenance.

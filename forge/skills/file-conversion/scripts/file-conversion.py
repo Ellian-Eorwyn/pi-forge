@@ -4,6 +4,7 @@ import argparse
 import csv
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import posixpath
@@ -22,6 +23,9 @@ import zipfile
 from collections import Counter
 from pathlib import Path, PurePosixPath
 from xml.etree import ElementTree
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
+import run_state
 
 
 LOW_TEXT_CHARACTERS = 40
@@ -223,6 +227,60 @@ def require_run_directory(raw_path):
     if not (path / "conversion_manifest.csv").is_file():
         fail(f"conversion_manifest.csv is missing: {path}")
     return path
+
+
+def conversion_configuration(args):
+    return {
+        "workflow": "file-conversion",
+        "command": "convert",
+        "input": {"roots": [str(Path(value).expanduser().resolve()) for value in args.inputs]},
+        "options": {
+            "target": args.target,
+            "fromExtension": args.from_extension,
+            "cover": str(Path(args.cover).expanduser().resolve()) if args.cover else None,
+            "title": args.title,
+            "author": args.author,
+            "language": args.language,
+            "date": args.date,
+        },
+    }
+
+
+def conversion_item(path):
+    digest = sha256(path)
+    return {
+        "id": f"file:{run_state.configuration_fingerprint({'path': str(path), 'sha256': digest})[:20]}",
+        "path": str(path),
+        "sha256": digest,
+        "format": path.suffix.lower().lstrip(".") or "(none)",
+        "status": "pending",
+        "attempts": 0,
+        "transient": False,
+        "error": None,
+    }
+
+
+def conversion_row(item, target, cover=None):
+    return {
+        "source_path": item["path"],
+        "source_sha256": item["sha256"],
+        "source_format": item["format"],
+        "target_format": target,
+        "status": item["status"],
+        "output_path": item.get("outputPath", ""),
+        "warning_count": item.get("warningCount", 0),
+        "error": item.get("error") or "",
+        "cover_path": str(cover) if cover else "",
+        "cover_sha256": sha256(cover) if cover else "",
+    }
+
+
+def write_conversion_manifest(path, rows):
+    handle = io.StringIO(newline="")
+    writer = csv.DictWriter(handle, fieldnames=MANIFEST_COLUMNS, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(rows)
+    run_state.atomic_write_text(path, handle.getvalue())
 
 
 def iter_input_files(root):
@@ -1465,7 +1523,17 @@ def command_convert(args):
         from_extension = from_extension.lower()
         if from_extension not in EXTENSION_GROUP:
             fail(f"--from extension is not a recognized source: {from_extension}")
-    files = discover_inputs(args.inputs)
+    configuration = conversion_configuration(args)
+    output = Path(args.output).expanduser().resolve()
+    if output.exists():
+        try:
+            state = run_state.load_run_state(output, "file-conversion")
+            run_state.assert_compatible_run(state, configuration)
+        except (OSError, ValueError) as error:
+            fail(str(error))
+        files = [Path(item["path"]) for item in state["items"] if not item.get("retired")]
+    else:
+        files = discover_inputs(args.inputs)
     selected_files = [path for path in files if not from_extension or path.suffix.lower() == from_extension]
     book_options_used = any([args.cover, args.title, args.author, args.language, args.date])
     if book_options_used and args.target != "epub":
@@ -1482,67 +1550,173 @@ def command_convert(args):
             validate_cover(cover)
         except RuntimeError as error:
             fail(str(error))
-    output = require_new_directory(args.output)
-    converted_dir = output / "converted"
-    converted_dir.mkdir()
+    if not output.exists():
+        output.mkdir(parents=True)
+        (output / "converted").mkdir()
+        items = [conversion_item(source) for source in selected_files]
+        if not items:
+            fail("no files matched the requested conversion; nothing was written")
+        state = run_state.create_run_state(
+            "file-conversion",
+            "convert",
+            configuration["input"],
+            configuration["options"],
+            items=items,
+            phase="converting",
+            next_action="convert",
+        )
+        run_state.initialize_run_state(output, state)
+        write_conversion_manifest(output / "conversion_manifest.csv", [conversion_row(item, args.target, cover) for item in items])
     manifest_path = output / "conversion_manifest.csv"
-    used_names = set()
-    rows = []
-    counts = Counter()
-    for source in files:
-        if from_extension and source.suffix.lower() != from_extension:
-            continue
-        options = {
-            "cover": cover,
-            "title": args.title,
-            "author": args.author,
-            "language": args.language,
-            "date": args.date,
-        }
-        outcome = convert_one(source, args.target, converted_dir, used_names, options)
-        counts[outcome["status"]] += 1
-        output_rel = str(outcome["output"].relative_to(output)) if outcome["output"] else ""
-        rows.append(
-            [
-                str(source),
-                sha256(source),
-                source.suffix.lower().lstrip(".") or "(none)",
-                args.target,
-                outcome["status"],
-                output_rel,
-                len(outcome["warnings"]),
-                outcome["error"],
-                str(cover) if cover else "",
-                sha256(cover) if cover else "",
-            ]
-        )
-        append_log(output, "conversion_log.md", [f"- {utc_now()} {outcome['status'].upper()} {source} -> {output_rel or '(none)'}"])
-        if outcome["warnings"]:
-            append_log(output, "warnings.md", [f"## {source.name} -> {args.target}", "", *[f"- {warning}" for warning in outcome["warnings"]], ""])
-    if not rows:
-        fail("no files matched the requested conversion; nothing was written")
-    with manifest_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle, lineterminator="\n")
-        writer.writerow(MANIFEST_COLUMNS)
-        writer.writerows(rows)
-    print(
-        json.dumps(
-            {
-                "runDirectory": str(output),
-                "target": args.target,
-                "success": counts["success"],
-                "needsReview": counts["needs_review"],
-                "skipped": counts["skipped"],
-                "failed": counts["failed"],
-            }
-        )
-    )
+    state = run_state.load_run_state(output, "file-conversion")
+    with manifest_path.open(encoding="utf-8-sig", newline="") as handle:
+        rows_by_key = {(row["source_path"], row["source_sha256"]): row for row in csv.DictReader(handle)}
+    used_names = {Path(row["output_path"]).name.lower() for row in rows_by_key.values() if row.get("output_path")}
+    with run_state.run_lock(output):
+        for snapshot in state["items"]:
+            if snapshot.get("retired") or snapshot["status"] in {"success", "needs_review", "skipped"}:
+                continue
+            if snapshot["status"] == "failed" and (not snapshot.get("transient") or snapshot.get("attempts", 0) >= run_state.DEFAULT_MAX_ATTEMPTS):
+                continue
+            source = Path(snapshot["path"])
+            if not source.is_file() or sha256(source) != snapshot["sha256"]:
+                continue
+            item = snapshot
+            while item.get("attempts", 0) < run_state.DEFAULT_MAX_ATTEMPTS:
+                attempt = item.get("attempts", 0) + 1
+                state = run_state.update_run_state(
+                    output,
+                    lambda draft, item_id=item["id"], attempt=attempt: mark_conversion_started(draft, item_id, attempt),
+                    {"type": "item_started", "itemId": item["id"], "attempt": attempt},
+                )
+                item = next(candidate for candidate in state["items"] if candidate["id"] == item["id"] and candidate["sha256"] == item["sha256"])
+                attempt_names = set(used_names)
+                options = {"cover": cover, "title": args.title, "author": args.author, "language": args.language, "date": args.date}
+                outcome = convert_one(source, args.target, output / "converted", attempt_names, options)
+                transient = outcome["status"] == "failed" and run_state.is_transient_failure(RuntimeError(outcome["error"]))
+                output_rel = str(outcome["output"].relative_to(output)) if outcome["output"] else ""
+                item.update({"status": outcome["status"], "outputPath": output_rel, "warningCount": len(outcome["warnings"]), "error": outcome["error"] or None, "transient": transient})
+                rows_by_key[(item["path"], item["sha256"])] = conversion_row(item, args.target, cover)
+                write_conversion_manifest(manifest_path, list(rows_by_key.values()))
+                state = run_state.update_run_state(
+                    output,
+                    lambda draft, updated=item: mark_conversion_finished(draft, updated),
+                    {"type": "item_completed" if outcome["status"] != "failed" else "item_failed", "itemId": item["id"], "status": outcome["status"], "transient": transient, "attempt": attempt},
+                )
+                append_log(output, "conversion_log.md", [f"- {utc_now()} {outcome['status'].upper()} {source} -> {output_rel or '(none)'}"])
+                if outcome["warnings"]:
+                    append_log(output, "warnings.md", [f"## {source.name} -> {args.target}", "", *[f"- {warning}" for warning in outcome["warnings"]], ""])
+                if outcome["status"] != "failed":
+                    used_names = attempt_names
+                    break
+                if not transient:
+                    break
+        state = run_state.update_run_state(output, finish_conversion_phase, {"type": "phase_updated"})
+    counts = Counter(row["status"] for row in rows_by_key.values())
+    print(json.dumps({"runDirectory": str(output), "target": args.target, "complete": state["status"] == "complete", "success": counts["success"], "needsReview": counts["needs_review"], "skipped": counts["skipped"], "failed": counts["failed"]}))
+
+
+def mark_conversion_started(state, item_id, attempt):
+    item = next(item for item in state["items"] if item["id"] == item_id)
+    item.update({"status": "in_progress", "attempts": attempt, "error": None})
+    state.update({"status": "running", "phase": "converting", "nextAction": "convert"})
+    return state
+
+
+def mark_conversion_finished(state, updated):
+    item = next(item for item in state["items"] if item["id"] == updated["id"] and item["sha256"] == updated["sha256"])
+    item.update(updated)
+    return state
+
+
+def finish_conversion_phase(state):
+    retryable = any(run_state.retryable_item(item) for item in state["items"] if not item.get("retired"))
+    state["status"] = "running" if retryable else "complete"
+    state["phase"] = "converting" if retryable else "complete"
+    state["nextAction"] = "convert" if retryable else None
+    return state
 
 
 def append_log(run_directory, name, lines):
     path = run_directory / name
     existing = path.read_text(encoding="utf-8") if path.is_file() else ""
-    path.write_text(existing + "\n".join(lines) + "\n", encoding="utf-8")
+    run_state.atomic_write_text(path, existing + "\n".join(lines) + "\n")
+
+
+def conversion_drift(state):
+    try:
+        current_files = discover_inputs(state["input"]["roots"])
+    except SystemExit:
+        current_files = []
+    current = [{"path": str(path), "sha256": sha256(path)} for path in current_files]
+    snapshot = [{"path": item["path"], "sha256": item["sha256"]} for item in state["items"] if not item.get("retired")]
+    return run_state.input_drift(snapshot, current), current_files
+
+
+def command_status(args):
+    run_directory = require_run_directory(args.run_directory)
+    try:
+        state = run_state.load_run_state(run_directory, "file-conversion")
+    except ValueError as error:
+        fail(str(error))
+    drift, _ = conversion_drift(state)
+    counts = Counter(item["status"] for item in state["items"] if not item.get("retired"))
+    print(json.dumps({"runDirectory": str(run_directory), "status": state["status"], "phase": state["phase"], "nextAction": state.get("nextAction"), "counts": dict(counts), "inputDrift": drift, "refreshRequired": any(drift.values())}, indent=2))
+
+
+def command_refresh(args):
+    run_directory = require_run_directory(args.run_directory)
+    state = run_state.load_run_state(run_directory, "file-conversion")
+    drift, _ = conversion_drift(state)
+    if not any(drift.values()):
+        print(json.dumps({"runDirectory": str(run_directory), "refreshed": False, "inputDrift": drift}, indent=2))
+        return
+    retired = {(item["path"], item["sha256"]) for item in drift["removed"]}
+    retired.update((item["before"]["path"], item["before"]["sha256"]) for item in drift["changed"])
+    additions = [*drift["added"], *[item["after"] for item in drift["changed"]]]
+    with (run_directory / "conversion_manifest.csv").open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    rows_by_key = {(row["source_path"], row["source_sha256"]): row for row in rows}
+    for key in retired:
+        if key in rows_by_key:
+            rows_by_key[key]["status"] = "skipped"
+            rows_by_key[key]["error"] = "retired or superseded by refresh"
+    new_items = [conversion_item(Path(item["path"])) for item in additions]
+    for item in new_items:
+        rows_by_key[(item["path"], item["sha256"])] = conversion_row(item, state["options"]["target"], Path(state["options"]["cover"]) if state["options"].get("cover") else None)
+    def refreshed(draft):
+        for item in draft["items"]:
+            if (item["path"], item["sha256"]) in retired:
+                item.update({"status": "skipped", "retired": True, "error": "retired or superseded by refresh"})
+        draft["items"].extend(new_items)
+        draft.update({"status": "running", "phase": "converting", "nextAction": "convert"})
+        return draft
+    run_state.update_run_state(run_directory, refreshed, {"type": "input_refreshed", "added": len(drift["added"]), "changed": len(drift["changed"]), "removed": len(drift["removed"])})
+    write_conversion_manifest(run_directory / "conversion_manifest.csv", list(rows_by_key.values()))
+    print(json.dumps({"runDirectory": str(run_directory), "refreshed": True, "inputDrift": drift, "nextAction": "convert"}, indent=2))
+
+
+def command_retry(args):
+    run_directory = require_run_directory(args.run_directory)
+    state = run_state.load_run_state(run_directory, "file-conversion")
+    targets = {item["id"] for item in state["items"] if item["status"] == "failed" and (args.all_failed or item["id"] == args.item)}
+    if not targets:
+        fail(f"failed item not found: {args.item}" if args.item else "run has no failed items")
+    with (run_directory / "conversion_manifest.csv").open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    target_keys = {(item["path"], item["sha256"]) for item in state["items"] if item["id"] in targets}
+    for row in rows:
+        if (row["source_path"], row["source_sha256"]) in target_keys:
+            row.update({"status": "pending", "output_path": "", "warning_count": "0", "error": ""})
+    def retried(draft):
+        for item in draft["items"]:
+            if item["id"] in targets:
+                item.update({"status": "pending", "attempts": 0, "transient": False, "error": None, "outputPath": "", "warningCount": 0})
+        draft.update({"status": "running", "phase": "converting", "nextAction": "convert"})
+        return draft
+    run_state.update_run_state(run_directory, retried, {"type": "items_retried", "itemIds": sorted(targets)})
+    write_conversion_manifest(run_directory / "conversion_manifest.csv", rows)
+    print(json.dumps({"runDirectory": str(run_directory), "retried": len(targets), "nextAction": "convert"}))
 
 
 def local_archive_target(base, href):
@@ -1741,7 +1915,10 @@ def command_validate(args):
     for row in rows:
         counts[row.get("status")] += 1
         source = Path(row.get("source_path", ""))
-        if not source.is_file():
+        retired = row.get("status") == "skipped" and row.get("error") == "retired or superseded by refresh"
+        if retired:
+            pass
+        elif not source.is_file():
             errors.append(f"source file is missing: {source}")
         elif sha256(source) != row.get("source_sha256"):
             errors.append(f"source file hash differs from conversion: {source}")
@@ -1808,6 +1985,22 @@ def parser():
     convert.add_argument("--language", help="Override EPUB language metadata for a single source (for example, en-US).")
     convert.add_argument("--date", help="Override EPUB date metadata for a single source (ISO 8601 recommended).")
     convert.set_defaults(handler=command_convert)
+
+    status = subparsers.add_parser("status", help="Report durable conversion progress and input drift.")
+    status.add_argument("run_directory")
+    status.add_argument("--json", action="store_true")
+    status.set_defaults(handler=command_status)
+
+    refresh = subparsers.add_parser("refresh", help="Explicitly reconcile added, changed, and removed inputs.")
+    refresh.add_argument("run_directory")
+    refresh.set_defaults(handler=command_refresh)
+
+    retry = subparsers.add_parser("retry", help="Explicitly requeue permanent conversion failures.")
+    retry.add_argument("run_directory")
+    retry_group = retry.add_mutually_exclusive_group(required=True)
+    retry_group.add_argument("--item")
+    retry_group.add_argument("--all-failed", action="store_true")
+    retry.set_defaults(handler=command_retry)
 
     validate = subparsers.add_parser("validate", help="Validate a conversion run against its manifest.")
     validate.add_argument("run_directory")

@@ -45,8 +45,11 @@ Project recordings follow `transcription`, `transcript-cleanup`, then
 
 - `doctor --json`: capability check.
 - `prepare <input> --output <input>/Ingest`: deterministic extraction and manifest creation.
-- `status <run-directory>`: compact progress, validation state, pending review list, and repair hints.
+- `status <run-directory>`: durable progress, validation state, input drift, pending review list, and repair hints.
+- `refresh <run-directory>`: explicitly reconcile added, changed, and removed sources while preserving revision history.
+- `retry <run-directory> --item <id>|--all-failed`: explicitly requeue permanent failures.
 - `next-review <run-directory>`: one structured review packet with allowed enum values, paths, metadata, and exact recording commands.
+- `record-review-unit <run-directory> --doc-id <id> --kind chunk|vision-page --index <n> --reviewed-file <markdown>`: atomically commit one granular review unit.
 - `record-review <run-directory> --review-file <review.json>`: atomically update `metadata.json`, `manifest.csv`, and `extraction_report.md` after model review.
 - `record-transcript <run-directory> --doc-id <id> --transcript <cleaned.md>`: atomically install a cleaned transcript as the final document text and repair transcript chunk validation state.
 - `validate <run-directory> --fix-hints --json`: machine-readable quality gate with repair hints.
@@ -70,14 +73,21 @@ folder ingestion, review, finalization, and literature handoff.
    ```
 
 2. Choose the source folder's `Ingest/` directory as the run directory for
-   folder ingestion, or a new explicit run directory for a single-file run.
+   folder ingestion, or an explicit run directory for a single-file run. The
+   same command resumes a compatible run, and returns its completion summary
+   when already complete. Use a numbered directory only for an independent run.
    Prepare the input without moving or overwriting sources:
 
    ```bash
    node <skill-directory>/scripts/document-ingest.mjs prepare <input-folder> --output <input-folder>/Ingest
    ```
 
-   This deterministic step creates a `manifest.csv` containing all files, automatically extracts audio from videos (via `ffmpeg`), applies OCR to images/PDFs (via `glmocr`), extracts PPTX slide text, tables, notes, and alt text with slide source maps, and determines a `suggested_pipeline` (e.g. `personal-admin`, `literature`, `project-extraction`, `transcription,transcript-cleanup`, `basic-markdown`) based on the folder contents and file formats.
+   This writes `run_state.json`, `run_events.jsonl`, and a pending
+   `manifest.csv` before extraction. It commits each completed document
+   immediately, automatically extracts audio from videos (via `ffmpeg`),
+   applies OCR to images/PDFs (via `glmocr`), extracts PPTX slide text, tables,
+   notes, and alt text with slide source maps, and determines a
+   `suggested_pipeline` based on the folder contents and file formats.
 
 3. Use the structured review queue instead of reading the full manifest and
    guessing valid values:
@@ -87,7 +97,10 @@ folder ingestion, review, finalization, and literature handoff.
    node <skill-directory>/scripts/document-ingest.mjs next-review <new-directory>
    ```
 
-   For each packet with `complete == false`, follow its `suggestedPipeline`:
+   Each packet is one vision page, large chunk, or final document metadata
+   review. Commit page/chunk packets with `record-review-unit`; if context ends
+   before recording, `next-review` returns the same unit. For each final
+   document packet with `complete == false`, follow its `suggestedPipeline`:
 
    **For `basic-markdown`, `personal-admin`, `literature`, or `project-extraction`**:
    - Review and clean up the `document.md` structure in the file's output directory. 
@@ -134,7 +147,8 @@ folder ingestion, review, finalization, and literature handoff.
      ```
 
    - `finalize` refuses to run unless validation passes and no destination
-     conflicts exist.
+     conflicts exist. It records a hash-bound `finalize_plan.json`, commits each
+     move/copy independently, and safely resumes after interruption.
    - For a flat source folder, final cleaned Markdown files go at the source
      folder root. For a clearly structured folder with multiple source
      subfolders, final cleaned Markdown preserves the relative subfolder
@@ -172,7 +186,9 @@ folder ingestion, review, finalization, and literature handoff.
 
 ## Safety and Failure Handling
 
-- Never overwrite an input or existing output directory.
+- Never overwrite an input or unrelated output directory. Resume only a
+  compatible marked run. Use `status` to inspect drift and `refresh` before
+  adopting source revisions.
 - Do not upload files to external internet APIs unless using a locally configured backend.
 - Keep automatically generated OCR PDFs under `derived/ocr.pdf` and media under `derived/audio.mp3`.
 - Do not install system packages. Report missing capabilities and the commands that require them.

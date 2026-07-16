@@ -17,7 +17,9 @@ default to `.agents/skills/<name>/SKILL.md`.
 - Preserve original files. Never overwrite, rename, move, or delete a source
   unless the user explicitly requests it.
 - Write generated artifacts to a dedicated output directory. If the intended
-  path exists, use a new numbered path or ask before replacing it.
+  path contains a compatible incomplete batch run, resume it. If it contains a
+  compatible complete run, report its completion summary. Use a numbered path
+  only for a genuinely independent run; never adopt an unmarked legacy folder.
 - Use working copies for transformations that could alter source content.
 - Keep sensitive material local and avoid unnecessary copies.
 
@@ -40,6 +42,9 @@ default to `.agents/skills/<name>/SKILL.md`.
 - Keep detailed reference material out of startup context; load it only when the
   selected skill asks for it.
 - For batches, report every processed, skipped, failed, and review-needed item.
+- Batch workflows follow `RUN_STATE_CONTRACT.md`: keep `run_state.json` and an
+  fsynced `run_events.jsonl`, commit one bounded unit at a time, report input
+  drift with `status`, and require explicit `refresh` before reconciling it.
 - Log transformations and make lossy operations visible.
 - Keep outputs readable by both people and future agents.
 

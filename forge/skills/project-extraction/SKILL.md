@@ -27,13 +27,18 @@ requested.
 1. Resolve this skill directory from the loaded `SKILL.md` path. Read
    [references/project-control-contract.md](references/project-control-contract.md)
    before extraction or reconciliation.
-2. Check the local workflow and initialize a new run directory:
+2. Check the local workflow and initialize a run directory. Repeating the same
+   command and output resumes a compatible marked run:
 
    ```bash
    python3 <skill-directory>/scripts/project-extraction.py doctor
    python3 <skill-directory>/scripts/project-extraction.py init <inputs...> \
      --output <new-directory> [--title "Project name"]
    ```
+
+   Use `status <run> --json` to inspect the frozen source snapshot without
+   changing it, and `retry <run> --item <packet-id>|--all-failed` for explicit
+   permanent-failure retry.
 
 3. Process exactly one bounded packet at a time. Read the returned packet,
    classify its document role, and write a JSON object containing

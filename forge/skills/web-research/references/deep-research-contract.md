@@ -14,6 +14,9 @@ evidence extraction.
 
 ```text
 <run-dir>/
+  run_state.json              # provider, URL, or iteration queue
+  run_events.jsonl            # fsynced transition journal
+  deep_checkpoint.json        # resumable deep-research domain checkpoint
   research_run.json          # run configuration, seed queries, counts
   query_log.jsonl            # one record per searched query
   source_index.json          # source registry without full text
@@ -45,7 +48,10 @@ evidence extraction.
   validation_report.json     # validator output
 ```
 
-The output directory must not already exist. Source web pages are never modified.
+A compatible output directory resumes. Quick reads commit each URL, academic
+runs commit each provider, and deep runs checkpoint queries, source URLs, and
+iteration boundaries. Unrelated or legacy directories are refused. Source web
+pages are never modified.
 
 ## Provenance Model
 
@@ -175,6 +181,7 @@ deduplicates them, and emits citation-manager-ready RIS.
   provider_requests.jsonl    # request URLs, status, raw paths, hashes
   provider_errors.jsonl      # non-fatal provider failures
   raw/<provider>/*           # archived provider responses
+  provider_results/*.json    # atomic provider checkpoints
   works.ris                  # aggregate RIS, one record per unique Work
   ris/<work-id>.ris          # individual RIS record for each unique Work
   ris_manifest.json          # Work-to-RIS mapping and dedupe keys

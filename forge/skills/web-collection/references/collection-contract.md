@@ -2,10 +2,12 @@
 
 ## Run Layout
 
-Use one new directory per run. The script writes:
+Use one compatible directory per resumable run. The script writes:
 
 ```text
 downloads/                          # raw HTTP response bodies
+run_state.json                      # durable per-URL queue
+run_events.jsonl                    # fsynced transition journal
 captures/<stem>-<sha12>/            # only when --render is used
   rendered.html                    # post-JavaScript DOM
   snapshot.mhtml                   # single-file Chromium snapshot
@@ -19,8 +21,10 @@ collection_report.md
 failed_downloads.csv
 ```
 
-Saved files are written with exclusive create. Nothing is overwritten. The
-original web sources are never modified; only new local files are produced.
+Saved files and manifests are committed atomically. Repeating the same command
+skips committed URLs and continues the queue. An existing download is accepted
+only when its expected hash matches. The original web sources are never
+modified; only new local files are produced.
 
 ## Provenance and Manifest
 

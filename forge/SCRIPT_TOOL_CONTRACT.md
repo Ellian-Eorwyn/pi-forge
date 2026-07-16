@@ -14,6 +14,13 @@ Preferred contract:
 - Preserve source files unless the user explicitly requests destructive changes.
 - Record provenance for research, document, literature, web, and data workflows.
 
+Scripts that process multiple files, rows, URLs, chunks, packets, pages, or
+deliverables must also follow `RUN_STATE_CONTRACT.md`. Keep current state in
+`run_state.json`, transitions in an append-only fsynced `run_events.jsonl`, and
+domain manifests as atomic projections. Expose `status`, `refresh`, and `retry`
+where applicable. A `next` call returns one bounded unit and `record` commits it
+atomically so an unrecorded unit is returned again after interruption.
+
 Scripts may also expose command-oriented CLIs when that is already the local
 convention, but new tool extraction should move toward this structured result
 shape so agents and MCP callers do not need to parse prose logs.

@@ -4,7 +4,9 @@
 
 Use one directory per source named `<source-stem>-<first-12-sha256-chars>`.
 For folder ingestion, the run root is the source folder's `Ingest/` directory.
-Write `manifest.csv` at the run root. A document directory contains:
+Write `run_state.json`, `run_events.jsonl`, and `manifest.csv` at the run root
+before extraction starts. Stage an active document under `.partial/` and rename
+it into place only after its artifacts are durable. A document directory contains:
 
 ```text
 document.md
@@ -169,7 +171,8 @@ Use exactly these columns:
 document_id,source_path,source_sha256,source_format,status,suggested_pipeline,output_directory,title,author,document_date,page_count,extraction_method,ocr_used,warning_count,error
 ```
 
-Allowed statuses are `success`, `needs_review`, `failed`, and `skipped`.
+Allowed statuses are `pending`, `in_progress`, `success`, `needs_review`,
+`failed`, and `skipped`.
 Quote CSV values correctly. Keep paths absolute for sources and relative to the
 run root for outputs. `suggested_pipeline` is advisory and may contain values
 such as `basic-markdown`, `personal-admin`, `literature`,
@@ -185,7 +188,10 @@ document-ingest.mjs finalize <source-folder>/Ingest --destination <source-folder
 ```
 
 `finalize` validates before moving or publishing anything, then preflights every
-destination. It refuses overwrite conflicts. The source folder uses:
+destination into `finalize_plan.json`. Each hash-bound operation is committed
+and journaled independently. On restart it recognizes an already moved or
+published expected hash and continues; it refuses overwrite conflicts or
+mismatched filesystem state. The source folder uses:
 
 ```text
 <source-folder>/
@@ -215,16 +221,18 @@ remain in `Ingest/`.
 
 ## Model Review and Chunks
 
-Review documents sequentially. The default threshold is 150,000 Unicode
+Review bounded units sequentially. Vision pages and large chunks are separate
+queue items, followed by one final document metadata review. The default
+threshold is 150,000 Unicode
 characters. Preparation splits only at paragraph boundaries; headings and PDF
 page transitions naturally qualify. A single unusually long paragraph may
 exceed the threshold rather than being split.
 
 For multiple chunks:
 
-1. Review each complete chunk independently and write the result to the matching
-   filename under `working/reviewed-chunks/`, without adding introductions or
-   conclusions.
+1. Review each complete chunk independently and commit it with
+   `record-review-unit`; the script writes the matching filename under
+   `working/reviewed-chunks/`. Do not add introductions or conclusions.
 2. Preserve chunk order and every source passage.
 3. Concatenate reviewed chunks without overlap.
 4. Review seams, heading hierarchy, metadata evidence, and source mappings

@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { JSDOM, VirtualConsole } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import * as playwright from "playwright";
 import { resolveConnectedServices } from "../../../lib/connected-services.mjs";
+import { atomicWriteFile, atomicWriteJson } from "../../../lib/run-state.mjs";
 
 export const DEFAULT_USER_AGENT = "pi-forge-web-research/1 (+https://github.com/pi-forge)";
 export const DEFAULT_TIMEOUT_MS = 30_000;
@@ -52,12 +53,12 @@ function sha256(value) {
 
 function writeJson(filePath, value) {
 	mkdirSync(dirname(filePath), { recursive: true });
-	writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+	atomicWriteJson(filePath, value);
 }
 
 function writeJsonl(filePath, rows) {
 	mkdirSync(dirname(filePath), { recursive: true });
-	writeFileSync(filePath, rows.map((row) => JSON.stringify(row)).join("\n") + (rows.length > 0 ? "\n" : ""));
+	atomicWriteFile(filePath, rows.map((row) => JSON.stringify(row)).join("\n") + (rows.length > 0 ? "\n" : ""));
 }
 
 function relativeArtifact(runDirectory, path) {
@@ -516,7 +517,7 @@ async function directHttpAcquire(url, context) {
 	const hash = sha256(buffer);
 	const cacheBodyPath = cachePath(context, "raw", `${finalUrl}:${hash}`, extension);
 	mkdirSync(dirname(cacheBodyPath), { recursive: true });
-	if (!existsSync(cacheBodyPath)) writeFileSync(cacheBodyPath, buffer);
+	if (!existsSync(cacheBodyPath)) atomicWriteFile(cacheBodyPath, buffer);
 	writeJson(cachedMetaPath, {
 		requestedUrl: url,
 		finalUrl,
@@ -758,7 +759,7 @@ function archiveBuffer(context, acquired) {
 	if (!context.runDirectory) return null;
 	const extension = extensionForContent(acquired.contentType ?? "", acquired.finalUrl);
 	const path = join(context.runDirectory, "archive", "raw", `${acquired.rawHash}.${extension}`);
-	if (!existsSync(path)) writeFileSync(path, acquired.buffer);
+	if (!existsSync(path)) atomicWriteFile(path, acquired.buffer);
 	return relativeArtifact(context.runDirectory, path);
 }
 
@@ -871,7 +872,7 @@ async function extractWithPlaywrightUnqueued(url, context, domainRule) {
 		let renderedArtifact = null;
 		if (context.runDirectory) {
 			renderedArtifact = join(context.runDirectory, "archive", "rendered", `${rawHash}.html`);
-			writeFileSync(renderedArtifact, html);
+			atomicWriteFile(renderedArtifact, html);
 			renderedArtifact = relativeArtifact(context.runDirectory, renderedArtifact);
 		}
 		return {

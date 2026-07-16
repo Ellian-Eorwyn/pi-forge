@@ -18,9 +18,10 @@ extracted facts separate from suggested steps, and organize rather than advise.
 
    This skill consumes `document.md`, `.md`, and `.txt` (paste emails or notes
    into a `.txt`). Convert PDF, DOCX, HTML, and RTF with `document-ingest` first.
-2. Create a new output directory under
-   `forge-output/personal-admin/<title-or-stem>/`. If it exists, use a numbered
-   suffix. Initialize the run:
+2. Use an output directory under
+   `forge-output/personal-admin/<title-or-stem>/`. Repeating `init` with the
+   same paths and options resumes a compatible marked run; use a numbered
+   suffix only for an independent run. Initialize the run:
 
    ```bash
    python3 <skill-directory>/scripts/personal-admin.py init <inputs...> \
@@ -29,6 +30,9 @@ extracted facts separate from suggested steps, and organize rather than advise.
 
    Use `--deliverables admin_summary,next_steps,deadline_checklist,contact_list,message_draft,comparison_table,call_script`
    to choose outputs; the default set is the first four.
+   Use `status <run-directory> --json` to inspect durable progress and source
+   drift. The run keeps `run_state.json`, an fsynced `run_events.jsonl`, and its
+   existing domain manifests.
 3. Read [references/admin-contract.md](references/admin-contract.md). Extract
    facts **one document at a time**:
 

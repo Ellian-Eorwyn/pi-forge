@@ -7,6 +7,8 @@ lossy conversion honestly.
 
 ```text
 <run-dir>/
+  run_state.json
+  run_events.jsonl
   converted/
     <safe-stem>.<target>     # one output per converted source
     media/<stem>/…           # media extracted from DOCX/HTML/EPUB sources
@@ -16,8 +18,10 @@ lossy conversion honestly.
   warnings.md
 ```
 
-Originals are never modified. Every output is written under `converted/`. The
-run directory must not pre-exist.
+Originals are never modified. Every output is written under `converted/`. A
+compatible run directory resumes from its first uncommitted file. Changed input
+snapshots are frozen until explicit `refresh`; retired revisions remain in the
+manifest history.
 
 ## Conversion Matrix
 

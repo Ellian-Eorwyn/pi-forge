@@ -46,7 +46,7 @@ repository checkout, so updates do not remove the local model cache.
 
 2. Confirm the **recording type** with the user (lecture, interview, meeting,
    call, voice-note, other). It routes the downstream cleanup track. Then
-   transcribe into a new run directory:
+   transcribe into a run directory:
 
    ```bash
    python3 <skill-directory>/scripts/transcription.py transcribe <media> \
@@ -58,6 +58,12 @@ repository checkout, so updates do not remove the local model cache.
    `raw_segments.json`, `raw_transcript.srt`, applies the dictionary into
    `corrected_transcript.md` / `.txt` with a `corrections_log.csv`, and prints a
    JSON result including the `recommended_track` and a `next_step`.
+   Repeating the same command resumes at the first uncommitted audio chunk and
+   deterministically reassembles the final transcript from committed chunk
+   results. Use `status <run-directory> --json` to inspect progress, `refresh
+   <run-directory>` to adopt changed source media while archiving the previous
+   revision, and `retry <run-directory> --item chunk-0001` or `--all-failed`
+   for explicit retry.
 
 3. Read [references/transcription-contract.md](references/transcription-contract.md)
    for the run layout, dictionary schema, and type→track mapping.
@@ -108,7 +114,8 @@ name; mark it uncertain and ask.
 ## Safety and Output Rules
 
 - Preserve the source recording. It is referenced by path and SHA-256, never
-  modified. Outputs go to a new run directory; never overwrite one.
+  modified. A compatible run directory is resumed; unrelated or legacy
+  directories are refused.
 - Keep recognized text separate from summary, analysis, and interpretation. The
   raw transcript is what the model heard; the corrected transcript only swaps in
   user-confirmed spellings, logged in `corrections_log.csv`.

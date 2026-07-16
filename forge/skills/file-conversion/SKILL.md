@@ -29,9 +29,10 @@ disclose lossy conversions. This is the profile's general-purpose converter.
 
    This writes under pi-forge's isolated agent state; it never installs Java or
    another system package.
-2. Create a new output directory under
-   `forge-output/file-conversion/<input-stem>/`. If it exists, use a numbered
-   suffix. Convert files or folders to one target format:
+2. Use an output directory under `forge-output/file-conversion/<input-stem>/`.
+   Repeating the same command resumes its compatible incomplete run or returns
+   its completion summary; use a numbered suffix only for an independent run.
+   Convert files or folders to one target format:
 
    ```bash
    python3 <skill-directory>/scripts/file-conversion.py convert <input...> \
@@ -76,6 +77,14 @@ disclose lossy conversions. This is the profile's general-purpose converter.
    ```
 
    Resolve errors (missing output, changed source) before completion.
+
+   Inspect or repair a stopped run without repeating completed files:
+
+   ```bash
+   python3 <skill-directory>/scripts/file-conversion.py status <run-directory> --json
+   python3 <skill-directory>/scripts/file-conversion.py refresh <run-directory>
+   python3 <skill-directory>/scripts/file-conversion.py retry <run-directory> --all-failed
+   ```
 
 ## Safety and Output Rules
 

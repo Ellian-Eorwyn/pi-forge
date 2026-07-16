@@ -16,6 +16,22 @@ import {
 } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+	DEFAULT_MAX_ATTEMPTS,
+	appendRunEvent,
+	assertCompatibleRun,
+	atomicWriteFile,
+	atomicWriteJson,
+	configurationFingerprint,
+	createRunState,
+	inputDrift,
+	initializeRunState,
+	isTransientFailure,
+	loadRunState,
+	retryableItem,
+	updateRunState,
+	withRunLock,
+} from "../../../lib/run-state.mjs";
 
 const DEFAULT_CHUNK_CHARACTERS = 150_000;
 const DEFAULT_GLMOCR_URL = "http://llms:5002/glmocr/parse";
@@ -65,7 +81,8 @@ const ARTIFACT_MANIFEST_COLUMNS = [
 	"sha256",
 	"created_at",
 ];
-const DOCUMENT_STATUSES = ["success", "needs_review", "failed", "skipped"];
+const DOCUMENT_STATUSES = ["pending", "in_progress", "success", "needs_review", "failed", "skipped"];
+const RUN_STATE_WORKFLOW = "document-ingest";
 const EVIDENCE_FIELDS = ["title", "author", "date", "source"];
 const EVIDENCE_ORIGINS = ["embedded-metadata", "document-text", "filename", "user-provided"];
 const EVIDENCE_CONFIDENCES = ["high", "medium", "low"];
@@ -865,7 +882,7 @@ function writeJson(filePath, value) {
 }
 
 function writeJsonReplacing(filePath, value) {
-	writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+	atomicWriteJson(filePath, value);
 }
 
 function csvValue(value) {
@@ -876,13 +893,13 @@ function csvValue(value) {
 function writeManifest(runDirectory, rows) {
 	const lines = [MANIFEST_COLUMNS.join(",")];
 	for (const row of rows) lines.push(MANIFEST_COLUMNS.map((column) => csvValue(row[column])).join(","));
-	writeFileSync(join(runDirectory, "manifest.csv"), `${lines.join("\n")}\n`);
+	atomicWriteFile(join(runDirectory, "manifest.csv"), `${lines.join("\n")}\n`);
 }
 
 function writeArtifactManifest(runDirectory, rows) {
 	const lines = [ARTIFACT_MANIFEST_COLUMNS.join(",")];
 	for (const row of rows) lines.push(ARTIFACT_MANIFEST_COLUMNS.map((column) => csvValue(row[column])).join(","));
-	writeFileSync(join(runDirectory, "artifact_manifest.csv"), `${lines.join("\n")}\n`);
+	atomicWriteFile(join(runDirectory, "artifact_manifest.csv"), `${lines.join("\n")}\n`);
 }
 
 function collectInputs(inputPath) {
@@ -972,7 +989,7 @@ Review every prepared document or chunk against \`working/extracted.md\`. Do not
 `;
 }
 
-async function prepareDocument(filePath, runDirectory, options, tools, usedDirectories) {
+async function prepareDocument(filePath, runDirectory, options, tools, usedDirectories, attempt = 1) {
 	const sourceBuffer = readFileSync(filePath);
 	const sourceHash = sha256(sourceBuffer);
 	const directoryName = `${safeStem(filePath)}-${sourceHash.slice(0, 12)}`;
@@ -997,7 +1014,10 @@ async function prepareDocument(filePath, runDirectory, options, tools, usedDirec
 		};
 	}
 	usedDirectories.add(directoryName);
-	const documentDirectory = join(runDirectory, directoryName);
+	const finalDirectory = join(runDirectory, directoryName);
+	const documentDirectory = join(runDirectory, ".partial", `${directoryName}.attempt-${attempt}`);
+	mkdirSync(dirname(documentDirectory), { recursive: true });
+	rmSync(documentDirectory, { recursive: true, force: true });
 	mkdirSync(documentDirectory);
 	const sourceStat = statSync(filePath);
 	const format = sourceFormat(filePath);
@@ -1077,6 +1097,8 @@ async function prepareDocument(filePath, runDirectory, options, tools, usedDirec
 		entries: extracted.sourceMapEntries,
 	});
 	writeFileSync(join(documentDirectory, "extraction_report.md"), extractionReport(source, extraction, "needs_review — model normalization pending"), { flag: "wx" });
+	if (existsSync(finalDirectory)) throw new Error(`prepared output already exists: ${finalDirectory}`);
+	renameSync(documentDirectory, finalDirectory);
 	return {
 		row: {
 			document_id: metadata.documentId,
@@ -1134,82 +1156,197 @@ function parsePrepareArguments(args) {
 	return { input, output, ocr, ocrBackend, glmocrUrl, glmocrTimeoutMs, glmocrLayoutVisualization, chunkCharacters };
 }
 
-async function prepareRun(options) {
-	if (!existsSync(options.input)) fail(`input does not exist: ${options.input}`);
-	if (existsSync(options.output)) fail(`output directory already exists: ${options.output}`);
-	mkdirSync(dirname(options.output), { recursive: true });
-	mkdirSync(options.output);
-	const tools = inspectTools();
-	const inputs = collectInputs(options.input);
-	const folderCategory = await categorizeFolder(inputs.files);
-	const rows = [];
-	const usedDirectories = new Set();
+function prepareConfiguration(options) {
+	return {
+		workflow: RUN_STATE_WORKFLOW,
+		command: "prepare",
+		input: { path: options.input },
+		options: {
+			ocr: options.ocr,
+			ocrBackend: options.ocrBackend,
+			glmocrUrl: options.glmocrUrl,
+			glmocrTimeoutMs: options.glmocrTimeoutMs,
+			glmocrLayoutVisualization: options.glmocrLayoutVisualization,
+			chunkCharacters: options.chunkCharacters,
+		},
+	};
+}
+
+function pipelineFor(format, folderCategory) {
+	if (["mp4", "mov", "mkv", "webm", "avi", "mp3", "wav", "m4a", "flac", "ogg", "opus"].includes(format)) {
+		return folderCategory === "project" ? "transcription,transcript-cleanup,project-extraction" : "transcription,transcript-cleanup";
+	}
+	return folderCategory === "general" ? "basic-markdown" : folderCategory === "project" ? "project-extraction" : folderCategory;
+}
+
+function pendingManifestRow(item) {
+	return {
+		document_id: item.documentId ?? "",
+		source_path: item.path,
+		source_sha256: item.sha256 ?? "",
+		source_format: item.format,
+		status: item.status,
+		suggested_pipeline: "",
+		output_directory: item.outputDirectory ?? "",
+		title: "",
+		author: "",
+		document_date: "",
+		page_count: "",
+		extraction_method: "",
+		ocr_used: false,
+		warning_count: 0,
+		error: item.error ?? "",
+	};
+}
+
+function manifestRowKey(value) {
+	return `${value.source_path ?? value.path}\n${value.source_sha256 ?? value.sha256 ?? ""}`;
+}
+
+function preparedRowFromDirectory(item, runDirectory, folderCategory) {
+	const metadata = JSON.parse(readFileSync(join(runDirectory, item.outputDirectory, "metadata.json"), "utf8"));
+	return {
+		document_id: metadata.documentId,
+		source_path: item.path,
+		source_sha256: item.sha256,
+		source_format: item.format,
+		status: metadata.extraction.status,
+		suggested_pipeline: pipelineFor(item.format, folderCategory),
+		output_directory: item.outputDirectory,
+		title: metadata.fields?.title?.value ?? "",
+		author: metadata.fields?.author?.value ?? "",
+		document_date: metadata.fields?.date?.value ?? "",
+		page_count: metadata.extraction?.pageCount ?? "",
+		extraction_method: metadata.extraction?.method ?? "",
+		ocr_used: metadata.extraction?.ocr?.used ?? false,
+		warning_count: metadata.extraction?.warnings?.length ?? 0,
+		error: "",
+	};
+}
+
+function initialPrepareItems(inputs) {
+	const items = inputs.files.sort().map((filePath) => {
+		const sourceHash = sha256(readFileSync(filePath));
+		const outputDirectory = `${safeStem(filePath)}-${sourceHash.slice(0, 12)}`;
+		return {
+			id: `sha256:${sourceHash}`,
+			documentId: `sha256:${sourceHash}`,
+			path: filePath,
+			sha256: sourceHash,
+			format: sourceFormat(filePath),
+			outputDirectory,
+			status: "pending",
+			attempts: 0,
+			transient: false,
+			error: null,
+		};
+	});
 	for (const skipped of inputs.skipped) {
-		rows.push({
-			document_id: "",
-			source_path: skipped.path,
-			source_sha256: "",
-			source_format: sourceFormat(skipped.path),
+		items.push({
+			id: `skipped:${configurationFingerprint(skipped)}`,
+			documentId: "",
+			path: skipped.path,
+			sha256: "",
+			format: sourceFormat(skipped.path),
+			outputDirectory: "",
 			status: "skipped",
-			suggested_pipeline: "",
-			output_directory: "",
-			title: "",
-			author: "",
-			document_date: "",
-			page_count: "",
-			extraction_method: "",
-			ocr_used: false,
-			warning_count: 0,
+			attempts: 0,
+			transient: false,
 			error: skipped.reason,
 		});
 	}
-	for (const filePath of inputs.files.sort()) {
-		try {
-			rows.push((await prepareDocument(filePath, options.output, options, tools, usedDirectories)).row);
-		} catch (error) {
-			let sourceHash = "";
-			try {
-				sourceHash = sha256(readFileSync(filePath));
-				const partialDirectory = join(options.output, `${safeStem(filePath)}-${sourceHash.slice(0, 12)}`);
-				rmSync(partialDirectory, { recursive: true, force: true });
-			} catch {
-				// Preserve the original extraction error when cleanup or hashing also fails.
+	return items.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+async function prepareRun(options) {
+	if (!existsSync(options.input)) fail(`input does not exist: ${options.input}`);
+	const configuration = prepareConfiguration(options);
+	if (!existsSync(options.output)) {
+		mkdirSync(dirname(options.output), { recursive: true });
+		mkdirSync(options.output);
+		const inputs = collectInputs(options.input);
+		const folderCategory = await categorizeFolder(inputs.files);
+		const items = initialPrepareItems(inputs);
+		const state = createRunState({
+			...configuration,
+			items,
+			phase: "preparing",
+			nextAction: "prepare",
+		});
+		state.folderCategory = folderCategory;
+		initializeRunState(options.output, state);
+		writeManifest(options.output, items.map(pendingManifestRow));
+	}
+	let state = loadRunState(options.output, RUN_STATE_WORKFLOW);
+	assertCompatibleRun(state, configuration);
+	const tools = inspectTools();
+	await withRunLock(options.output, async () => {
+		state = loadRunState(options.output, RUN_STATE_WORKFLOW);
+		const rows = readManifestRows(options.output);
+		const rowsByKey = new Map(rows.map((row) => [manifestRowKey(row), row]));
+		const usedDirectories = new Set();
+		for (const item of state.items) {
+			if (item.status === "success") {
+				if (item.outputDirectory) usedDirectories.add(item.outputDirectory);
+				continue;
 			}
-			rows.push({
-				document_id: sourceHash ? `sha256:${sourceHash}` : "",
-				source_path: filePath,
-				source_sha256: sourceHash,
-				source_format: sourceFormat(filePath),
-				status: "failed",
-				suggested_pipeline: "",
-				output_directory: "",
-				title: "",
-				author: "",
-				document_date: "",
-				page_count: "",
-				extraction_method: "",
-				ocr_used: false,
-				warning_count: 0,
-				error: error instanceof Error ? error.message : String(error),
-			});
+			if (!retryableItem(item, DEFAULT_MAX_ATTEMPTS)) continue;
+			const attempt = (item.attempts ?? 0) + 1;
+			state = updateRunState(options.output, (draft) => {
+				const current = draft.items.find((candidate) => candidate.path === item.path && candidate.sha256 === item.sha256);
+				current.status = "in_progress";
+				current.attempts = attempt;
+				current.error = null;
+				draft.phase = "preparing";
+				draft.nextAction = "prepare";
+				return draft;
+			}, { type: "item_started", itemId: item.id, phase: "prepare", attempt });
+			const active = state.items.find((candidate) => candidate.path === item.path && candidate.sha256 === item.sha256);
+			let row = rowsByKey.get(manifestRowKey(active)) ?? pendingManifestRow(active);
+			row.status = "in_progress";
+			row.error = "";
+			rowsByKey.set(manifestRowKey(active), row);
+			writeManifest(options.output, [...rowsByKey.values()].sort((left, right) => left.source_path.localeCompare(right.source_path) || left.source_sha256.localeCompare(right.source_sha256)));
+			try {
+				const finalDirectory = join(options.output, active.outputDirectory);
+				if (existsSync(join(finalDirectory, "metadata.json"))) row = preparedRowFromDirectory(active, options.output, state.folderCategory);
+				else row = (await prepareDocument(active.path, options.output, options, tools, usedDirectories, attempt)).row;
+				if (row.status === "needs_review") row.suggested_pipeline = pipelineFor(row.source_format, state.folderCategory);
+				rowsByKey.set(manifestRowKey(active), row);
+				if (row.output_directory) usedDirectories.add(row.output_directory);
+				state = updateRunState(options.output, (draft) => {
+					const current = draft.items.find((candidate) => candidate.path === item.path && candidate.sha256 === item.sha256);
+					current.status = row.status === "skipped" ? "skipped" : "success";
+					current.resultStatus = row.status;
+					current.outputDirectory = row.output_directory;
+					current.error = row.error || null;
+					current.transient = false;
+					return draft;
+				}, { type: "item_completed", itemId: item.id, phase: "prepare", status: row.status, attempt });
+			} catch (error) {
+				const transient = isTransientFailure(error);
+				row = { ...pendingManifestRow(active), status: "failed", error: error instanceof Error ? error.message : String(error) };
+				rowsByKey.set(manifestRowKey(active), row);
+				state = updateRunState(options.output, (draft) => {
+					const current = draft.items.find((candidate) => candidate.path === item.path && candidate.sha256 === item.sha256);
+					current.status = "failed";
+					current.error = row.error;
+					current.transient = transient;
+					return draft;
+				}, { type: "item_failed", itemId: item.id, phase: "prepare", transient, attempt, error: row.error });
+			}
+			writeManifest(options.output, [...rowsByKey.values()].sort((left, right) => left.source_path.localeCompare(right.source_path) || left.source_sha256.localeCompare(right.source_sha256)));
 		}
-	}
-
-	// Set suggested pipelines based on format and category
-	for (const row of rows) {
-		if (row.status !== "needs_review") continue;
-		const format = row.source_format;
-		if (["mp4", "mov", "mkv", "webm", "avi", "mp3", "wav", "m4a", "flac", "ogg", "opus"].includes(format)) {
-			row.suggested_pipeline = folderCategory === "project" ? "transcription,transcript-cleanup,project-extraction" : "transcription,transcript-cleanup";
-		} else {
-			row.suggested_pipeline = folderCategory === "general" ? "basic-markdown" : folderCategory === "project" ? "project-extraction" : folderCategory;
-		}
-	}
-
-	rows.sort((left, right) => left.source_path.localeCompare(right.source_path));
-	writeManifest(options.output, rows);
+		const remaining = state.items.some((item) => retryableItem(item, DEFAULT_MAX_ATTEMPTS));
+		state = updateRunState(options.output, (draft) => {
+			draft.phase = remaining ? "preparing" : "review";
+			draft.nextAction = remaining ? "prepare" : "review";
+			return draft;
+		}, { type: "phase_updated", phase: remaining ? "preparing" : "review" });
+	});
+	const rows = readManifestRows(options.output);
 	const counts = Object.fromEntries(DOCUMENT_STATUSES.map((status) => [status, rows.filter((row) => row.status === status).length]));
-	return { runDirectory: options.output, documents: rows.length, counts };
+	return { runDirectory: options.output, resumed: state.createdAt !== state.updatedAt, documents: rows.length, counts, phase: state.phase, nextAction: state.nextAction };
 }
 
 async function prepare(args) {
@@ -1568,6 +1705,42 @@ function updateRowFromMetadata(row, metadata) {
 	row.error = "";
 }
 
+function finalizedArtifactState(runDirectory, sourceRoot) {
+	const manifestPath = join(runDirectory, "artifact_manifest.csv");
+	if (!existsSync(manifestPath)) return { owned: new Set(), relocated: [] };
+	const parsed = parseCsv(readFileSync(manifestPath, "utf8"));
+	const headers = parsed.shift() ?? [];
+	const rows = parsed
+		.filter((row) => row.some((field) => field !== ""))
+		.map((values) => Object.fromEntries(headers.map((column, index) => [column, values[index] ?? ""])));
+	const owned = new Set(rows.map((row) => resolve(sourceRoot, row.destination_path)));
+	const relocated = rows
+		.filter((row) => row.role === "original")
+		.map((row) => ({ path: row.source_path, currentPath: resolve(sourceRoot, row.destination_path), sha256: row.sha256 }));
+	return { owned, relocated };
+}
+
+function currentInputSnapshot(runDirectory, state) {
+	const root = state.input.path;
+	if (!existsSync(root)) return [];
+	const artifacts = finalizedArtifactState(runDirectory, root);
+	const files = collectInputs(root).files.filter((filePath) => !artifacts.owned.has(resolve(filePath)));
+	const current = files.map((filePath) => ({ path: filePath, sha256: sha256(readFileSync(filePath)), format: sourceFormat(filePath) }));
+	for (const relocated of artifacts.relocated) {
+		if (!existsSync(relocated.path) && existsSync(relocated.currentPath) && sha256(readFileSync(relocated.currentPath)) === relocated.sha256) {
+			current.push({ path: relocated.path, sha256: relocated.sha256, format: sourceFormat(relocated.path), relocatedTo: relocated.currentPath });
+		}
+	}
+	return current.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function runInputDrift(runDirectory, state) {
+	const snapshot = state.items
+		.filter((item) => item.sha256 && item.retired !== true && item.superseded !== true)
+		.map((item) => ({ path: item.path, sha256: item.sha256, format: item.format }));
+	return inputDrift(snapshot, currentInputSnapshot(runDirectory, state));
+}
+
 function conciseStatus(runDirectory) {
 	requireRunDirectory(runDirectory);
 	const rows = readManifestRows(runDirectory);
@@ -1582,10 +1755,17 @@ function conciseStatus(runDirectory) {
 			nextReviewCommand: `document-ingest.mjs next-review ${runDirectory}`,
 		}));
 	const validation = validateRun(runDirectory, { emit: false, exitOnError: false, fixHints: true });
+	const state = loadRunState(runDirectory, RUN_STATE_WORKFLOW);
+	const drift = runInputDrift(runDirectory, state);
 	return {
 		runDirectory,
+		status: state.status,
+		phase: state.phase,
+		nextAction: state.nextAction,
 		counts,
 		pendingReview,
+		inputDrift: drift,
+		refreshRequired: drift.added.length > 0 || drift.changed.length > 0 || drift.removed.length > 0,
 		valid: validation.valid,
 		errors: validation.errors,
 		warnings: validation.warnings,
@@ -1596,6 +1776,87 @@ function conciseStatus(runDirectory) {
 function commandStatus(args) {
 	if (args.length !== 1) fail("status requires exactly one run directory");
 	process.stdout.write(`${JSON.stringify(conciseStatus(resolve(args[0])), null, 2)}\n`);
+}
+
+function commandRefresh(args) {
+	if (args.length !== 1) fail("refresh requires exactly one run directory");
+	const runDirectory = resolve(args[0]);
+	requireRunDirectory(runDirectory);
+	let state = loadRunState(runDirectory, RUN_STATE_WORKFLOW);
+	const drift = runInputDrift(runDirectory, state);
+	if (drift.added.length === 0 && drift.changed.length === 0 && drift.removed.length === 0) {
+		process.stdout.write(`${JSON.stringify({ refreshed: false, runDirectory, inputDrift: drift }, null, 2)}\n`);
+		return;
+	}
+	const rows = readManifestRows(runDirectory);
+	const rowsByKey = new Map(rows.map((row) => [manifestRowKey(row), row]));
+	const retiredKeys = new Set([...drift.removed, ...drift.changed.map((entry) => entry.before)].map(manifestRowKey));
+	for (const key of retiredKeys) {
+		const row = rowsByKey.get(key);
+		if (row) {
+			row.status = "skipped";
+			row.error = drift.changed.some((entry) => manifestRowKey(entry.before) === key) ? "superseded by refresh after source content changed" : "retired by refresh after source removal";
+		}
+	}
+	const additions = [...drift.added, ...drift.changed.map((entry) => entry.after)];
+	const newItems = initialPrepareItems({ files: additions.map((item) => item.path), skipped: [] });
+	for (const item of newItems) rowsByKey.set(manifestRowKey(item), pendingManifestRow(item));
+	state = updateRunState(runDirectory, (draft) => {
+		for (const item of draft.items) {
+			const key = manifestRowKey(item);
+			if (!retiredKeys.has(key)) continue;
+			item.status = "skipped";
+			item.retired = true;
+			item.superseded = drift.changed.some((entry) => manifestRowKey(entry.before) === key);
+			item.error = item.superseded ? "superseded by refresh after source content changed" : "retired by refresh after source removal";
+		}
+		draft.items.push(...newItems);
+		draft.phase = "preparing";
+		draft.status = "running";
+		draft.nextAction = "prepare";
+		return draft;
+	}, { type: "input_refreshed", added: drift.added.length, changed: drift.changed.length, removed: drift.removed.length });
+	writeManifest(runDirectory, [...rowsByKey.values()].sort((left, right) => left.source_path.localeCompare(right.source_path) || left.source_sha256.localeCompare(right.source_sha256)));
+	process.stdout.write(`${JSON.stringify({ refreshed: true, runDirectory, inputDrift: drift, nextAction: state.nextAction }, null, 2)}\n`);
+}
+
+function commandRetry(args) {
+	if (args.length < 1) fail("retry requires a run directory");
+	const runDirectory = resolve(args[0]);
+	let itemId = null;
+	let allFailed = false;
+	for (let index = 1; index < args.length; index += 1) {
+		if (args[index] === "--item") itemId = args[++index] ?? fail("--item requires an id");
+		else if (args[index] === "--all-failed") allFailed = true;
+		else fail(`unknown retry option: ${args[index]}`);
+	}
+	if ((!itemId && !allFailed) || (itemId && allFailed)) fail("retry requires exactly one of --item <id> or --all-failed");
+	requireRunDirectory(runDirectory);
+	const rows = readManifestRows(runDirectory);
+	const rowsByKey = new Map(rows.map((row) => [manifestRowKey(row), row]));
+	let retried = 0;
+	const state = updateRunState(runDirectory, (draft) => {
+		for (const item of draft.items) {
+			if (item.status !== "failed" || (!allFailed && item.id !== itemId)) continue;
+			item.status = "pending";
+			item.attempts = 0;
+			item.transient = false;
+			item.error = null;
+			const row = rowsByKey.get(manifestRowKey(item));
+			if (row) {
+				row.status = "pending";
+				row.error = "";
+			}
+			retried += 1;
+		}
+		if (retried === 0) fail(itemId ? `failed item not found: ${itemId}` : "run has no failed items");
+		draft.status = "running";
+		draft.phase = "preparing";
+		draft.nextAction = "prepare";
+		return draft;
+	}, { type: "items_retried", itemId, allFailed });
+	writeManifest(runDirectory, [...rowsByKey.values()].sort((left, right) => left.source_path.localeCompare(right.source_path) || left.source_sha256.localeCompare(right.source_sha256)));
+	process.stdout.write(`${JSON.stringify({ runDirectory, retried, nextAction: state.nextAction }, null, 2)}\n`);
 }
 
 function reviewPacket(runDirectory, row) {
@@ -1609,8 +1870,36 @@ function reviewPacket(runDirectory, row) {
 			}))
 		: [];
 	const derivedAudioPath = existsSync(join(documentDirectory, "derived", "audio.mp3")) ? join(documentDirectory, "derived", "audio.mp3") : null;
+	let unit = { kind: "document", path: join(documentDirectory, "document.md") };
+	const vision = metadata.extraction?.vision;
+	if (vision?.required && vision.used !== true && !vision.unavailableReason) {
+		const completed = new Set(vision.completedPages ?? []);
+		const page = (vision.candidatePages ?? []).find((candidate) => !completed.has(candidate));
+		if (page !== undefined) {
+			const rendered = (vision.renderedPages ?? []).find((candidate) => candidate.page === page);
+			unit = {
+				kind: "vision-page",
+				index: page,
+				path: rendered ? join(documentDirectory, rendered.path) : null,
+				recordCommand: `document-ingest.mjs record-review-unit ${runDirectory} --doc-id ${row.document_id} --kind vision-page --index ${page} --reviewed-file <page-transcript.md>`,
+			};
+		}
+	}
+	if (unit.kind === "document" && chunks.length > 1) {
+		const reviewedDirectory = join(documentDirectory, "working", "reviewed-chunks");
+		const chunk = chunks.find((candidate) => !existsSync(join(reviewedDirectory, `chunk-${String(candidate.index).padStart(4, "0")}.md`)));
+		if (chunk) {
+			unit = {
+				kind: "chunk",
+				index: chunk.index,
+				path: chunk.path,
+				characters: chunk.characters,
+				recordCommand: `document-ingest.mjs record-review-unit ${runDirectory} --doc-id ${row.document_id} --kind chunk --index ${chunk.index} --reviewed-file <reviewed-chunk.md>`,
+			};
+		}
+	}
 	return {
-		reviewPacketVersion: 1,
+		reviewPacketVersion: 2,
 		documentId: row.document_id,
 		sourcePath: row.source_path,
 		sourceFormat: row.source_format,
@@ -1625,6 +1914,7 @@ function reviewPacket(runDirectory, row) {
 			derivedAudio: derivedAudioPath,
 		},
 		chunks,
+		unit,
 		allowedValues: {
 			statuses: DOCUMENT_STATUSES,
 			evidenceOrigins: EVIDENCE_ORIGINS,
@@ -1669,6 +1959,53 @@ function commandNextReview(args) {
 	process.stdout.write(`${JSON.stringify({ complete: false, ...reviewPacket(runDirectory, row) }, null, 2)}\n`);
 }
 
+function commandRecordReviewUnit(args) {
+	if (args.length < 1) fail("record-review-unit requires a run directory");
+	const runDirectory = resolve(args[0]);
+	let documentId = null;
+	let kind = null;
+	let index = null;
+	let reviewedFile = null;
+	for (let position = 1; position < args.length; position += 1) {
+		if (args[position] === "--doc-id") documentId = args[++position] ?? fail("--doc-id requires an id");
+		else if (args[position] === "--kind") kind = args[++position] ?? fail("--kind requires chunk or vision-page");
+		else if (args[position] === "--index") index = Number.parseInt(args[++position] ?? "", 10);
+		else if (args[position] === "--reviewed-file") reviewedFile = resolve(args[++position] ?? fail("--reviewed-file requires a path"));
+		else fail(`unknown record-review-unit option: ${args[position]}`);
+	}
+	if (!documentId || !["chunk", "vision-page"].includes(kind) || !Number.isInteger(index) || index < 1 || !reviewedFile) {
+		fail("record-review-unit requires --doc-id, --kind chunk|vision-page, --index N, and --reviewed-file");
+	}
+	if (!existsSync(reviewedFile) || !lstatSync(reviewedFile).isFile()) fail(`reviewed file does not exist: ${reviewedFile}`);
+	requireRunDirectory(runDirectory);
+	const rows = readManifestRows(runDirectory);
+	const row = matchingRow(rows, documentId);
+	if (row.status !== "needs_review") fail(`document is not pending review: ${documentId}`);
+	const documentDirectory = documentDirectoryForRow(runDirectory, row);
+	const metadata = loadDocumentMetadata(documentDirectory);
+	const text = ensureFinalNewline(readFileSync(reviewedFile, "utf8"));
+	let destination;
+	let completedVisionPages = null;
+	if (kind === "chunk") {
+		const chunks = metadata.extraction?.chunks ?? [];
+		if (index > chunks.length) fail(`chunk index is out of range: ${index}`);
+		destination = join(documentDirectory, "working", "reviewed-chunks", `chunk-${String(index).padStart(4, "0")}.md`);
+	} else {
+		if (!(metadata.extraction?.vision?.candidatePages ?? []).includes(index)) fail(`page is not a vision candidate: ${index}`);
+		destination = join(documentDirectory, "working", "vision-pages", `page-${String(index).padStart(4, "0")}.md`);
+		const completed = new Set(metadata.extraction.vision.completedPages ?? []);
+		completed.add(index);
+		completedVisionPages = [...completed].sort((left, right) => left - right);
+	}
+	atomicWriteFile(destination, text);
+	if (completedVisionPages) {
+		metadata.extraction.vision.completedPages = completedVisionPages;
+		writeJsonReplacing(join(documentDirectory, "metadata.json"), metadata);
+	}
+	appendRunEvent(runDirectory, { type: "review_unit_completed", documentId, kind, index, output: relative(runDirectory, destination) });
+	process.stdout.write(`${JSON.stringify({ recorded: true, documentId, kind, index, output: destination, nextCommand: `document-ingest.mjs next-review ${runDirectory}` }, null, 2)}\n`);
+}
+
 function parseJsonFile(filePath, label) {
 	try {
 		return JSON.parse(readFileSync(filePath, "utf8"));
@@ -1707,19 +2044,37 @@ function normalizeFinalOutput(value, existing) {
 
 function updateSourceMapForDocument(documentDirectory, metadata, sourceLocatorType) {
 	const document = readFileSync(join(documentDirectory, "document.md"), "utf8");
+	const entries = [
+		{
+			markdownStartLine: document.trim() ? 1 : null,
+			markdownEndLine: document.trim() ? document.split("\n").length : null,
+			sourceLocator: { type: sourceLocatorType, path: metadata.source?.path ?? null },
+			method: "model-alignment",
+			confidence: "high",
+		},
+	];
+	if (metadata.extraction?.vision?.used) {
+		for (const page of metadata.extraction.vision.completedPages ?? []) {
+			const transcriptPath = join(documentDirectory, "working", "vision-pages", `page-${String(page).padStart(4, "0")}.md`);
+			if (!existsSync(transcriptPath)) continue;
+			const transcript = readFileSync(transcriptPath, "utf8").trim();
+			const offset = document.indexOf(transcript);
+			if (offset < 0) continue;
+			const startLine = (document.slice(0, offset).match(/\n/g) ?? []).length + 1;
+			entries.push({
+				markdownStartLine: startLine,
+				markdownEndLine: startLine + (transcript.match(/\n/g) ?? []).length,
+				sourceLocator: { type: "pdf-page", page },
+				method: "vision-transcription",
+				confidence: "high",
+			});
+		}
+	}
 	writeJsonReplacing(join(documentDirectory, "source_map.json"), {
 		schemaVersion: 1,
 		documentId: metadata.documentId,
 		markdownFile: "document.md",
-		entries: [
-			{
-				markdownStartLine: document.trim() ? 1 : null,
-				markdownEndLine: document.trim() ? document.split("\n").length : null,
-				sourceLocator: { type: sourceLocatorType, path: metadata.source?.path ?? null },
-				method: "model-alignment",
-				confidence: "high",
-			},
-		],
+		entries,
 	});
 }
 
@@ -1738,7 +2093,7 @@ function completeMetadataReview(metadata, payload) {
 }
 
 function rewriteReport(documentDirectory, metadata) {
-	writeFileSync(join(documentDirectory, "extraction_report.md"), extractionReport(metadata.source, metadata.extraction, "success — model normalization complete"));
+	atomicWriteFile(join(documentDirectory, "extraction_report.md"), extractionReport(metadata.source, metadata.extraction, "success — model normalization complete"));
 }
 
 function parseRecordReviewArguments(args) {
@@ -1765,19 +2120,47 @@ function commandRecordReview(args) {
 	const metadata = loadDocumentMetadata(documentDirectory);
 	let documentChanged = false;
 	if (typeof payload.documentMarkdown === "string") {
-		writeFileSync(join(documentDirectory, "document.md"), ensureFinalNewline(payload.documentMarkdown));
+		atomicWriteFile(join(documentDirectory, "document.md"), ensureFinalNewline(payload.documentMarkdown));
 		documentChanged = true;
 	} else if (payload.documentMarkdownPath) {
-		writeFileSync(join(documentDirectory, "document.md"), ensureFinalNewline(readFileSync(resolve(payload.documentMarkdownPath), "utf8")));
+		atomicWriteFile(join(documentDirectory, "document.md"), ensureFinalNewline(readFileSync(resolve(payload.documentMarkdownPath), "utf8")));
+		documentChanged = true;
+	} else if ((metadata.extraction?.chunks ?? []).length > 1) {
+		const reviewedDirectory = join(documentDirectory, "working", "reviewed-chunks");
+		const expected = metadata.extraction.chunks.map((_, index) => join(reviewedDirectory, `chunk-${String(index + 1).padStart(4, "0")}.md`));
+		if (expected.some((path) => !existsSync(path))) fail("all reviewed chunks must be recorded before final document review");
+		atomicWriteFile(join(documentDirectory, "document.md"), expected.map((path) => readFileSync(path, "utf8")).join(""));
 		documentChanged = true;
 	}
 	const reviewedDocument = readFileSync(join(documentDirectory, "document.md"), "utf8");
+	const vision = metadata.extraction?.vision;
+	if (vision?.required) {
+		if (payload.visionUnavailableReason) vision.unavailableReason = String(payload.visionUnavailableReason);
+		else {
+			const expectedPages = [...(vision.candidatePages ?? [])].sort((left, right) => left - right);
+			const completedPages = [...(vision.completedPages ?? [])].sort((left, right) => left - right);
+			if (expectedPages.join(",") !== completedPages.join(",")) fail("all vision pages must be recorded before final document review");
+			for (const page of completedPages) {
+				const transcript = readFileSync(join(documentDirectory, "working", "vision-pages", `page-${String(page).padStart(4, "0")}.md`), "utf8").trim();
+				if (!reviewedDocument.includes(transcript)) fail(`final document does not include the recorded vision transcript for page ${page}`);
+			}
+			vision.used = true;
+		}
+	}
 	completeMetadataReview(metadata, { ...payload, documentMarkdown: reviewedDocument });
 	if (documentChanged) updateSourceMapForDocument(documentDirectory, metadata, "document");
 	writeJsonReplacing(join(documentDirectory, "metadata.json"), metadata);
 	updateRowFromMetadata(row, metadata);
 	writeUpdatedManifest(options.runDirectory, rows);
 	rewriteReport(documentDirectory, metadata);
+	const pending = rows.some((candidate) => candidate.status === "needs_review");
+	updateRunState(options.runDirectory, (draft) => {
+		const item = draft.items.find((candidate) => candidate.path === row.source_path && candidate.sha256 === row.source_sha256);
+		if (item) item.reviewStatus = "complete";
+		draft.phase = pending ? "review" : "validation";
+		draft.nextAction = pending ? "review" : "validate";
+		return draft;
+	}, { type: "document_review_completed", documentId: payload.documentId });
 	process.stdout.write(`${JSON.stringify({ recorded: payload.documentId, status: row.status, validateCommand: `document-ingest.mjs validate ${options.runDirectory} --fix-hints --json` }, null, 2)}\n`);
 }
 
@@ -1817,11 +2200,11 @@ function commandRecordTranscript(args) {
 	const documentDirectory = documentDirectoryForRow(options.runDirectory, row);
 	const metadata = loadDocumentMetadata(documentDirectory);
 	const transcript = ensureFinalNewline(readFileSync(options.transcript, "utf8"));
-	writeFileSync(join(documentDirectory, "document.md"), transcript);
-	writeFileSync(join(documentDirectory, "working", "extracted.md"), transcript);
+	atomicWriteFile(join(documentDirectory, "document.md"), transcript);
+	atomicWriteFile(join(documentDirectory, "working", "extracted.md"), transcript);
 	const chunksDirectory = join(documentDirectory, "working", "chunks");
 	mkdirSync(chunksDirectory, { recursive: true });
-	writeFileSync(join(chunksDirectory, "chunk-0001.md"), transcript);
+	atomicWriteFile(join(chunksDirectory, "chunk-0001.md"), transcript);
 	metadata.extraction.status = "success";
 	metadata.extraction.chunks = [{ path: "working/chunks/chunk-0001.md", characters: unicodeLength(transcript) }];
 	if (options.title) metadata.fields.title = evidence(options.title, "user-provided", "high", "record-transcript --title");
@@ -1837,6 +2220,14 @@ function commandRecordTranscript(args) {
 	updateRowFromMetadata(row, metadata);
 	writeUpdatedManifest(options.runDirectory, rows);
 	rewriteReport(documentDirectory, metadata);
+	const pending = rows.some((candidate) => candidate.status === "needs_review");
+	updateRunState(options.runDirectory, (draft) => {
+		const item = draft.items.find((candidate) => candidate.path === row.source_path && candidate.sha256 === row.source_sha256);
+		if (item) item.reviewStatus = "complete";
+		draft.phase = pending ? "review" : "validation";
+		draft.nextAction = pending ? "review" : "validate";
+		return draft;
+	}, { type: "document_review_completed", documentId: options.docId, kind: "transcript" });
 	process.stdout.write(`${JSON.stringify({ recorded: options.docId, status: row.status, transcript: options.transcript }, null, 2)}\n`);
 }
 
@@ -1884,8 +2275,7 @@ function requireNoDuplicateDestinations(operations) {
 	}
 }
 
-function commandFinalize(args) {
-	const options = parseFinalizeArguments(args);
+function createFinalizePlan(options) {
 	if (!existsSync(options.runDirectory) || !lstatSync(options.runDirectory).isDirectory()) fail(`run directory does not exist: ${options.runDirectory}`);
 	if (!existsSync(options.destination) || !lstatSync(options.destination).isDirectory()) fail(`destination folder does not exist: ${options.destination}`);
 	const expectedRunDirectory = join(options.destination, "Ingest");
@@ -1897,9 +2287,7 @@ function commandFinalize(args) {
 	const layout = options.layout === "auto" ? detectWorkspaceLayout(options.destination) : options.layout;
 	const rows = readManifestRows(options.runDirectory);
 	const completedRows = rows.filter((row) => row.status === "success");
-	const moveOperations = [];
-	const publishOperations = [];
-	const generatedOperations = [];
+	const operations = [];
 	const movableSourcePaths = new Set();
 	for (const row of completedRows) {
 		const sourcePath = resolve(row.source_path);
@@ -1911,64 +2299,104 @@ function commandFinalize(args) {
 		if (!existsSync(documentPath)) fail(`final document is missing: ${documentPath}`);
 		const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
 		const markdownDestination = join(options.destination, markdownOutputRelativePath(options.destination, sourcePath, layout, row, metadata));
-		moveOperations.push({ role: "original", documentId: row.document_id, from: sourcePath, to: originalDestination });
-		publishOperations.push({ role: "final_markdown", documentId: row.document_id, from: documentPath, to: markdownDestination });
+		operations.push({ id: `original:${row.document_id}`, role: "original", documentId: row.document_id, from: sourcePath, to: originalDestination, sha256: row.source_sha256, status: "pending" });
+		operations.push({ id: `final_markdown:${row.document_id}`, role: "final_markdown", documentId: row.document_id, from: documentPath, to: markdownDestination, sha256: sha256(readFileSync(documentPath)), status: "pending" });
 		movableSourcePaths.add(sourcePath);
 	}
 	for (const artifactPath of collectGeneratedArtifacts(options.runDirectory)) {
 		const generatedRelative = relative(options.runDirectory, artifactPath);
-		generatedOperations.push({
+		operations.push({
+			id: `generated_artifact:${configurationFingerprint(generatedRelative).slice(0, 16)}`,
 			role: "generated_artifact",
 			documentId: "",
 			from: artifactPath,
 			to: join(options.destination, "Generated", generatedRelative),
+			sha256: sha256(readFileSync(artifactPath)),
+			status: "pending",
 		});
 	}
-	requireNoDuplicateDestinations([...moveOperations, ...publishOperations, ...generatedOperations]);
-	for (const operation of [...moveOperations, ...publishOperations, ...generatedOperations]) {
+	requireNoDuplicateDestinations(operations);
+	for (const operation of operations) {
 		if (existsSync(operation.to) && !movableSourcePaths.has(operation.to)) fail(`finalize destination already exists: ${operation.to}`);
 	}
-	const artifactRows = [];
-	const createdAt = new Date().toISOString();
-	for (const operation of moveOperations) {
-		mkdirSync(dirname(operation.to), { recursive: true });
-		renameSync(operation.from, operation.to);
-		artifactRows.push({
-			role: operation.role,
-			document_id: operation.documentId,
-			source_path: operation.from,
-			destination_path: relative(options.destination, operation.to),
-			sha256: sha256(readFileSync(operation.to)),
-			created_at: createdAt,
-		});
+	return {
+		schemaVersion: 1,
+		createdAt: new Date().toISOString(),
+		destination: options.destination,
+		layout,
+		operations: operations.sort((left, right) => (left.role === "original" ? -1 : right.role === "original" ? 1 : left.id.localeCompare(right.id))),
+	};
+}
+
+function executeFinalize(options) {
+	const planPath = join(options.runDirectory, "finalize_plan.json");
+	let plan;
+	if (existsSync(planPath)) {
+		plan = JSON.parse(readFileSync(planPath, "utf8"));
+		if (resolve(plan.destination) !== resolve(options.destination)) fail("existing finalize plan uses a different destination");
+		if (options.layout !== "auto" && plan.layout !== options.layout) fail("existing finalize plan uses a different layout");
+	} else {
+		plan = createFinalizePlan(options);
+		atomicWriteJson(planPath, plan);
+		updateRunState(options.runDirectory, (draft) => {
+			draft.phase = "finalizing";
+			draft.nextAction = "finalize";
+			return draft;
+		}, { type: "finalize_planned", operations: plan.operations.length, layout: plan.layout });
 	}
-	for (const operation of [...publishOperations, ...generatedOperations]) {
-		mkdirSync(dirname(operation.to), { recursive: true });
-		copyFileSync(operation.from, operation.to);
-		artifactRows.push({
-			role: operation.role,
-			document_id: operation.documentId,
-			source_path: operation.from,
-			destination_path: relative(options.destination, operation.to),
-			sha256: sha256(readFileSync(operation.to)),
-			created_at: createdAt,
-		});
+	let completedThisInvocation = 0;
+	const failAfter = Number.parseInt(process.env.PI_FORGE_FAIL_AFTER_FINALIZE_OPERATIONS ?? "", 10);
+	for (const operation of plan.operations) {
+		if (operation.status === "complete") continue;
+		const sourceExists = existsSync(operation.from);
+		const destinationExists = existsSync(operation.to);
+		if (destinationExists) {
+			const actual = sha256(readFileSync(operation.to));
+			if (actual !== operation.sha256) fail(`finalize destination hash mismatch: ${operation.to}`);
+			if (operation.role === "original" && sourceExists) fail(`both original source and destination exist during recovery: ${operation.from}`);
+		} else {
+			if (!sourceExists) fail(`both finalize source and destination are missing: ${operation.from}`);
+			if (sha256(readFileSync(operation.from)) !== operation.sha256) fail(`finalize source hash mismatch: ${operation.from}`);
+			mkdirSync(dirname(operation.to), { recursive: true });
+			if (operation.role === "original") renameSync(operation.from, operation.to);
+			else copyFileSync(operation.from, operation.to);
+			if (sha256(readFileSync(operation.to)) !== operation.sha256) fail(`finalize copy verification failed: ${operation.to}`);
+		}
+		operation.status = "complete";
+		operation.completedAt = new Date().toISOString();
+		atomicWriteJson(planPath, plan);
+		appendRunEvent(options.runDirectory, { type: "finalize_operation_completed", operationId: operation.id, role: operation.role, sha256: operation.sha256 });
+		completedThisInvocation += 1;
+		if (Number.isInteger(failAfter) && failAfter > 0 && completedThisInvocation >= failAfter) throw new Error("fault injection after finalize operation");
 	}
+	const artifactRows = plan.operations.map((operation) => ({
+		role: operation.role,
+		document_id: operation.documentId,
+		source_path: operation.from,
+		destination_path: relative(options.destination, operation.to),
+		sha256: operation.sha256,
+		created_at: operation.completedAt,
+	}));
 	writeArtifactManifest(options.runDirectory, artifactRows);
-	process.stdout.write(
-		`${JSON.stringify(
-			{
-				finalized: true,
-				layout,
-				movedOriginals: moveOperations.length,
-				publishedMarkdown: publishOperations.length,
-				generatedArtifacts: generatedOperations.length,
-				artifactManifest: join(options.runDirectory, "artifact_manifest.csv"),
-			},
-			null,
-			2,
-		)}\n`,
-	);
+	updateRunState(options.runDirectory, (draft) => {
+		draft.phase = "finalized";
+		draft.nextAction = "handoff_or_complete";
+		return draft;
+	}, { type: "finalize_completed", operations: plan.operations.length });
+	return {
+		finalized: true,
+		resumed: completedThisInvocation < plan.operations.length,
+		layout: plan.layout,
+		movedOriginals: plan.operations.filter((operation) => operation.role === "original").length,
+		publishedMarkdown: plan.operations.filter((operation) => operation.role === "final_markdown").length,
+		generatedArtifacts: plan.operations.filter((operation) => operation.role === "generated_artifact").length,
+		artifactManifest: join(options.runDirectory, "artifact_manifest.csv"),
+	};
+}
+
+function commandFinalize(args) {
+	const result = executeFinalize(parseFinalizeArguments(args));
+	process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
 function parseRunArguments(args) {
@@ -1997,13 +2425,12 @@ function parseRunArguments(args) {
 
 async function commandRun(args) {
 	const options = parseRunArguments(args);
-	let prepared = null;
-	if (!existsSync(options.prepareOptions.output)) {
-		prepared = await prepareRun(options.prepareOptions);
-	}
+	const prepared = await prepareRun(options.prepareOptions);
 	requireRunDirectory(options.prepareOptions.output);
 	const status = conciseStatus(options.prepareOptions.output);
-	const projectPipeline = readManifestRows(options.prepareOptions.output).some((row) => row.suggested_pipeline.includes("project-extraction"));
+	const manifestRows = readManifestRows(options.prepareOptions.output);
+	const projectPipeline = manifestRows.some((row) => row.suggested_pipeline.includes("project-extraction"));
+	const literaturePipeline = manifestRows.some((row) => row.suggested_pipeline.includes("literature"));
 	const result = {
 		runDirectory: options.prepareOptions.output,
 		prepared,
@@ -2018,13 +2445,17 @@ async function commandRun(args) {
 		});
 		result.finalized = finalized;
 	}
-	if (options.literature) {
+	if (options.literature || literaturePipeline) {
 		const literatureInput = options.destination ?? options.prepareOptions.input;
+		const literatureOutput = join(literatureInput, "Generated", "Literature-Extraction");
 		result.literature = {
 			input: literatureInput,
-			command: `literature-extraction.py init ${literatureInput} --output <new-literature-run-directory>`,
+			output: literatureOutput,
+			command: `literature-extraction.py init ${literatureInput} --output ${literatureOutput}`,
+			automatic: literaturePipeline,
 			note: "The literature tool ignores Ingest, Originals, and Generated by default.",
 		};
+		if (result.finalized) result.nextAction = "literature_extraction";
 	}
 	if (options.project || projectPipeline) {
 		const projectInput = options.destination ?? options.prepareOptions.input;
@@ -2038,87 +2469,28 @@ async function commandRun(args) {
 		};
 		if (result.finalized) result.nextAction = "project_extraction";
 	}
+	const childEntries = Object.fromEntries(
+		[
+			result.literature ? ["literature", { workflow: "literature-extraction", path: result.literature.output, status: existsSync(join(result.literature.output, "run_state.json")) ? JSON.parse(readFileSync(join(result.literature.output, "run_state.json"), "utf8")).status : "pending" }] : null,
+			result.project ? ["project", { workflow: "project-extraction", path: result.project.output, status: existsSync(join(result.project.output, "run_state.json")) ? JSON.parse(readFileSync(join(result.project.output, "run_state.json"), "utf8")).status : "pending" }] : null,
+		].filter(Boolean),
+	);
+	updateRunState(options.prepareOptions.output, (draft) => {
+		draft.children = { ...draft.children, ...childEntries };
+		if (result.finalized && Object.keys(childEntries).length === 0) {
+			draft.status = "complete";
+			draft.phase = "complete";
+			draft.nextAction = null;
+		} else if (result.finalized) {
+			draft.nextAction = result.nextAction;
+		}
+		return draft;
+	}, { type: "workflow_status_updated", nextAction: result.nextAction, children: Object.keys(childEntries) });
 	process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
 function commandFinalizeReturning(options) {
-	if (!existsSync(options.runDirectory) || !lstatSync(options.runDirectory).isDirectory()) fail(`run directory does not exist: ${options.runDirectory}`);
-	if (!existsSync(options.destination) || !lstatSync(options.destination).isDirectory()) fail(`destination folder does not exist: ${options.destination}`);
-	const expectedRunDirectory = join(options.destination, "Ingest");
-	if (resolve(options.runDirectory) !== resolve(expectedRunDirectory)) {
-		fail(`finalize expects the run directory to be the destination Ingest folder: ${expectedRunDirectory}`);
-	}
-	const validation = validateRun(options.runDirectory, { emit: false, exitOnError: false });
-	if (!validation.valid) fail(`run must validate before finalize: ${validation.errors.join("; ")}`);
-	const layout = options.layout === "auto" ? detectWorkspaceLayout(options.destination) : options.layout;
-	const rows = readManifestRows(options.runDirectory);
-	const completedRows = rows.filter((row) => row.status === "success");
-	const moveOperations = [];
-	const publishOperations = [];
-	const generatedOperations = [];
-	const movableSourcePaths = new Set();
-	for (const row of completedRows) {
-		const sourcePath = resolve(row.source_path);
-		if (!existsSync(sourcePath) || !lstatSync(sourcePath).isFile()) fail(`source file is missing before finalize: ${sourcePath}`);
-		const sourceRelative = relativeSourcePath(options.destination, sourcePath);
-		const originalDestination = join(options.destination, "Originals", sourceRelative);
-		const documentPath = join(options.runDirectory, row.output_directory, "document.md");
-		const metadataPath = join(options.runDirectory, row.output_directory, "metadata.json");
-		if (!existsSync(documentPath)) fail(`final document is missing: ${documentPath}`);
-		const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
-		const markdownDestination = join(options.destination, markdownOutputRelativePath(options.destination, sourcePath, layout, row, metadata));
-		moveOperations.push({ role: "original", documentId: row.document_id, from: sourcePath, to: originalDestination });
-		publishOperations.push({ role: "final_markdown", documentId: row.document_id, from: documentPath, to: markdownDestination });
-		movableSourcePaths.add(sourcePath);
-	}
-	for (const artifactPath of collectGeneratedArtifacts(options.runDirectory)) {
-		const generatedRelative = relative(options.runDirectory, artifactPath);
-		generatedOperations.push({
-			role: "generated_artifact",
-			documentId: "",
-			from: artifactPath,
-			to: join(options.destination, "Generated", generatedRelative),
-		});
-	}
-	requireNoDuplicateDestinations([...moveOperations, ...publishOperations, ...generatedOperations]);
-	for (const operation of [...moveOperations, ...publishOperations, ...generatedOperations]) {
-		if (existsSync(operation.to) && !movableSourcePaths.has(operation.to)) fail(`finalize destination already exists: ${operation.to}`);
-	}
-	const artifactRows = [];
-	const createdAt = new Date().toISOString();
-	for (const operation of moveOperations) {
-		mkdirSync(dirname(operation.to), { recursive: true });
-		renameSync(operation.from, operation.to);
-		artifactRows.push({
-			role: operation.role,
-			document_id: operation.documentId,
-			source_path: operation.from,
-			destination_path: relative(options.destination, operation.to),
-			sha256: sha256(readFileSync(operation.to)),
-			created_at: createdAt,
-		});
-	}
-	for (const operation of [...publishOperations, ...generatedOperations]) {
-		mkdirSync(dirname(operation.to), { recursive: true });
-		copyFileSync(operation.from, operation.to);
-		artifactRows.push({
-			role: operation.role,
-			document_id: operation.documentId,
-			source_path: operation.from,
-			destination_path: relative(options.destination, operation.to),
-			sha256: sha256(readFileSync(operation.to)),
-			created_at: createdAt,
-		});
-	}
-	writeArtifactManifest(options.runDirectory, artifactRows);
-	return {
-		finalized: true,
-		layout,
-		movedOriginals: moveOperations.length,
-		publishedMarkdown: publishOperations.length,
-		generatedArtifacts: generatedOperations.length,
-		artifactManifest: join(options.runDirectory, "artifact_manifest.csv"),
-	};
+	return executeFinalize(options);
 }
 
 function usage() {
@@ -2126,7 +2498,10 @@ function usage() {
   document-ingest.mjs doctor [--json]
   document-ingest.mjs prepare <input> --output <new-directory> [--ocr auto|force|never] [--ocr-backend local|glmocr|auto] [--glmocr-url URL] [--chunk-chars N]
   document-ingest.mjs status <run-directory>
+  document-ingest.mjs refresh <run-directory>
+  document-ingest.mjs retry <run-directory> (--item <id> | --all-failed)
   document-ingest.mjs next-review <run-directory>
+  document-ingest.mjs record-review-unit <run-directory> --doc-id <document-id> --kind chunk|vision-page --index N --reviewed-file <markdown>
   document-ingest.mjs record-review <run-directory> --review-file <review.json>
   document-ingest.mjs record-transcript <run-directory> --doc-id <document-id> --transcript <cleaned.md> [--title TEXT] [--author TEXT] [--filename NAME.md]
   document-ingest.mjs validate <run-directory> [--fix-hints] [--json]
@@ -2145,7 +2520,10 @@ if (command === "doctor") {
 	printDoctor(args.includes("--json"));
 } else if (command === "prepare") await prepare(args);
 else if (command === "status") commandStatus(args);
+else if (command === "refresh") commandRefresh(args);
+else if (command === "retry") commandRetry(args);
 else if (command === "next-review") commandNextReview(args);
+else if (command === "record-review-unit") commandRecordReviewUnit(args);
 else if (command === "record-review") commandRecordReview(args);
 else if (command === "record-transcript") commandRecordTranscript(args);
 else if (command === "validate") {

@@ -26,9 +26,12 @@ ffmpeg normalizes every input to 16 kHz mono PCM WAV before recognition.
 
 ```
 forge-output/transcription/<source-stem>/
+  run_state.json               # chunk statuses, attempts, and next action
+  run_events.jsonl             # fsynced transition journal
   audio/
     normalized.wav            # 16 kHz mono working copy
     chunks/                   # only when the recording was split
+  chunk_results/              # one atomic JSON result per committed chunk
   raw_transcript.txt          # what the model heard, segments blank-line separated
   raw_segments.json           # [{start, end, text}] with seconds offsets
   raw_transcript.srt          # subtitle view for review
@@ -39,7 +42,9 @@ forge-output/transcription/<source-stem>/
   warnings.md                 # CPU speed, chunk boundaries, silence, etc.
 ```
 
-Never overwrite an existing run directory; the script appends a numbered suffix.
+A compatible directory resumes from its first uncommitted chunk. An unrelated
+or legacy directory is refused. `refresh` archives an earlier media revision
+under `revisions/` before resetting the active chunk queue.
 
 ## Long Audio
 
@@ -47,6 +52,9 @@ Recordings longer than `--chunk-threshold` seconds (default 600) are split into
 fixed `--chunk-seconds` windows (default 480) with no overlap, transcribed
 independently, and stitched with each segment's start time offset by its window.
 Boundary wording can be imperfect; this is recorded in `warnings.md`.
+Each window result is committed before the next window begins. Final TXT, JSON,
+and SRT outputs are rebuilt in chunk order, so an interrupted assembly is safe
+to repeat.
 
 ## Recording Type → Cleanup Track
 
