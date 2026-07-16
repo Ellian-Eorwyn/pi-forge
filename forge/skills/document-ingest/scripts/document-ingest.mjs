@@ -15,6 +15,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const DEFAULT_CHUNK_CHARACTERS = 150_000;
 const DEFAULT_GLMOCR_URL = "http://llms:5002/glmocr/parse";
@@ -27,8 +28,9 @@ const MAXIMUM_PUNCTUATION_RATIO = 0.55;
 const MAXIMUM_DOT_RUN_RATIO = 0.2;
 const IMAGE_EXTENSIONS = new Set([".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"]);
 const AUDIO_VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".mkv", ".webm", ".avi", ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus"]);
-const SUPPORTED_EXTENSIONS = new Set([".pdf", ".docx", ".txt", ".md", ".markdown", ".html", ".htm", ".rtf", ...IMAGE_EXTENSIONS, ...AUDIO_VIDEO_EXTENSIONS]);
+const SUPPORTED_EXTENSIONS = new Set([".pdf", ".docx", ".pptx", ".txt", ".md", ".markdown", ".html", ".htm", ".rtf", ...IMAGE_EXTENSIONS, ...AUDIO_VIDEO_EXTENSIONS]);
 const RESERVED_WORKSPACE_DIRECTORIES = new Set(["Ingest", "Originals", "Generated"]);
+const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const GENERATED_ARTIFACT_NAMES = new Set([
 	"evidence_table.csv",
 	"methods_matrix.csv",
@@ -97,6 +99,7 @@ function inspectTools() {
 		ocrmypdf: toolInfo("ocrmypdf"),
 		tesseract: toolInfo("tesseract"),
 		ffmpeg: toolInfo("ffmpeg", ["-version"]),
+		python3: toolInfo("python3", ["--version"]),
 		glmocr: { available: Boolean(glmocrUrl), version: glmocrUrl },
 	};
 }
@@ -105,6 +108,7 @@ function printDoctor(asJson) {
 	const tools = inspectTools();
 	const capabilities = {
 		pandocDocuments: tools.pandoc.available,
+		pptxDocuments: tools.python3.available,
 		pdfText: tools.pdftotext.available && tools.pdfinfo.available,
 		pdfImageDetection: tools.pdfimages.available,
 		pdfPageRendering: tools.pdftoppm.available,
@@ -114,6 +118,7 @@ function printDoctor(asJson) {
 	};
 	const remediation = [];
 	if (!tools.pandoc.available) remediation.push("Install Pandoc (macOS: brew install pandoc; Debian/Ubuntu: apt install pandoc).");
+	if (!tools.python3.available) remediation.push("Install Python 3 for standard-library PPTX extraction.");
 	if (!tools.ffmpeg.available) remediation.push("Install FFmpeg (macOS: brew install ffmpeg; Debian/Ubuntu: apt install ffmpeg).");
 	if (!capabilities.pdfText || !capabilities.pdfImageDetection || !capabilities.pdfPageRendering) {
 		remediation.push("Install Poppler (macOS: brew install poppler; Debian/Ubuntu: apt install poppler-utils).");
@@ -129,6 +134,7 @@ function printDoctor(asJson) {
 		process.stdout.write(`${name}: ${info.available ? info.version : "missing"}\n`);
 	}
 	process.stdout.write(`Pandoc document conversion: ${capabilities.pandocDocuments ? "available" : "unavailable"}\n`);
+	process.stdout.write(`PPTX OOXML conversion: ${capabilities.pptxDocuments ? "available" : "unavailable"}\n`);
 	process.stdout.write(`PDF text extraction: ${capabilities.pdfText ? "available" : "unavailable"}\n`);
 	process.stdout.write(`Automatic PDF OCR: ${capabilities.pdfOcr ? "available" : "unavailable"}\n`);
 	process.stdout.write(`GLM-OCR SDK endpoint: ${tools.glmocr.version}\n`);
@@ -728,6 +734,37 @@ function extractPandoc(filePath, documentDirectory, format, tools) {
 	};
 }
 
+function extractPptx(filePath, tools) {
+	if (!tools.python3.available) throw new Error("Python 3 is required for PPTX ingestion but was not found on PATH");
+	const helper = join(SCRIPT_DIRECTORY, "pptx_to_markdown.py");
+	const result = run("python3", [helper, filePath]);
+	if (result.error || result.status !== 0) {
+		throw new Error(`PPTX conversion failed: ${result.stderr.trim() || result.error?.message || `exit status ${result.status}`}`);
+	}
+	let extracted;
+	try {
+		extracted = JSON.parse(result.stdout);
+	} catch {
+		throw new Error("PPTX conversion returned invalid JSON");
+	}
+	return {
+		...extracted,
+		ocr: {
+			mode: "not-applicable",
+			attempted: false,
+			used: false,
+			reason: null,
+			candidatePages: [],
+			beforeQuality: [],
+			afterQuality: [],
+			unresolvedPages: [],
+			derivedPath: null,
+			derivedSha256: null,
+			error: null,
+		},
+	};
+}
+
 function extractText(filePath) {
 	const buffer = readFileSync(filePath);
 	let markdown;
@@ -797,7 +834,7 @@ async function categorizeFolder(inputs) {
 				messages: [
 					{
 						role: "system",
-						content: "You are a folder categorization assistant. Analyze the list of file paths. Reply with exactly one word: 'personal-admin', 'literature', or 'general'."
+						content: "You are a folder categorization assistant. Analyze the list of file paths. Reply with exactly one word: 'personal-admin', 'literature', 'project', or 'general'. Use project for grants, awards, proposals, scopes of work, contracts, work plans, reports, presentations, meetings, interviews, deliverables, deadlines, or project controls."
 					},
 					{
 						role: "user",
@@ -815,6 +852,7 @@ async function categorizeFolder(inputs) {
 			}
 			if (text.includes("personal-admin") || text.includes("admin")) return "personal-admin";
 			if (text.includes("literature") || text.includes("academic")) return "literature";
+			if (text.includes("project") || text.includes("grant") || text.includes("scope of work")) return "project";
 		}
 	} catch (e) {
 		// Ignore error and return general
@@ -965,6 +1003,7 @@ async function prepareDocument(filePath, runDirectory, options, tools, usedDirec
 	const format = sourceFormat(filePath);
 	let extracted;
 	if (format === "pdf") extracted = await extractPdf(filePath, documentDirectory, options, tools);
+	else if (format === "pptx") extracted = extractPptx(filePath, tools);
 	else if (IMAGE_EXTENSIONS.has(extname(filePath).toLowerCase())) {
 		if (options.ocr === "never") throw new Error("image ingestion requires OCR, but OCR was disabled");
 		if (options.ocrBackend === "local") throw new Error("image ingestion requires --ocr-backend glmocr or auto");
@@ -1161,9 +1200,9 @@ async function prepareRun(options) {
 		if (row.status !== "needs_review") continue;
 		const format = row.source_format;
 		if (["mp4", "mov", "mkv", "webm", "avi", "mp3", "wav", "m4a", "flac", "ogg", "opus"].includes(format)) {
-			row.suggested_pipeline = "transcription,transcript-cleanup";
+			row.suggested_pipeline = folderCategory === "project" ? "transcription,transcript-cleanup,project-extraction" : "transcription,transcript-cleanup";
 		} else {
-			row.suggested_pipeline = folderCategory === "general" ? "basic-markdown" : folderCategory;
+			row.suggested_pipeline = folderCategory === "general" ? "basic-markdown" : folderCategory === "project" ? "project-extraction" : folderCategory;
 		}
 	}
 
@@ -1936,11 +1975,13 @@ function parseRunArguments(args) {
 	if (args.length === 0) fail("run requires an input path");
 	const prepareArgs = [args[0]];
 	let literature = false;
+	let project = false;
 	let destination = null;
 	let layout = "auto";
 	for (let index = 1; index < args.length; index += 1) {
 		const argument = args[index];
 		if (argument === "--literature") literature = true;
+		else if (argument === "--project") project = true;
 		else if (argument === "--destination") destination = resolve(args[++index] ?? fail("--destination requires a folder"));
 		else if (argument === "--layout") layout = args[++index] ?? fail("--layout requires auto, flat, or structured");
 		else {
@@ -1951,7 +1992,7 @@ function parseRunArguments(args) {
 		}
 	}
 	if (!new Set(["auto", "flat", "structured"]).has(layout)) fail("--layout must be auto, flat, or structured");
-	return { prepareOptions: parsePrepareArguments(prepareArgs), literature, destination, layout };
+	return { prepareOptions: parsePrepareArguments(prepareArgs), literature, project, destination, layout };
 }
 
 async function commandRun(args) {
@@ -1962,6 +2003,7 @@ async function commandRun(args) {
 	}
 	requireRunDirectory(options.prepareOptions.output);
 	const status = conciseStatus(options.prepareOptions.output);
+	const projectPipeline = readManifestRows(options.prepareOptions.output).some((row) => row.suggested_pipeline.includes("project-extraction"));
 	const result = {
 		runDirectory: options.prepareOptions.output,
 		prepared,
@@ -1983,6 +2025,18 @@ async function commandRun(args) {
 			command: `literature-extraction.py init ${literatureInput} --output <new-literature-run-directory>`,
 			note: "The literature tool ignores Ingest, Originals, and Generated by default.",
 		};
+	}
+	if (options.project || projectPipeline) {
+		const projectInput = options.destination ?? options.prepareOptions.input;
+		const projectOutput = join(projectInput, "Generated", "Project-Extraction");
+		result.project = {
+			input: projectInput,
+			output: projectOutput,
+			command: `project-extraction.py init ${projectInput} --output ${projectOutput}`,
+			automatic: projectPipeline,
+			note: "Run after finalized Markdown and cleaned transcripts are present; reserved ingest folders are skipped.",
+		};
+		if (result.finalized) result.nextAction = "project_extraction";
 	}
 	process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
@@ -2077,7 +2131,7 @@ function usage() {
   document-ingest.mjs record-transcript <run-directory> --doc-id <document-id> --transcript <cleaned.md> [--title TEXT] [--author TEXT] [--filename NAME.md]
   document-ingest.mjs validate <run-directory> [--fix-hints] [--json]
   document-ingest.mjs finalize <run-directory> --destination <source-folder> [--layout auto|flat|structured]
-  document-ingest.mjs run <input> --output <new-directory> [--literature] [--destination <source-folder>]
+  document-ingest.mjs run <input> --output <new-directory> [--literature] [--project] [--destination <source-folder>]
 `);
 }
 

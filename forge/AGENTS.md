@@ -2,7 +2,7 @@
 
 Forge processes raw information into reviewable, reusable outputs. It supports
 documents, transcripts, spreadsheets, web sources, code, personal materials,
-and reports. Do not assume Obsidian conventions or schemas unless the user
+complex project records, and reports. Do not assume Obsidian conventions or schemas unless the user
 explicitly requests them.
 
 Use `CAPABILITIES.md` as the compact capability index. Do not load every full
@@ -42,3 +42,10 @@ default to `.agents/skills/<name>/SKILL.md`.
 - For batches, report every processed, skipped, failed, and review-needed item.
 - Log transformations and make lossy operations visible.
 - Keep outputs readable by both people and future agents.
+
+When a folder contains grants, awards, proposals, scopes of work, contracts,
+work plans, project reports, presentations, meeting notes, or interviews and
+the user needs deliverables, requirements, dates, actions, or risks tracked,
+route finalized document-ingest outputs to `project-extraction`. Keep its
+`project_status.csv` human-maintained and use `report-output` only for polished
+downstream deliverables.

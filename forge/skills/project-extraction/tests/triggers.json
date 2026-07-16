@@ -1,0 +1,14 @@
+{
+	"positive": [
+		"Extract every deliverable, deadline, reporting requirement, and acceptance criterion from this grant award and scope of work.",
+		"Turn this project folder of proposals, reports, meeting notes, interviews, and presentations into a refreshable project tracker.",
+		"Compare the contract and amendment, preserve conflicts, and build registers for decisions, risks, actions, and dependencies.",
+		"Create a proposal submission checklist from this funding notice without treating proposed work as awarded obligations."
+	],
+	"negative": [
+		"Extract research claims, methods, findings, and literature gaps from these journal articles.",
+		"Organize my personal tax notices, insurance renewals, and household paperwork.",
+		"Turn this completed analysis into a polished DOCX briefing and slide outline.",
+		"Convert this PDF and PowerPoint into clean Markdown with source maps."
+	]
+}

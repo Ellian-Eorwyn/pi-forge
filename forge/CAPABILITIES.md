@@ -14,6 +14,7 @@ Prefer deterministic scripts/tools for mechanical work such as parsing, conversi
 - `literature-extraction`: Extract structured evidence, claims, metadata, and citations from research documents.
 - `organize-folder`: Sort messy folders through a reviewable manifest before making changes.
 - `personal-admin`: Turn personal/admin documents into summaries, decisions, and action plans.
+- `project-extraction`: Turn grants, scopes of work, contracts, proposals, reports, presentations, meetings, and interviews into refreshable evidence, project-control registers, and human-authored briefs while preserving source conflicts and status ownership.
 - `report-output`: Assemble polished deliverables from processed research or document outputs.
 - `skill-builder`: Design, scaffold, validate, and audit portable Agent Skills.
 - `site-builder`: Build static websites from structured content folders.

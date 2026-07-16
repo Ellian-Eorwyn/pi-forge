@@ -1,0 +1,22 @@
+{
+	"name": "project-extraction",
+	"type": "pi-forge-skill",
+	"version": "0.1.0",
+	"description": "Extract refreshable, source-backed project controls from complex project documents.",
+	"skill_file": "SKILL.md",
+	"scripts_dir": "scripts",
+	"references_dir": "references",
+	"tools": [
+		{
+			"name": "project_extraction",
+			"description": "Initialize, extract, reconcile, refresh, build, and validate project-control workspaces.",
+			"command": "python3 scripts/project-extraction.py",
+			"destructive": false
+		}
+	],
+	"safety": {
+		"destructive_by_default": false,
+		"requires_review_for_filesystem_changes": true,
+		"preserve_provenance_when_applicable": true
+	}
+}

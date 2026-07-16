@@ -105,6 +105,12 @@ entries with:
 Update line ranges after model normalization. Do not claim page-level precision
 for formats that do not expose pages.
 
+For PPTX, use ordered slide locators. Extract slide titles, body text, tables,
+speaker notes, and image alt text from OOXML. Warn on visual-only slides,
+charts, images whose meaning cannot be verified from alt text, and unsupported
+embedded objects. Do not claim that deterministic XML extraction interpreted a
+chart or visual composition.
+
 ## Extraction Report
 
 Retain these sections:
@@ -166,8 +172,9 @@ document_id,source_path,source_sha256,source_format,status,suggested_pipeline,ou
 Allowed statuses are `success`, `needs_review`, `failed`, and `skipped`.
 Quote CSV values correctly. Keep paths absolute for sources and relative to the
 run root for outputs. `suggested_pipeline` is advisory and may contain values
-such as `basic-markdown`, `personal-admin`, `literature`, or
-`transcription,transcript-cleanup`.
+such as `basic-markdown`, `personal-admin`, `literature`,
+`project-extraction`, `transcription,transcript-cleanup`, or
+`transcription,transcript-cleanup,project-extraction`.
 
 ## Final Folder Layout
 

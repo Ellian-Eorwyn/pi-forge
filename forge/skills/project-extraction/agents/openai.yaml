@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project Extraction"
+  short_description: "Extract project controls from complex documents"
+  default_prompt: "Use $project-extraction to extract deliverables, requirements, dates, decisions, and risks into a refreshable project workspace."

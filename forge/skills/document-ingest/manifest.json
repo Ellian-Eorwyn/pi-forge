@@ -27,6 +27,12 @@
 			"destructive": false
 		},
 		{
+			"name": "pptx_to_markdown",
+			"description": "Extract one PPTX to Markdown with slide text, tables, notes, alt text, warnings, and source maps.",
+			"command": "node scripts/pptx_to_markdown.mjs",
+			"destructive": false
+		},
+		{
 			"name": "extract_metadata",
 			"description": "Read or prepare document-ingest metadata for PDF and DOCX sources.",
 			"command": "node scripts/extract_metadata.mjs",

@@ -177,6 +177,42 @@ function authorFiles(directory, names) {
 	}
 }
 
+function authorProjectFiles(directory) {
+	for (const name of [
+		"project_brief.md",
+		"deliverables_and_dates.md",
+		"compliance_and_reporting.md",
+		"status_brief.md",
+		"decisions_and_open_questions.md",
+		"risks_issues_dependencies.md",
+		"proposal_checklist.md",
+	]) {
+		const path = join(directory, name);
+		if (!existsSync(path)) continue;
+		writeFileSync(path, readFileSync(path, "utf8").replaceAll(placeholder, "Authored from cited project controls and the human status overlay."));
+	}
+}
+
+function createPptxFixture(workspace, output) {
+	const entries = {
+		"ppt/presentation.xml": `<?xml version="1.0"?><p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId1"/><p:sldId id="257" r:id="rId2"/></p:sldIdLst></p:presentation>`,
+		"ppt/_rels/presentation.xml.rels": `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/></Relationships>`,
+		"ppt/slides/slide1.xml": `<?xml version="1.0"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="1" name="Title"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:txBody><a:p><a:r><a:t>Project Kickoff</a:t></a:r></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="2" name="Body"/><p:cNvSpPr/><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr><p:txBody><a:p><a:r><a:t>Deliver the implementation plan.</a:t></a:r></a:p></p:txBody></p:sp><p:graphicFrame><a:graphic><a:graphicData><a:tbl><a:tr><a:tc><a:txBody><a:p><a:r><a:t>Owner</a:t></a:r></a:p></a:txBody></a:tc><a:tc><a:txBody><a:p><a:r><a:t>Date</a:t></a:r></a:p></a:txBody></a:tc></a:tr><a:tr><a:tc><a:txBody><a:p><a:r><a:t>Alex</a:t></a:r></a:p></a:txBody></a:tc><a:tc><a:txBody><a:p><a:r><a:t>July 30</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame><p:pic><p:nvPicPr><p:cNvPr id="3" name="Picture" descr="Timeline diagram"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr></p:pic></p:spTree></p:cSld></p:sld>`,
+		"ppt/slides/_rels/slide1.xml.rels": `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdNotes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide1.xml"/></Relationships>`,
+		"ppt/notesSlides/notesSlide1.xml": `<?xml version="1.0"?><p:notes xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="1" name="Notes"/><p:cNvSpPr/><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr><p:txBody><a:p><a:r><a:t>Confirm sponsor approval.</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:notes>`,
+		"ppt/slides/slide2.xml": `<?xml version="1.0"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:pic><p:nvPicPr><p:cNvPr id="1" name="Visual"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr></p:pic><p:graphicFrame><a:graphic><a:graphicData uri="chart"/></a:graphic></p:graphicFrame></p:spTree></p:cSld></p:sld>`,
+		"docProps/core.xml": `<?xml version="1.0"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/"><dc:title>Project Deck</dc:title><dc:creator>Example Author</dc:creator><dcterms:created>2026-07-16T12:00:00Z</dcterms:created></cp:coreProperties>`,
+	};
+	const entriesPath = join(workspace, "pptx-entries.json");
+	const builderPath = join(workspace, "build-pptx.py");
+	writeFileSync(entriesPath, `${JSON.stringify(entries)}\n`);
+	writeFileSync(
+		builderPath,
+		"import json, sys, zipfile\nentries=json.load(open(sys.argv[1], encoding='utf-8'))\nwith zipfile.ZipFile(sys.argv[2], 'w', zipfile.ZIP_DEFLATED) as archive:\n    for name, value in entries.items(): archive.writestr(name, value)\n",
+	);
+	run(python, [builderPath, entriesPath, output]);
+}
+
 function csvEscape(value) {
 	const text = value === null || value === undefined ? "" : String(value);
 	return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
@@ -1466,6 +1502,135 @@ test("literature extraction ignores finalized ingest workspace folders by defaul
 			]),
 		);
 		assert.equal(included.documents, 4);
+	});
+});
+
+test("project extraction builds distinct controls and refreshes sources without overwriting human status", () => {
+	withWorkspace((workspace) => {
+		const sources = join(workspace, "project-sources");
+		mkdirSync(sources);
+		for (const [name, content] of Object.entries({
+			"award.md": "# Award\n\nThe final evaluation report is due July 31, 2026 and requires sponsor acceptance.\n",
+			"scope-of-work.md": "# Scope of Work\n\nSubmit the progress report 30 days after each quarter ends.\n",
+			"proposal.md": "# Proposal\n\nThe applicant proposes a community workshop series.\n",
+			"report.md": "# Status Report\n\nSteering updates recur monthly.\n",
+			"presentation.md": "# Project Presentation\n\nThe kickoff milestone is July 20, 2026.\n",
+			"meeting.md": "# Meeting\n\nAlex will circulate revised minutes.\n",
+			"interview.md": "# Interview\n\nStaff availability may delay field work.\n",
+		})) {
+			writeFileSync(join(sources, name), content);
+		}
+		writeCsvRows(join(sources, "budget.csv"), [["category", "amount"], ["Evaluation", "5000"]]);
+
+		const scriptPath = script("project-extraction", "project-extraction.py");
+		const runDirectory = join(workspace, "project-run");
+		const initialized = jsonOutput(run(python, [scriptPath, "init", sources, "--output", runDirectory, "--title", "Grant Delivery"]));
+		assert.equal(initialized.sources, 8);
+
+		const extractionFor = (sourcePath, changed = false) => {
+			const filename = sourcePath.split("/").pop();
+			const definitions = {
+				"award.md": ["award", { item_type: "deliverable", title: "Final evaluation report", date_text: changed ? "August 15, 2026" : "July 31, 2026", date_kind: "exact", date: changed ? "2026-08-15" : "2026-07-31", acceptance_criteria: "Sponsor acceptance", commitment_level: "required" }],
+				"scope-of-work.md": ["scope_of_work", { item_type: "reporting_requirement", title: "Quarterly progress report", date_text: "30 days after each quarter ends", date_kind: "relative", date: null, trigger: "each quarter ends", offset_days: 30, recurrence: "quarterly", commitment_level: "required" }],
+				"proposal.md": ["proposal", { item_type: "proposal_requirement", title: "Community workshop series", date_kind: "none", date: null, commitment_level: "proposed" }],
+				"report.md": ["report", { item_type: "requirement", title: "Monthly steering updates", date_text: "monthly", date_kind: "recurring", date: null, recurrence: "monthly", commitment_level: "committed" }],
+				"presentation.md": ["presentation", { item_type: "milestone", title: "Project kickoff", date_text: "July 20, 2026", date_kind: "exact", date: "2026-07-20", commitment_level: "discussed" }],
+				"meeting.md": ["meeting", { item_type: "action_item", title: "Circulate revised minutes", date_kind: "none", date: null, party: "Alex", commitment_level: "committed" }],
+				"interview.md": ["interview", { item_type: "risk", title: "Staff availability may delay field work", date_kind: "none", date: null, commitment_level: "discussed" }],
+				"budget.csv": ["budget", { item_type: "budget_fact", title: "Evaluation budget", amount: "5000", currency: "USD", date_kind: "none", date: null, commitment_level: "informational" }],
+				"contract.md": ["contract", { item_type: "requirement", title: "Approval before publication", date_text: "before publication", date_kind: "conditional", date: null, trigger: "publication", commitment_level: "required" }],
+			};
+			const [documentRole, item] = definitions[filename];
+			return {
+				documentRole,
+				items: [{ description: "Source-backed project record.", direct_quotes: ["Source wording"], interpretation: "explicit", confidence: "high", ...item }],
+			};
+		};
+
+		const processPending = (changed = false, testRelativeDateGuard = false) => {
+			while (true) {
+				const packet = jsonOutput(run(python, [scriptPath, "next", runDirectory]));
+				if (packet.complete) break;
+				const extractionPath = join(runDirectory, "working", `${packet.packetId}.json`);
+				const extraction = extractionFor(packet.sourcePath, changed && packet.sourcePath.endsWith("award.md"));
+				if (testRelativeDateGuard && packet.sourcePath.endsWith("scope-of-work.md")) {
+					const invalid = structuredClone(extraction);
+					invalid.items[0].date = "2026-08-30";
+					writeFileSync(extractionPath, `${JSON.stringify(invalid)}\n`);
+					runFailure(python, [scriptPath, "record", runDirectory, "--packet-id", packet.packetId, "--items-file", extractionPath], /must not normalize a non-exact date/);
+				}
+				writeFileSync(extractionPath, `${JSON.stringify(extraction)}\n`);
+				run(python, [scriptPath, "record", runDirectory, "--packet-id", packet.packetId, "--items-file", extractionPath]);
+			}
+		};
+
+		const prefixes = { deliverable: "DEL", reporting_requirement: "RPT", proposal_requirement: "PRP", requirement: "REQ", milestone: "MIL", action_item: "ACT", risk: "RSK", budget_fact: "BUD" };
+		const reconcileAndReview = () => {
+			run(python, [scriptPath, "reconcile", runDirectory]);
+			while (true) {
+				const pending = jsonOutput(run(python, [scriptPath, "next-review", runDirectory]));
+				if (pending.complete) break;
+				const packet = JSON.parse(readFileSync(pending.path, "utf8"));
+				const controls = packet.evidenceItems.map((evidence, index) => ({
+					control_id: `${prefixes[packet.controlType]}-${String(index + 1).padStart(3, "0")}`,
+					control_type: packet.controlType,
+					title: evidence.title,
+					description: evidence.description,
+					owner: evidence.party ?? null,
+					date_text: evidence.date_text ?? null,
+					date_kind: evidence.date_kind,
+					date: evidence.date ?? null,
+					trigger: evidence.trigger ?? null,
+					offset_days: evidence.offset_days ?? null,
+					recurrence: evidence.recurrence ?? null,
+					acceptance_criteria: evidence.acceptance_criteria ?? null,
+					commitment_level: evidence.commitment_level,
+					source_evidence_ids: [evidence.evidence_id],
+					relationships: { parent: [], depends_on: [], satisfies: [], supersedes: [], conflicts_with: [] },
+				}));
+				const reviewPath = join(runDirectory, "working", `${pending.reviewPacketId}-review.json`);
+				writeFileSync(reviewPath, `${JSON.stringify({ reviewPacketId: pending.reviewPacketId, controls, dispositions: [] })}\n`);
+				run(python, [scriptPath, "record-review", runDirectory, "--review-file", reviewPath]);
+			}
+		};
+
+		processPending(false, true);
+		reconcileAndReview();
+		run(python, [scriptPath, "build", runDirectory, "--as-of", "2026-07-16"]);
+		assert.match(readFileSync(join(runDirectory, "deliverables.csv"), "utf8"), /Final evaluation report/);
+		assert.doesNotMatch(readFileSync(join(runDirectory, "deliverables.csv"), "utf8"), /Circulate revised minutes/);
+		assert.match(readFileSync(join(runDirectory, "actions.csv"), "utf8"), /Circulate revised minutes/);
+		assert.match(readFileSync(join(runDirectory, "evidence_items.csv"), "utf8"), /award|proposal|scope_of_work/);
+		assert.match(readFileSync(join(runDirectory, "schedule.csv"), "utf8"), /30 days after each quarter ends/);
+		assert.equal(existsSync(join(runDirectory, "proposal_checklist.md")), true);
+		authorProjectFiles(runDirectory);
+		assert.equal(jsonOutput(run(python, [scriptPath, "validate", runDirectory, "--json"])).valid, true);
+
+		const statusRows = parseCsvRows(readFileSync(join(runDirectory, "project_status.csv"), "utf8"));
+		const statusHeader = statusRows.shift();
+		const deliverableStatus = statusRows.find((row) => row[0] === "DEL-001");
+		deliverableStatus[1] = "Jordan";
+		deliverableStatus[2] = "in_progress";
+		deliverableStatus[3] = "2026-08-10";
+		deliverableStatus[4] = "2026-07-16";
+		deliverableStatus[5] = "Human status note.";
+		writeCsvRows(join(runDirectory, "project_status.csv"), [statusHeader, ...statusRows]);
+
+		writeFileSync(join(sources, "award.md"), "# Award Amendment\n\nThe final evaluation report is now due August 15, 2026 and still requires sponsor acceptance.\n");
+		rmSync(join(sources, "meeting.md"));
+		writeFileSync(join(sources, "contract.md"), "# Contract\n\nSponsor approval is required before publication.\n");
+		const refreshed = jsonOutput(run(python, [scriptPath, "refresh", runDirectory]));
+		assert.deepEqual({ added: refreshed.added, changed: refreshed.changed, removed: refreshed.removed, unchanged: refreshed.unchanged }, { added: 1, changed: 1, removed: 1, unchanged: 6 });
+		assert.equal(refreshed.pendingPackets, 2);
+		processPending(true);
+		reconcileAndReview();
+		run(python, [scriptPath, "build", runDirectory, "--as-of", "2026-07-17"]);
+		const refreshedStatus = readFileSync(join(runDirectory, "project_status.csv"), "utf8");
+		assert.match(refreshedStatus, /DEL-001,Jordan,in_progress,2026-08-10,2026-07-16/);
+		assert.match(refreshedStatus, /Human status note\. Status review required after source refresh\./);
+		assert.doesNotMatch(readFileSync(join(runDirectory, "actions.csv"), "utf8"), /Circulate revised minutes/);
+		assert.match(readFileSync(join(runDirectory, "source_changes.csv"), "utf8"), /added|changed|removed/);
+		assert.equal(jsonOutput(run(python, [scriptPath, "validate", runDirectory, "--json"])).valid, true);
 	});
 });
 
@@ -2818,7 +2983,7 @@ test("extracted web and document tools expose metadata and conversion boundaries
 	withWorkspace((workspace) => {
 		const requiredTools = {
 			"web-collection": ["fetch_url", "archive_page", "html_to_markdown", "extract_metadata"],
-			"document-ingest": ["pdf_to_markdown", "docx_to_markdown", "extract_metadata"],
+			"document-ingest": ["pdf_to_markdown", "docx_to_markdown", "pptx_to_markdown", "extract_metadata"],
 			"skill-builder": ["skill_builder"],
 		};
 		for (const [skill, names] of Object.entries(requiredTools)) {
@@ -2902,6 +3067,31 @@ printf 'Readable PDF text extracted by the fake pdftotext command for the tool w
 	});
 });
 
+test("document ingest extracts ordered PPTX content and flags visual review", () => {
+	withWorkspace((workspace) => {
+		const source = join(workspace, "project-deck.pptx");
+		createPptxFixture(workspace, source);
+		const input = join(workspace, "pptx-input.json");
+		const runDirectory = join(workspace, "pptx-run");
+		writeFileSync(input, `${JSON.stringify({ input: source, output: runDirectory })}\n`);
+		const result = jsonOutput(run("node", [script("document-ingest", "pptx_to_markdown.mjs"), "--input", input]));
+		assert.equal(result.status, "ok");
+		const document = result.data.documents[0];
+		const markdown = readFileSync(document.markdownPath, "utf8");
+		assert.match(markdown, /# Slide 1: Project Kickoff/);
+		assert.match(markdown, /Deliver the implementation plan/);
+		assert.match(markdown, /\| Owner \| Date \|/);
+		assert.match(markdown, /Timeline diagram/);
+		assert.match(markdown, /Confirm sponsor approval/);
+		assert.match(markdown, /# Slide 2/);
+		const sourceMap = JSON.parse(readFileSync(document.sourceMapPath, "utf8"));
+		assert.deepEqual(sourceMap.entries.map((entry) => entry.sourceLocator.value), [1, 2]);
+		assert.match(result.warnings.join("\n"), /image|visual-only|chart or unsupported drawing object/);
+		assert.equal(document.metadata.fields.title.value, "Project Deck");
+		assert.equal(document.metadata.extraction.method, "pptx-ooxml");
+	});
+});
+
 test("document ingest detects FFmpeg with its supported version flag", async () => {
 	await withAsyncWorkspace(async (workspace) => {
 		const fakeBin = join(workspace, "fake-bin");
@@ -2929,7 +3119,7 @@ printf 'synthetic audio' > "$output"
 		const source = join(workspace, "clip.mp4");
 		writeFileSync(source, "synthetic video");
 		const runDirectory = join(workspace, "media-ingest");
-		const chatServer = await startChatFixture(workspace, "general");
+		const chatServer = await startChatFixture(workspace, "project");
 		try {
 			const prepared = jsonOutput(
 				runWithEnvironment(
@@ -2941,6 +3131,7 @@ printf 'synthetic audio' > "$output"
 			assert.equal(prepared.counts.needs_review, 1);
 			const documentDirectoryName = firstManifestRow(runDirectory).output_directory;
 			assert.equal(existsSync(join(runDirectory, documentDirectoryName, "derived", "audio.mp3")), true);
+			assert.equal(firstManifestRow(runDirectory).suggested_pipeline, "transcription,transcript-cleanup,project-extraction");
 		} finally {
 			await chatServer.close();
 		}
@@ -3019,6 +3210,36 @@ test("document ingest categorizes folders with the base model endpoint", async (
 			assert.equal(requests[0].body.model, "code");
 			assert.match(requests[0].body.messages[1].content, /essay\.txt/);
 			assert.equal(firstManifestRow(runDirectory).suggested_pipeline, "literature");
+		} finally {
+			await chatServer.close();
+		}
+	});
+});
+
+test("document ingest routes project folders to the fixed project extraction handoff", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const chatServer = await startChatFixture(workspace, "project");
+		try {
+			const inputDirectory = join(workspace, "grant-project");
+			mkdirSync(inputDirectory);
+			writeFileSync(join(inputDirectory, "scope-of-work.txt"), "Deliver the final report by the contractual deadline.\n");
+			const runDirectory = join(workspace, "project-ingest");
+			runWithEnvironment(
+				"node",
+				[script("document-ingest", "document-ingest.mjs"), "prepare", inputDirectory, "--output", runDirectory],
+				{ FORGE_BASE_CHAT_URL: chatServer.url },
+			);
+			assert.equal(firstManifestRow(runDirectory).suggested_pipeline, "project-extraction");
+			const resumed = jsonOutput(
+				runWithEnvironment(
+					"node",
+					[script("document-ingest", "document-ingest.mjs"), "run", inputDirectory, "--output", runDirectory],
+					{ FORGE_BASE_CHAT_URL: chatServer.url },
+				),
+			);
+			assert.equal(resumed.project.automatic, true);
+			assert.equal(resumed.project.output, join(inputDirectory, "Generated", "Project-Extraction"));
+			assert.match(resumed.project.command, /project-extraction\.py init/);
 		} finally {
 			await chatServer.close();
 		}

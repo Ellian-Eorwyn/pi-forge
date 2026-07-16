@@ -1,6 +1,6 @@
 ---
 name: document-ingest
-description: One-stop-shop folder ingestion pipeline. Ingest, normalize, and process folders of documents, images, audio, and video files. Automatically categorizes folders and routes files to the appropriate specialized skills (transcription, personal-admin, literature-extraction). Uses a hybrid deterministic and LLM-driven orchestration approach.
+description: One-stop-shop folder ingestion pipeline. Ingest, normalize, and process folders of documents, presentations, images, audio, and video files. Automatically categorizes folders and routes files to the appropriate specialized skills (transcription, personal-admin, literature-extraction, project-extraction). Uses a hybrid deterministic and LLM-driven orchestration approach.
 ---
 
 # Document Ingest
@@ -29,6 +29,18 @@ Do this because `literature-extraction` skips `Ingest/`, `Originals/`, and
 only the clean top-level Markdown outputs. Do not ask the user to name the
 second skill when the document type makes the handoff clear.
 
+If prepared files are categorized as `project`, or the folder contains grants,
+awards, proposals, scopes of work, contracts, work plans, reports,
+presentations, meetings, or interviews that need deliverables and dates tracked,
+run `project-extraction` after finalization. Put its refreshable workspace at:
+
+```bash
+<input-folder>/Generated/Project-Extraction
+```
+
+Project recordings follow `transcription`, `transcript-cleanup`, then
+`project-extraction`. Do not treat proposal language as an awarded obligation.
+
 ## Command Card
 
 - `doctor --json`: capability check.
@@ -38,13 +50,13 @@ second skill when the document type makes the handoff clear.
 - `record-review <run-directory> --review-file <review.json>`: atomically update `metadata.json`, `manifest.csv`, and `extraction_report.md` after model review.
 - `record-transcript <run-directory> --doc-id <id> --transcript <cleaned.md>`: atomically install a cleaned transcript as the final document text and repair transcript chunk validation state.
 - `validate <run-directory> --fix-hints --json`: machine-readable quality gate with repair hints.
-- `run <input> --output <input>/Ingest --literature`: deterministic prepare/resume wrapper that reports the next review action and downstream literature handoff.
+- `run <input> --output <input>/Ingest [--literature] [--project]`: deterministic prepare/resume wrapper that reports the next review action and downstream handoff.
 - For finalized literature-like folders: `python3 <literature-skill>/scripts/literature-extraction.py init <input-folder> --output <input-folder>/Generated/Literature-Extraction`.
 
 ## Mechanical Tools
 
 For lower-level execution, the manifest also exposes `pdf_to_markdown`,
-`docx_to_markdown`, and `extract_metadata`. These tools accept structured JSON
+`docx_to_markdown`, `pptx_to_markdown`, and `extract_metadata`. These tools accept structured JSON
 input and return structured JSON results with prepared Markdown, metadata,
 source-map, and extraction-report artifact paths. Use the full workflow for
 folder ingestion, review, finalization, and literature handoff.
@@ -65,7 +77,7 @@ folder ingestion, review, finalization, and literature handoff.
    node <skill-directory>/scripts/document-ingest.mjs prepare <input-folder> --output <input-folder>/Ingest
    ```
 
-   This deterministic step creates a `manifest.csv` containing all files, automatically extracts audio from videos (via `ffmpeg`), applies OCR to images/PDFs (via `glmocr`), and determines a `suggested_pipeline` (e.g. `personal-admin`, `literature`, `transcription,transcript-cleanup`, `basic-markdown`) based on the folder contents and file formats.
+   This deterministic step creates a `manifest.csv` containing all files, automatically extracts audio from videos (via `ffmpeg`), applies OCR to images/PDFs (via `glmocr`), extracts PPTX slide text, tables, notes, and alt text with slide source maps, and determines a `suggested_pipeline` (e.g. `personal-admin`, `literature`, `project-extraction`, `transcription,transcript-cleanup`, `basic-markdown`) based on the folder contents and file formats.
 
 3. Use the structured review queue instead of reading the full manifest and
    guessing valid values:
@@ -77,7 +89,7 @@ folder ingestion, review, finalization, and literature handoff.
 
    For each packet with `complete == false`, follow its `suggestedPipeline`:
 
-   **For `basic-markdown`, `personal-admin`, or `literature`**:
+   **For `basic-markdown`, `personal-admin`, `literature`, or `project-extraction`**:
    - Review and clean up the `document.md` structure in the file's output directory. 
    - Improve headings, paragraphs, lists, and tables supported by the source. Leave uncertain text visible and note it in `extraction_report.md`.
    - Complete a review JSON file matching the packet shape, set
@@ -93,15 +105,17 @@ folder ingestion, review, finalization, and literature handoff.
      in `.md`.
    - Record the review with `record-review`; do not hand-edit `metadata.json`,
      `manifest.csv`, or `extraction_report.md`.
-   - If the pipeline is `personal-admin` or `literature`, load and execute that specific skill's instructions on the finalized `document.md` to produce the required summary/spreadsheet outputs.
+   - If the pipeline names a specialized skill, load and execute that skill's instructions on the finalized Markdown outputs.
 
-   **For `transcription,transcript-cleanup`**:
+   **For pipelines containing `transcription,transcript-cleanup`**:
    - Locate the extracted `derived/audio.mp3` in the file's output directory.
    - Load and execute the `transcription` skill instructions on the audio file to produce a transcript.
    - Load and execute the `transcript-cleanup` skill instructions to format the raw transcript into a clean, readable Markdown document.
    - Save the cleaned transcript with `record-transcript`, including a
      meaningful `--filename` when known. Do not manually copy transcript text
      into `working/` files.
+   - If the pipeline ends with `project-extraction`, include the cleaned
+     transcript in the finalized folder before starting project extraction.
 
 4. As you complete each file, update your internal task checklist or the `manifest.csv` to track progress. Ensure every successfully processed file is reviewed.
 
@@ -146,7 +160,15 @@ folder ingestion, review, finalization, and literature handoff.
    - Complete the literature extraction workflow through `build`, model-authored
      deliverables, and `validate --fix-hints --json`.
    - Report both ingestion outputs and generated literature deliverables in the
-     final response.
+   final response.
+
+8. **Automatic Project Handoff**:
+   - If any successful item has `suggested_pipeline` containing
+     `project-extraction`, initialize that workflow after finalization.
+   - Use the finalized source folder as input and
+     `<input-folder>/Generated/Project-Extraction` as output.
+   - Complete packet extraction, reconciliation, build, authored Markdown, and
+     validation. Preserve `project_status.csv` for later refreshes.
 
 ## Safety and Failure Handling
 
@@ -154,3 +176,5 @@ folder ingestion, review, finalization, and literature handoff.
 - Do not upload files to external internet APIs unless using a locally configured backend.
 - Keep automatically generated OCR PDFs under `derived/ocr.pdf` and media under `derived/audio.mp3`.
 - Do not install system packages. Report missing capabilities and the commands that require them.
+- Legacy `.ppt`, Keynote, and ODP are unsupported in v1. PPTX charts,
+  visual-only slides, and embedded objects require explicit review warnings.
