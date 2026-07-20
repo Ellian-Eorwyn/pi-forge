@@ -10,3 +10,5 @@
 - Added local-first deep web research scheduling with serialized model calls, cached SearXNG searches, embedding-ranked chunks, batched evidence extraction, and scheduler/ranking artifacts.
 - Added settings-backed SearXNG and Playwright connected service defaults plus quick web search/read tools.
 - Added the published `@ellian-eorwyn/pi-forge` package surface for no-clone installs and updates.
+- Added opt-in cache-aware local inference scheduling with isolated interactive and project-extraction slots, activity leases, worker preemption, adaptive larger batches, focused views, extraction metrics, and source-backed Gantt outputs.
+- Added hybrid search and resumable Inbox intake for live project-extraction repositories.

@@ -2278,13 +2278,19 @@ function requireNoDuplicateDestinations(operations) {
 function createFinalizePlan(options) {
 	if (!existsSync(options.runDirectory) || !lstatSync(options.runDirectory).isDirectory()) fail(`run directory does not exist: ${options.runDirectory}`);
 	if (!existsSync(options.destination) || !lstatSync(options.destination).isDirectory()) fail(`destination folder does not exist: ${options.destination}`);
-	const expectedRunDirectory = join(options.destination, "Ingest");
-	if (resolve(options.runDirectory) !== resolve(expectedRunDirectory)) {
-		fail(`finalize expects the run directory to be the destination Ingest folder: ${expectedRunDirectory}`);
+	const expectedRunDirectory = options.intakeRoot ? join(options.destination, "Ingest", "Inbox") : join(options.destination, "Ingest");
+	if (options.intakeRoot ? !pathInside(expectedRunDirectory, options.runDirectory) : resolve(options.runDirectory) !== resolve(expectedRunDirectory)) {
+		fail(`finalize expects the run directory ${options.intakeRoot ? "under" : "to be"} the destination Ingest folder: ${expectedRunDirectory}`);
+	}
+	if (options.intakeRoot) {
+		const inboxDirectory = join(options.destination, "Inbox");
+		if (!pathInside(inboxDirectory, options.intakeRoot)) fail(`intake source is outside the destination Inbox folder: ${options.intakeRoot}`);
+		const state = loadRunState(options.runDirectory, RUN_STATE_WORKFLOW);
+		if (resolve(state.input.path) !== resolve(options.intakeRoot)) fail("intake run input does not match the requested intake source");
 	}
 	const validation = validateRun(options.runDirectory, { emit: false, exitOnError: false });
 	if (!validation.valid) fail(`run must validate before finalize: ${validation.errors.join("; ")}`);
-	const layout = options.layout === "auto" ? detectWorkspaceLayout(options.destination) : options.layout;
+	const layout = options.intakeRoot ? "structured" : options.layout === "auto" ? detectWorkspaceLayout(options.destination) : options.layout;
 	const rows = readManifestRows(options.runDirectory);
 	const completedRows = rows.filter((row) => row.status === "success");
 	const operations = [];
@@ -2292,13 +2298,17 @@ function createFinalizePlan(options) {
 	for (const row of completedRows) {
 		const sourcePath = resolve(row.source_path);
 		if (!existsSync(sourcePath) || !lstatSync(sourcePath).isFile()) fail(`source file is missing before finalize: ${sourcePath}`);
-		const sourceRelative = relativeSourcePath(options.destination, sourcePath);
-		const originalDestination = join(options.destination, "Originals", sourceRelative);
+		const sourceRelative = relativeSourcePath(options.intakeRoot ?? options.destination, sourcePath);
+		const originalDestination = options.intakeRoot
+			? join(options.destination, "Originals", "Inbox", sourceRelative)
+			: join(options.destination, "Originals", sourceRelative);
 		const documentPath = join(options.runDirectory, row.output_directory, "document.md");
 		const metadataPath = join(options.runDirectory, row.output_directory, "metadata.json");
 		if (!existsSync(documentPath)) fail(`final document is missing: ${documentPath}`);
 		const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
-		const markdownDestination = join(options.destination, markdownOutputRelativePath(options.destination, sourcePath, layout, row, metadata));
+		const markdownDestination = options.intakeRoot
+			? join(options.destination, "Sources", "Inbox", dirname(sourceRelative), inferredMarkdownFilename(row, metadata, sourcePath))
+			: join(options.destination, markdownOutputRelativePath(options.destination, sourcePath, layout, row, metadata));
 		operations.push({ id: `original:${row.document_id}`, role: "original", documentId: row.document_id, from: sourcePath, to: originalDestination, sha256: row.source_sha256, status: "pending" });
 		operations.push({ id: `final_markdown:${row.document_id}`, role: "final_markdown", documentId: row.document_id, from: documentPath, to: markdownDestination, sha256: sha256(readFileSync(documentPath)), status: "pending" });
 		movableSourcePaths.add(sourcePath);
@@ -2323,6 +2333,7 @@ function createFinalizePlan(options) {
 		schemaVersion: 1,
 		createdAt: new Date().toISOString(),
 		destination: options.destination,
+		intakeRoot: options.intakeRoot ?? null,
 		layout,
 		operations: operations.sort((left, right) => (left.role === "original" ? -1 : right.role === "original" ? 1 : left.id.localeCompare(right.id))),
 	};
@@ -2334,6 +2345,7 @@ function executeFinalize(options) {
 	if (existsSync(planPath)) {
 		plan = JSON.parse(readFileSync(planPath, "utf8"));
 		if (resolve(plan.destination) !== resolve(options.destination)) fail("existing finalize plan uses a different destination");
+		if (resolve(plan.intakeRoot ?? "") !== resolve(options.intakeRoot ?? "")) fail("existing finalize plan uses a different intake source");
 		if (options.layout !== "auto" && plan.layout !== options.layout) fail("existing finalize plan uses a different layout");
 	} else {
 		plan = createFinalizePlan(options);
@@ -2395,7 +2407,58 @@ function executeFinalize(options) {
 }
 
 function commandFinalize(args) {
-	const result = executeFinalize(parseFinalizeArguments(args));
+	const result = executeFinalize({ ...parseFinalizeArguments(args), intakeRoot: null });
+	process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+}
+
+function parseIntakeArguments(args) {
+	if (args.length === 0) fail("intake requires an Inbox staging directory");
+	const prepareArgs = [args[0]];
+	let destination = null;
+	for (let index = 1; index < args.length; index += 1) {
+		const argument = args[index];
+		if (argument === "--destination") destination = resolve(args[++index] ?? fail("--destination requires a folder"));
+		else {
+			prepareArgs.push(argument);
+			if (["--output", "--ocr", "--ocr-backend", "--glmocr-url", "--glmocr-timeout-ms", "--chunk-chars"].includes(argument)) {
+				prepareArgs.push(args[++index] ?? fail(`${argument} requires a value`));
+			}
+		}
+	}
+	if (!destination) fail("intake requires --destination <project-folder>");
+	const prepareOptions = parsePrepareArguments(prepareArgs);
+	if (!pathInside(join(destination, "Inbox"), prepareOptions.input)) fail("intake input must be inside the destination Inbox folder");
+	if (!pathInside(join(destination, "Ingest", "Inbox"), prepareOptions.output)) fail("intake output must be inside <destination>/Ingest/Inbox");
+	return { prepareOptions, destination };
+}
+
+async function commandIntake(args) {
+	const options = parseIntakeArguments(args);
+	const prepared = await prepareRun(options.prepareOptions);
+	const status = conciseStatus(options.prepareOptions.output);
+	const result = {
+		intake: true,
+		projectRoot: options.destination,
+		runDirectory: options.prepareOptions.output,
+		prepared,
+		status,
+		nextAction: status.pendingReview.length > 0 ? "review" : status.valid ? "finalize" : "repair_validation_errors",
+	};
+	if (status.pendingReview.length === 0 && status.valid) {
+		result.finalized = executeFinalize({
+			runDirectory: options.prepareOptions.output,
+			destination: options.destination,
+			layout: "structured",
+			intakeRoot: options.prepareOptions.input,
+		});
+		result.nextAction = "project_refresh";
+		updateRunState(options.prepareOptions.output, (draft) => {
+			draft.status = "complete";
+			draft.phase = "complete";
+			draft.nextAction = null;
+			return draft;
+		}, { type: "intake_completed", destination: options.destination });
+	}
 	process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
@@ -2490,7 +2553,7 @@ async function commandRun(args) {
 }
 
 function commandFinalizeReturning(options) {
-	return executeFinalize(options);
+	return executeFinalize({ ...options, intakeRoot: null });
 }
 
 function usage() {
@@ -2506,6 +2569,7 @@ function usage() {
   document-ingest.mjs record-transcript <run-directory> --doc-id <document-id> --transcript <cleaned.md> [--title TEXT] [--author TEXT] [--filename NAME.md]
   document-ingest.mjs validate <run-directory> [--fix-hints] [--json]
   document-ingest.mjs finalize <run-directory> --destination <source-folder> [--layout auto|flat|structured]
+  document-ingest.mjs intake <inbox-staging-directory> --destination <project-folder> --output <project-folder>/Ingest/Inbox/<batch-id>
   document-ingest.mjs run <input> --output <new-directory> [--literature] [--project] [--destination <source-folder>]
 `);
 }
@@ -2539,5 +2603,6 @@ else if (command === "validate") {
 	if (!existsSync(runDirectory) || !lstatSync(runDirectory).isDirectory()) fail(`run directory does not exist: ${runDirectory}`);
 	validateRun(runDirectory, { fixHints });
 } else if (command === "finalize") commandFinalize(args);
+else if (command === "intake") await commandIntake(args);
 else if (command === "run") await commandRun(args);
 else fail(`unknown command: ${command}`, 2);

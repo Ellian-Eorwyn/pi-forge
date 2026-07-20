@@ -1,8 +1,8 @@
 {
 	"name": "project-extraction",
 	"type": "pi-forge-skill",
-	"version": "0.1.0",
-	"description": "Extract refreshable, source-backed project controls from complex project documents.",
+	"version": "0.3.0",
+	"description": "Search and continuously refresh source-backed project controls, focused views, Inbox updates, and Gantt outputs.",
 	"skill_file": "SKILL.md",
 	"scripts_dir": "scripts",
 	"references_dir": "references",
@@ -11,7 +11,7 @@
 	"tools": [
 		{
 			"name": "project_extraction",
-			"description": "Initialize, extract, reconcile, refresh, build, and validate project-control workspaces.",
+			"description": "Initialize, ingest, search, schedule, extract, reconcile, focus, refresh, build, and validate live project-control workspaces.",
 			"command": "python3 scripts/project-extraction.py",
 			"destructive": false
 		}

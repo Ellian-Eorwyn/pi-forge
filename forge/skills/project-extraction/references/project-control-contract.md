@@ -4,7 +4,7 @@ Load this reference before extracting evidence or reconciling canonical
 controls. It is the authoritative behavioral and data contract for the bundled
 `project-extraction` workflow.
 
-## Three Layers
+## Four Layers
 
 1. **Evidence items** are immutable facts from one source revision. Each item
    carries an evidence ID, source and revision IDs, packet ID, quote or source
@@ -12,9 +12,16 @@ controls. It is the authoritative behavioral and data contract for the bundled
 2. **Control records** reconcile evidence into canonical project records. Each
    control cites evidence IDs and may relate to other control IDs.
 3. **`project_status.csv`** is a human-maintained overlay for current owner,
-   working status, forecast date, last update, and notes. Extraction and refresh
-   may add rows or mark them for review, but must not infer or overwrite human
-   status fields.
+   working status, forecast date, forecast start/end dates, last update, and
+   notes. Extraction and refresh may add rows or mark them for review, but must
+	   not infer or overwrite human status fields.
+4. **The search index** is a disposable derivative of active controls,
+   evidence, status, and frozen source passages. Hash-keyed embeddings affect
+   retrieval order only; they never change source authority or reconciliation.
+
+All version-2 records may include `teams`, `workstreams`, and
+`scope_relation` (`direct`, `dependency`, `shared`, or `full`). These fields
+support focused views but do not weaken provenance requirements.
 
 ## Evidence Types
 
@@ -72,6 +79,13 @@ source supports them:
   "locator": {"type": "page", "value": 12},
   "interpretation": "explicit",
   "confidence": "high",
+  "teams": ["Delivery"],
+  "workstreams": ["Evaluation"],
+  "scope_relation": "full",
+  "start_date": "2026-07-01",
+  "end_date": "2026-08-01",
+  "duration_days": 32,
+  "schedule_basis": "Source states the performance period",
   "notes": null
 }
 ```
@@ -94,6 +108,11 @@ Set `date_kind` to one of:
 Never calculate a relative or conditional calendar date unless the trigger date
 is explicit and the user requests that derived calculation. A missing trigger
 date is an open question, not permission to invent a deadline.
+
+Gantt outputs may plot only source-backed exact start/end dates or
+human-maintained forecast start/end dates. Relative, recurring, conditional,
+and missing dates belong in the unscheduled section. Never model-estimate a
+date or duration.
 
 ## Reconciliation
 
@@ -139,11 +158,47 @@ record. Add new evidence or update fields when a changed source supports it.
 Create a new ID when it is genuinely a different record. Relationships must
 reference valid current control IDs.
 
+Exact source hashes can establish duplicate packets. Embedding similarity is
+advisory and requires model confirmation. Evidence with materially different
+owners, dates, acceptance criteria, or obligations must remain separate unless
+the reconciliation records an explicit merge justification.
+
+## Scope and Packet Dispositions
+
+Full-project extraction is the default. Focused extraction screens the complete
+frozen inventory, then extracts direct matches and relevant dependencies,
+shared milestones, decisions, risks, and reporting obligations. Every packet
+must end as `extracted`, `screened_no_controls`, `duplicate_source`,
+`excluded_by_scope`, `needs_review`, `preempted`, or `failed`.
+`excluded_by_scope` is invalid in a full-project run, and generic unprocessed
+skips are invalid in every run. Every direct quote must match frozen packet
+text exactly.
+
+## Live Inbox and Search
+
+A marked top-level `Inbox/` is a landing area, not project evidence. Intake must
+stage a hash-bound batch, finish document-ingest review, verify publication,
+archive originals under `Originals/Inbox/`, and publish cleaned Markdown under
+`Sources/Inbox/` before project `refresh` discovers it. Never overwrite a
+destination collision. Interrupted batches resume from their durable ingest
+and Inbox manifests; failed files remain reviewable.
+
+Search results must identify their hit kind, source paths and revisions,
+locators, packet IDs when applicable, and related evidence/control IDs. Use
+hybrid lexical and embedding ranking when embeddings are reachable and lexical
+ranking otherwise. Load a full source only after a ranked passage is
+insufficient or ambiguous. A stale index may answer against the last completed
+extraction only when the response explicitly reports pending intake or refresh.
+
 ## Outputs and Completion
 
 Machine-readable outputs are `evidence_items.csv`, `controls.jsonl`, the eight
 project registers, `conflicts_and_gaps.csv`, `source_changes.csv`, and
-`project_status.csv`. Human outputs are the six project briefs; add
+`project_status.csv`. Version-2 runs also produce `scope_manifest.csv`,
+`gantt.csv`, `inference_schedule.jsonl`, `run_metrics.json`,
+`search_index.jsonl`, and `search_index_meta.json`; live runs also maintain
+`inbox_manifest.json` and `inbox_events.jsonl`. Human outputs are the six
+project briefs, `gantt.md`, and `gantt.html`; add
 `proposal_checklist.md` only when a funding notice or proposal is present.
 
 A run is complete only when all extraction packets and review packets are

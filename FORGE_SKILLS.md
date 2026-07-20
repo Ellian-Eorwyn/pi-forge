@@ -6,10 +6,10 @@
 
 - Available skills: 17
 - Model-visible skills at launch: 17
-- Managed instructions (`AGENTS.md` with its `<project_context>` wrapper): 810 tokens
-- Skills menu (metadata for all skills): 2890 tokens
-- **Total forge launch context (always processed): 3700 tokens**
-- **Maximum if every `SKILL.md` body is also loaded at once: 29891 tokens**
+- Managed instructions (`AGENTS.md` with its `<project_context>` wrapper): 946 tokens
+- Skills menu (metadata for all skills): 2939 tokens
+- **Total forge launch context (always processed): 3885 tokens**
+- **Maximum if every `SKILL.md` body is also loaded at once: 31308 tokens**
 
 Of the skills menu above, the shared wrapper (instructions and XML envelope, independent of skill count) is ~92 tokens; the rest scales with the number of skills.
 
@@ -22,12 +22,12 @@ Still excluded, because they are owned by the Pi harness rather than this profil
 | Skill | Summary | Launch metadata tokens | On-demand body tokens | Complete file tokens | Launch visibility |
 |---|---|---:|---:|---:|---|
 | [`coding`](forge/skills/coding/SKILL.md) | Inspect repos and ship small reviewable changes | 160 | 750 | 886 | Model-visible |
-| [`document-ingest`](forge/skills/document-ingest/SKILL.md) | Normalize documents with provenance | 131 | 2722 | 2826 | Model-visible |
+| [`document-ingest`](forge/skills/document-ingest/SKILL.md) | Normalize documents with provenance | 131 | 2868 | 2972 | Model-visible |
 | [`file-conversion`](forge/skills/file-conversion/SKILL.md) | Convert files, including Markdown and EPUB | 213 | 1238 | 1425 | Model-visible |
 | [`literature-extraction`](forge/skills/literature-extraction/SKILL.md) | Extract structured evidence from research documents | 180 | 2743 | 2895 | Model-visible |
 | [`organize-folder`](forge/skills/organize-folder/SKILL.md) | Sort a messy folder via a reviewable manifest | 167 | 1743 | 1883 | Model-visible |
 | [`personal-admin`](forge/skills/personal-admin/SKILL.md) | Summarize personal documents into action plans | 206 | 838 | 1019 | Model-visible |
-| [`project-extraction`](forge/skills/project-extraction/SKILL.md) | Extract project controls from complex documents | 208 | 1008 | 1189 | Model-visible |
+| [`project-extraction`](forge/skills/project-extraction/SKILL.md) | Search and refresh live project controls | 257 | 2045 | 2275 | Model-visible |
 | [`report-output`](forge/skills/report-output/SKILL.md) | Assemble polished deliverables from processed outputs | 181 | 729 | 884 | Model-visible |
 | [`site-builder`](forge/skills/site-builder/SKILL.md) | Build a static website from a content folder | 190 | 1320 | 1484 | Model-visible |
 | [`skill-builder`](forge/skills/skill-builder/SKILL.md) | Create and validate portable Agent Skills | 192 | 742 | 908 | Model-visible |

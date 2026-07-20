@@ -15,6 +15,14 @@ export const DEFAULT_CONNECTED_SERVICES = Object.freeze({
 		enabled: true,
 		baseUrl: "http://llms:8008/v1/chat/completions",
 		model: "code",
+		scheduling: Object.freeze({
+			enabled: false,
+			interactiveSlot: 0,
+			backgroundSlot: 1,
+			idleGraceMs: 2000,
+			yieldMs: 1000,
+			backgroundOutputTokens: 4096,
+		}),
 	}),
 	embeddings: Object.freeze({
 		enabled: true,
@@ -47,6 +55,8 @@ export function seedConnectedServicesSettings(settings) {
 			? current.playwright
 			: {};
 	const chat = current.chat && typeof current.chat === "object" && !Array.isArray(current.chat) ? current.chat : {};
+	const scheduling =
+		chat.scheduling && typeof chat.scheduling === "object" && !Array.isArray(chat.scheduling) ? chat.scheduling : {};
 	const embeddings =
 		current.embeddings && typeof current.embeddings === "object" && !Array.isArray(current.embeddings)
 			? current.embeddings
@@ -65,6 +75,26 @@ export function seedConnectedServicesSettings(settings) {
 			enabled: chat.enabled ?? DEFAULT_CONNECTED_SERVICES.chat.enabled,
 			baseUrl: normalizeHttpBaseUrl(chat.baseUrl) ?? DEFAULT_CONNECTED_SERVICES.chat.baseUrl,
 			model: normalizeServiceName(chat.model) ?? DEFAULT_CONNECTED_SERVICES.chat.model,
+			scheduling: {
+				enabled: scheduling.enabled ?? DEFAULT_CONNECTED_SERVICES.chat.scheduling.enabled,
+				interactiveSlot: normalizeNonnegativeInteger(
+					scheduling.interactiveSlot,
+					DEFAULT_CONNECTED_SERVICES.chat.scheduling.interactiveSlot,
+				),
+				backgroundSlot: normalizeNonnegativeInteger(
+					scheduling.backgroundSlot,
+					DEFAULT_CONNECTED_SERVICES.chat.scheduling.backgroundSlot,
+				),
+				idleGraceMs: normalizeNonnegativeInteger(
+					scheduling.idleGraceMs,
+					DEFAULT_CONNECTED_SERVICES.chat.scheduling.idleGraceMs,
+				),
+				yieldMs: normalizeNonnegativeInteger(scheduling.yieldMs, DEFAULT_CONNECTED_SERVICES.chat.scheduling.yieldMs),
+				backgroundOutputTokens: normalizePositiveInteger(
+					scheduling.backgroundOutputTokens,
+					DEFAULT_CONNECTED_SERVICES.chat.scheduling.backgroundOutputTokens,
+				),
+			},
 		},
 		embeddings: {
 			enabled: embeddings.enabled ?? DEFAULT_CONNECTED_SERVICES.embeddings.enabled,
@@ -108,6 +138,7 @@ export function resolveConnectedServices(options = {}) {
 			enabled: explicitChat ? true : chatEnvPresent ? Boolean(envChat) : seeded.chat.enabled,
 			baseUrl: explicitChat ?? envChat ?? seeded.chat.baseUrl,
 			model: explicitChatModel ?? envChatModel ?? seeded.chat.model,
+			scheduling: seeded.chat.scheduling,
 		},
 		embeddings: {
 			enabled: explicitEmbeddings ? true : embeddingsEnvPresent ? Boolean(envEmbeddings) : seeded.embeddings.enabled,
@@ -135,4 +166,12 @@ function normalizeServiceName(value) {
 	if (typeof value !== "string") return undefined;
 	const trimmed = value.trim();
 	return trimmed || undefined;
+}
+
+function normalizeNonnegativeInteger(value, fallback) {
+	return Number.isInteger(value) && value >= 0 ? value : fallback;
+}
+
+function normalizePositiveInteger(value, fallback) {
+	return Number.isInteger(value) && value > 0 ? value : fallback;
 }

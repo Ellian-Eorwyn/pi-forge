@@ -1,4 +1,4 @@
 interface:
   display_name: "Project Extraction"
-  short_description: "Extract project controls from complex documents"
-  default_prompt: "Use $project-extraction to extract deliverables, requirements, dates, decisions, and risks into a refreshable project workspace."
+  short_description: "Search and refresh live project controls"
+  default_prompt: "Use $project-extraction to check the project Inbox, search existing source-backed controls and documents, and refresh deliverables, requirements, dates, decisions, risks, focused views, and Gantt outputs."

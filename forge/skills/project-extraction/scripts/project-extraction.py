@@ -3,22 +3,45 @@
 import argparse
 import csv
 import hashlib
+import html
+import http.client
 import io
 import json
+import math
+import os
 import re
+import subprocess
 import sys
+import threading
+import time
+import urllib.parse
+from collections import Counter
 from datetime import date, datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import run_state
+import forge_embeddings
 
 
-RUN_SCHEMA_VERSION = 1
-DEFAULT_PACKET_CHARACTERS = 60_000
+RUN_SCHEMA_VERSION = 2
+DEFAULT_PACKET_CHARACTERS = 112_000
+MIN_ADAPTIVE_PACKET_CHARACTERS = 96_000
+MAX_ADAPTIVE_PACKET_CHARACTERS = 140_000
+TARGET_SOURCE_TOKENS = 32_768
+DEFAULT_CHARS_PER_TOKEN = 3.42
+DEFAULT_PROMPT_TOKEN_CEILING = 36_864
+PROMPT_TOKEN_RESERVE = 3_500
+LEASE_STALE_MS = 15_000
 SOURCE_EXTENSIONS = {".md", ".markdown", ".txt", ".csv"}
-RESERVED_DIRECTORIES = {"Ingest", "Originals", "Generated"}
+RESERVED_DIRECTORIES = {"Inbox", "Ingest", "Originals", "Generated"}
 PLACEHOLDER = "<!-- TODO: author this section -->"
+SEARCH_CHUNK_CHARACTERS = 4_000
+SEARCH_CHUNK_OVERLAP = 400
+SEARCH_EMBED_CHARACTERS = 8_000
+SEARCH_RRF_K = 60
+INBOX_MARKER = ".project-extraction-inbox.json"
+INBOX_MANIFEST_SCHEMA_VERSION = 1
 
 ITEM_TYPES = (
     "objective",
@@ -64,7 +87,15 @@ COMMITMENT_LEVELS = {"required", "committed", "proposed", "discussed", "informat
 DATE_KINDS = {"exact", "relative", "recurring", "conditional", "none"}
 INTERPRETATIONS = {"explicit", "inferred", "unclear"}
 CONFIDENCES = {"high", "medium", "low"}
-PACKET_STATUSES = {"success", "needs_review", "skipped", "failed"}
+PACKET_STATUSES = {
+    "extracted",
+    "screened_no_controls",
+    "duplicate_source",
+    "excluded_by_scope",
+    "needs_review",
+    "preempted",
+    "failed",
+}
 REVIEW_DISPOSITIONS = {"contextual", "duplicate", "superseded", "conflicting"}
 WORKING_STATUSES = {"", "unknown", "not_started", "in_progress", "blocked", "submitted", "accepted", "completed", "cancelled"}
 
@@ -114,6 +145,13 @@ OPTIONAL_ITEM_FIELDS = (
     "interpretation",
     "confidence",
     "notes",
+	"teams",
+	"workstreams",
+	"scope_relation",
+	"start_date",
+	"end_date",
+	"duration_days",
+	"schedule_basis",
 )
 
 EVIDENCE_COLUMNS = (
@@ -153,9 +191,25 @@ CONTROL_COLUMNS = (
     "supersedes_control_ids",
     "conflicts_with_control_ids",
     "notes",
+	"teams",
+	"workstreams",
+	"scope_relation",
+	"start_date",
+	"end_date",
+	"duration_days",
+	"schedule_basis",
 )
 
-STATUS_COLUMNS = ("control_id", "current_owner", "working_status", "forecast_date", "last_updated", "notes")
+STATUS_COLUMNS = (
+    "control_id",
+    "current_owner",
+    "working_status",
+    "forecast_date",
+    "forecast_start_date",
+    "forecast_end_date",
+    "last_updated",
+    "notes",
+)
 SOURCE_CHANGE_COLUMNS = ("changed_at", "change_type", "source_id", "relative_path", "previous_revision", "current_revision")
 
 MARKDOWN_TEMPLATES = {
@@ -328,10 +382,195 @@ def read_csv(path):
         return list(csv.DictReader(handle))
 
 
+def forge_agent_directory():
+    root = os.environ.get("PI_FORGE_HOME")
+    if root:
+        return Path(root).expanduser() / "agent"
+    explicit = os.environ.get("PI_CODING_AGENT_DIR") or os.environ.get("PI_FORGE_AGENT_DIR")
+    return Path(explicit).expanduser() if explicit else Path.home() / ".pi-forge" / "agent"
+
+
+def chat_configuration():
+    settings_path = forge_agent_directory() / "settings.json"
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        settings = {}
+    chat = ((settings.get("connectedServices") or {}).get("chat") or {})
+    scheduling = chat.get("scheduling") or {}
+    return {
+        "enabled": bool(chat.get("enabled", True)),
+        "url": os.environ.get("FORGE_BASE_CHAT_URL") or os.environ.get("FORGE_CHAT_URL") or chat.get("baseUrl") or "http://llms:8008/v1/chat/completions",
+        "model": os.environ.get("FORGE_BASE_MODEL") or chat.get("model") or "code",
+        "scheduling": {
+            "enabled": bool(scheduling.get("enabled", False)),
+            "interactiveSlot": int(scheduling.get("interactiveSlot", 0)),
+            "backgroundSlot": int(scheduling.get("backgroundSlot", 1)),
+            "idleGraceMs": int(scheduling.get("idleGraceMs", 2000)),
+            "yieldMs": int(scheduling.get("yieldMs", 1000)),
+            "backgroundOutputTokens": int(scheduling.get("backgroundOutputTokens", 4096)),
+        },
+    }
+
+
+def active_interactive_leases():
+    directory = forge_agent_directory() / "inference-leases"
+    if not directory.is_dir():
+        return []
+    now_ms = time.time() * 1000
+    active = []
+    for path in directory.glob("*.json"):
+        try:
+            row = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if now_ms - float(row.get("updatedAtMs", 0)) <= LEASE_STALE_MS:
+            active.append(row)
+    return active
+
+
+def wait_for_interactive_idle(run_directory, scheduling):
+    started = time.monotonic()
+    grace = max(0, scheduling["idleGraceMs"]) / 1000
+    while True:
+        while active_interactive_leases():
+            time.sleep(0.2)
+        if not grace:
+            break
+        time.sleep(grace)
+        if not active_interactive_leases():
+            break
+    waited_ms = int((time.monotonic() - started) * 1000)
+    if waited_ms:
+        append_jsonl(run_directory / "inference_schedule.jsonl", {"at": utc_now(), "event": "idle_wait", "waitedMs": waited_ms})
+
+
+def extract_json_text(value):
+    text = str(value or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = min((position for position in (text.find("{"), text.find("[")) if position >= 0), default=-1)
+        end = max(text.rfind("}"), text.rfind("]"))
+        if start < 0 or end < start:
+            raise
+        return json.loads(text[start : end + 1])
+
+
+def post_chat_json(run_directory, task, system_prompt, user_prompt, chat, allow_preemption=True, parse_content=True):
+    parsed = urllib.parse.urlsplit(chat["url"])
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        fail(f"unsupported chat URL: {chat['url']}")
+    scheduling = chat["scheduling"]
+    wait_for_interactive_idle(run_directory, scheduling)
+    worker_session = "project-extraction-slot-probe"
+    config_path = run_directory / "run_config.json"
+    if config_path.is_file():
+        worker_session = json.loads(config_path.read_text(encoding="utf-8")).get("worker", {}).get("sessionId") or worker_session
+    body = json.dumps(
+        {
+            "model": chat["model"],
+            "user": worker_session,
+            "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+            "temperature": 0.1,
+            "max_tokens": scheduling["backgroundOutputTokens"],
+            "stream": False,
+            "cache_prompt": True,
+            "id_slot": scheduling["backgroundSlot"],
+        }
+    ).encode("utf-8")
+    connection_class = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+    connection = connection_class(parsed.hostname, parsed.port, timeout=600)
+    result = {}
+    failure = {}
+
+    def execute():
+        try:
+            request_path = parsed.path or "/"
+            if parsed.query:
+                request_path += f"?{parsed.query}"
+            connection.request("POST", request_path, body=body, headers={"Content-Type": "application/json", "Authorization": "Bearer local"})
+            response = connection.getresponse()
+            payload = response.read()
+            if response.status >= 400:
+                raise RuntimeError(f"chat endpoint returned HTTP {response.status}: {payload.decode('utf-8', errors='replace')[:500]}")
+            result["payload"] = json.loads(payload)
+        except BaseException as error:
+            failure["error"] = error
+
+    started = time.monotonic()
+    thread = threading.Thread(target=execute, daemon=True)
+    thread.start()
+    preempted = False
+    while thread.is_alive():
+        thread.join(0.1)
+        if allow_preemption and active_interactive_leases():
+            preempted = True
+            connection.close()
+            break
+    if preempted:
+        thread.join(2)
+        append_jsonl(run_directory / "inference_schedule.jsonl", {"at": utc_now(), "event": "preempted", "task": task, "slot": scheduling["backgroundSlot"]})
+        raise InterruptedError("background inference preempted by interactive activity")
+    thread.join()
+    connection.close()
+    if failure:
+        raise failure["error"]
+    payload = result["payload"]
+    usage = payload.get("usage") or {}
+    details = usage.get("prompt_tokens_details") or {}
+    timings = payload.get("timings") or {}
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    record = {
+        "at": utc_now(),
+        "event": "model_call",
+        "task": task,
+        "sessionId": worker_session,
+        "slot": scheduling["backgroundSlot"],
+        "promptCharacters": len(system_prompt) + len(user_prompt),
+        "promptTokens": usage.get("prompt_tokens"),
+        "cachedTokens": details.get("cached_tokens", timings.get("cache_n")),
+        "prefillMs": timings.get("prompt_ms"),
+        "generationMs": timings.get("predicted_ms"),
+        "elapsedMs": elapsed_ms,
+    }
+    append_jsonl(run_directory / "inference_schedule.jsonl", record)
+    choices = payload.get("choices") or []
+    content = ((choices[0].get("message") or {}).get("content") if choices else None)
+    return (extract_json_text(content) if parse_content else content), record
+
+
+def probe_background_slot(chat):
+    if not chat["scheduling"]["enabled"]:
+        return {"configured": False, "available": False, "detail": "cache-aware scheduling is disabled"}
+    temporary = Path(os.environ.get("TMPDIR") or "/tmp") / f"project-extraction-slot-probe-{os.getpid()}"
+    temporary.mkdir(parents=True, exist_ok=True)
+    probe_chat = json.loads(json.dumps(chat))
+    probe_chat["scheduling"]["backgroundOutputTokens"] = 16
+    try:
+        post_chat_json(temporary, "slot-probe", "Reply briefly.", "Reply ok.", probe_chat, allow_preemption=False, parse_content=False)
+        return {"configured": True, "available": True, "slot": chat["scheduling"]["backgroundSlot"]}
+    except BaseException as error:
+        return {"configured": True, "available": False, "slot": chat["scheduling"]["backgroundSlot"], "detail": str(error)}
+    finally:
+        for path in temporary.glob("*"):
+            path.unlink(missing_ok=True)
+        temporary.rmdir()
+
+
 def require_run_directory(raw_path):
     path = Path(raw_path).expanduser().resolve()
     if not path.is_dir() or not (path / "run_config.json").is_file():
         fail(f"not a project-extraction run: {path}")
+    try:
+        schema_version = json.loads((path / "run_config.json").read_text(encoding="utf-8")).get("schemaVersion")
+    except (OSError, json.JSONDecodeError):
+        fail(f"invalid project-extraction run configuration: {path}")
+    if schema_version != RUN_SCHEMA_VERSION:
+        fail(f"project-extraction run schema {schema_version} is unsupported; create a new version-{RUN_SCHEMA_VERSION} extraction")
     return path
 
 
@@ -339,6 +578,171 @@ def load_run(run_directory):
     config = json.loads((run_directory / "run_config.json").read_text(encoding="utf-8"))
     manifest = json.loads((run_directory / "source_manifest.json").read_text(encoding="utf-8"))
     return config, manifest
+
+
+def inferred_project_root(config):
+    roots = [Path(value).expanduser().resolve() for value in config.get("inputs", [])]
+    return roots[0] if len(roots) == 1 and roots[0].is_dir() else None
+
+
+def live_repository_config(config):
+    configured = config.get("liveRepository") or {}
+    project_root = Path(configured["projectRoot"]).expanduser().resolve() if configured.get("projectRoot") else inferred_project_root(config)
+    if project_root is None:
+        return None
+    inbox = Path(configured.get("inbox") or project_root / "Inbox").expanduser().resolve()
+    return {
+        "projectRoot": project_root,
+        "inbox": inbox,
+        "publishDirectory": Path(configured.get("publishDirectory") or project_root / "Sources" / "Inbox").expanduser().resolve(),
+        "originalsDirectory": Path(configured.get("originalsDirectory") or project_root / "Originals" / "Inbox").expanduser().resolve(),
+    }
+
+
+def initialize_live_repository(run_directory, config, persist=True):
+    live = live_repository_config(config)
+    if live is None:
+        return None
+    live["inbox"].mkdir(parents=True, exist_ok=True)
+    marker_path = live["inbox"] / INBOX_MARKER
+    marker = {
+        "schemaVersion": 1,
+        "workflow": "project-extraction",
+        "runDirectory": str(run_directory),
+        "projectRoot": str(live["projectRoot"]),
+    }
+    if marker_path.is_file():
+        existing = json.loads(marker_path.read_text(encoding="utf-8"))
+        if Path(existing.get("runDirectory", "")).expanduser().resolve() != run_directory:
+            fail(f"Inbox is already linked to another project-extraction run: {marker_path}")
+    else:
+        write_json(marker_path, marker)
+    if persist:
+        config["liveRepository"] = {key: str(value) for key, value in live.items()}
+        config["updatedAt"] = utc_now()
+        write_json(run_directory / "run_config.json", config)
+    return live
+
+
+def inbox_manifest(run_directory):
+    path = run_directory / "inbox_manifest.json"
+    if not path.is_file():
+        return {"schemaVersion": INBOX_MANIFEST_SCHEMA_VERSION, "updatedAt": None, "activeBatch": None, "items": []}
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if value.get("schemaVersion") != INBOX_MANIFEST_SCHEMA_VERSION:
+        fail(f"unsupported inbox manifest schema in {path}")
+    return value
+
+
+def write_inbox_manifest(run_directory, value):
+    value["updatedAt"] = utc_now()
+    write_json(run_directory / "inbox_manifest.json", value)
+
+
+def scan_inbox(live):
+    inbox = live["inbox"]
+    if not inbox.is_dir():
+        return []
+    rows = []
+    for path in sorted(inbox.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        relative = path.relative_to(inbox)
+        if any(part.startswith(".") for part in relative.parts) or path.name == INBOX_MARKER:
+            continue
+        digest = sha256_file(path)
+        rows.append(
+            {
+                "itemId": stable_id("inbox", f"{relative.as_posix()}|{digest}"),
+                "relativePath": relative.as_posix(),
+                "path": str(path),
+                "sha256": digest,
+                "sizeBytes": path.stat().st_size,
+            }
+        )
+    return rows
+
+
+def inbox_status_value(run_directory):
+    config, _ = load_run(run_directory)
+    live = live_repository_config(config)
+    if live is None:
+        return {
+            "configured": False,
+            "reason": "multiple or non-directory inputs require an explicit liveRepository configuration",
+            "pending": [],
+            "activeBatch": None,
+        }
+    manifest = inbox_manifest(run_directory)
+    current = scan_inbox(live)
+    completed_hashes = {row.get("sha256") for row in manifest["items"] if row.get("status") == "ingested"}
+    pending = [{**row, "duplicate": row["sha256"] in completed_hashes} for row in current]
+    return {
+        "configured": True,
+        "projectRoot": str(live["projectRoot"]),
+        "inbox": str(live["inbox"]),
+        "pending": pending,
+        "pendingCount": len(pending),
+        "activeBatch": manifest.get("activeBatch"),
+        "failed": [row for row in manifest["items"] if row.get("status") == "failed"],
+    }
+
+
+def remove_empty_directories(root):
+    if not root.is_dir():
+        return
+    for path in sorted((value for value in root.rglob("*") if value.is_dir()), reverse=True):
+        try:
+            path.rmdir()
+        except OSError:
+            pass
+
+
+def archive_duplicate_inbox_item(live, row):
+    source = Path(row["path"])
+    destination = live["originalsDirectory"] / "Duplicates" / row["relativePath"]
+    if destination.exists():
+        if not destination.is_file() or sha256_file(destination) != row["sha256"]:
+            destination = destination.with_name(f"{destination.stem}.duplicate-{row['sha256'][:8]}{destination.suffix}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        if sha256_file(destination) != row["sha256"]:
+            fail(f"duplicate archive destination hash mismatch: {destination}")
+        source.unlink()
+    else:
+        source.rename(destination)
+    return str(destination)
+
+
+def stage_inbox_batch(run_directory, live, manifest, pending):
+    batch_key = "|".join(f"{row['relativePath']}:{row['sha256']}" for row in pending)
+    batch_id = stable_id("batch", batch_key)
+    staging = live["inbox"] / ".processing" / batch_id
+    items = []
+    for row in pending:
+        source = Path(row["path"])
+        destination = staging / row["relativePath"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            if sha256_file(destination) != row["sha256"]:
+                fail(f"Inbox staging destination hash mismatch: {destination}")
+        else:
+            source.rename(destination)
+        item = {**row, "path": str(destination), "stagedAt": utc_now(), "status": "processing", "batchId": batch_id}
+        items.append(item)
+        append_jsonl(run_directory / "inbox_events.jsonl", {"at": utc_now(), "type": "inbox_item_staged", "itemId": row["itemId"], "batchId": batch_id, "sha256": row["sha256"]})
+    batch = {
+        "batchId": batch_id,
+        "stagingDirectory": str(staging),
+        "ingestRun": str(live["projectRoot"] / "Ingest" / "Inbox" / batch_id),
+        "itemIds": [row["itemId"] for row in items],
+        "status": "processing",
+        "createdAt": utc_now(),
+    }
+    manifest["items"].extend(items)
+    manifest["activeBatch"] = batch
+    write_inbox_manifest(run_directory, manifest)
+    return batch
 
 
 def normalized_relative(path):
@@ -379,7 +783,7 @@ def discover_sources(raw_inputs):
                 if not path.is_file() or path.is_symlink():
                     continue
                 relative = path.relative_to(root)
-                if any(part.startswith(".") or part in RESERVED_DIRECTORIES for part in relative.parts[:-1]):
+                if any(part.startswith(".") for part in relative.parts[:-1]) or (relative.parts and relative.parts[0] in RESERVED_DIRECTORIES):
                     continue
                 if path.suffix.lower() in SOURCE_EXTENSIONS:
                     candidates.append((path, normalized_relative(relative)))
@@ -679,16 +1083,45 @@ def normalize_item(raw, index):
     if not isinstance(quotes, list) or not quotes or any(not isinstance(quote, str) or not quote.strip() for quote in quotes):
         fail(f"item {index} direct_quotes must be a nonempty array of source excerpts")
     item["direct_quotes"] = [quote.strip() for quote in quotes]
+    for field in ("teams", "workstreams"):
+        value = item.get(field)
+        if value is None:
+            item[field] = []
+        elif isinstance(value, str):
+            item[field] = [value.strip()] if value.strip() else []
+        elif isinstance(value, list) and all(isinstance(entry, str) and entry.strip() for entry in value):
+            item[field] = [entry.strip() for entry in value]
+        else:
+            fail(f"item {index} {field} must be an array of nonblank strings")
+    item["scope_relation"] = item.get("scope_relation") or "direct"
+    if item["scope_relation"] not in {"direct", "dependency", "shared", "full"}:
+        fail(f"item {index} scope_relation is invalid")
+    for field in ("start_date", "end_date"):
+        item[field] = validate_iso_date(item.get(field), f"item {index} {field}")
+    duration = item.get("duration_days")
+    if duration not in (None, "") and (not isinstance(duration, int) or duration < 0):
+        fail(f"item {index} duration_days must be a nonnegative integer or null")
+    item["duration_days"] = None if duration in (None, "") else duration
+    item["schedule_basis"] = item.get("schedule_basis") or ("source" if item.get("start_date") or item.get("end_date") or item.get("date") else None)
     return item
 
 
 def command_doctor(args):
+    chat = chat_configuration()
+    slot_probe = probe_background_slot(chat) if args.probe_slot else {
+        "configured": chat["scheduling"]["enabled"],
+        "available": None,
+        "slot": chat["scheduling"]["backgroundSlot"],
+        "detail": "pass --probe-slot to verify the configured background slot",
+    }
     result = {
         "status": "ok",
         "python": sys.version.split()[0],
         "schemaVersion": RUN_SCHEMA_VERSION,
         "sourceExtensions": sorted(SOURCE_EXTENSIONS),
         "defaultPacketCharacters": DEFAULT_PACKET_CHARACTERS,
+        "targetSourceTokens": TARGET_SOURCE_TOKENS,
+        "chat": {"url": chat["url"], "model": chat["model"], "scheduling": chat["scheduling"], "backgroundSlotProbe": slot_probe},
     }
     if args.json:
         print(json.dumps(result, indent=2))
@@ -697,12 +1130,29 @@ def command_doctor(args):
         print(f"Source formats: {', '.join(result['sourceExtensions'])}")
 
 
-def project_configuration(inputs, title, packet_characters):
+def scope_options(args):
+    return {
+        "focus": args.focus,
+        "teams": args.team or [],
+        "people": args.person or [],
+        "workstreams": args.workstream or [],
+        "includeSources": args.include_source or [],
+        "excludeSources": args.exclude_source or [],
+        "controlTypes": args.control_type or [],
+        "dateFrom": args.date_from,
+        "dateTo": args.date_to,
+    }
+
+
+def project_configuration(inputs, title, packet_characters, scope, inbox=None):
+    options = {"title": title, "packetCharacters": packet_characters, "scope": scope}
+    if inbox:
+        options["inbox"] = str(Path(inbox).expanduser().resolve())
     return {
         "workflow": "project-extraction",
         "command": "init",
         "input": {"roots": [str(Path(value).expanduser().resolve()) for value in inputs]},
-        "options": {"title": title, "packetCharacters": packet_characters},
+        "options": options,
     }
 
 
@@ -732,10 +1182,14 @@ def command_init(args):
     if args.packet_chars < 1_000:
         fail("--packet-chars must be at least 1000")
     title = args.title or Path(args.inputs[0]).expanduser().stem or "Project"
-    configuration = project_configuration(args.inputs, title, args.packet_chars)
+    scope = scope_options(args)
+    configuration = project_configuration(args.inputs, title, args.packet_chars, scope, args.inbox)
     run_directory = Path(args.output).expanduser().resolve()
     if run_directory.exists():
         try:
+            existing_config = json.loads((run_directory / "run_config.json").read_text(encoding="utf-8"))
+            if existing_config.get("schemaVersion") != RUN_SCHEMA_VERSION:
+                raise ValueError(f"existing project-extraction run uses schema {existing_config.get('schemaVersion')}; create a new version-{RUN_SCHEMA_VERSION} extraction")
             state = run_state.load_run_state(run_directory, "project-extraction")
             run_state.assert_compatible_run(state, configuration)
         except (OSError, ValueError) as error:
@@ -754,7 +1208,25 @@ def command_init(args):
         "createdAt": utc_now(),
         "updatedAt": utc_now(),
         "asOfDate": None,
+        "scope": scope,
+        "scopeMode": "focused" if any(value for value in scope.values()) else "full",
+        "worker": {
+            "targetSourceTokens": TARGET_SOURCE_TOKENS,
+            "charactersPerToken": DEFAULT_CHARS_PER_TOKEN,
+            "promptTokenCeiling": DEFAULT_PROMPT_TOKEN_CEILING,
+            "packetCharacters": args.packet_chars,
+            "consecutiveNoCacheReuse": 0,
+            "sessionId": stable_id("worker", str(run_directory)),
+        },
     }
+    if args.inbox:
+        inbox = Path(args.inbox).expanduser().resolve()
+        config["liveRepository"] = {
+            "projectRoot": str(inbox.parent),
+            "inbox": str(inbox),
+            "publishDirectory": str(inbox.parent / "Sources" / "Inbox"),
+            "originalsDirectory": str(inbox.parent / "Originals" / "Inbox"),
+        }
     write_json(run_directory / "run_config.json", config)
     write_json(run_directory / "source_manifest.json", manifest)
     state = run_state.create_run_state(
@@ -768,6 +1240,7 @@ def command_init(args):
     )
     run_state.initialize_run_state(run_directory, state)
     append_source_changes(run_directory, None, manifest)
+    initialize_live_repository(run_directory, config)
     print(json.dumps({"runDirectory": str(run_directory), "sources": len(sources), "packets": len(active_packets(manifest))}, indent=2))
 
 
@@ -812,9 +1285,14 @@ def command_record(args):
     results = current_results(run_directory, manifest)
     if args.packet_id in results:
         fail(f"packet already has a disposition: {args.packet_id}")
-    if args.status != "success":
+    if args.status != "extracted":
         if not args.note:
             fail("non-success dispositions require --note")
+        if re.search(r"\bunprocessed\b", args.note, flags=re.IGNORECASE):
+            fail("generic unprocessed dispositions are not allowed; screen the packet or mark it needs_review")
+        config, _ = load_run(run_directory)
+        if args.status == "excluded_by_scope" and config.get("scopeMode") != "focused":
+            fail("full-project runs cannot exclude packets by scope")
         result = {
             "recordedAt": utc_now(),
             "packetId": args.packet_id,
@@ -855,11 +1333,16 @@ def command_record(args):
             "packetSha256": packet["sha256"],
             "sourceId": source["sourceId"],
             "sourceRevision": source["revisionId"],
-            "status": "success",
+            "status": "extracted",
             "documentRole": document_role,
             "items": normalized,
             "note": args.note,
         }
+        packet_text = Path(packet["path"]).read_text(encoding="utf-8")
+        for item in normalized:
+            for quote in item["direct_quotes"]:
+                if quote not in packet_text:
+                    fail(f"direct quote is not present in frozen packet {args.packet_id}: {quote[:120]}")
     append_jsonl(run_directory / "extraction_results.jsonl", result)
     def recorded(state):
         for item in state["items"]:
@@ -879,7 +1362,7 @@ def evidence_rows(run_directory, manifest):
     rows = []
     for packet in active_packets(manifest):
         result = results.get(packet["packetId"])
-        if not result or result["status"] != "success":
+        if not result or result["status"] != "extracted":
             continue
         source = source_by_id[result["sourceId"]]
         for item in result["items"]:
@@ -1037,6 +1520,12 @@ def normalize_control(raw, expected_type, evidence_ids, index):
     relationships = raw.get("relationships") or {}
     if not isinstance(relationships, dict):
         fail(f"control {index} relationships must be an object")
+    duration_days = raw.get("duration_days")
+    if duration_days not in (None, "") and (not isinstance(duration_days, int) or duration_days < 0):
+        fail(f"control {index} duration_days must be a nonnegative integer or null")
+    scope_relation = string_or_none(raw.get("scope_relation")) or "full"
+    if scope_relation not in {"direct", "dependency", "shared", "full"}:
+        fail(f"control {index} scope_relation is invalid")
     return {
         "control_id": control_id,
         "control_type": control_type,
@@ -1061,6 +1550,13 @@ def normalize_control(raw, expected_type, evidence_ids, index):
         "supersedes_control_ids": string_list(relationships.get("supersedes"), f"control {index} relationships.supersedes"),
         "conflicts_with_control_ids": string_list(relationships.get("conflicts_with"), f"control {index} relationships.conflicts_with"),
         "notes": string_or_none(raw.get("notes")),
+        "teams": string_list(raw.get("teams"), f"control {index} teams"),
+        "workstreams": string_list(raw.get("workstreams"), f"control {index} workstreams"),
+        "scope_relation": scope_relation,
+        "start_date": validate_iso_date(raw.get("start_date"), f"control {index} start_date"),
+        "end_date": validate_iso_date(raw.get("end_date"), f"control {index} end_date"),
+        "duration_days": None if duration_days in (None, "") else duration_days,
+        "schedule_basis": string_or_none(raw.get("schedule_basis")),
     }
 
 
@@ -1198,6 +1694,8 @@ def write_status_overlay(run_directory, controls, previous_controls):
                     "current_owner": "",
                     "working_status": "unknown",
                     "forecast_date": "",
+                    "forecast_start_date": "",
+                    "forecast_end_date": "",
                     "last_updated": "",
                     "notes": "",
                 }
@@ -1235,6 +1733,118 @@ def scaffold_markdown(run_directory, proposal_present):
         proposal_path.write_text(PROPOSAL_TEMPLATE, encoding="utf-8")
 
 
+def markdown_control_list(controls):
+    if not controls:
+        return "No source-backed controls were identified."
+    lines = []
+    for control in controls:
+        timing = control.get("date") or control.get("date_text") or control.get("end_date") or "unscheduled"
+        lines.append(f"- **{control['control_id']} — {control['title']}** ({timing}; {control.get('commitment_level') or 'unclear'})")
+    return "\n".join(lines)
+
+
+def author_markdown_briefs(run_directory, config, controls, proposal_present):
+    by_type = {item_type: [row for row in controls if row["control_type"] == item_type] for item_type in ITEM_TYPES}
+    source_note = "Document roles do not establish legal precedence. Review conflicts and source evidence before relying on these controls."
+    files = {
+        "project_brief.md": f"# Project Brief\n\n## Purpose and Scope\n\n{config['title']} project-control extraction as of {config.get('asOfDate') or 'unspecified'}.\n\n## Objectives and Outcomes\n\n{markdown_control_list(by_type['objective'] + by_type['outcome'])}\n\n## Source Authority and Limits\n\n{source_note}\n",
+        "deliverables_and_dates.md": f"# Deliverables and Dates\n\n## Deliverables\n\n{markdown_control_list(by_type['deliverable'])}\n\n## Milestones and Deadlines\n\n{markdown_control_list(by_type['milestone'] + by_type['deadline'])}\n\n## Conditional and Recurring Dates\n\n{markdown_control_list([row for row in controls if row.get('date_kind') in {'relative', 'conditional', 'recurring'}])}\n",
+        "compliance_and_reporting.md": f"# Compliance and Reporting\n\n## Requirements\n\n{markdown_control_list(by_type['requirement'])}\n\n## Reporting Calendar\n\n{markdown_control_list(by_type['reporting_requirement'])}\n\n## Acceptance and Evidence\n\n{markdown_control_list(by_type['acceptance_criterion'])}\n",
+        "status_brief.md": f"# Status Brief\n\n## Current Position\n\nStatus is maintained in `project_status.csv`; extraction does not infer completion.\n\n## Upcoming and Overdue\n\n{markdown_control_list([row for row in controls if row.get('date') or row.get('end_date')])}\n\n## Decisions or Support Needed\n\n{markdown_control_list(by_type['decision'] + by_type['open_question'])}\n",
+        "decisions_and_open_questions.md": f"# Decisions and Open Questions\n\n## Decisions\n\n{markdown_control_list(by_type['decision'])}\n\n## Open Questions\n\n{markdown_control_list(by_type['open_question'])}\n\n## Source Conflicts\n\n{markdown_control_list([row for row in controls if row.get('conflicts_with_control_ids')])}\n",
+        "risks_issues_dependencies.md": f"# Risks, Issues, and Dependencies\n\n## Risks\n\n{markdown_control_list(by_type['risk'])}\n\n## Issues\n\n{markdown_control_list(by_type['issue'])}\n\n## Assumptions and Dependencies\n\n{markdown_control_list(by_type['assumption'] + by_type['dependency'])}\n",
+    }
+    if proposal_present:
+        files["proposal_checklist.md"] = f"# Proposal Checklist\n\n## Eligibility and Submission Requirements\n\n{markdown_control_list(by_type['proposal_requirement'])}\n\n## Required Components\n\n{markdown_control_list(by_type['deliverable'] + by_type['requirement'])}\n\n## Review Criteria and Open Questions\n\n{markdown_control_list(by_type['acceptance_criterion'] + by_type['open_question'])}\n"
+    for filename, body in files.items():
+        run_state.atomic_write_text(run_directory / filename, body)
+
+
+GANTT_COLUMNS = (
+    "control_id", "title", "section", "start_date", "end_date", "duration_days", "date_basis", "scheduled",
+    "working_status", "owner", "teams", "workstreams", "depends_on", "source_evidence_ids",
+)
+
+
+def gantt_rows(run_directory, controls):
+    status = {row.get("control_id"): row for row in read_csv(run_directory / "project_status.csv")}
+    rows = []
+    for control in controls:
+        overlay = status.get(control["control_id"], {})
+        source_start = control.get("start_date")
+        source_end = control.get("end_date") or control.get("date")
+        forecast_start = overlay.get("forecast_start_date") or None
+        forecast_end = overlay.get("forecast_end_date") or overlay.get("forecast_date") or None
+        start = source_start or forecast_start
+        end = source_end or forecast_end
+        basis = "source" if source_start or source_end else "human_forecast" if forecast_start or forecast_end else "unscheduled"
+        if start is None and end is not None:
+            start = end
+        section_values = control.get("workstreams") or control.get("teams") or ["Unassigned"]
+        rows.append(
+            {
+                "control_id": control["control_id"],
+                "title": control["title"],
+                "section": section_values[0],
+                "start_date": start,
+                "end_date": end,
+                "duration_days": control.get("duration_days"),
+                "date_basis": basis,
+                "scheduled": "yes" if start or end else "no",
+                "working_status": overlay.get("working_status") or "unknown",
+                "owner": overlay.get("current_owner") or control.get("owner"),
+                "teams": control.get("teams", []),
+                "workstreams": control.get("workstreams", []),
+                "depends_on": control.get("depends_on_control_ids", []),
+                "source_evidence_ids": control.get("source_evidence_ids", []),
+            }
+        )
+    return rows
+
+
+def mermaid_text(rows):
+    lines = ["# Project Gantt", "", "```mermaid", "gantt", "    title Source-backed project schedule", "    dateFormat YYYY-MM-DD"]
+    scheduled = [row for row in rows if row["scheduled"] == "yes"]
+    for section in sorted({row["section"] for row in scheduled}):
+        lines.append(f"    section {section.replace(':', ' - ')}")
+        for row in [value for value in scheduled if value["section"] == section]:
+            title = row["title"].replace(":", " - ").replace("\n", " ")
+            gantt_id = re.sub(r"[^A-Za-z0-9_]", "_", row["control_id"])
+            if row["start_date"] == row["end_date"] or not row["end_date"]:
+                lines.append(f"    {title} :milestone, {gantt_id}, {row['start_date']}, 0d")
+            else:
+                lines.append(f"    {title} :{gantt_id}, {row['start_date']}, {row['end_date']}")
+    lines.extend(["```", "", "## Unscheduled", "", markdown_control_list([{"control_id": row["control_id"], "title": row["title"], "commitment_level": "", "date_text": None} for row in rows if row["scheduled"] == "no"]), ""])
+    return "\n".join(lines)
+
+
+def gantt_html(rows):
+    safe_rows = []
+    for row in rows:
+        safe_rows.append({key: [html.escape(str(item), quote=True) for item in value] if isinstance(value, list) else html.escape(str(value), quote=True) if value is not None else None for key, value in row.items()})
+    payload = json.dumps(safe_rows, ensure_ascii=False).replace("</", "<\\/")
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Project Gantt</title><style>
+body{{font:14px system-ui;margin:2rem;color:#17202a}} .controls{{display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:1rem}}
+table{{border-collapse:collapse;width:100%}} th,td{{border:1px solid #ccd1d1;padding:.45rem;text-align:left}} th{{background:#eef2f3}}
+.timeline{{min-width:24rem}} .bar{{height:1rem;background:#315b7d;border-radius:3px;transform-origin:left}} .forecast{{background:#b36b00}} .unscheduled{{color:#666}}
+</style></head><body><h1>Project Gantt</h1>
+<div class="controls"><label>Search <input id="search"></label><label>Section <select id="section"><option value="">All</option></select></label><label>Status <select id="status"><option value="">All</option></select></label><label>Zoom <input id="zoom" type="range" min="50" max="200" value="100"></label></div>
+<table><thead><tr><th>ID</th><th>Task</th><th>Section</th><th>Dates</th><th class="timeline">Timeline</th><th>Status</th><th>Dependencies</th><th>Evidence</th></tr></thead><tbody id="rows"></tbody></table>
+<script>const data={payload};const q=id=>document.getElementById(id);const unique=k=>[...new Set(data.map(x=>x[k]).filter(Boolean))].sort();
+for(const k of ['section','status']){{for(const v of unique(k==='status'?'working_status':k)){{const o=document.createElement('option');o.value=o.textContent=v;q(k).append(o)}}}}
+function render(){{const text=q('search').value.toLowerCase(),section=q('section').value,status=q('status').value,zoom=+q('zoom').value;q('rows').replaceChildren();for(const x of data){{if(text&&!JSON.stringify(x).toLowerCase().includes(text)||section&&x.section!==section||status&&x.working_status!==status)continue;const tr=document.createElement('tr');const dates=x.scheduled==='yes'?`${{x.start_date||''}} – ${{x.end_date||x.start_date||''}}`:'Unscheduled';const width=x.scheduled==='yes'?Math.max(8,Math.min(100,(x.duration_days||1)*3))*zoom/100:0;tr.innerHTML=`<td>${{x.control_id}}</td><td>${{x.title}}</td><td>${{x.section}}</td><td>${{dates}} (${{x.date_basis}})</td><td>${{width?`<div class="bar ${{x.date_basis==='human_forecast'?'forecast':''}}" style="width:${{width}}%" title="${{dates}}"></div>`:'<span class="unscheduled">Not plotted</span>'}}</td><td>${{x.working_status}}</td><td>${{(x.depends_on||[]).join(', ')}}</td><td>${{(x.source_evidence_ids||[]).join(', ')}}</td>`;q('rows').append(tr)}}}}
+for(const id of ['search','section','status','zoom'])q(id).addEventListener('input',render);render();</script></body></html>"""
+
+
+def write_gantt_outputs(run_directory, controls):
+    rows = gantt_rows(run_directory, controls)
+    write_csv(run_directory / "gantt.csv", GANTT_COLUMNS, rows)
+    run_state.atomic_write_text(run_directory / "gantt.md", mermaid_text(rows))
+    run_state.atomic_write_text(run_directory / "gantt.html", gantt_html(rows))
+
+
 def write_source_changes(run_directory):
     rows = []
     for row in read_jsonl(run_directory / "source_history.jsonl"):
@@ -1249,6 +1859,330 @@ def write_source_changes(run_directory):
             }
         )
     write_csv(run_directory / "source_changes.csv", SOURCE_CHANGE_COLUMNS, rows)
+
+
+def search_tokens(value):
+    return re.findall(r"[\w-]+", str(value or "").lower(), flags=re.UNICODE)
+
+
+def search_source_chunks(source, packet):
+    text = Path(packet["path"]).read_text(encoding="utf-8")
+    if not text:
+        return [(0, 0, "")]
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = min(len(text), start + SEARCH_CHUNK_CHARACTERS)
+        if end < len(text):
+            boundary = text.rfind("\n\n", start, end)
+            if boundary > start + SEARCH_CHUNK_CHARACTERS // 2:
+                end = boundary + 2
+        chunks.append((start, end, text[start:end]))
+        if end >= len(text):
+            break
+        start = max(start + 1, end - SEARCH_CHUNK_OVERLAP)
+    return chunks
+
+
+def search_index_documents(run_directory, manifest):
+    evidence = read_csv(run_directory / "evidence_items.csv")
+    evidence_by_id = {row.get("evidence_id"): row for row in evidence}
+    status = {row.get("control_id"): row for row in read_csv(run_directory / "project_status.csv")}
+    documents = []
+    for row in read_jsonl(run_directory / "controls.jsonl"):
+        evidence_rows_for_control = [evidence_by_id[value] for value in row.get("source_evidence_ids", []) if value in evidence_by_id]
+        source_paths = sorted({value.get("source_path") for value in evidence_rows_for_control if value.get("source_path")})
+        locators = [value.get("locator") for value in evidence_rows_for_control if value.get("locator")]
+        overlay = status.get(row["control_id"], {})
+        text = "\n".join(
+            value
+            for value in (
+                row.get("control_id"),
+                row.get("control_type"),
+                row.get("title"),
+                row.get("description"),
+                row.get("date_text"),
+                row.get("acceptance_criteria"),
+                row.get("evidence_required"),
+                row.get("notes"),
+                " ".join(row.get("teams") or []),
+                " ".join(row.get("workstreams") or []),
+                overlay.get("current_owner"),
+                overlay.get("working_status"),
+                overlay.get("notes"),
+            )
+            if value
+        )
+        documents.append(
+            {
+                "hitId": f"control:{row['control_id']}",
+                "kind": "control",
+                "title": f"{row['control_id']} — {row['title']}",
+                "text": text,
+                "sourcePaths": source_paths,
+                "locators": locators,
+                "controlIds": [row["control_id"]],
+                "evidenceIds": row.get("source_evidence_ids", []),
+                "packetId": None,
+                "sourceRevision": None,
+            }
+        )
+    for row in evidence:
+        quotes = row.get("direct_quotes") or ""
+        text = "\n".join(value for value in (row.get("title"), row.get("description"), quotes, row.get("date_text"), row.get("notes")) if value)
+        documents.append(
+            {
+                "hitId": f"evidence:{row['evidence_id']}",
+                "kind": "evidence",
+                "title": row.get("title") or row["evidence_id"],
+                "text": text,
+                "sourcePaths": [row["source_path"]] if row.get("source_path") else [],
+                "locators": [row.get("locator")] if row.get("locator") else [],
+                "controlIds": [],
+                "evidenceIds": [row["evidence_id"]],
+                "packetId": row.get("packet_id"),
+                "sourceRevision": row.get("source_revision"),
+                "directQuotes": quotes.split(";") if quotes else [],
+            }
+        )
+    for source in active_sources(manifest):
+        for packet in source.get("packets", []):
+            for index, (start, end, text) in enumerate(search_source_chunks(source, packet), 1):
+                documents.append(
+                    {
+                        "hitId": f"source:{packet['packetId']}:{index}",
+                        "kind": "source",
+                        "title": f"{Path(source['path']).stem} — excerpt {index}",
+                        "text": text,
+                        "sourcePaths": [source["path"]],
+                        "locators": [{"packet": packet["locator"], "characterStart": start, "characterEnd": end}],
+                        "controlIds": [],
+                        "evidenceIds": [],
+                        "packetId": packet["packetId"],
+                        "sourceRevision": source["revisionId"],
+                    }
+                )
+    for document in documents:
+        document["contentSha256"] = sha256_bytes(f"{document['title']}\n{document['text']}".encode("utf-8"))
+    return sorted(documents, key=lambda row: row["hitId"])
+
+
+def search_index_fingerprint(run_directory, manifest):
+    values = {
+        "sources": [
+            {
+                "sourceId": source["sourceId"],
+                "revisionId": source["revisionId"],
+                "packets": [(packet["packetId"], packet["sha256"]) for packet in source.get("packets", [])],
+            }
+            for source in active_sources(manifest)
+        ],
+        "controls": sha256_file(run_directory / "controls.jsonl") if (run_directory / "controls.jsonl").is_file() else None,
+        "evidence": sha256_file(run_directory / "evidence_items.csv") if (run_directory / "evidence_items.csv").is_file() else None,
+        "status": sha256_file(run_directory / "project_status.csv") if (run_directory / "project_status.csv").is_file() else None,
+    }
+    return sha256_bytes(json.dumps(values, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+
+
+def search_index_ready(run_directory, manifest):
+    results = current_results(run_directory, manifest)
+    return all(packet["packetId"] in results for packet in active_packets(manifest)) and all(
+        (run_directory / filename).is_file() for filename in ("controls.jsonl", "evidence_items.csv", "project_status.csv")
+    )
+
+
+def build_search_index(run_directory, force=False):
+    _, manifest = load_run(run_directory)
+    if not search_index_ready(run_directory, manifest):
+        fail("search indexing requires all active packets and built control artifacts")
+    documents = search_index_documents(run_directory, manifest)
+    model = forge_embeddings.model_name()
+    cache_path = run_directory / "working" / "search_embeddings.json"
+    existing = {}
+    if cache_path.is_file() and not force:
+        raw_cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        if raw_cache.get("model") == model:
+            existing = raw_cache.get("entries") or {}
+    entries = {}
+    missing = []
+    reused = 0
+    for document in documents:
+        cached = existing.get(document["hitId"])
+        if cached and cached.get("contentSha256") == document["contentSha256"] and isinstance(cached.get("vector"), list):
+            entries[document["hitId"]] = cached
+            reused += 1
+        else:
+            missing.append(document)
+    embedding_info = {"enabled": bool(entries), "model": model, "embedded": 0, "reused": reused, "reason": None}
+    if missing:
+        embedded = forge_embeddings.embed_texts(
+            [f"{row['title']}\n{row['text'][:SEARCH_EMBED_CHARACTERS]}" for row in missing],
+            timeout=5.0,
+        )
+        if embedded.get("ok"):
+            for document, vector in zip(missing, embedded["vectors"]):
+                entries[document["hitId"]] = {"contentSha256": document["contentSha256"], "vector": vector}
+            embedding_info.update({"enabled": True, "model": embedded["model"], "dimensions": embedded["dimensions"], "embedded": len(missing)})
+        else:
+            embedding_info["reason"] = embedded.get("reason")
+    write_json(cache_path, {"schemaVersion": 1, "model": model, "entries": entries})
+    run_state.atomic_write_text(
+        run_directory / "search_index.jsonl",
+        "" if not documents else "\n".join(json.dumps(row, ensure_ascii=False, sort_keys=True) for row in documents) + "\n",
+    )
+    meta = {
+        "schemaVersion": 1,
+        "generatedAt": utc_now(),
+        "fingerprint": search_index_fingerprint(run_directory, manifest),
+        "documents": len(documents),
+        "kinds": dict(Counter(row["kind"] for row in documents)),
+        "embeddings": embedding_info,
+    }
+    write_json(run_directory / "search_index_meta.json", meta)
+    return meta
+
+
+def ensure_search_index(run_directory):
+    _, manifest = load_run(run_directory)
+    meta_path = run_directory / "search_index_meta.json"
+    current_fingerprint = search_index_fingerprint(run_directory, manifest)
+    if meta_path.is_file() and (run_directory / "search_index.jsonl").is_file():
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if meta.get("fingerprint") == current_fingerprint:
+            return meta, False
+        if not search_index_ready(run_directory, manifest):
+            return meta, True
+    return build_search_index(run_directory), False
+
+
+def lexical_search_scores(query, documents):
+    query_terms = search_tokens(query)
+    if not query_terms:
+        return {}
+    token_counts = [Counter(search_tokens(f"{row['title']} {row['text']}")) for row in documents]
+    document_frequency = Counter()
+    for counts in token_counts:
+        document_frequency.update(set(counts))
+    total = max(1, len(documents))
+    scores = {}
+    for document, counts in zip(documents, token_counts):
+        length = max(1, sum(counts.values()))
+        score = 0.0
+        for term in query_terms:
+            frequency = counts.get(term, 0)
+            if frequency:
+                inverse = 1.0 + math.log((total + 1) / (document_frequency[term] + 1))
+                score += inverse * frequency / (frequency + 1.2 * (0.25 + 0.75 * length / 200))
+        if score:
+            scores[document["hitId"]] = score
+    return scores
+
+
+def semantic_search_scores(run_directory, query):
+    cache_path = run_directory / "working" / "search_embeddings.json"
+    if not cache_path.is_file():
+        return {}, "embedding cache is missing"
+    cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    result = forge_embeddings.embed_texts([query], model=cache.get("model"), timeout=5.0)
+    if not result.get("ok"):
+        return {}, result.get("reason")
+    query_vector = forge_embeddings.normalize(result["vectors"][0])
+    return {
+        hit_id: forge_embeddings.cosine(query_vector, forge_embeddings.normalize(row["vector"]))
+        for hit_id, row in (cache.get("entries") or {}).items()
+        if isinstance(row.get("vector"), list)
+    }, None
+
+
+def ranked_search_hits(run_directory, query, limit):
+    documents = read_jsonl(run_directory / "search_index.jsonl")
+    by_id = {row["hitId"]: row for row in documents}
+    lexical = lexical_search_scores(query, documents)
+    semantic, semantic_warning = semantic_search_scores(run_directory, query)
+    lexical_rank = {hit_id: index for index, (hit_id, _) in enumerate(sorted(lexical.items(), key=lambda row: (-row[1], row[0])), 1)}
+    semantic_rank = {hit_id: index for index, (hit_id, _) in enumerate(sorted(semantic.items(), key=lambda row: (-row[1], row[0])), 1)}
+    query_lower = query.lower().strip()
+    ranked = []
+    for hit_id in set(lexical_rank) | set(semantic_rank):
+        document = by_id.get(hit_id)
+        if document is None:
+            continue
+        score = 0.0
+        if hit_id in lexical_rank:
+            score += 1 / (SEARCH_RRF_K + lexical_rank[hit_id])
+        if hit_id in semantic_rank:
+            score += 1 / (SEARCH_RRF_K + semantic_rank[hit_id])
+        if query_lower == hit_id.lower() or query_lower in {value.lower() for value in document.get("controlIds", []) + document.get("evidenceIds", [])}:
+            score += 1
+        elif query_lower and query_lower in document["title"].lower():
+            score += 0.25
+        snippet = re.sub(r"\s+", " ", document.get("text", "")).strip()[:500]
+        ranked.append(
+            {
+                **{key: value for key, value in document.items() if key != "text"},
+                "score": round(score, 8),
+                "lexicalScore": round(lexical.get(hit_id, 0), 8),
+                "semanticScore": round(semantic.get(hit_id), 8) if hit_id in semantic else None,
+                "snippet": snippet,
+            }
+        )
+    ranked.sort(key=lambda row: (-row["score"], row["hitId"]))
+    return ranked[:limit], semantic_warning
+
+
+def command_index(args):
+    run_directory = require_run_directory(args.run_directory)
+    meta = build_search_index(run_directory, force=args.rebuild)
+    print(json.dumps({"runDirectory": str(run_directory), **meta, "inbox": inbox_status_value(run_directory)}, indent=2))
+
+
+def command_search(args):
+    run_directory = require_run_directory(args.run_directory)
+    if args.limit < 1:
+        fail("--limit must be at least 1")
+    meta, stale = ensure_search_index(run_directory)
+    hits, semantic_warning = ranked_search_hits(run_directory, args.query, args.limit)
+    inbox = inbox_status_value(run_directory)
+    warnings = []
+    if stale:
+        warnings.append("search index is stale because refreshed project controls are not built yet")
+    if inbox.get("pendingCount") or inbox.get("activeBatch"):
+        warnings.append("Inbox intake is pending; results cover the last completed project index")
+    if semantic_warning:
+        warnings.append(f"semantic ranking unavailable; lexical results remain available: {semantic_warning}")
+    print(
+        json.dumps(
+            {
+                "query": args.query,
+                "runDirectory": str(run_directory),
+                "indexGeneratedAt": meta.get("generatedAt"),
+                "indexStale": stale,
+                "ranking": "hybrid" if not semantic_warning else "lexical",
+                "hits": hits,
+                "warnings": warnings,
+                "inbox": inbox,
+                "nextAction": "Use show on relevant hit IDs; load full sources only when the passages are insufficient.",
+            },
+            indent=2,
+        )
+    )
+
+
+def command_show(args):
+    run_directory = require_run_directory(args.run_directory)
+    ensure_search_index(run_directory)
+    hit = next((row for row in read_jsonl(run_directory / "search_index.jsonl") if row.get("hitId") == args.hit_id), None)
+    if hit is None:
+        fail(f"search hit not found: {args.hit_id}")
+    result = {"hit": hit, "fullSources": []}
+    if args.full_source:
+        for raw_path in hit.get("sourcePaths", []):
+            path = Path(raw_path)
+            if not path.is_file():
+                result["fullSources"].append({"path": raw_path, "error": "source file is missing"})
+                continue
+            result["fullSources"].append({"path": raw_path, "sha256": sha256_file(path), "text": path.read_text(encoding="utf-8")})
+    print(json.dumps(result, indent=2))
 
 
 def command_build(args):
@@ -1282,7 +2216,17 @@ def command_build(args):
     config["asOfDate"] = args.as_of or date.today().isoformat()
     config["updatedAt"] = utc_now()
     write_json(run_directory / "run_config.json", config)
-    print(json.dumps({"controls": len(controls), "asOfDate": config["asOfDate"], "proposalChecklist": proposal_present}, indent=2))
+    author_markdown_briefs(run_directory, config, controls, proposal_present)
+    write_gantt_outputs(run_directory, controls)
+    search_meta = build_search_index(run_directory)
+    write_run_metrics(run_directory)
+    def built(state):
+        state["status"] = "running"
+        state["phase"] = "validating"
+        state["nextAction"] = "validate"
+        return state
+    run_state.update_run_state(run_directory, built, {"type": "build_completed", "controls": len(controls)})
+    print(json.dumps({"controls": len(controls), "asOfDate": config["asOfDate"], "proposalChecklist": proposal_present, "searchIndex": search_meta}, indent=2))
 
 
 def command_refresh(args):
@@ -1328,6 +2272,9 @@ def command_status(args):
         fail(str(error))
     results = current_results(run_directory, manifest)
     drift = project_input_drift(config, manifest)
+    worker = worker_control(run_directory)
+    pid = worker.get("pid")
+    worker["alive"] = run_state._pid_alive(pid) if pid else False
     print(
         json.dumps(
             {
@@ -1339,6 +2286,160 @@ def command_status(args):
                 "totalPackets": len(active_packets(manifest)),
                 "inputDrift": drift,
                 "refreshRequired": any(drift.values()),
+                "worker": worker,
+                "scopeMode": config.get("scopeMode", "full"),
+                "inbox": inbox_status_value(run_directory),
+            },
+            indent=2,
+        )
+    )
+
+
+def command_inbox_status(args):
+    run_directory = require_run_directory(args.run_directory)
+    print(json.dumps(inbox_status_value(run_directory), indent=2))
+
+
+def configure_inbox_for_sync(run_directory, config, explicit_inbox):
+    if explicit_inbox:
+        inbox = Path(explicit_inbox).expanduser().resolve()
+        config["liveRepository"] = {
+            "projectRoot": str(inbox.parent),
+            "inbox": str(inbox),
+            "publishDirectory": str(inbox.parent / "Sources" / "Inbox"),
+            "originalsDirectory": str(inbox.parent / "Originals" / "Inbox"),
+        }
+    live = initialize_live_repository(run_directory, config)
+    if live is None:
+        fail("multiple or non-directory inputs require inbox-sync --inbox <project-folder>/Inbox")
+    return live
+
+
+def parse_command_json(output, label):
+    try:
+        return json.loads(output)
+    except json.JSONDecodeError as error:
+        fail(f"{label} returned invalid JSON: {error}")
+
+
+def finalize_inbox_batch(run_directory, live, manifest, batch, intake_result):
+    artifact_rows = read_csv(Path(intake_result["finalized"]["artifactManifest"]))
+    originals = {str(Path(row["source_path"]).resolve()): row for row in artifact_rows if row.get("role") == "original"}
+    published_by_document = {
+        row.get("document_id"): str(live["projectRoot"] / row["destination_path"])
+        for row in artifact_rows
+        if row.get("role") == "final_markdown"
+    }
+    batch_ids = set(batch["itemIds"])
+    for item in manifest["items"]:
+        if item.get("itemId") not in batch_ids:
+            continue
+        original = originals.get(str(Path(item["path"]).resolve()))
+        if original:
+            item.update(
+                {
+                    "status": "ingested",
+                    "completedAt": utc_now(),
+                    "archivedPath": str(live["projectRoot"] / original["destination_path"]),
+                    "publishedPath": published_by_document.get(original.get("document_id")),
+                }
+            )
+            append_jsonl(run_directory / "inbox_events.jsonl", {"at": utc_now(), "type": "inbox_item_ingested", "itemId": item["itemId"], "batchId": batch["batchId"], "sha256": item["sha256"]})
+            continue
+        staged = Path(item["path"])
+        restored = live["inbox"] / item["relativePath"]
+        if staged.is_file() and not restored.exists():
+            restored.parent.mkdir(parents=True, exist_ok=True)
+            staged.rename(restored)
+            item["path"] = str(restored)
+        item.update({"status": "failed", "completedAt": utc_now(), "error": "document ingest did not publish this item"})
+        append_jsonl(run_directory / "inbox_events.jsonl", {"at": utc_now(), "type": "inbox_item_failed", "itemId": item["itemId"], "batchId": batch["batchId"], "error": item["error"]})
+    batch["status"] = "complete"
+    batch["completedAt"] = utc_now()
+    manifest["activeBatch"] = None
+    write_inbox_manifest(run_directory, manifest)
+    remove_empty_directories(live["inbox"] / ".processing")
+
+
+def command_inbox_sync(args):
+    run_directory = require_run_directory(args.run_directory)
+    config, _ = load_run(run_directory)
+    live = configure_inbox_for_sync(run_directory, config, args.inbox)
+    manifest = inbox_manifest(run_directory)
+    batch = manifest.get("activeBatch")
+    archived_duplicates = []
+    if batch is None:
+        status = inbox_status_value(run_directory)
+        pending = []
+        for row in status["pending"]:
+            if row["duplicate"]:
+                archived_path = archive_duplicate_inbox_item(live, row)
+                archived_duplicates.append({"itemId": row["itemId"], "archivedPath": archived_path})
+                manifest["items"].append({**row, "status": "ingested", "completedAt": utc_now(), "archivedPath": archived_path, "duplicate": True})
+                append_jsonl(run_directory / "inbox_events.jsonl", {"at": utc_now(), "type": "inbox_duplicate_archived", "itemId": row["itemId"], "sha256": row["sha256"]})
+            else:
+                pending.append(row)
+        if not pending:
+            write_inbox_manifest(run_directory, manifest)
+            print(json.dumps({"synced": False, "pending": 0, "archivedDuplicates": archived_duplicates, "nextAction": "search_or_status"}, indent=2))
+            return
+        batch = stage_inbox_batch(run_directory, live, manifest, pending)
+    document_ingest = Path(__file__).resolve().parents[2] / "document-ingest" / "scripts" / "document-ingest.mjs"
+    result = subprocess.run(
+        [
+            "node",
+            str(document_ingest),
+            "intake",
+            batch["stagingDirectory"],
+            "--destination",
+            str(live["projectRoot"]),
+            "--output",
+            batch["ingestRun"],
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        batch["status"] = "needs_review"
+        batch["error"] = result.stderr.strip() or result.stdout.strip()
+        write_inbox_manifest(run_directory, manifest)
+        fail(f"document Inbox intake failed: {batch['error']}")
+    intake = parse_command_json(result.stdout, "document-ingest intake")
+    if not intake.get("finalized"):
+        batch["status"] = "needs_review" if intake.get("nextAction") == "review" else "processing"
+        batch["nextAction"] = intake.get("nextAction")
+        write_inbox_manifest(run_directory, manifest)
+        print(
+            json.dumps(
+                {
+                    "synced": False,
+                    "batch": batch,
+                    "documentIngest": intake,
+                    "archivedDuplicates": archived_duplicates,
+                    "nextAction": "complete_document_ingest_review",
+                },
+                indent=2,
+            )
+        )
+        return
+    finalize_inbox_batch(run_directory, live, manifest, batch, intake)
+    refresh = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve()), "refresh", str(run_directory)],
+        capture_output=True,
+        text=True,
+    )
+    if refresh.returncode != 0:
+        fail(f"Inbox intake completed but project refresh failed: {refresh.stderr.strip() or refresh.stdout.strip()}")
+    refresh_value = parse_command_json(refresh.stdout, "project-extraction refresh")
+    print(
+        json.dumps(
+            {
+                "synced": True,
+                "batchId": batch["batchId"],
+                "documentIngest": intake["finalized"],
+                "projectRefresh": refresh_value,
+                "archivedDuplicates": archived_duplicates,
+                "nextAction": "process" if refresh_value.get("pendingPackets", 0) else "index",
             },
             indent=2,
         )
@@ -1394,7 +2495,7 @@ def validate_run(run_directory):
         result = results.get(packet["packetId"])
         if result is None:
             issues.append(validation_issue("packet_pending", f"packet has no disposition: {packet['packetId']}", "Run next and record."))
-        elif result["status"] != "success":
+        elif result["status"] != "extracted":
             warnings.append(f"{packet['packetId']} is {result['status']}: {result.get('note') or 'no note'}")
     required_after_reconcile = ("evidence_items.csv", "evidence_items.jsonl", "review_manifest.json")
     for filename in required_after_reconcile:
@@ -1419,17 +2520,36 @@ def validate_run(run_directory):
         "conflicts_and_gaps.csv",
         "source_changes.csv",
         "project_status.csv",
+        "gantt.csv",
+        "gantt.md",
+        "gantt.html",
+        "run_metrics.json",
+        "search_index.jsonl",
+        "search_index_meta.json",
     )
     for filename in required_built:
         if not (run_directory / filename).is_file():
             issues.append(validation_issue("artifact_missing", f"missing required artifact: {filename}", "Run build."))
+    search_meta_path = run_directory / "search_index_meta.json"
+    if search_meta_path.is_file() and search_index_ready(run_directory, manifest):
+        search_meta = json.loads(search_meta_path.read_text(encoding="utf-8"))
+        if search_meta.get("fingerprint") != search_index_fingerprint(run_directory, manifest):
+            issues.append(validation_issue("search_index_stale", "search index does not match current controls, status, and source revisions", "Run index or build."))
     evidence_ids = {row["evidence_id"] for row in read_csv(run_directory / "evidence_items.csv")}
     controls = read_jsonl(run_directory / "controls.jsonl")
+    evidence_by_id = {row.get("evidence_id"): row for row in read_csv(run_directory / "evidence_items.csv")}
     control_ids = {row.get("control_id") for row in controls}
     for control in controls:
         unknown_evidence = set(control.get("source_evidence_ids", [])) - evidence_ids
         if unknown_evidence:
             issues.append(validation_issue("unknown_evidence", f"{control['control_id']} cites unknown evidence: {', '.join(sorted(unknown_evidence))}"))
+        cited_titles = {
+            re.sub(r"\W+", " ", evidence_by_id[evidence_id].get("title", "").lower()).strip()
+            for evidence_id in control.get("source_evidence_ids", [])
+            if evidence_id in evidence_by_id
+        }
+        if len(cited_titles) >= 3 and "merge justification" not in (control.get("notes") or "").lower():
+            issues.append(validation_issue("heterogeneous_merge", f"{control['control_id']} collapses heterogeneous evidence without a merge justification"))
         for field in ("parent_control_ids", "depends_on_control_ids", "satisfies_control_ids", "supersedes_control_ids", "conflicts_with_control_ids"):
             unknown_controls = set(control.get(field, [])) - control_ids
             if unknown_controls:
@@ -1439,7 +2559,7 @@ def validate_run(run_directory):
         for row_number, row in enumerate(read_csv(status_path), 2):
             if row.get("working_status", "") not in WORKING_STATUSES:
                 issues.append(validation_issue("status_value", f"project_status.csv:{row_number} has invalid working_status"))
-            if not is_iso_date(row.get("forecast_date")) or not is_iso_date(row.get("last_updated")):
+            if not all(is_iso_date(row.get(field)) for field in ("forecast_date", "forecast_start_date", "forecast_end_date", "last_updated")):
                 issues.append(validation_issue("status_date", f"project_status.csv:{row_number} has an invalid date"))
             if row.get("control_id") not in control_ids:
                 warnings.append(f"project_status.csv:{row_number} references a non-current control: {row.get('control_id')}")
@@ -1471,6 +2591,470 @@ def command_validate(args):
             print(f"Error: {error}", file=sys.stderr)
     if not result["valid"]:
         raise SystemExit(1)
+    def completed(state):
+        state["status"] = "complete"
+        state["phase"] = "complete"
+        state["nextAction"] = None
+        state["completion"] = {"validatedAt": utc_now()}
+        return state
+    run_state.update_run_state(run_directory, completed, {"type": "run_completed"})
+
+
+WORKER_SYSTEM_PROMPT = """You extract source-backed project controls. Return only valid JSON. Keep each packet separate. Never invent dates, owners, obligations, quotes, teams, workstreams, or precedence. A direct quote must occur exactly in that packet. Use screened_no_controls only after reading the packet. Preserve distinct deliverables, milestones, tasks, requirements, decisions, risks, dependencies, and stakeholders as distinct items."""
+
+
+def focused_terms(config):
+    scope = config.get("scope") or {}
+    values = [scope.get("focus"), *scope.get("teams", []), *scope.get("people", []), *scope.get("workstreams", [])]
+    return [value.strip().lower() for value in values if isinstance(value, str) and value.strip()]
+
+
+def source_scope_decision(config, source, packet_text):
+    scope = config.get("scope") or {}
+    relative = source["relativePath"].lower()
+    if any(value.lower() in relative for value in scope.get("excludeSources", [])):
+        return "excluded_by_scope", "excluded source filter", "direct"
+    include = scope.get("includeSources", [])
+    if include and not any(value.lower() in relative for value in include):
+        return "excluded_by_scope", "not selected by include-source filter", "direct"
+    if config.get("scopeMode") != "focused":
+        return "extract", "full-project run", "full"
+    terms = focused_terms(config)
+    haystack = f"{relative}\n{packet_text}".lower()
+    matched = [term for term in terms if term in haystack]
+    if matched:
+        return "extract", f"matched focus terms: {', '.join(matched[:8])}", "direct"
+    if re.search(r"\b(dependenc|shared milestone|reporting requirement|decision|risk|issue|blocking|approval)\w*\b", haystack):
+        return "extract", "included for dependency closure", "dependency"
+    return "excluded_by_scope", "no direct or dependency-closure match", "direct"
+
+
+def extraction_prompt(batch, config):
+    scope = config.get("scope") or {}
+    packet_blocks = []
+    for source, packet, text, relation in batch:
+        packet_blocks.append(
+            f"\n--- PACKET {packet['packetId']} ---\nsource_path: {source['relativePath']}\nsource_locator: {json.dumps(packet['locator'])}\nscope_relation: {relation}\n{text}"
+        )
+    return f"""Extract project controls from every supplied packet.
+
+Focus configuration: {json.dumps(scope, ensure_ascii=False, sort_keys=True)}
+
+Return exactly:
+{{"packets":[{{"packetId":"pkt-...","documentRole":"award|funding_notice|proposal|scope_of_work|contract|amendment|work_plan|report|presentation|meeting|interview|correspondence|budget|other","disposition":"extracted|screened_no_controls|needs_review","reason":"specific reason","items":[{{"item_type":"one allowed project-control type","title":"concise distinct control","description":"source-backed description or null","party":"responsible party or null","counterparty":"recipient or null","date_text":"source wording or null","date_kind":"exact|relative|recurring|conditional|none","date":"YYYY-MM-DD only for exact dates or null","trigger":"source trigger or null","offset_days":null,"recurrence":null,"acceptance_criteria":null,"evidence_required":null,"commitment_level":"required|committed|proposed|discussed|informational|unclear","direct_quotes":["short exact quote"],"interpretation":"explicit|inferred|unclear","confidence":"high|medium|low","teams":[],"workstreams":[],"scope_relation":"direct|dependency|shared|full","start_date":null,"end_date":null,"duration_days":null,"schedule_basis":null}}]}}]}}
+
+Allowed item types: {', '.join(ITEM_TYPES)}.
+Packets:{''.join(packet_blocks)}
+"""
+
+
+def packet_embedding_scores(run_directory, candidates, config):
+    cache_path = run_directory / "working" / "embedding_scores.json"
+    query = (config.get("scope") or {}).get("focus") or "project deliverables requirements milestones decisions risks dependencies reporting obligations"
+    if cache_path.is_file():
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        entries = cache.get("packets") or {}
+        if cache.get("query") == query and all(entries.get(entry[1]["packetId"], {}).get("sha256") == entry[1]["sha256"] for entry in candidates):
+            return {entry[1]["packetId"]: entries[entry[1]["packetId"]]["score"] for entry in candidates}
+    texts = [query, *[f"{entry[0]['relativePath']}\n{entry[2][:8000]}" for entry in candidates]]
+    embedded = forge_embeddings.embed_texts(texts)
+    if not embedded.get("ok"):
+        write_json(cache_path, {"query": query, "packets": {}, "reason": embedded.get("reason")})
+        return {}
+    vectors = [forge_embeddings.normalize(vector) for vector in embedded["vectors"]]
+    scores = {entry[1]["packetId"]: round(forge_embeddings.cosine(vectors[0], vectors[index + 1]), 6) for index, entry in enumerate(candidates)}
+    candidates_rows = []
+    for left in range(len(candidates)):
+        for right in range(left + 1, len(candidates)):
+            similarity = forge_embeddings.cosine(vectors[left + 1], vectors[right + 1])
+            if similarity >= 0.985:
+                candidates_rows.append({"left_packet_id": candidates[left][1]["packetId"], "right_packet_id": candidates[right][1]["packetId"], "similarity": round(similarity, 6), "disposition": "review_candidate"})
+    write_csv(run_directory / "duplicate_candidates.csv", ("left_packet_id", "right_packet_id", "similarity", "disposition"), candidates_rows)
+    write_json(
+        cache_path,
+        {
+            "query": query,
+            "packets": {entry[1]["packetId"]: {"sha256": entry[1]["sha256"], "score": scores[entry[1]["packetId"]]} for entry in candidates},
+            "model": embedded.get("model"),
+            "dimensions": embedded.get("dimensions"),
+        },
+    )
+    return scores
+
+
+def pending_extraction_batches(run_directory, config, manifest):
+    results = current_results(run_directory, manifest)
+    worker = config.get("worker", {})
+    characters_per_token = float(worker.get("charactersPerToken") or DEFAULT_CHARS_PER_TOKEN)
+    ceiling = int(worker.get("promptTokenCeiling") or DEFAULT_PROMPT_TOKEN_CEILING)
+    ceiling_characters = max(1_000, int(max(1, ceiling - PROMPT_TOKEN_RESERVE) * characters_per_token))
+    target = min(int(worker.get("packetCharacters") or DEFAULT_PACKET_CHARACTERS), ceiling_characters)
+    candidates = []
+    scope_rows = []
+    canonical_by_hash = {}
+    for source in active_sources(manifest):
+        for packet in source.get("packets", []):
+            canonical_packet = canonical_by_hash.setdefault(packet["sha256"], packet["packetId"])
+            if packet["packetId"] in results:
+                continue
+            text = Path(packet["path"]).read_text(encoding="utf-8")
+            decision, reason, relation = source_scope_decision(config, source, text)
+            scope_rows.append({"source_id": source["sourceId"], "packet_id": packet["packetId"], "source_path": source["relativePath"], "decision": decision, "scope_relation": relation, "embedding_score": "", "matched_filters": "", "reason": reason})
+            if canonical_packet != packet["packetId"]:
+                reason = f"exact duplicate of frozen packet {canonical_packet}"
+                command_record(argparse.Namespace(run_directory=str(run_directory), packet_id=packet["packetId"], items_file=None, status="duplicate_source", note=reason))
+                scope_rows[-1].update({"decision": "duplicate_source", "reason": reason})
+            elif decision == "excluded_by_scope":
+                command_record(argparse.Namespace(run_directory=str(run_directory), packet_id=packet["packetId"], items_file=None, status="excluded_by_scope", note=reason))
+            else:
+                candidates.append((source, packet, text, relation))
+    scores = packet_embedding_scores(run_directory, candidates, config) if candidates else {}
+    for row in scope_rows:
+        if row["packet_id"] in scores:
+            row["embedding_score"] = scores[row["packet_id"]]
+    if scope_rows:
+        existing = read_csv(run_directory / "scope_manifest.csv")
+        write_csv(run_directory / "scope_manifest.csv", ("source_id", "packet_id", "source_path", "decision", "scope_relation", "embedding_score", "matched_filters", "reason"), [*existing, *scope_rows])
+    candidates.sort(key=lambda entry: (-scores.get(entry[1]["packetId"], 0), entry[0]["sourceKey"], entry[1]["sequence"]))
+    batches = []
+    current = []
+    current_chars = 0
+    current_source = None
+    for entry in candidates:
+        source_id = entry[0]["sourceId"]
+        if current and (current_chars + len(entry[2]) > target or source_id != current_source):
+            batches.append(current)
+            current = []
+            current_chars = 0
+        current_source = source_id
+        current.append(entry)
+        current_chars += len(entry[2])
+    if current:
+        batches.append(current)
+    return batches
+
+
+def record_worker_packet(run_directory, packet_id, payload):
+    disposition = payload.get("disposition")
+    if disposition not in {"extracted", "screened_no_controls", "needs_review"}:
+        disposition = "needs_review"
+    if disposition != "extracted":
+        command_record(argparse.Namespace(run_directory=str(run_directory), packet_id=packet_id, items_file=None, status=disposition, note=payload.get("reason") or "model could not extract this packet"))
+        return
+    path = run_directory / "working" / f"{packet_id}-worker.json"
+    write_json(path, {"documentRole": payload.get("documentRole") or "other", "items": payload.get("items") or []})
+    command_record(argparse.Namespace(run_directory=str(run_directory), packet_id=packet_id, items_file=str(path), status="extracted", note=payload.get("reason")))
+
+
+def update_worker_calibration(run_directory, config, source_characters, record):
+    prompt_tokens = record.get("promptTokens")
+    if not isinstance(prompt_tokens, int) or prompt_tokens <= 1500:
+        return
+    observed = max(2.5, min(5.0, source_characters / max(1, prompt_tokens - 1500)))
+    prior = float(config.get("worker", {}).get("charactersPerToken") or DEFAULT_CHARS_PER_TOKEN)
+    calibrated = prior * 0.7 + observed * 0.3
+    target = int(max(MIN_ADAPTIVE_PACKET_CHARACTERS, min(MAX_ADAPTIVE_PACKET_CHARACTERS, TARGET_SOURCE_TOKENS * calibrated)))
+    config.setdefault("worker", {})["charactersPerToken"] = round(calibrated, 4)
+    config["worker"]["packetCharacters"] = target
+    config["updatedAt"] = utc_now()
+    write_json(run_directory / "run_config.json", config)
+
+
+def update_cache_health(run_directory, config, record):
+    cached_tokens = record.get("cachedTokens")
+    prompt_tokens = record.get("promptTokens")
+    if not isinstance(cached_tokens, int) or not isinstance(prompt_tokens, int):
+        return False
+    worker = config.setdefault("worker", {})
+    consecutive = int(worker.get("consecutiveNoCacheReuse") or 0)
+    consecutive = consecutive + 1 if cached_tokens == 0 else 0
+    worker["consecutiveNoCacheReuse"] = consecutive
+    write_json(run_directory / "run_config.json", config)
+    if consecutive < 3:
+        return False
+    warning = {
+        "at": utc_now(),
+        "event": "cache_warning",
+        "task": record.get("task"),
+        "slot": record.get("slot"),
+        "detail": "three consecutive worker calls reported zero cached prompt tokens; worker paused",
+    }
+    append_jsonl(run_directory / "inference_schedule.jsonl", warning)
+    set_worker_control(run_directory, "paused")
+    return True
+
+
+def process_extraction(run_directory, chat):
+    config, manifest = load_run(run_directory)
+    while True:
+        if worker_control(run_directory).get("desiredState") != "running":
+            return
+        batches = pending_extraction_batches(run_directory, config, manifest)
+        if not batches:
+            return
+        batch = batches[0]
+        prompt = extraction_prompt(batch, config)
+        source_characters = sum(len(entry[2]) for entry in batch)
+        last_error = None
+        for attempt in range(2):
+            try:
+                value, record = post_chat_json(run_directory, "extract", WORKER_SYSTEM_PROMPT, prompt if attempt == 0 else f"{prompt}\n\nPrevious output failed validation: {last_error}. Return corrected JSON only.", chat)
+                packets = value.get("packets") if isinstance(value, dict) else None
+                if not isinstance(packets, list):
+                    raise ValueError("worker response requires a packets array")
+                by_id = {row.get("packetId"): row for row in packets if isinstance(row, dict)}
+                expected = {entry[1]["packetId"] for entry in batch}
+                if set(by_id) != expected:
+                    raise ValueError("worker response packet ids do not exactly match the requested batch")
+                for packet_id in [entry[1]["packetId"] for entry in batch]:
+                    record_worker_packet(run_directory, packet_id, by_id[packet_id])
+                update_worker_calibration(run_directory, config, source_characters, record)
+                update_cache_health(run_directory, config, record)
+                break
+            except InterruptedError:
+                time.sleep(max(0, chat["scheduling"]["yieldMs"]) / 1000)
+                break
+            except (ValueError, KeyError, json.JSONDecodeError, SystemExit) as error:
+                last_error = str(error)
+                append_jsonl(run_directory / "inference_schedule.jsonl", {"at": utc_now(), "event": "validation_retry", "task": "extract", "attempt": attempt + 1, "detail": last_error})
+                if attempt == 1:
+                    for _, packet, _, _ in batch:
+                        if packet["packetId"] not in current_results(run_directory, manifest):
+                            command_record(argparse.Namespace(run_directory=str(run_directory), packet_id=packet["packetId"], items_file=None, status="needs_review", note=f"worker validation failed twice: {last_error}"))
+        time.sleep(max(0, chat["scheduling"]["yieldMs"]) / 1000)
+        if worker_control(run_directory).get("desiredState") != "running":
+            return
+        config, manifest = load_run(run_directory)
+
+
+def automatic_review(run_directory):
+    manifest = load_review_manifest(run_directory)
+    counters = {item_type: 0 for item_type in ITEM_TYPES}
+    for control in read_jsonl(run_directory / "controls.jsonl"):
+        match = re.fullmatch(r"[A-Z]+-(\d+)", control.get("control_id", ""))
+        if match and control.get("control_type") in counters:
+            counters[control["control_type"]] = max(counters[control["control_type"]], int(match.group(1)))
+    for packet in manifest["packets"]:
+        if packet["status"] == "complete" and review_result(run_directory, packet["reviewPacketId"]):
+            continue
+        raw = json.loads(Path(packet["path"]).read_text(encoding="utf-8"))
+        controls = []
+        for evidence in raw["evidenceItems"]:
+            item_type = packet["controlType"]
+            counters[item_type] += 1
+            controls.append(
+                {
+                    "control_id": f"{CONTROL_PREFIXES[item_type]}-{counters[item_type]:03d}",
+                    "control_type": item_type,
+                    "title": evidence["title"],
+                    "description": evidence.get("description"),
+                    "owner": evidence.get("party"),
+                    "recipient": evidence.get("counterparty"),
+                    "date_text": evidence.get("date_text"),
+                    "date_kind": evidence.get("date_kind"),
+                    "date": evidence.get("date"),
+                    "trigger": evidence.get("trigger"),
+                    "offset_days": evidence.get("offset_days"),
+                    "recurrence": evidence.get("recurrence"),
+                    "acceptance_criteria": evidence.get("acceptance_criteria"),
+                    "evidence_required": evidence.get("evidence_required"),
+                    "source_status": evidence.get("source_status"),
+                    "commitment_level": evidence.get("commitment_level"),
+                    "source_evidence_ids": [evidence["evidence_id"]],
+                    "relationships": {"parent": [], "depends_on": [], "satisfies": [], "supersedes": [], "conflicts_with": []},
+                    "teams": evidence.get("teams") or [],
+                    "workstreams": evidence.get("workstreams") or [],
+                    "scope_relation": evidence.get("scope_relation") or "full",
+                    "start_date": evidence.get("start_date"),
+                    "end_date": evidence.get("end_date"),
+                    "duration_days": evidence.get("duration_days"),
+                    "schedule_basis": evidence.get("schedule_basis"),
+                }
+            )
+        review_path = run_directory / "working" / f"{packet['reviewPacketId']}-automatic.json"
+        write_json(review_path, {"reviewPacketId": packet["reviewPacketId"], "controls": controls, "dispositions": []})
+        command_record_review(argparse.Namespace(run_directory=str(run_directory), review_file=str(review_path)))
+
+
+def write_run_metrics(run_directory):
+    config, manifest = load_run(run_directory)
+    results = current_results(run_directory, manifest)
+    schedule = read_jsonl(run_directory / "inference_schedule.jsonl")
+    evidence = read_jsonl(run_directory / "evidence_items.jsonl")
+    controls = read_jsonl(run_directory / "controls.jsonl")
+    cached = sum(int(row.get("cachedTokens") or 0) for row in schedule)
+    prompt = sum(int(row.get("promptTokens") or 0) for row in schedule)
+    metrics = {
+        "generatedAt": utc_now(),
+        "packets": len(active_packets(manifest)),
+        "dispositions": {status: sum(row.get("status") == status for row in results.values()) for status in PACKET_STATUSES},
+        "modelCalls": sum(row.get("event") == "model_call" for row in schedule),
+        "preemptions": sum(row.get("event") == "preempted" for row in schedule),
+        "promptTokens": prompt,
+        "cachedTokens": cached,
+        "cacheHitRatio": round(cached / prompt, 4) if prompt else None,
+        "prefillMs": sum(int(row.get("prefillMs") or 0) for row in schedule),
+        "generationMs": sum(int(row.get("generationMs") or 0) for row in schedule),
+        "retries": sum(row.get("event") == "validation_retry" for row in schedule),
+        "warnings": [row.get("detail") for row in schedule if row.get("event") == "cache_warning"],
+        "evidenceItems": len(evidence),
+        "controls": len(controls),
+        "evidencePerControl": round(len(evidence) / len(controls), 3) if controls else None,
+        "elapsedSeconds": round((datetime.now(timezone.utc) - datetime.fromisoformat(config["createdAt"])).total_seconds(), 3),
+    }
+    write_json(run_directory / "run_metrics.json", metrics)
+
+
+def worker_control(run_directory):
+    path = run_directory / "worker_control.json"
+    if not path.is_file():
+        write_json(path, {"desiredState": "running", "pid": None, "updatedAt": utc_now()})
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def set_worker_control(run_directory, desired_state, pid=None):
+    value = worker_control(run_directory)
+    value.update({"desiredState": desired_state, "updatedAt": utc_now()})
+    if pid is not None:
+        value["pid"] = pid
+    write_json(run_directory / "worker_control.json", value)
+    return value
+
+
+def require_worker_runtime(run_directory):
+    chat = chat_configuration()
+    if not chat["enabled"]:
+        fail("connectedServices.chat is disabled; configure the local llama.cpp chat endpoint before processing")
+    if not chat["scheduling"]["enabled"]:
+        fail("cache-aware scheduling is disabled; enable connectedServices.chat.scheduling before processing")
+    if chat["scheduling"]["interactiveSlot"] == chat["scheduling"]["backgroundSlot"]:
+        fail("interactiveSlot and backgroundSlot must be different; reserve slot 0 for interactive work and slot 1 for background extraction")
+    config, _ = load_run(run_directory)
+    identity = {"url": chat["url"], "model": chat["model"], "slot": chat["scheduling"]["backgroundSlot"]}
+    verified = config.get("worker", {}).get("slotProbe")
+    if not isinstance(verified, dict) or any(verified.get(key) != value for key, value in identity.items()):
+        probe = probe_background_slot(chat)
+        if not probe.get("available"):
+            fail(f"background slot {chat['scheduling']['backgroundSlot']} is unavailable: {probe.get('detail')}. Configure llama.cpp with at least two slots; slot 0 is interactive and slot 1 is background.")
+        config.setdefault("worker", {})["slotProbe"] = {**identity, "verifiedAt": utc_now()}
+        write_json(run_directory / "run_config.json", config)
+    return chat
+
+
+def run_worker(run_directory):
+    chat = require_worker_runtime(run_directory)
+    with run_state.run_lock(run_directory):
+        set_worker_control(run_directory, "running", os.getpid())
+        process_extraction(run_directory, chat)
+        control = worker_control(run_directory)
+        if control["desiredState"] != "running":
+            return
+        command_reconcile(argparse.Namespace(run_directory=str(run_directory)))
+        automatic_review(run_directory)
+        command_build(argparse.Namespace(run_directory=str(run_directory), as_of=None))
+        command_validate(argparse.Namespace(run_directory=str(run_directory), fix_hints=True, json=True))
+        write_run_metrics(run_directory)
+        set_worker_control(run_directory, "complete", os.getpid())
+
+
+def command_process(args):
+    run_directory = require_run_directory(args.run_directory)
+    if args.worker or not args.background:
+        run_worker(run_directory)
+        return
+    require_worker_runtime(run_directory)
+    logs = run_directory / "working" / "worker.log"
+    handle = logs.open("a", encoding="utf-8")
+    process = subprocess.Popen(
+        [sys.executable, str(Path(__file__).resolve()), "process", str(run_directory), "--worker"],
+        stdin=subprocess.DEVNULL,
+        stdout=handle,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    handle.close()
+    set_worker_control(run_directory, "running", process.pid)
+    print(json.dumps({"runDirectory": str(run_directory), "background": True, "pid": process.pid, "log": str(logs)}, indent=2))
+
+
+def command_worker_control(args):
+    run_directory = require_run_directory(args.run_directory)
+    desired = {"pause": "paused", "stop-after-current": "stop_after_current", "resume": "running"}[args.command]
+    value = set_worker_control(run_directory, desired)
+    if args.command == "resume":
+        command_process(argparse.Namespace(run_directory=str(run_directory), background=True, worker=False))
+        return
+    print(json.dumps({"runDirectory": str(run_directory), **value}, indent=2))
+
+
+def control_matches_scope(control, scope):
+    serialized = json.dumps(control, ensure_ascii=False).lower()
+    if scope.get("focus") and scope["focus"].lower() not in serialized:
+        return False
+    for key in ("teams", "people", "workstreams"):
+        values = scope.get(key, [])
+        if values and not any(value.lower() in serialized for value in values):
+            return False
+    control_types = scope.get("controlTypes", [])
+    if control_types and control["control_type"] not in control_types:
+        return False
+    date_value = control.get("date") or control.get("end_date") or control.get("start_date")
+    if scope.get("dateFrom") and (not date_value or date_value < scope["dateFrom"]):
+        return False
+    if scope.get("dateTo") and (not date_value or date_value > scope["dateTo"]):
+        return False
+    return True
+
+
+def command_focus(args):
+    parent = require_run_directory(args.run_directory)
+    state = run_state.load_run_state(parent, "project-extraction")
+    if state.get("status") != "complete":
+        fail("focus views require a completed parent run")
+    output = Path(args.output).expanduser().resolve()
+    if output.exists():
+        fail(f"focus output already exists: {output}")
+    output.mkdir(parents=True)
+    scope = scope_options(args)
+    controls = read_jsonl(parent / "controls.jsonl")
+    selected_ids = {row["control_id"] for row in controls if control_matches_scope(row, scope)}
+    changed = True
+    while changed:
+        changed = False
+        for row in controls:
+            related = set(row.get("depends_on_control_ids", [])) | set(row.get("parent_control_ids", []))
+            if row["control_id"] in selected_ids:
+                before = len(selected_ids)
+                selected_ids.update(related)
+                changed |= len(selected_ids) != before
+            elif related & selected_ids:
+                selected_ids.add(row["control_id"])
+                changed = True
+    selected = [{**row, "scope_relation": "direct" if control_matches_scope(row, scope) else "dependency"} for row in controls if row["control_id"] in selected_ids]
+    run_state.atomic_write_text(output / "controls.jsonl", "" if not selected else "\n".join(json.dumps(row, ensure_ascii=False, sort_keys=True) for row in selected) + "\n")
+    write_csv(output / "controls.csv", CONTROL_COLUMNS, control_csv_rows(selected))
+    status = [row for row in read_csv(parent / "project_status.csv") if row.get("control_id") in selected_ids]
+    write_csv(output / "project_status.csv", STATUS_COLUMNS, status)
+    write_gantt_outputs(output, selected)
+    parent_config, _ = load_run(parent)
+    view_config = {**parent_config, "scope": scope, "scopeMode": "focused", "parentRun": str(parent)}
+    write_json(output / "view_config.json", view_config)
+    coverage_gap = parent_config.get("scopeMode") == "focused"
+    write_json(output / "coverage.json", {"completeParentCoverage": not coverage_gap, "warning": "Parent run was focused; this view may not cover excluded source material." if coverage_gap else None})
+    author_markdown_briefs(output, view_config, selected, False)
+    print(json.dumps({"viewDirectory": str(output), "controls": len(selected), "coverageGap": coverage_gap}, indent=2))
+
+
+def add_scope_arguments(command):
+    command.add_argument("--focus")
+    command.add_argument("--team", action="append")
+    command.add_argument("--person", action="append")
+    command.add_argument("--workstream", action="append")
+    command.add_argument("--include-source", action="append")
+    command.add_argument("--exclude-source", action="append")
+    command.add_argument("--control-type", action="append", choices=ITEM_TYPES)
+    command.add_argument("--date-from", type=lambda value: validate_iso_date(value, "--date-from"))
+    command.add_argument("--date-to", type=lambda value: validate_iso_date(value, "--date-to"))
 
 
 def parser():
@@ -1479,6 +3063,7 @@ def parser():
 
     doctor = commands.add_parser("doctor", help="Report local project-extraction capabilities.")
     doctor.add_argument("--json", action="store_true")
+    doctor.add_argument("--probe-slot", action="store_true")
     doctor.set_defaults(handler=command_doctor)
 
     init = commands.add_parser("init", help="Discover sources, hash them, and create bounded extraction packets.")
@@ -1486,6 +3071,8 @@ def parser():
     init.add_argument("--output", required=True)
     init.add_argument("--title")
     init.add_argument("--packet-chars", type=int, default=DEFAULT_PACKET_CHARACTERS)
+    init.add_argument("--inbox", help="Explicit Inbox path for multi-root or nonstandard project layouts.")
+    add_scope_arguments(init)
     init.set_defaults(handler=command_init)
 
     next_command = commands.add_parser("next", help="Return exactly one pending source packet as JSON.")
@@ -1496,7 +3083,7 @@ def parser():
     record.add_argument("run_directory")
     record.add_argument("--packet-id", required=True)
     record.add_argument("--items-file")
-    record.add_argument("--status", choices=sorted(PACKET_STATUSES), default="success")
+    record.add_argument("--status", choices=sorted(PACKET_STATUSES), default="extracted")
     record.add_argument("--note")
     record.set_defaults(handler=command_record)
 
@@ -1539,6 +3126,49 @@ def parser():
     validate.add_argument("--fix-hints", action="store_true")
     validate.add_argument("--json", action="store_true")
     validate.set_defaults(handler=command_validate)
+
+    index = commands.add_parser("index", help="Build or incrementally refresh the hybrid project search index.")
+    index.add_argument("run_directory")
+    index.add_argument("--rebuild", action="store_true")
+    index.set_defaults(handler=command_index)
+
+    search = commands.add_parser("search", help="Return hybrid-ranked controls, evidence, and source passages.")
+    search.add_argument("run_directory")
+    search.add_argument("--query", required=True)
+    search.add_argument("--limit", type=int, default=10)
+    search.set_defaults(handler=command_search)
+
+    show = commands.add_parser("show", help="Load one search hit and optionally its complete source documents.")
+    show.add_argument("run_directory")
+    show.add_argument("--hit-id", required=True)
+    show.add_argument("--full-source", action="store_true")
+    show.set_defaults(handler=command_show)
+
+    inbox_status = commands.add_parser("inbox-status", help="Report pending Inbox files without modifying them.")
+    inbox_status.add_argument("run_directory")
+    inbox_status.set_defaults(handler=command_inbox_status)
+
+    inbox_sync = commands.add_parser("inbox-sync", help="Resume Inbox ingestion and refresh the project when publication completes.")
+    inbox_sync.add_argument("run_directory")
+    inbox_sync.add_argument("--inbox", help="Configure an explicit Inbox path for an existing multi-root run.")
+    inbox_sync.set_defaults(handler=command_inbox_sync)
+
+    process = commands.add_parser("process", help="Run the cache-aware extraction worker through completion.")
+    process.add_argument("run_directory")
+    process.add_argument("--background", action="store_true")
+    process.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
+    process.set_defaults(handler=command_process)
+
+    for name in ("pause", "resume", "stop-after-current"):
+        control = commands.add_parser(name, help=f"{name.replace('-', ' ').title()} the cache-aware worker.")
+        control.add_argument("run_directory")
+        control.set_defaults(handler=command_worker_control)
+
+    focus = commands.add_parser("focus", help="Build a focused dependency-closed view from a completed run.")
+    focus.add_argument("run_directory")
+    focus.add_argument("--output", required=True)
+    add_scope_arguments(focus)
+    focus.set_defaults(handler=command_focus)
     return root
 
 

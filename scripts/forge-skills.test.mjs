@@ -18,6 +18,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import test from "node:test";
 import webResearchExtension, { formatRunFailure } from "../forge/extensions/web-research.ts";
+import { addInteractiveSlot } from "../forge/extensions/inference-scheduling.ts";
 import {
 	appendRunEvent,
 	assertCompatibleRun,
@@ -864,6 +865,71 @@ server.listen(0, "127.0.0.1", () => {
 	});
 }
 
+function startProjectExtractionWorkerFixture(workspace, rejectBackgroundSlot = false, cachedTokens = 500, extractionDelayMs = 0) {
+	const requestsPath = join(workspace, "project-worker-requests.jsonl");
+	const serverPath = join(workspace, "project-worker-server.mjs");
+	writeFileSync(
+		serverPath,
+		`import { appendFileSync } from "node:fs";
+import { createServer } from "node:http";
+const requestsPath = ${JSON.stringify(requestsPath)};
+const rejectBackgroundSlot = ${JSON.stringify(rejectBackgroundSlot)};
+const cachedTokens = ${JSON.stringify(cachedTokens)};
+const extractionDelayMs = ${JSON.stringify(extractionDelayMs)};
+const server = createServer((request, response) => {
+  let body = "";
+  request.setEncoding("utf8");
+  request.on("data", chunk => body += chunk);
+  request.on("end", () => {
+    const payload = JSON.parse(body);
+    appendFileSync(requestsPath, JSON.stringify(payload) + "\\n");
+    if (rejectBackgroundSlot && payload.id_slot === 1) {
+      response.writeHead(400, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "invalid slot id 1" } }));
+      return;
+    }
+    const user = payload.messages?.at(-1)?.content || "";
+    const ids = [...user.matchAll(/--- PACKET (pkt-[a-f0-9]+) ---/g)].map(match => match[1]);
+    const value = ids.length === 0 ? { ok: true } : { packets: ids.map(packetId => ({
+      packetId,
+      documentRole: "award",
+      disposition: "extracted",
+      reason: "source contains an explicit deliverable",
+      items: [{ item_type: "deliverable", title: "Final report", description: "Submit the final report.", date_text: "2026-08-01", date_kind: "exact", date: "2026-08-01", commitment_level: "required", direct_quotes: ["Final report due 2026-08-01."], interpretation: "explicit", confidence: "high", teams: ["Delivery"], workstreams: ["Reporting"], scope_relation: "full", start_date: null, end_date: "2026-08-01", duration_days: null, schedule_basis: "source" }]
+    })) };
+    const send = () => {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(value) } }], usage: { prompt_tokens: Math.ceil(body.length / 4), prompt_tokens_details: { cached_tokens: ids.length ? cachedTokens : 0 } }, timings: { prompt_ms: 25, predicted_ms: 10 } }));
+    };
+    if (ids.length && extractionDelayMs) setTimeout(send, extractionDelayMs);
+    else send();
+  });
+});
+server.listen(0, "127.0.0.1", () => process.stdout.write(String(server.address().port) + "\\n"));
+`,
+	);
+	const child = spawn(process.execPath, [serverPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+	return new Promise((resolveServer, rejectServer) => {
+		let stdout = "";
+		let stderr = "";
+		child.stdout.setEncoding("utf8");
+		child.stderr.setEncoding("utf8");
+		child.stderr.on("data", (chunk) => (stderr += chunk));
+		child.stdout.on("data", (chunk) => {
+			stdout += chunk;
+			const port = stdout.split(/\r?\n/).find((value) => value.trim());
+			if (!port) return;
+			resolveServer({
+				url: `http://127.0.0.1:${port.trim()}/v1/chat/completions`,
+				requestsPath,
+				close: () => new Promise((resolveClose) => { child.once("exit", resolveClose); child.kill(); }),
+			});
+		});
+		child.once("error", rejectServer);
+		child.once("exit", (code) => { if (!stdout.trim()) rejectServer(new Error(`project worker fixture exited ${code}: ${stderr}`)); });
+	});
+}
+
 test("transcript cleanup and file conversion preserve their source", () => {
 	withWorkspace((workspace) => {
 		const source = join(workspace, "transcript.txt");
@@ -1607,6 +1673,17 @@ test("project extraction builds distinct controls and refreshes sources without 
 
 		const extractionFor = (sourcePath, changed = false) => {
 			const filename = sourcePath.split("/").pop();
+			const quotes = {
+				"award.md": "final evaluation report",
+				"scope-of-work.md": "Submit the progress report",
+				"proposal.md": "community workshop series",
+				"report.md": "Steering updates recur monthly",
+				"presentation.md": "kickoff milestone",
+				"meeting.md": "circulate revised minutes",
+				"interview.md": "Staff availability may delay field work",
+				"budget.csv": "Evaluation,5000",
+				"contract.md": "approval is required before publication",
+			};
 			const definitions = {
 				"award.md": ["award", { item_type: "deliverable", title: "Final evaluation report", date_text: changed ? "August 15, 2026" : "July 31, 2026", date_kind: "exact", date: changed ? "2026-08-15" : "2026-07-31", acceptance_criteria: "Sponsor acceptance", commitment_level: "required" }],
 				"scope-of-work.md": ["scope_of_work", { item_type: "reporting_requirement", title: "Quarterly progress report", date_text: "30 days after each quarter ends", date_kind: "relative", date: null, trigger: "each quarter ends", offset_days: 30, recurrence: "quarterly", commitment_level: "required" }],
@@ -1621,7 +1698,7 @@ test("project extraction builds distinct controls and refreshes sources without 
 			const [documentRole, item] = definitions[filename];
 			return {
 				documentRole,
-				items: [{ description: "Source-backed project record.", direct_quotes: ["Source wording"], interpretation: "explicit", confidence: "high", ...item }],
+				items: [{ description: "Source-backed project record.", direct_quotes: [quotes[filename]], interpretation: "explicit", confidence: "high", ...item }],
 			};
 		};
 
@@ -1687,11 +1764,11 @@ test("project extraction builds distinct controls and refreshes sources without 
 		const statusRows = parseCsvRows(readFileSync(join(runDirectory, "project_status.csv"), "utf8"));
 		const statusHeader = statusRows.shift();
 		const deliverableStatus = statusRows.find((row) => row[0] === "DEL-001");
-		deliverableStatus[1] = "Jordan";
-		deliverableStatus[2] = "in_progress";
-		deliverableStatus[3] = "2026-08-10";
-		deliverableStatus[4] = "2026-07-16";
-		deliverableStatus[5] = "Human status note.";
+		deliverableStatus[statusHeader.indexOf("current_owner")] = "Jordan";
+		deliverableStatus[statusHeader.indexOf("working_status")] = "in_progress";
+		deliverableStatus[statusHeader.indexOf("forecast_date")] = "2026-08-10";
+		deliverableStatus[statusHeader.indexOf("last_updated")] = "2026-07-16";
+		deliverableStatus[statusHeader.indexOf("notes")] = "Human status note.";
 		writeCsvRows(join(runDirectory, "project_status.csv"), [statusHeader, ...statusRows]);
 
 		writeFileSync(join(sources, "award.md"), "# Award Amendment\n\nThe final evaluation report is now due August 15, 2026 and still requires sponsor acceptance.\n");
@@ -1700,15 +1777,236 @@ test("project extraction builds distinct controls and refreshes sources without 
 		const refreshed = jsonOutput(run(python, [scriptPath, "refresh", runDirectory]));
 		assert.deepEqual({ added: refreshed.added, changed: refreshed.changed, removed: refreshed.removed, unchanged: refreshed.unchanged }, { added: 1, changed: 1, removed: 1, unchanged: 6 });
 		assert.equal(refreshed.pendingPackets, 2);
+		const staleSearch = jsonOutput(run(python, [scriptPath, "search", runDirectory, "--query", "final evaluation report"]));
+		assert.equal(staleSearch.indexStale, true);
+		assert.match(staleSearch.warnings.join(" "), /last completed|stale/);
 		processPending(true);
 		reconcileAndReview();
 		run(python, [scriptPath, "build", runDirectory, "--as-of", "2026-07-17"]);
 		const refreshedStatus = readFileSync(join(runDirectory, "project_status.csv"), "utf8");
-		assert.match(refreshedStatus, /DEL-001,Jordan,in_progress,2026-08-10,2026-07-16/);
+		assert.match(refreshedStatus, /DEL-001,Jordan,in_progress,2026-08-10,,,2026-07-16/);
 		assert.match(refreshedStatus, /Human status note\. Status review required after source refresh\./);
 		assert.doesNotMatch(readFileSync(join(runDirectory, "actions.csv"), "utf8"), /Circulate revised minutes/);
 		assert.match(readFileSync(join(runDirectory, "source_changes.csv"), "utf8"), /added|changed|removed/);
 		assert.equal(jsonOutput(run(python, [scriptPath, "validate", runDirectory, "--json"])).valid, true);
+	});
+});
+
+test("project extraction Inbox drains reviewed files, resumes finalization, and refreshes once", () => {
+	withWorkspace((workspace) => {
+		const projectRoot = join(workspace, "live-project");
+		mkdirSync(projectRoot);
+		writeFileSync(join(projectRoot, "baseline.md"), "# Baseline\n\nExisting project source.\n");
+		const cli = script("project-extraction", "project-extraction.py");
+		const runDirectory = join(projectRoot, "Generated", "Project-Extraction");
+		jsonOutput(run(python, [cli, "init", projectRoot, "--output", runDirectory]));
+		const inbox = join(projectRoot, "Inbox");
+		assert.equal(existsSync(join(inbox, ".project-extraction-inbox.json")), true);
+		writeFileSync(join(inbox, "update.txt"), "Project update: sponsor approval is required before publication.\n");
+		const before = jsonOutput(run(python, [cli, "inbox-status", runDirectory]));
+		assert.equal(before.pendingCount, 1);
+		assert.equal(JSON.parse(readFileSync(join(runDirectory, "source_manifest.json"), "utf8")).sources.length, 1);
+
+		const firstSync = jsonOutput(run(python, [cli, "inbox-sync", runDirectory]));
+		assert.equal(firstSync.synced, false);
+		assert.equal(firstSync.nextAction, "complete_document_ingest_review");
+		completeIngestRun(firstSync.batch.ingestRun);
+		mkdirSync(join(projectRoot, "Sources", "Inbox"), { recursive: true });
+		writeFileSync(join(projectRoot, "Sources", "Inbox", "update.md"), "collision\n");
+		runFailure(python, [cli, "inbox-sync", runDirectory], /finalize destination already exists/);
+		assert.equal(readFileSync(join(projectRoot, "Sources", "Inbox", "update.md"), "utf8"), "collision\n");
+		rmSync(join(projectRoot, "Sources", "Inbox", "update.md"));
+		const interrupted = runWithEnvironment(
+			python,
+			[cli, "inbox-sync", runDirectory],
+			{ PI_FORGE_FAIL_AFTER_FINALIZE_OPERATIONS: "1" },
+			1,
+		);
+		assert.match(`${interrupted.stdout}\n${interrupted.stderr}`, /fault injection after finalize operation/);
+		const completed = jsonOutput(run(python, [cli, "inbox-sync", runDirectory]));
+		assert.equal(completed.synced, true);
+		assert.equal(completed.projectRefresh.added, 1);
+		assert.equal(existsSync(join(projectRoot, "Sources", "Inbox", "update.md")), true);
+		assert.equal(existsSync(join(projectRoot, "Originals", "Inbox", "update.txt")), true);
+		assert.equal(existsSync(join(inbox, "update.txt")), false);
+		assert.equal(jsonOutput(run(python, [cli, "inbox-status", runDirectory])).pendingCount, 0);
+
+		copyFileSync(join(projectRoot, "Originals", "Inbox", "update.txt"), join(inbox, "update-copy.txt"));
+		const duplicateStatus = jsonOutput(run(python, [cli, "inbox-status", runDirectory]));
+		assert.equal(duplicateStatus.pending[0].duplicate, true);
+		const duplicateSync = jsonOutput(run(python, [cli, "inbox-sync", runDirectory]));
+		assert.equal(duplicateSync.synced, false);
+		assert.equal(duplicateSync.archivedDuplicates.length, 1);
+		assert.equal(existsSync(join(projectRoot, "Originals", "Inbox", "Duplicates", "update-copy.txt")), true);
+		assert.equal(JSON.parse(readFileSync(join(runDirectory, "source_manifest.json"), "utf8")).sources.filter((source) => source.active !== false).length, 2);
+	});
+});
+
+test("project extraction worker isolates its slot and completes cache-aware artifacts", async () => {
+	assert.deepEqual(addInteractiveSlot({ model: "code", messages: [] }, { enabled: true, interactiveSlot: 0 }), {
+		model: "code",
+		messages: [],
+		id_slot: 0,
+		cache_prompt: true,
+	});
+	assert.deepEqual(addInteractiveSlot({ model: "code" }, { enabled: false, interactiveSlot: 0 }), { model: "code" });
+
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startProjectExtractionWorkerFixture(workspace);
+		const embeddings = await startEmbeddingsFixture(workspace);
+		try {
+			const agentDirectory = join(workspace, "agent");
+			mkdirSync(agentDirectory);
+			writeFileSync(
+				join(agentDirectory, "settings.json"),
+				`${JSON.stringify({ connectedServices: { chat: { enabled: true, baseUrl: fixture.url, model: "code", scheduling: { enabled: true, interactiveSlot: 0, backgroundSlot: 1, idleGraceMs: 0, yieldMs: 0, backgroundOutputTokens: 4096 } } } })}\n`,
+			);
+			const sources = join(workspace, "sources");
+			mkdirSync(sources);
+			writeFileSync(join(sources, "award.md"), "# Award\n\nFinal report due 2026-08-01.\n");
+			const runDirectory = join(workspace, "run");
+			const cli = script("project-extraction", "project-extraction.py");
+			run(python, [cli, "init", sources, "--output", runDirectory]);
+			const projectEnvironment = {
+				PI_FORGE_AGENT_DIR: agentDirectory,
+				FORGE_BASE_CHAT_URL: fixture.url,
+				FORGE_EMBEDDINGS_URL: embeddings.url,
+			};
+			await runAsyncWithEnvironment(python, [cli, "process", runDirectory], projectEnvironment);
+			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			assert.ok(requests.length >= 2);
+			assert.ok(requests.every((request) => request.id_slot === 1 && request.cache_prompt === true));
+			assert.equal(JSON.parse(readFileSync(join(runDirectory, "run_state.json"), "utf8")).status, "complete");
+			assert.equal(JSON.parse(readFileSync(join(runDirectory, "run_metrics.json"), "utf8")).cachedTokens, 500);
+			assert.match(readFileSync(join(runDirectory, "gantt.md"), "utf8"), /Final report/);
+			assert.match(readFileSync(join(runDirectory, "gantt.html"), "utf8"), /Project Gantt/);
+			const indexed = jsonOutput(runWithEnvironment(python, [cli, "index", runDirectory], projectEnvironment));
+			assert.ok(indexed.embeddings.reused > 0);
+			const search = jsonOutput(runWithEnvironment(python, [cli, "search", runDirectory, "--query", "final report deadline"], projectEnvironment));
+			assert.equal(search.ranking, "hybrid");
+			assert.equal(search.hits[0].controlIds.includes("DEL-001") || search.hits[0].title.includes("Final report"), true);
+			const shown = jsonOutput(runWithEnvironment(python, [cli, "show", runDirectory, "--hit-id", search.hits[0].hitId, "--full-source"], projectEnvironment));
+			assert.match(JSON.stringify(shown), /Final report due 2026-08-01/);
+			const lexical = jsonOutput(runWithEnvironment(python, [cli, "search", runDirectory, "--query", "DEL-001"], { ...projectEnvironment, FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings" }));
+			assert.equal(lexical.ranking, "lexical");
+			assert.equal(lexical.hits[0].controlIds.includes("DEL-001"), true);
+
+			const view = join(workspace, "delivery-view");
+			const focused = jsonOutput(run(python, [cli, "focus", runDirectory, "--output", view, "--team", "Delivery"]));
+			assert.equal(focused.controls, 1);
+			assert.equal(JSON.parse(readFileSync(join(view, "coverage.json"), "utf8")).completeParentCoverage, true);
+		} finally {
+			await fixture.close();
+			await embeddings.close();
+		}
+	});
+});
+
+test("project extraction worker refuses a server without its reserved slot", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startProjectExtractionWorkerFixture(workspace, true);
+		try {
+			const agentDirectory = join(workspace, "agent");
+			mkdirSync(agentDirectory);
+			writeFileSync(join(agentDirectory, "settings.json"), `${JSON.stringify({ connectedServices: { chat: { baseUrl: fixture.url, model: "code", scheduling: { enabled: true, interactiveSlot: 0, backgroundSlot: 1, idleGraceMs: 0, yieldMs: 0, backgroundOutputTokens: 4096 } } } })}\n`);
+			const sources = join(workspace, "sources");
+			mkdirSync(sources);
+			writeFileSync(join(sources, "award.md"), "# Award\n\nFinal report due 2026-08-01.\n");
+			const runDirectory = join(workspace, "run");
+			const cli = script("project-extraction", "project-extraction.py");
+			run(python, [cli, "init", sources, "--output", runDirectory]);
+			const result = await runAsyncWithEnvironment(
+				python,
+				[cli, "process", runDirectory, "--background"],
+				{ PI_FORGE_AGENT_DIR: agentDirectory, FORGE_BASE_CHAT_URL: fixture.url, FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings" },
+				1,
+			);
+			assert.match(result.stderr, /background slot 1 is unavailable/);
+			assert.equal(JSON.parse(readFileSync(join(runDirectory, "run_state.json"), "utf8")).items[0].status, "pending");
+			assert.equal(existsSync(join(runDirectory, "worker_control.json")), false);
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("project extraction worker pauses after repeated cache misses", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startProjectExtractionWorkerFixture(workspace, false, 0);
+		try {
+			const agentDirectory = join(workspace, "agent");
+			mkdirSync(agentDirectory);
+			writeFileSync(
+				join(agentDirectory, "settings.json"),
+				`${JSON.stringify({ connectedServices: { chat: { baseUrl: fixture.url, model: "code", scheduling: { enabled: true, interactiveSlot: 0, backgroundSlot: 1, idleGraceMs: 0, yieldMs: 0, backgroundOutputTokens: 4096 } } } })}\n`,
+			);
+			const sources = join(workspace, "sources");
+			mkdirSync(sources);
+			for (let index = 1; index <= 3; index += 1) {
+				writeFileSync(join(sources, `${index}.md`), `# Award ${index}\n\nFinal report due 2026-08-01.\n\nSource ${index}.\n`);
+			}
+			const runDirectory = join(workspace, "run");
+			const cli = script("project-extraction", "project-extraction.py");
+			run(python, [cli, "init", sources, "--output", runDirectory]);
+			await runAsyncWithEnvironment(python, [cli, "process", runDirectory], {
+				PI_FORGE_AGENT_DIR: agentDirectory,
+				FORGE_BASE_CHAT_URL: fixture.url,
+				FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
+			});
+			assert.equal(JSON.parse(readFileSync(join(runDirectory, "worker_control.json"), "utf8")).desiredState, "paused");
+			assert.match(readFileSync(join(runDirectory, "inference_schedule.jsonl"), "utf8"), /cache_warning/);
+			assert.equal(JSON.parse(readFileSync(join(runDirectory, "run_config.json"), "utf8")).worker.promptTokenCeiling, 36_864);
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("project extraction worker preempts and requeues for an interactive lease", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startProjectExtractionWorkerFixture(workspace, false, 500, 500);
+		try {
+			const agentDirectory = join(workspace, "agent");
+			mkdirSync(agentDirectory);
+			writeFileSync(
+				join(agentDirectory, "settings.json"),
+				`${JSON.stringify({ connectedServices: { chat: { baseUrl: fixture.url, model: "code", scheduling: { enabled: true, interactiveSlot: 0, backgroundSlot: 1, idleGraceMs: 0, yieldMs: 0, backgroundOutputTokens: 4096 } } } })}\n`,
+			);
+			const sources = join(workspace, "sources");
+			mkdirSync(sources);
+			writeFileSync(join(sources, "award.md"), "# Award\n\nFinal report due 2026-08-01.\n");
+			const runDirectory = join(workspace, "run");
+			const cli = script("project-extraction", "project-extraction.py");
+			run(python, [cli, "init", sources, "--output", runDirectory]);
+			const processing = runAsyncWithEnvironment(python, [cli, "process", runDirectory], {
+				PI_FORGE_AGENT_DIR: agentDirectory,
+				FORGE_BASE_CHAT_URL: fixture.url,
+				FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
+			});
+			await new Promise((resolve, reject) => {
+				const deadline = Date.now() + 3000;
+				const poll = () => {
+					const calls = existsSync(fixture.requestsPath) ? readFileSync(fixture.requestsPath, "utf8").trim().split("\n").length : 0;
+					if (calls >= 2) resolve();
+					else if (Date.now() >= deadline) reject(new Error("worker extraction request did not start"));
+					else setTimeout(poll, 20);
+				};
+				poll();
+			});
+			const leaseDirectory = join(agentDirectory, "inference-leases");
+			mkdirSync(leaseDirectory);
+			const lease = join(leaseDirectory, "interactive.json");
+			writeFileSync(lease, `${JSON.stringify({ kind: "interactive", updatedAtMs: Date.now() })}\n`);
+			await new Promise((resolve) => setTimeout(resolve, 250));
+			rmSync(lease);
+			await processing;
+			const metrics = JSON.parse(readFileSync(join(runDirectory, "run_metrics.json"), "utf8"));
+			assert.equal(metrics.preemptions, 1);
+			assert.equal(metrics.dispositions.extracted, 1);
+			assert.equal(JSON.parse(readFileSync(join(runDirectory, "run_state.json"), "utf8")).status, "complete");
+		} finally {
+			await fixture.close();
+		}
 	});
 });
 
@@ -4081,6 +4379,14 @@ test("profile configuration installs local service defaults without dropping use
 				enabled: true,
 				baseUrl: "http://llms:8008/v1/chat/completions",
 				model: "code",
+				scheduling: {
+					enabled: false,
+					interactiveSlot: 0,
+					backgroundSlot: 1,
+					idleGraceMs: 2000,
+					yieldMs: 1000,
+					backgroundOutputTokens: 4096,
+				},
 			},
 			embeddings: {
 				enabled: true,
@@ -4131,6 +4437,14 @@ test("profile configuration preserves connected service overrides", () => {
 				enabled: true,
 				baseUrl: "http://llms:8008/v1/chat/completions",
 				model: "code",
+				scheduling: {
+					enabled: false,
+					interactiveSlot: 0,
+					backgroundSlot: 1,
+					idleGraceMs: 2000,
+					yieldMs: 1000,
+					backgroundOutputTokens: 4096,
+				},
 			},
 			embeddings: {
 				enabled: true,

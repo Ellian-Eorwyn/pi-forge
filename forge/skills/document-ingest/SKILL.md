@@ -54,6 +54,7 @@ Project recordings follow `transcription`, `transcript-cleanup`, then
 - `record-transcript <run-directory> --doc-id <id> --transcript <cleaned.md>`: atomically install a cleaned transcript as the final document text and repair transcript chunk validation state.
 - `validate <run-directory> --fix-hints --json`: machine-readable quality gate with repair hints.
 - `run <input> --output <input>/Ingest [--literature] [--project]`: deterministic prepare/resume wrapper that reports the next review action and downstream handoff.
+- `intake <project>/Inbox/.processing/<batch> --destination <project> --output <project>/Ingest/Inbox/<batch>`: resumable live-project intake that publishes reviewed Markdown to `Sources/Inbox/` and originals to `Originals/Inbox/`.
 - For finalized literature-like folders: `python3 <literature-skill>/scripts/literature-extraction.py init <input-folder> --output <input-folder>/Generated/Literature-Extraction`.
 
 ## Mechanical Tools
@@ -163,6 +164,11 @@ folder ingestion, review, finalization, and literature handoff.
      background processing files.
    - Do not place raw originals or raw transcripts at the source-folder top
      level. The top level should contain only final cleaned Markdown outputs.
+   - For a project-extraction Inbox batch, use `intake` instead of ordinary
+     `finalize`. The project workflow owns the hidden staging batch. Intake
+     preserves its relative paths, refuses destination collisions, publishes
+     cleaned Markdown under `Sources/Inbox/`, and archives originals under
+     `Originals/Inbox/` before project refresh.
 
 7. **Automatic Literature Handoff**:
    - If any successful item has `suggested_pipeline` containing `literature`, or
