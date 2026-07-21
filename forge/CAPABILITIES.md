@@ -19,7 +19,7 @@ reconciles it.
 - `literature-extraction`: Extract structured evidence, claims, metadata, and citations from research documents.
 - `organize-folder`: Sort messy folders through a reviewable manifest before making changes.
 - `personal-admin`: Turn personal/admin documents into summaries, decisions, and action plans.
-- `project-extraction`: Search and continuously refresh live project repositories with a reviewed Inbox, source-backed evidence and controls, focused team/workstream views, briefs, and CSV/Mermaid/HTML Gantt outputs while preserving conflicts and human status ownership.
+- `project-extraction`: Run or continuously refresh live project repositories with truthful packet/source coverage, reviewed Inbox intake, serial model-assisted extraction and reconciliation, source-backed controls, focused views, explicitly labeled drafts, and CSV/Mermaid/HTML Gantt outputs while preserving conflicts and human status ownership.
 - `report-output`: Assemble polished deliverables from processed research or document outputs.
 - `skill-builder`: Design, scaffold, validate, and audit portable Agent Skills.
 - `site-builder`: Build static websites from structured content folders.

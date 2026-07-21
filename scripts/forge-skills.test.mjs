@@ -865,7 +865,7 @@ server.listen(0, "127.0.0.1", () => {
 	});
 }
 
-function startProjectExtractionWorkerFixture(workspace, rejectBackgroundSlot = false, cachedTokens = 500, extractionDelayMs = 0) {
+function startProjectExtractionWorkerFixture(workspace, rejectBackgroundSlot = false, cachedTokens = 500, extractionDelayMs = 0, responseMode = "normal") {
 	const requestsPath = join(workspace, "project-worker-requests.jsonl");
 	const serverPath = join(workspace, "project-worker-server.mjs");
 	writeFileSync(
@@ -876,6 +876,8 @@ const requestsPath = ${JSON.stringify(requestsPath)};
 const rejectBackgroundSlot = ${JSON.stringify(rejectBackgroundSlot)};
 const cachedTokens = ${JSON.stringify(cachedTokens)};
 const extractionDelayMs = ${JSON.stringify(extractionDelayMs)};
+const responseMode = ${JSON.stringify(responseMode)};
+let extractionCalls = 0;
 const server = createServer((request, response) => {
   let body = "";
   request.setEncoding("utf8");
@@ -890,16 +892,61 @@ const server = createServer((request, response) => {
     }
     const user = payload.messages?.at(-1)?.content || "";
     const ids = [...user.matchAll(/--- PACKET (pkt-[a-f0-9]+) ---/g)].map(match => match[1]);
-    const value = ids.length === 0 ? { ok: true } : { packets: ids.map(packetId => ({
+    let value;
+    if (user.startsWith("Reconcile this one control-type")) {
+      const raw = JSON.parse(user.slice(user.indexOf("Evidence:\\n") + "Evidence:\\n".length));
+      const groupFor = (evidence, evidenceIds) => ({
+        existingControlId: responseMode === "reconcile-merge" ? raw.existingControls?.[0]?.control_id ?? null : null,
+        title: evidence.title,
+        description: evidence.description,
+        evidenceIds,
+        owner: evidence.party,
+        recipient: evidence.counterparty,
+        date_text: evidence.date_text,
+        date_kind: evidence.date_kind,
+        date: evidence.date,
+        trigger: evidence.trigger,
+        offset_days: evidence.offset_days,
+        recurrence: evidence.recurrence,
+        acceptance_criteria: evidence.acceptance_criteria,
+        evidence_required: evidence.evidence_required,
+        source_status: evidence.source_status,
+        commitment_level: evidence.commitment_level,
+        teams: evidence.teams,
+        workstreams: evidence.workstreams,
+        scope_relation: evidence.scope_relation,
+        start_date: evidence.start_date,
+        end_date: evidence.end_date,
+        duration_days: evidence.duration_days,
+        schedule_basis: evidence.schedule_basis,
+        mergeJustification: evidenceIds.length > 1 ? "Same deliverable, date, commitment level, and source status." : null,
+      });
+      value = {
+        reviewPacketId: raw.reviewPacketId,
+        needsReview: false,
+        groups: responseMode === "reconcile-merge"
+          ? [groupFor(raw.evidenceItems[0], raw.evidenceItems.map(evidence => evidence.evidence_id))]
+          : raw.evidenceItems.map(evidence => groupFor(evidence, [evidence.evidence_id])),
+        dispositions: [],
+        reviewReason: null,
+      };
+    } else if (user.startsWith("Review cross-control relationships")) {
+      value = { relationships: [], needsReview: false, reviewReason: null };
+    } else value = ids.length === 0 ? { ok: true } : { packets: ids.map(packetId => ({
       packetId,
       documentRole: "award",
       disposition: "extracted",
       reason: "source contains an explicit deliverable",
       items: [{ item_type: "deliverable", title: "Final report", description: "Submit the final report.", date_text: "2026-08-01", date_kind: "exact", date: "2026-08-01", commitment_level: "required", direct_quotes: ["Final report due 2026-08-01."], interpretation: "explicit", confidence: "high", teams: ["Delivery"], workstreams: ["Reporting"], scope_relation: "full", start_date: null, end_date: "2026-08-01", duration_days: null, schedule_basis: "source" }]
     })) };
+    const isExtraction = ids.length > 0;
+    if (isExtraction) extractionCalls += 1;
+    const malformed = isExtraction && extractionCalls === 1 && ["truncate-once", "malformed-once"].includes(responseMode);
+    const content = malformed ? '{"packets": [' : JSON.stringify(value);
+    const finishReason = malformed && responseMode === "truncate-once" ? "length" : "stop";
     const send = () => {
       response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(value) } }], usage: { prompt_tokens: Math.ceil(body.length / 4), prompt_tokens_details: { cached_tokens: ids.length ? cachedTokens : 0 } }, timings: { prompt_ms: 25, predicted_ms: 10 } }));
+      response.end(JSON.stringify({ choices: [{ finish_reason: finishReason, message: { content } }], usage: { prompt_tokens: Math.ceil(body.length / 4), prompt_tokens_details: { cached_tokens: ids.length ? cachedTokens : 0 } }, timings: { prompt_ms: 25, predicted_ms: 10 } }));
     };
     if (ids.length && extractionDelayMs) setTimeout(send, extractionDelayMs);
     else send();
@@ -1872,7 +1919,7 @@ test("project extraction worker isolates its slot and completes cache-aware arti
 				FORGE_BASE_CHAT_URL: fixture.url,
 				FORGE_EMBEDDINGS_URL: embeddings.url,
 			};
-			await runAsyncWithEnvironment(python, [cli, "process", runDirectory], projectEnvironment);
+			await runAsyncWithEnvironment(python, [cli, "process", runDirectory, "--worker"], projectEnvironment);
 			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
 			assert.ok(requests.length >= 2);
 			assert.ok(requests.every((request) => request.id_slot === 1 && request.cache_prompt === true));
@@ -1898,6 +1945,151 @@ test("project extraction worker isolates its slot and completes cache-aware arti
 		} finally {
 			await fixture.close();
 			await embeddings.close();
+		}
+	});
+});
+
+test("project extraction run completes 100-plus packets serially without scheduling", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startProjectExtractionWorkerFixture(workspace);
+		try {
+			const agentDirectory = join(workspace, "agent");
+			mkdirSync(agentDirectory);
+			writeFileSync(join(agentDirectory, "settings.json"), `${JSON.stringify({ connectedServices: { chat: { enabled: true, baseUrl: fixture.url, model: "code", scheduling: { enabled: false } } } })}\n`);
+			const sources = join(workspace, "sources");
+			mkdirSync(sources);
+			const sections = Array.from({ length: 101 }, (_, offset) => `# Award ${offset + 1}\n\nFinal report due 2026-08-01.\n\n${"Packet-specific context. ".repeat(38)}\n`);
+			writeFileSync(join(sources, "awards.md"), sections.join("\n"));
+			const runDirectory = join(workspace, "run");
+			const cli = script("project-extraction", "project-extraction.py");
+			run(python, [cli, "init", sources, "--output", runDirectory, "--packet-chars", "1000"]);
+			const configPath = join(runDirectory, "run_config.json");
+			const config = JSON.parse(readFileSync(configPath, "utf8"));
+			config.worker.packetCharacters = 48_000;
+			writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+			await runAsyncWithEnvironment(python, [cli, "process", runDirectory], {
+				PI_FORGE_AGENT_DIR: agentDirectory,
+				FORGE_BASE_CHAT_URL: fixture.url,
+				FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
+			});
+			assert.equal(JSON.parse(readFileSync(join(runDirectory, "run_state.json"), "utf8")).status, "complete");
+			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			assert.ok(requests.length >= 4);
+			assert.ok(requests.every((request) => request.id_slot === undefined));
+			const metrics = JSON.parse(readFileSync(join(runDirectory, "run_metrics.json"), "utf8"));
+			assert.equal(metrics.packets, 101);
+			assert.ok(metrics.foregroundModelCalls >= 4);
+			assert.equal(metrics.backgroundModelCalls, 0);
+			assert.equal(metrics.coverage.completionEligible, true);
+			const resumed = jsonOutput(await runAsyncWithEnvironment(python, [cli, "run", sources, "--output", runDirectory, "--packet-chars", "1000"], {
+				PI_FORGE_AGENT_DIR: agentDirectory,
+				FORGE_BASE_CHAT_URL: fixture.url,
+				FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
+			}));
+			assert.equal(resumed.complete, true);
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("project extraction rejects deferred screening and labels incomplete drafts", () => {
+	withWorkspace((workspace) => {
+		const source = join(workspace, "source.md");
+		writeFileSync(source, "# Notes\n\nThis packet still requires review.\n");
+		const cli = script("project-extraction", "project-extraction.py");
+		const runDirectory = join(workspace, "run");
+		run(python, [cli, "init", source, "--output", runDirectory]);
+		const packet = jsonOutput(run(python, [cli, "next", runDirectory]));
+		runFailure(python, [cli, "record", runDirectory, "--packet-id", packet.packetId, "--status", "screened_no_controls", "--note", "Awaiting full extraction.", "--screening-method", "human", "--disposition-source", "manual"], /substantive finding/);
+		runFailure(python, [cli, "build", runDirectory], /complete build requires substantive coverage/);
+		const draft = jsonOutput(run(python, [cli, "build", runDirectory, "--draft"]));
+		assert.equal(draft.draft, true);
+		const coverage = JSON.parse(readFileSync(join(runDirectory, "coverage.json"), "utf8"));
+		assert.equal(coverage.completionEligible, false);
+		assert.equal(coverage.packetCounts.pending, 1);
+		assert.match(readFileSync(join(runDirectory, "project_brief.md"), "utf8"), /Incomplete draft/i);
+		assert.match(readFileSync(join(runDirectory, "gantt.html"), "utf8"), /Incomplete draft/i);
+		runFailure(python, [cli, "validate", runDirectory, "--json"], /incomplete_coverage|completion-eligible/);
+	});
+});
+
+test("project extraction validation reports all extraction errors together", () => {
+	withWorkspace((workspace) => {
+		const source = join(workspace, "source.md");
+		writeFileSync(source, "# Source\n\nExact source words.\n");
+		const cli = script("project-extraction", "project-extraction.py");
+		const runDirectory = join(workspace, "run");
+		run(python, [cli, "init", source, "--output", runDirectory]);
+		const packet = jsonOutput(run(python, [cli, "next", runDirectory]));
+		const invalidPath = join(workspace, "invalid.json");
+		writeFileSync(invalidPath, JSON.stringify({ documentRole: "invalid", items: [{ item_type: "unknown", title: "", date_kind: "exact", date: "tomorrow", direct_quotes: ["absent quote"] }] }));
+		const result = runWithEnvironment(python, [cli, "validate-extraction", runDirectory, "--packet-id", packet.packetId, "--items-file", invalidPath], {}, 1);
+		const validation = JSON.parse(result.stdout);
+		assert.ok(validation.errors.length >= 5);
+		assert.match(validation.errors.join(" "), /documentRole.*item_type.*title.*YYYY-MM-DD.*quote/s);
+	});
+});
+
+test("project extraction splits truncated responses and retries malformed responses without evidence loss", async () => {
+	for (const mode of ["truncate-once", "malformed-once"]) {
+		await withAsyncWorkspace(async (workspace) => {
+			const fixture = await startProjectExtractionWorkerFixture(workspace, false, 500, 0, mode);
+			try {
+				const agentDirectory = join(workspace, "agent");
+				mkdirSync(agentDirectory);
+				writeFileSync(join(agentDirectory, "settings.json"), `${JSON.stringify({ connectedServices: { chat: { enabled: true, baseUrl: fixture.url, model: "code", scheduling: { enabled: false, yieldMs: 0 } } } })}\n`);
+				const source = join(workspace, "award.md");
+				writeFileSync(source, `# Award\n\nFinal report due 2026-08-01.\n\n${"Project context and reporting detail. ".repeat(250)}\n`);
+				const runDirectory = join(workspace, "run");
+				const cli = script("project-extraction", "project-extraction.py");
+				run(python, [cli, "init", source, "--output", runDirectory]);
+				await runAsyncWithEnvironment(python, [cli, "process", runDirectory], {
+					PI_FORGE_AGENT_DIR: agentDirectory,
+					FORGE_BASE_CHAT_URL: fixture.url,
+					FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
+				});
+				assert.equal(JSON.parse(readFileSync(join(runDirectory, "run_state.json"), "utf8")).status, "complete");
+				assert.equal(JSON.parse(readFileSync(join(runDirectory, "run_metrics.json"), "utf8")).dispositions.extracted, 1);
+				const schedule = readFileSync(join(runDirectory, "inference_schedule.jsonl"), "utf8");
+				assert.match(schedule, mode === "truncate-once" ? /truncation_split/ : /validation_retry/);
+			} finally {
+				await fixture.close();
+			}
+		});
+	}
+});
+
+test("project extraction model reconciliation merges duplicate evidence and preserves stable control IDs", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startProjectExtractionWorkerFixture(workspace, false, 500, 0, "reconcile-merge");
+		try {
+			const agentDirectory = join(workspace, "agent");
+			mkdirSync(agentDirectory);
+			writeFileSync(join(agentDirectory, "settings.json"), `${JSON.stringify({ connectedServices: { chat: { enabled: true, baseUrl: fixture.url, model: "code", scheduling: { enabled: false, yieldMs: 0 } } } })}\n`);
+			const sources = join(workspace, "sources");
+			mkdirSync(sources);
+			writeFileSync(join(sources, "award.md"), "# Award\n\nFinal report due 2026-08-01.\n");
+			writeFileSync(join(sources, "work-plan.md"), "# Work Plan\n\nFinal report due 2026-08-01.\n");
+			const runDirectory = join(workspace, "run");
+			const cli = script("project-extraction", "project-extraction.py");
+			const environment = { PI_FORGE_AGENT_DIR: agentDirectory, FORGE_BASE_CHAT_URL: fixture.url, FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings" };
+			run(python, [cli, "init", sources, "--output", runDirectory]);
+			await runAsyncWithEnvironment(python, [cli, "process", runDirectory], environment);
+			let controls = readFileSync(join(runDirectory, "controls.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			assert.equal(controls.length, 1);
+			assert.equal(controls[0].control_id, "DEL-001");
+			assert.equal(controls[0].source_evidence_ids.length, 2);
+			assert.match(controls[0].notes, /Merge justification/);
+
+			writeFileSync(join(sources, "award.md"), "# Award Update\n\nFinal report due 2026-08-01.\n\nStatus clarified.\n");
+			run(python, [cli, "refresh", runDirectory]);
+			await runAsyncWithEnvironment(python, [cli, "process", runDirectory], environment);
+			controls = readFileSync(join(runDirectory, "controls.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			assert.equal(controls.length, 1);
+			assert.equal(controls[0].control_id, "DEL-001");
+		} finally {
+			await fixture.close();
 		}
 	});
 });
@@ -1948,7 +2140,7 @@ test("project extraction worker pauses after repeated cache misses", async () =>
 			const runDirectory = join(workspace, "run");
 			const cli = script("project-extraction", "project-extraction.py");
 			run(python, [cli, "init", sources, "--output", runDirectory]);
-			await runAsyncWithEnvironment(python, [cli, "process", runDirectory], {
+			await runAsyncWithEnvironment(python, [cli, "process", runDirectory, "--worker"], {
 				PI_FORGE_AGENT_DIR: agentDirectory,
 				FORGE_BASE_CHAT_URL: fixture.url,
 				FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
@@ -1978,7 +2170,7 @@ test("project extraction worker preempts and requeues for an interactive lease",
 			const runDirectory = join(workspace, "run");
 			const cli = script("project-extraction", "project-extraction.py");
 			run(python, [cli, "init", sources, "--output", runDirectory]);
-			const processing = runAsyncWithEnvironment(python, [cli, "process", runDirectory], {
+			const processing = runAsyncWithEnvironment(python, [cli, "process", runDirectory, "--worker"], {
 				PI_FORGE_AGENT_DIR: agentDirectory,
 				FORGE_BASE_CHAT_URL: fixture.url,
 				FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
@@ -1994,7 +2186,7 @@ test("project extraction worker preempts and requeues for an interactive lease",
 				poll();
 			});
 			const leaseDirectory = join(agentDirectory, "inference-leases");
-			mkdirSync(leaseDirectory);
+			mkdirSync(leaseDirectory, { recursive: true });
 			const lease = join(leaseDirectory, "interactive.json");
 			writeFileSync(lease, `${JSON.stringify({ kind: "interactive", updatedAtMs: Date.now() })}\n`);
 			await new Promise((resolve) => setTimeout(resolve, 250));
@@ -3607,6 +3799,40 @@ printf 'synthetic audio' > "$output"
 		assert.equal(recorded.status, "success");
 		assert.match(readFileSync(packet.paths.extracted, "utf8"), /cleaned lecture transcript/);
 		assert.equal(jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", runDirectory])).valid, true);
+	});
+});
+
+test("document ingest adapts Zoom JSON and archives represented provenance sidecars", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const cli = script("document-ingest", "document-ingest.mjs");
+		const project = join(workspace, "project");
+		const staging = join(project, "Inbox", ".processing", "batch");
+		mkdirSync(staging, { recursive: true });
+		const zoomName = "meeting.zoom.json";
+		const zoomRecords = [{ speaker: "Alex", text: "The final report is due Friday." }, { speaker: "Sam", text: "I will circulate the draft." }];
+		writeFileSync(join(staging, zoomName), `${JSON.stringify(zoomRecords)}\n`);
+		writeFileSync(join(staging, "meeting.md"), `# Project Meeting\n\nSource: \`${zoomName}\`\n\n## Transcript\n\n**Alex:** The final report is due Friday.\n\n**Sam:** I will circulate the draft.\n`);
+		const runDirectory = join(project, "Ingest", "Inbox", "batch");
+		const intake = jsonOutput(await runAsyncWithEnvironment(process.execPath, [cli, "intake", staging, "--destination", project, "--output", runDirectory], {}));
+		assert.equal(intake.finalized.finalized, true);
+		assert.equal(intake.finalized.publishedMarkdown, 1);
+		assert.equal(intake.finalized.movedOriginals, 2);
+		assert.equal(existsSync(join(project, "Sources", "Inbox", "meeting.md")), true);
+		assert.equal(existsSync(join(project, "Originals", "Inbox", zoomName)), true);
+		assert.match(readFileSync(join(runDirectory, "manifest.csv"), "utf8"), /represented_by_published_source:meeting\.md/);
+		assert.match(readFileSync(join(runDirectory, "source_relationships.jsonl"), "utf8"), /represented_by_published_source/);
+
+		const standaloneProject = join(workspace, "standalone-project");
+		const standaloneStaging = join(standaloneProject, "Inbox", ".processing", "batch");
+		mkdirSync(standaloneStaging, { recursive: true });
+		writeFileSync(join(standaloneStaging, "standalone.json"), `${JSON.stringify(zoomRecords)}\n`);
+		const standaloneRun = join(standaloneProject, "Ingest", "Inbox", "batch");
+		const standalone = jsonOutput(await runAsyncWithEnvironment(process.execPath, [cli, "intake", standaloneStaging, "--destination", standaloneProject, "--output", standaloneRun], {}));
+		assert.equal(standalone.nextAction, "review");
+		const review = jsonOutput(run(process.execPath, [cli, "next-review", standaloneRun]));
+		assert.equal(review.current.extraction.method, "zoom-json-transcript");
+		assert.match(readFileSync(review.paths.document, "utf8"), /\*\*Alex:\*\* The final report is due Friday\./);
+		assert.match(readFileSync(review.paths.sourceMap, "utf8"), /zoom-transcript-record/);
 	});
 });
 

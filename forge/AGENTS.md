@@ -52,12 +52,13 @@ When a folder contains grants, awards, proposals, scopes of work, contracts,
 work plans, project reports, presentations, meeting notes, or interviews and
 the user needs deliverables, requirements, dates, actions, or risks tracked,
 route finalized document-ingest outputs to `project-extraction`. Keep its
-`project_status.csv` human-maintained. When cache-aware scheduling is enabled,
-reserve local slot 0 for interactive work and slot 1 for its serialized worker;
-never fall back to sharing one slot. It can produce focused team/workstream
-views and source-backed Gantt outputs. When a marked project `Inbox/` exists,
-load `project-extraction`, run its Inbox preflight, and incorporate reviewed
-files before relying on refreshed controls. For questions about an existing
+`project_status.csv` human-maintained. Use its `run` command for initialization
+or resume, then Inbox intake, serial foreground extraction, model-assisted
+reconciliation, build, and validation. Background mode is opt-in and must use
+the cooperative inference lease. Artifacts do not imply completion: only a
+successful validation transition does. Partial builds must use `--draft` and
+retain coverage warnings. It can produce focused team/workstream views and
+source-backed Gantt outputs. For questions about an existing
 extraction, use its hybrid search first and load full source documents only
 when retrieved passages are insufficient. Use `report-output` only for polished
 downstream deliverables.

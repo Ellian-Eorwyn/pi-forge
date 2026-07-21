@@ -1,8 +1,8 @@
 {
 	"name": "project-extraction",
 	"type": "pi-forge-skill",
-	"version": "0.3.0",
-	"description": "Search and continuously refresh source-backed project controls, focused views, Inbox updates, and Gantt outputs.",
+	"version": "0.4.0",
+	"description": "Orchestrate truthful serial extraction, reconciliation, search, Inbox refresh, focused views, and project-control outputs.",
 	"skill_file": "SKILL.md",
 	"scripts_dir": "scripts",
 	"references_dir": "references",

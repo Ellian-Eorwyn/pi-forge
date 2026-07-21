@@ -44,7 +44,7 @@ const MAXIMUM_PUNCTUATION_RATIO = 0.55;
 const MAXIMUM_DOT_RUN_RATIO = 0.2;
 const IMAGE_EXTENSIONS = new Set([".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"]);
 const AUDIO_VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".mkv", ".webm", ".avi", ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus"]);
-const SUPPORTED_EXTENSIONS = new Set([".pdf", ".docx", ".pptx", ".txt", ".md", ".markdown", ".html", ".htm", ".rtf", ...IMAGE_EXTENSIONS, ...AUDIO_VIDEO_EXTENSIONS]);
+const SUPPORTED_EXTENSIONS = new Set([".pdf", ".docx", ".pptx", ".txt", ".md", ".markdown", ".json", ".html", ".htm", ".rtf", ...IMAGE_EXTENSIONS, ...AUDIO_VIDEO_EXTENSIONS]);
 const RESERVED_WORKSPACE_DIRECTORIES = new Set(["Ingest", "Originals", "Generated"]);
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const GENERATED_ARTIFACT_NAMES = new Set([
@@ -86,7 +86,7 @@ const RUN_STATE_WORKFLOW = "document-ingest";
 const EVIDENCE_FIELDS = ["title", "author", "date", "source"];
 const EVIDENCE_ORIGINS = ["embedded-metadata", "document-text", "filename", "user-provided"];
 const EVIDENCE_CONFIDENCES = ["high", "medium", "low"];
-const SOURCE_MAP_METHODS = ["page-extraction", "document-conversion", "model-alignment", "vision-transcription"];
+const SOURCE_MAP_METHODS = ["page-extraction", "document-conversion", "transcript-conversion", "model-alignment", "vision-transcription"];
 
 function fail(message, exitCode = 1) {
 	process.stderr.write(`Error: ${message}\n`);
@@ -810,6 +810,63 @@ function extractText(filePath) {
 	};
 }
 
+function cleanMarkdownMetadata(filePath, markdown) {
+	const title = markdown.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? null;
+	const source = markdown.match(/^\s*(?:source|derived from|zoom export)\s*:\s*(.+)$/im)?.[1]?.trim() ?? null;
+	return {
+		title: title ?? safeStem(filePath),
+		author: null,
+		date: basename(filePath).match(/\b(\d{4}-\d{2}-\d{2})\b/)?.[1] ?? null,
+		source,
+	};
+}
+
+function extractCleanMarkdown(filePath) {
+	const extracted = extractText(filePath);
+	extracted.method = "direct-clean-markdown";
+	extracted.embedded = cleanMarkdownMetadata(filePath, extracted.markdown);
+	return extracted;
+}
+
+function extractZoomTranscriptJson(filePath) {
+	let records;
+	try {
+		records = JSON.parse(readFileSync(filePath, "utf8"));
+	} catch (error) {
+		throw new Error(`JSON input is invalid: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	if (!Array.isArray(records) || records.length === 0) throw new Error("JSON input is not a nonempty Zoom transcript array");
+	for (const [index, record] of records.entries()) {
+		if (!record || typeof record !== "object" || Array.isArray(record) || typeof record.speaker !== "string" || record.speaker.trim() === "" || typeof record.text !== "string" || record.text.trim() === "") {
+			throw new Error(`Zoom transcript record ${index + 1} must contain nonblank speaker and text strings`);
+		}
+	}
+	const title = safeStem(filePath);
+	const lines = [`# ${title}`, "", `Source: \`${basename(filePath)}\``, "", "## Transcript", ""];
+	const sourceMapEntries = [];
+	for (const [index, record] of records.entries()) {
+		const start = lines.length + 1;
+		lines.push(`**${record.speaker.trim()}:** ${record.text.trim()}`, "");
+		sourceMapEntries.push({
+			markdownStartLine: start,
+			markdownEndLine: start,
+			sourceLocator: { type: "zoom-transcript-record", path: filePath, index },
+			method: "transcript-conversion",
+			confidence: "high",
+		});
+	}
+	const markdown = ensureFinalNewline(lines.join("\n"));
+	return {
+		markdown,
+		method: "zoom-json-transcript",
+		pageCount: null,
+		warnings: [],
+		embedded: { title, author: null, date: basename(filePath).match(/\b(\d{4}-\d{2}-\d{2})\b/)?.[1] ?? null, source: basename(filePath) },
+		sourceMapEntries,
+		ocr: { mode: "not-applicable", attempted: false, used: false, reason: null, candidatePages: [], beforeQuality: [], afterQuality: [], unresolvedPages: [], derivedPath: null, derivedSha256: null, error: null },
+	};
+}
+
 function extractMedia(filePath, documentDirectory, tools) {
 	if (!tools.ffmpeg.available) throw new Error("FFmpeg is required for media ingestion but was not found on PATH");
 	const derivedDirectory = join(documentDirectory, "derived");
@@ -1024,6 +1081,8 @@ async function prepareDocument(filePath, runDirectory, options, tools, usedDirec
 	let extracted;
 	if (format === "pdf") extracted = await extractPdf(filePath, documentDirectory, options, tools);
 	else if (format === "pptx") extracted = extractPptx(filePath, tools);
+	else if (format === "json") extracted = extractZoomTranscriptJson(filePath);
+	else if (format === "md" && options.cleanMarkdownFastPath) extracted = extractCleanMarkdown(filePath);
 	else if (IMAGE_EXTENSIONS.has(extname(filePath).toLowerCase())) {
 		if (options.ocr === "never") throw new Error("image ingestion requires OCR, but OCR was disabled");
 		if (options.ocrBackend === "local") throw new Error("image ingestion requires --ocr-backend glmocr or auto");
@@ -1055,8 +1114,9 @@ async function prepareDocument(filePath, runDirectory, options, tools, usedDirec
 	if (chunks.some((chunk) => unicodeLength(chunk) > options.chunkCharacters)) {
 		warnings.push("A single paragraph exceeds the chunk threshold and was preserved without splitting.");
 	}
+	const deterministicClean = extracted.method === "direct-clean-markdown" && warnings.length === 0 && chunks.length === 1 && /^#\s+\S/m.test(extracted.markdown);
 	const extraction = {
-		status: "needs_review",
+		status: deterministicClean ? "success" : "needs_review",
 		method: extracted.method,
 		toolVersions,
 		warnings,
@@ -1086,8 +1146,8 @@ async function prepareDocument(filePath, runDirectory, options, tools, usedDirec
 			source: evidence(extracted.embedded.source, "embedded-metadata", "medium", extracted.embedded.source ? "embedded metadata: source" : null),
 		},
 		structure: markdownStructure(extracted.markdown),
-		review: { completed: false, notes: [] },
-		finalOutput: { filename: null, namingReason: null },
+		review: { completed: deterministicClean, notes: deterministicClean ? ["Clean Markdown validated deterministically during Inbox intake."] : [] },
+		finalOutput: deterministicClean ? { filename: basename(filePath).replace(/\.markdown$/i, ".md"), namingReason: "Preserved already-clean Markdown filename." } : { filename: null, namingReason: null },
 	};
 	writeJson(join(documentDirectory, "metadata.json"), metadata);
 	writeJson(join(documentDirectory, "source_map.json"), {
@@ -1096,7 +1156,7 @@ async function prepareDocument(filePath, runDirectory, options, tools, usedDirec
 		markdownFile: "document.md",
 		entries: extracted.sourceMapEntries,
 	});
-	writeFileSync(join(documentDirectory, "extraction_report.md"), extractionReport(source, extraction, "needs_review — model normalization pending"), { flag: "wx" });
+	writeFileSync(join(documentDirectory, "extraction_report.md"), extractionReport(source, extraction, deterministicClean ? "success — deterministic clean Markdown validation complete" : "needs_review — model normalization pending"), { flag: "wx" });
 	if (existsSync(finalDirectory)) throw new Error(`prepared output already exists: ${finalDirectory}`);
 	renameSync(documentDirectory, finalDirectory);
 	return {
@@ -1105,7 +1165,7 @@ async function prepareDocument(filePath, runDirectory, options, tools, usedDirec
 			source_path: filePath,
 			source_sha256: sourceHash,
 			source_format: format,
-			status: "needs_review",
+			status: extraction.status,
 			suggested_pipeline: "", // To be populated later
 			output_directory: directoryName,
 			title: metadata.fields.title.value ?? "",
@@ -1153,7 +1213,7 @@ function parsePrepareArguments(args) {
 	}
 	if (!Number.isInteger(glmocrTimeoutMs) || glmocrTimeoutMs < 1) fail("--glmocr-timeout-ms must be a positive integer");
 	if (!Number.isInteger(chunkCharacters) || chunkCharacters < 1) fail("--chunk-chars must be a positive integer");
-	return { input, output, ocr, ocrBackend, glmocrUrl, glmocrTimeoutMs, glmocrLayoutVisualization, chunkCharacters };
+	return { input, output, ocr, ocrBackend, glmocrUrl, glmocrTimeoutMs, glmocrLayoutVisualization, chunkCharacters, cleanMarkdownFastPath: false };
 }
 
 function prepareConfiguration(options) {
@@ -1168,11 +1228,13 @@ function prepareConfiguration(options) {
 			glmocrTimeoutMs: options.glmocrTimeoutMs,
 			glmocrLayoutVisualization: options.glmocrLayoutVisualization,
 			chunkCharacters: options.chunkCharacters,
+			cleanMarkdownFastPath: options.cleanMarkdownFastPath,
 		},
 	};
 }
 
 function pipelineFor(format, folderCategory) {
+	if (format === "json") return folderCategory === "project" ? "transcript-cleanup,project-extraction" : "transcript-cleanup";
 	if (["mp4", "mov", "mkv", "webm", "avi", "mp3", "wav", "m4a", "flac", "ogg", "opus"].includes(format)) {
 		return folderCategory === "project" ? "transcription,transcript-cleanup,project-extraction" : "transcription,transcript-cleanup";
 	}
@@ -1224,10 +1286,28 @@ function preparedRowFromDirectory(item, runDirectory, folderCategory) {
 	};
 }
 
+
+function representedZoomSidecars(files) {
+	const markdownFiles = files.filter((path) => [".md", ".markdown"].includes(extname(path).toLowerCase()));
+	const jsonFiles = files.filter((path) => extname(path).toLowerCase() === ".json");
+	const represented = new Map();
+	for (const markdownPath of markdownFiles) {
+		const markdown = readFileSync(markdownPath, "utf8");
+		for (const jsonPath of jsonFiles) {
+			const escaped = basename(jsonPath).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			const explicitSource = new RegExp(`(?:source|derived from|zoom export)[^\\n]{0,160}${escaped}|${escaped}[^\\n]{0,160}(?:source|export)`, "iu");
+			if (explicitSource.test(markdown)) represented.set(jsonPath, markdownPath);
+		}
+	}
+	return represented;
+}
+
 function initialPrepareItems(inputs) {
+	const representedSidecars = representedZoomSidecars(inputs.files);
 	const items = inputs.files.sort().map((filePath) => {
 		const sourceHash = sha256(readFileSync(filePath));
 		const outputDirectory = `${safeStem(filePath)}-${sourceHash.slice(0, 12)}`;
+		const representedBy = representedSidecars.get(filePath);
 		return {
 			id: `sha256:${sourceHash}`,
 			documentId: `sha256:${sourceHash}`,
@@ -1235,10 +1315,11 @@ function initialPrepareItems(inputs) {
 			sha256: sourceHash,
 			format: sourceFormat(filePath),
 			outputDirectory,
-			status: "pending",
+			status: representedBy ? "skipped" : "pending",
 			attempts: 0,
 			transient: false,
-			error: null,
+			error: representedBy ? `represented_by_published_source:${basename(representedBy)}` : null,
+			representedBy: representedBy ?? null,
 		};
 	});
 	for (const skipped of inputs.skipped) {
@@ -1276,6 +1357,10 @@ async function prepareRun(options) {
 		state.folderCategory = folderCategory;
 		initializeRunState(options.output, state);
 		writeManifest(options.output, items.map(pendingManifestRow));
+		const relationships = items
+			.filter((item) => item.representedBy)
+			.map((item) => JSON.stringify({ sourcePath: item.path, relationship: "represented_by_published_source", derivedPath: item.representedBy, sourceSha256: item.sha256 }));
+		if (relationships.length > 0) atomicWriteFile(join(options.output, "source_relationships.jsonl"), `${relationships.join("\n")}\n`);
 	}
 	let state = loadRunState(options.output, RUN_STATE_WORKFLOW);
 	assertCompatibleRun(state, configuration);
@@ -2313,6 +2398,16 @@ function createFinalizePlan(options) {
 		operations.push({ id: `final_markdown:${row.document_id}`, role: "final_markdown", documentId: row.document_id, from: documentPath, to: markdownDestination, sha256: sha256(readFileSync(documentPath)), status: "pending" });
 		movableSourcePaths.add(sourcePath);
 	}
+	for (const row of rows.filter((candidate) => candidate.status === "skipped" && candidate.error.startsWith("represented_by_published_source:"))) {
+		const sourcePath = resolve(row.source_path);
+		if (!existsSync(sourcePath) || !lstatSync(sourcePath).isFile()) fail(`represented provenance sidecar is missing before finalize: ${sourcePath}`);
+		const sourceRelative = relativeSourcePath(options.intakeRoot ?? options.destination, sourcePath);
+		const originalDestination = options.intakeRoot
+			? join(options.destination, "Originals", "Inbox", sourceRelative)
+			: join(options.destination, "Originals", sourceRelative);
+		operations.push({ id: `represented_sidecar:${row.document_id}`, role: "original", documentId: row.document_id, from: sourcePath, to: originalDestination, sha256: row.source_sha256, status: "pending", relationship: row.error });
+		movableSourcePaths.add(sourcePath);
+	}
 	for (const artifactPath of collectGeneratedArtifacts(options.runDirectory)) {
 		const generatedRelative = relative(options.runDirectory, artifactPath);
 		operations.push({
@@ -2427,6 +2522,7 @@ function parseIntakeArguments(args) {
 	}
 	if (!destination) fail("intake requires --destination <project-folder>");
 	const prepareOptions = parsePrepareArguments(prepareArgs);
+	prepareOptions.cleanMarkdownFastPath = true;
 	if (!pathInside(join(destination, "Inbox"), prepareOptions.input)) fail("intake input must be inside the destination Inbox folder");
 	if (!pathInside(join(destination, "Ingest", "Inbox"), prepareOptions.output)) fail("intake output must be inside <destination>/Ingest/Inbox");
 	return { prepareOptions, destination };

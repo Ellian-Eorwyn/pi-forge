@@ -1,8 +1,8 @@
 {
 	"name": "document-ingest",
 	"type": "pi-forge-skill",
-	"version": "0.1.0",
-	"description": "Normalize documents with provenance.",
+	"version": "0.2.0",
+	"description": "Normalize documents and Zoom transcripts with source and derived-file provenance.",
 	"skill_file": "SKILL.md",
 	"scripts_dir": "scripts",
 	"schemas_dir": "schemas",

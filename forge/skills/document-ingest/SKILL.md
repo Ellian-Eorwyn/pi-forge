@@ -40,6 +40,10 @@ run `project-extraction` after finalization. Put its refreshable workspace at:
 
 Project recordings follow `transcription`, `transcript-cleanup`, then
 `project-extraction`. Do not treat proposal language as an awarded obligation.
+Zoom transcript JSON arrays containing `{speaker,text}` records convert to
+provenance-linked Markdown. If cleaned Markdown explicitly names the JSON
+export as its source, archive the JSON as a represented provenance sidecar
+instead of reviewing it as a second evidence source.
 
 ## Command Card
 
@@ -89,6 +93,10 @@ folder ingestion, review, finalization, and literature handoff.
    applies OCR to images/PDFs (via `glmocr`), extracts PPTX slide text, tables,
    notes, and alt text with slide source maps, and determines a
    `suggested_pipeline` based on the folder contents and file formats.
+   Project Inbox intake fast-paths already-clean Markdown through deterministic
+   structure, encoding, and metadata validation. Model review remains required
+   for ambiguity, malformed content, transformation needs, and standalone Zoom
+   JSON that still needs transcript cleanup.
 
 3. Use the structured review queue instead of reading the full manifest and
    guessing valid values:
@@ -187,8 +195,10 @@ folder ingestion, review, finalization, and literature handoff.
      `project-extraction`, initialize that workflow after finalization.
    - Use the finalized source folder as input and
      `<input-folder>/Generated/Project-Extraction` as output.
-   - Complete packet extraction, reconciliation, build, authored Markdown, and
-     validation. Preserve `project_status.csv` for later refreshes.
+   - Use `project-extraction.py run <input-folder> --output
+     <input-folder>/Generated/Project-Extraction` so initialization/resume
+     precedes Inbox sync and the durable workflow completes through validation.
+     Preserve `project_status.csv` for later refreshes.
 
 ## Safety and Failure Handling
 

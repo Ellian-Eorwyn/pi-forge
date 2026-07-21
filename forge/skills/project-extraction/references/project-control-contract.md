@@ -163,6 +163,15 @@ advisory and requires model confirmation. Evidence with materially different
 owners, dates, acceptance criteria, or obligations must remain separate unless
 the reconciliation records an explicit merge justification.
 
+The ordinary worker performs model-assisted reconciliation serially by control
+type and source role. It explicitly decides canonical grouping,
+contextual/duplicate/conflicting/superseded evidence, commitment and source
+status differences, and merge justification. A bounded second pass may add
+parent, dependency, satisfaction, supersession, and conflict relationships
+across types. The workflow, not the model, allocates deterministic IDs after
+those decisions. Unresolved authority conflicts and ambiguous merges remain
+review items.
+
 ## Scope and Packet Dispositions
 
 Full-project extraction is the default. Focused extraction screens the complete
@@ -174,6 +183,12 @@ must end as `extracted`, `screened_no_controls`, `duplicate_source`,
 skips are invalid in every run. Every direct quote must match frozen packet
 text exactly.
 
+`screened_no_controls` is a substantive result, not a progress state. It must
+record screening method and source, packet hash, document role, and a specific
+finding that no controls are present. Deferral language such as “awaiting
+extraction” is invalid and must be requeued. Pending, failed, preempted, and
+`needs_review` packets are incomplete.
+
 ## Live Inbox and Search
 
 A marked top-level `Inbox/` is a landing area, not project evidence. Intake must
@@ -182,6 +197,12 @@ archive originals under `Originals/Inbox/`, and publish cleaned Markdown under
 `Sources/Inbox/` before project `refresh` discovers it. Never overwrite a
 destination collision. Interrupted batches resume from their durable ingest
 and Inbox manifests; failed files remain reviewable.
+
+Zoom transcript JSON arrays containing `{speaker,text}` records are supported.
+When cleaned Markdown explicitly identifies that export as its source, the
+JSON is archived as `represented_by_published_source` provenance instead of
+failed or duplicated evidence. Already-clean Markdown may pass deterministic
+validation and metadata extraction without model review.
 
 Search results must identify their hit kind, source paths and revisions,
 locators, packet IDs when applicable, and related evidence/control IDs. Use
@@ -195,12 +216,19 @@ extraction only when the response explicitly reports pending intake or refresh.
 Machine-readable outputs are `evidence_items.csv`, `controls.jsonl`, the eight
 project registers, `conflicts_and_gaps.csv`, `source_changes.csv`, and
 `project_status.csv`. Version-2 runs also produce `scope_manifest.csv`,
-`gantt.csv`, `inference_schedule.jsonl`, `run_metrics.json`,
+`gantt.csv`, `inference_schedule.jsonl`, `run_metrics.json`, `coverage.json`,
 `search_index.jsonl`, and `search_index_meta.json`; live runs also maintain
 `inbox_manifest.json` and `inbox_events.jsonl`. Human outputs are the six
 project briefs, `gantt.md`, and `gantt.html`; add
 `proposal_checklist.md` only when a funding notice or proposal is present.
 
+A normal build requires substantive complete packet coverage and resolved
+reconciliation. `build --draft` may create partial artifacts, but
+`coverage.json` and every human-facing brief and Gantt artifact must identify
+the incomplete data and blocking counts.
+
 A run is complete only when all extraction packets and review packets are
 explicitly dispositioned, every control relationship resolves, every Markdown
-placeholder is authored, source hashes match, and `validate` succeeds.
+placeholder is authored, source hashes match, and `validate` succeeds. Only
+that successful validation transition may set run state to `complete`;
+artifact presence alone never supports a completion claim.

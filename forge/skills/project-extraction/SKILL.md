@@ -26,13 +26,16 @@ requested.
 
 ## Runtime preflight
 
-Automatic background processing is opt-in and requires a llama.cpp-compatible
-chat endpoint with two reserved slots. Configure
-`connectedServices.chat.scheduling` with `enabled: true`, interactive slot `0`,
-background slot `1`, and the desired idle/yield limits. The deployment must
-retain idle-slot prompt caches and provide enough total context for the
-interactive and worker slots. Run `doctor --json --probe-slot` before corpus
-work. Never share slot 0 or silently fall back to one slot.
+Serial foreground processing is the reliable default and requires only the
+ordinary configured chat endpoint. It works when scheduling is disabled and
+never issues concurrent model requests. `doctor --json` reports
+`foregroundAvailable` and `backgroundAvailable` separately.
+
+Background processing is opt-in. It requires scheduling plus a verified
+background slot; run `doctor --json --probe-slot` before using `--background`.
+The worker and interactive extension use a cooperative exclusive lease:
+interactive inference has priority, and a background request must yield before
+the interactive provider request begins.
 
 ```json
 {
@@ -53,32 +56,33 @@ caching. A 262,144-token deployment can keep the interactive context below
 128k while reserving roughly 36k prompt capacity for the worker. Stack-manager
 configuration is outside this skill and must be completed separately.
 
-Separate slots protect each prompt cache. Cancellation when an interactive
-lease appears is best effort; it cannot guarantee proxy-level compute priority
-during an already-running prefill.
+Separate slots protect prompt caches; the lease prevents them from inferring
+concurrently against the single loaded model.
 
 ## Workflow
 
 1. Resolve this skill directory from the loaded `SKILL.md` path. Read
    [references/project-control-contract.md](references/project-control-contract.md)
    before extraction or reconciliation.
-2. Before every project action, run `inbox-status`. If files or an active batch
-   are present, run `inbox-sync` and follow its document-ingest review action
-   until publication succeeds. Then run the returned project `process` action
-   before relying on refreshed controls. Search may use the last completed index
-   while intake is incomplete, but must report the warning.
+2. Initialize or resume first, then inspect the run's configured Inbox. The
+   normal path performs preflight, init/resume, Inbox sync, extraction,
+   reconciliation, build, indexing, and validation through durable checkpoints:
 
    ```bash
-   python3 <skill-directory>/scripts/project-extraction.py inbox-status <run>
-   python3 <skill-directory>/scripts/project-extraction.py inbox-sync <run>
+   python3 <skill-directory>/scripts/project-extraction.py run <inputs...> \
+     --output <run> [--background]
    ```
+
+   If Inbox review is required, `run`/`inbox-sync` returns the exact
+   document-ingest `next-review`, `record-review`, `validate`, `finalize`, and
+   project resume commands. Do not invent command names.
 
    New single-folder runs create `<project-root>/Inbox/`. Configure existing
    multi-root runs with `inbox-sync <run> --inbox <project-root>/Inbox`.
    Successful intake publishes cleaned Markdown under `Sources/Inbox/`, archives
    originals under `Originals/Inbox/`, and refreshes the project. Never read
    unprocessed Inbox files as project evidence.
-3. Check the local workflow and initialize a run directory. Repeating the same
+3. For diagnostics, check the local workflow and initialize a run directory. Repeating the same
    command and output resumes a compatible marked run:
 
    ```bash
@@ -88,16 +92,17 @@ during an already-running prefill.
      [--focus "scope"] [--team NAME] [--workstream NAME]
    ```
 
-   Use `status <run> --json` to inspect the frozen source snapshot without
-   changing it, and `retry <run> --item <packet-id>|--all-failed` for explicit
-   permanent-failure retry.
+   After initialization, run `inbox-status` and `inbox-sync`, then `process`.
+   Use `status <run> --json` to inspect truthful coverage, blocking counts, the
+   last successful stage, and the exact next command. Use `retry <run>
+   --item <packet-id>|--all-failed|--invalid-screenings` for explicit repair.
 
-4. Start the durable worker. It screens, extracts, reconciles, builds, indexes,
-   and validates serially. Foreground processing is useful for diagnosis;
-   `--background` returns immediately. Inspect compact status and control it
-   between model calls:
+4. `process <run>` performs the durable workflow serially in the foreground.
+   `--background` is optional and returns immediately. Inspect compact status
+   and control background work between model calls:
 
    ```bash
+   python3 <skill-directory>/scripts/project-extraction.py process <run>
    python3 <skill-directory>/scripts/project-extraction.py process <run> --background
    python3 <skill-directory>/scripts/project-extraction.py status <run> --json
    python3 <skill-directory>/scripts/project-extraction.py pause <run>
@@ -105,13 +110,16 @@ during an already-running prefill.
    python3 <skill-directory>/scripts/project-extraction.py stop-after-current <run>
    ```
 
-   The worker uses stable stage prefixes, slot 1, prompt caching, approximately
-   112,000-character initial packets, and response usage to calibrate toward
-   32,768 source tokens within the configured prompt ceiling. Embeddings may
-   rank relevance and flag duplicates, but cannot decide semantic identity.
-5. Retain `next`, `record`, `reconcile`, `next-review`, and `record-review` for
-   diagnosis. Every packet requires one structured disposition; generic
-   unprocessed skips are invalid. Quotes must match frozen packet text.
+   The worker uses stable prompt prefixes, semantic sections, and observed
+   output density, item count, token usage, and finish reason to adapt packet
+   size. Length-truncated responses split and requeue automatically. Embeddings
+   may rank relevance and flag duplicates, but cannot decide semantic identity.
+5. Retain `next`, `validate-extraction`, `record`, `reconcile`, `next-review`,
+   and `record-review` for diagnosis. `next` returns the versioned schema and a
+   ready response shape; `validate-extraction` reports all errors at once.
+   `screened_no_controls` requires packet-bound method, source, role, hash, and
+   a substantive finding. Deferral wording is invalid. Quotes are located with
+   Unicode-aware matching and stored as the unique exact source slice.
 
    ```bash
    python3 <skill-directory>/scripts/project-extraction.py reconcile <run>
@@ -120,7 +128,10 @@ during an already-running prefill.
      --review-file <working/review.json>
    ```
 
-6. Build and validate produce registers, briefs, metrics, a hybrid search index,
+6. A normal build requires complete extraction and reconciliation coverage.
+   `build --draft` is the only partial-output path. Drafts include
+   `coverage.json`, blocking/review counts, source coverage, and an incomplete
+   banner in every brief and Gantt artifact. Build and validate produce registers, briefs, metrics, a hybrid search index,
    and Gantt CSV, Mermaid Markdown, and accessible HTML. Only source-backed
    exact dates and human forecasts are scheduled; everything else remains
    unscheduled.
@@ -128,7 +139,11 @@ during an already-running prefill.
    ```bash
    python3 <skill-directory>/scripts/project-extraction.py build <run> \
      [--as-of YYYY-MM-DD]
+   python3 <skill-directory>/scripts/project-extraction.py build <run> --draft
    ```
+
+   Artifact presence never means completion. Only a successful `validate`
+   transition may set the run to `complete` or justify a completion claim.
 
 7. Derive reusable focused views from a completed comprehensive run:
 

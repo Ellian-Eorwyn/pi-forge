@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import contextlib
 import csv
 import hashlib
 import html
@@ -15,6 +16,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import unicodedata
 from collections import Counter
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -25,14 +27,15 @@ import forge_embeddings
 
 
 RUN_SCHEMA_VERSION = 2
-DEFAULT_PACKET_CHARACTERS = 112_000
-MIN_ADAPTIVE_PACKET_CHARACTERS = 96_000
-MAX_ADAPTIVE_PACKET_CHARACTERS = 140_000
-TARGET_SOURCE_TOKENS = 32_768
+DEFAULT_PACKET_CHARACTERS = 48_000
+MIN_ADAPTIVE_PACKET_CHARACTERS = 24_000
+MAX_ADAPTIVE_PACKET_CHARACTERS = 72_000
+TARGET_SOURCE_TOKENS = 14_000
 DEFAULT_CHARS_PER_TOKEN = 3.42
 DEFAULT_PROMPT_TOKEN_CEILING = 36_864
 PROMPT_TOKEN_RESERVE = 3_500
 LEASE_STALE_MS = 15_000
+EXTRACTION_SCHEMA_VERSION = 1
 SOURCE_EXTENSIONS = {".md", ".markdown", ".txt", ".csv"}
 RESERVED_DIRECTORIES = {"Inbox", "Ingest", "Originals", "Generated"}
 PLACEHOLDER = "<!-- TODO: author this section -->"
@@ -96,6 +99,12 @@ PACKET_STATUSES = {
     "preempted",
     "failed",
 }
+COMPLETION_PACKET_STATUSES = {"extracted", "screened_no_controls", "duplicate_source", "excluded_by_scope"}
+BLOCKING_PACKET_STATUSES = {"pending", "needs_review", "preempted", "failed"}
+DEFERRED_SCREENING_PATTERN = re.compile(
+    r"\b(await(?:ing)?|defer(?:red)?|later|not processed|not extracted|full extraction|scheduling|runtime unavailable)\b",
+    flags=re.IGNORECASE,
+)
 REVIEW_DISPOSITIONS = {"contextual", "duplicate", "superseded", "conflicting"}
 WORKING_STATUSES = {"", "unknown", "not_started", "in_progress", "blocked", "submitted", "accepted", "completed", "cancelled"}
 
@@ -340,6 +349,60 @@ def stable_id(prefix, value, length=12):
     return f"{prefix}-{sha256_bytes(value.encode('utf-8'))[:length]}"
 
 
+def normalized_quote_map(value):
+    normalized = []
+    spans = []
+    whitespace_open = False
+    replacements = {
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201a": "'",
+        "\u201b": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u201e": '"',
+        "\u201f": '"',
+        "\u2010": "-",
+        "\u2011": "-",
+        "\u2012": "-",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2212": "-",
+    }
+    for index, character in enumerate(value):
+        expanded = unicodedata.normalize("NFKC", replacements.get(character, character))
+        for normalized_character in expanded:
+            if normalized_character.isspace():
+                if whitespace_open or not normalized:
+                    continue
+                normalized.append(" ")
+                spans.append((index, index + 1))
+                whitespace_open = True
+            else:
+                normalized.append(normalized_character)
+                spans.append((index, index + 1))
+                whitespace_open = False
+    if normalized and normalized[-1] == " ":
+        normalized.pop()
+        spans.pop()
+    return "".join(normalized), spans
+
+
+def exact_source_quote(packet_text, proposed):
+    if proposed in packet_text:
+        return proposed
+    normalized_packet, spans = normalized_quote_map(packet_text)
+    normalized_proposed, _ = normalized_quote_map(proposed)
+    if not normalized_proposed:
+        return None
+    starts = [match.start() for match in re.finditer(re.escape(normalized_proposed), normalized_packet)]
+    if len(starts) != 1:
+        return None
+    start = starts[0]
+    end = start + len(normalized_proposed) - 1
+    return packet_text[spans[start][0] : spans[end][1]]
+
+
 def write_json(path, value):
     run_state.atomic_write_json(path, value)
 
@@ -424,7 +487,7 @@ def active_interactive_leases():
             row = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if now_ms - float(row.get("updatedAtMs", 0)) <= LEASE_STALE_MS:
+        if row.get("kind", "interactive") == "interactive" and now_ms - float(row.get("updatedAtMs", 0)) <= LEASE_STALE_MS:
             active.append(row)
     return active
 
@@ -460,28 +523,63 @@ def extract_json_text(value):
         return json.loads(text[start : end + 1])
 
 
-def post_chat_json(run_directory, task, system_prompt, user_prompt, chat, allow_preemption=True, parse_content=True):
+def post_chat_json(
+    run_directory,
+    task,
+    system_prompt,
+    user_prompt,
+    chat,
+    allow_preemption=True,
+    parse_content=True,
+    background=False,
+):
     parsed = urllib.parse.urlsplit(chat["url"])
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         fail(f"unsupported chat URL: {chat['url']}")
     scheduling = chat["scheduling"]
-    wait_for_interactive_idle(run_directory, scheduling)
+    background_lease = None
+    if background:
+        while True:
+            wait_for_interactive_idle(run_directory, scheduling)
+            lease_directory = forge_agent_directory() / "inference-leases"
+            lease_directory.mkdir(parents=True, exist_ok=True)
+            background_lease = lease_directory / f"background-{os.getpid()}-{threading.get_ident()}.json"
+            temporary = background_lease.with_suffix(".tmp")
+            run_state.atomic_write_text(
+                temporary,
+                json.dumps({"pid": os.getpid(), "kind": "background", "slot": scheduling["backgroundSlot"], "updatedAtMs": int(time.time() * 1000)}) + "\n",
+            )
+            temporary.replace(background_lease)
+            if not active_interactive_leases():
+                break
+            background_lease.unlink(missing_ok=True)
+
+    def clear_background_lease():
+        if background_lease is not None:
+            background_lease.unlink(missing_ok=True)
+
+    def refresh_background_lease():
+        if background_lease is not None:
+            run_state.atomic_write_text(
+                background_lease,
+                json.dumps({"pid": os.getpid(), "kind": "background", "slot": scheduling["backgroundSlot"], "updatedAtMs": int(time.time() * 1000)}) + "\n",
+            )
     worker_session = "project-extraction-slot-probe"
     config_path = run_directory / "run_config.json"
     if config_path.is_file():
         worker_session = json.loads(config_path.read_text(encoding="utf-8")).get("worker", {}).get("sessionId") or worker_session
-    body = json.dumps(
-        {
-            "model": chat["model"],
-            "user": worker_session,
-            "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-            "temperature": 0.1,
-            "max_tokens": scheduling["backgroundOutputTokens"],
-            "stream": False,
-            "cache_prompt": True,
-            "id_slot": scheduling["backgroundSlot"],
-        }
-    ).encode("utf-8")
+    request = {
+        "model": chat["model"],
+        "user": worker_session,
+        "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+        "temperature": 0.1,
+        "max_tokens": scheduling["backgroundOutputTokens"],
+        "stream": False,
+        "cache_prompt": True,
+    }
+    if background:
+        request["id_slot"] = scheduling["backgroundSlot"]
+    body = json.dumps(request).encode("utf-8")
     connection_class = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
     connection = connection_class(parsed.hostname, parsed.port, timeout=600)
     result = {}
@@ -505,19 +603,25 @@ def post_chat_json(run_directory, task, system_prompt, user_prompt, chat, allow_
     thread = threading.Thread(target=execute, daemon=True)
     thread.start()
     preempted = False
+    last_lease_refresh = time.monotonic()
     while thread.is_alive():
         thread.join(0.1)
-        if allow_preemption and active_interactive_leases():
+        if background and time.monotonic() - last_lease_refresh >= 1:
+            refresh_background_lease()
+            last_lease_refresh = time.monotonic()
+        if background and allow_preemption and active_interactive_leases():
             preempted = True
             connection.close()
             break
     if preempted:
         thread.join(2)
+        clear_background_lease()
         append_jsonl(run_directory / "inference_schedule.jsonl", {"at": utc_now(), "event": "preempted", "task": task, "slot": scheduling["backgroundSlot"]})
         raise InterruptedError("background inference preempted by interactive activity")
     thread.join()
     connection.close()
     if failure:
+        clear_background_lease()
         raise failure["error"]
     payload = result["payload"]
     usage = payload.get("usage") or {}
@@ -529,7 +633,8 @@ def post_chat_json(run_directory, task, system_prompt, user_prompt, chat, allow_
         "event": "model_call",
         "task": task,
         "sessionId": worker_session,
-        "slot": scheduling["backgroundSlot"],
+        "mode": "background" if background else "foreground",
+        "slot": scheduling["backgroundSlot"] if background else None,
         "promptCharacters": len(system_prompt) + len(user_prompt),
         "promptTokens": usage.get("prompt_tokens"),
         "cachedTokens": details.get("cached_tokens", timings.get("cache_n")),
@@ -537,10 +642,19 @@ def post_chat_json(run_directory, task, system_prompt, user_prompt, chat, allow_
         "generationMs": timings.get("predicted_ms"),
         "elapsedMs": elapsed_ms,
     }
-    append_jsonl(run_directory / "inference_schedule.jsonl", record)
     choices = payload.get("choices") or []
+    record["finishReason"] = choices[0].get("finish_reason") if choices else None
+    append_jsonl(run_directory / "inference_schedule.jsonl", record)
+    clear_background_lease()
     content = ((choices[0].get("message") or {}).get("content") if choices else None)
-    return (extract_json_text(content) if parse_content else content), record
+    if not parse_content:
+        return content, record
+    try:
+        return extract_json_text(content), record
+    except json.JSONDecodeError:
+        if record["finishReason"] == "length":
+            return None, record
+        raise
 
 
 def probe_background_slot(chat):
@@ -551,7 +665,16 @@ def probe_background_slot(chat):
     probe_chat = json.loads(json.dumps(chat))
     probe_chat["scheduling"]["backgroundOutputTokens"] = 16
     try:
-        post_chat_json(temporary, "slot-probe", "Reply briefly.", "Reply ok.", probe_chat, allow_preemption=False, parse_content=False)
+        post_chat_json(
+            temporary,
+            "slot-probe",
+            "Reply briefly.",
+            "Reply ok.",
+            probe_chat,
+            allow_preemption=False,
+            parse_content=False,
+            background=True,
+        )
         return {"configured": True, "available": True, "slot": chat["scheduling"]["backgroundSlot"]}
     except BaseException as error:
         return {"configured": True, "available": False, "slot": chat["scheduling"]["backgroundSlot"], "detail": str(error)}
@@ -1011,6 +1134,74 @@ def current_results(run_directory, manifest):
     return latest
 
 
+def coverage_summary(run_directory, manifest):
+    results = current_results(run_directory, manifest)
+    packets = active_packets(manifest)
+    counts = Counter(results.get(packet["packetId"], {}).get("status", "pending") for packet in packets)
+    complete_packets = sum(counts[status] for status in COMPLETION_PACKET_STATUSES)
+    source_rows = []
+    for source in active_sources(manifest):
+        statuses = [results.get(packet["packetId"], {}).get("status", "pending") for packet in source.get("packets", [])]
+        source_rows.append(
+            {
+                "sourceId": source["sourceId"],
+                "relativePath": source["relativePath"],
+                "complete": bool(statuses) and all(status in COMPLETION_PACKET_STATUSES for status in statuses),
+                "statuses": dict(Counter(statuses)),
+            }
+        )
+    unresolved_review_items = []
+    review_manifest_path = run_directory / "review_manifest.json"
+    if review_manifest_path.is_file():
+        review_manifest = json.loads(review_manifest_path.read_text(encoding="utf-8"))
+        review_results = current_review_results(run_directory, review_manifest)
+        unresolved_review_items = [packet["reviewPacketId"] for packet in review_manifest.get("packets", []) if packet["reviewPacketId"] not in review_results]
+    invalid_screenings = []
+    for packet_id, result in results.items():
+        if result.get("status") != "screened_no_controls":
+            continue
+        screening = result.get("screening")
+        finding = screening.get("finding") if isinstance(screening, dict) else None
+        if (
+            not isinstance(screening, dict)
+            or screening.get("method") not in {"model", "human"}
+            or screening.get("source") not in {"worker", "manual"}
+            or not finding
+            or DEFERRED_SCREENING_PATTERN.search(finding)
+        ):
+            invalid_screenings.append(packet_id)
+    blocking_counts = {status: counts[status] for status in sorted(BLOCKING_PACKET_STATUSES) if counts[status]}
+    if invalid_screenings:
+        blocking_counts["invalid_screening"] = len(invalid_screenings)
+    deferred_count = sum(counts[status] for status in BLOCKING_PACKET_STATUSES)
+    completion_eligible = not blocking_counts and not unresolved_review_items and complete_packets == len(packets)
+    return {
+        "packets": len(packets),
+        "packetCounts": dict(sorted(counts.items())),
+        "coveredPackets": complete_packets,
+        "extractedCount": counts["extracted"],
+        "screenedCount": counts["screened_no_controls"],
+        "deferredCount": deferred_count,
+        "coveragePercent": round(100 * complete_packets / len(packets), 2) if packets else 100.0,
+        "sources": len(source_rows),
+        "coveredSources": sum(row["complete"] for row in source_rows),
+        "sourceCoveragePercent": round(100 * sum(row["complete"] for row in source_rows) / len(source_rows), 2) if source_rows else 100.0,
+        "blockingCounts": blocking_counts,
+        "invalidScreenings": invalid_screenings,
+        "pendingReviewPackets": len(unresolved_review_items),
+        "unresolvedReviewItems": unresolved_review_items,
+        "completionEligible": completion_eligible,
+        "sourceCoverage": source_rows,
+    }
+
+
+def write_coverage(run_directory, manifest, draft):
+    value = coverage_summary(run_directory, manifest)
+    value.update({"generatedAt": utc_now(), "draft": draft})
+    write_json(run_directory / "coverage.json", value)
+    return value
+
+
 def source_for_packet(manifest, packet_id):
     for source in active_sources(manifest):
         for packet in source.get("packets", []):
@@ -1114,6 +1305,16 @@ def command_doctor(args):
         "slot": chat["scheduling"]["backgroundSlot"],
         "detail": "pass --probe-slot to verify the configured background slot",
     }
+    background_configured = bool(chat["enabled"] and chat["scheduling"]["enabled"] and chat["scheduling"]["interactiveSlot"] != chat["scheduling"]["backgroundSlot"])
+    remediation = []
+    if not chat["enabled"]:
+        remediation.append("Enable connectedServices.chat for serial foreground extraction.")
+    if chat["enabled"] and not chat["scheduling"]["enabled"]:
+        remediation.append("Foreground extraction is available. Enable scheduling only if optional background processing is required.")
+    if chat["scheduling"]["enabled"] and chat["scheduling"]["interactiveSlot"] == chat["scheduling"]["backgroundSlot"]:
+        remediation.append("Configure different interactiveSlot and backgroundSlot values before using --background.")
+    if args.probe_slot and slot_probe.get("available") is False:
+        remediation.append("Omit --background, or repair the configured background slot before retrying it.")
     result = {
         "status": "ok",
         "python": sys.version.split()[0],
@@ -1121,7 +1322,10 @@ def command_doctor(args):
         "sourceExtensions": sorted(SOURCE_EXTENSIONS),
         "defaultPacketCharacters": DEFAULT_PACKET_CHARACTERS,
         "targetSourceTokens": TARGET_SOURCE_TOKENS,
+        "foregroundAvailable": chat["enabled"],
+        "backgroundAvailable": bool(background_configured and slot_probe.get("available") is not False),
         "chat": {"url": chat["url"], "model": chat["model"], "scheduling": chat["scheduling"], "backgroundSlotProbe": slot_probe},
+        "remediation": remediation,
     }
     if args.json:
         print(json.dumps(result, indent=2))
@@ -1194,7 +1398,8 @@ def command_init(args):
             run_state.assert_compatible_run(state, configuration)
         except (OSError, ValueError) as error:
             fail(str(error))
-        print(json.dumps({"runDirectory": str(run_directory), "resumed": True, "status": state["status"], "phase": state["phase"], "nextAction": state.get("nextAction")}, indent=2))
+        chat = chat_configuration()
+        print(json.dumps({"runDirectory": str(run_directory), "resumed": True, "status": state["status"], "phase": state["phase"], "nextAction": state.get("nextAction"), "foregroundAvailable": chat["enabled"], "nextCommand": f"project-extraction.py process {run_directory}" if chat["enabled"] else "Configure connectedServices.chat, then rerun process."}, indent=2))
         return
     run_directory.mkdir(parents=True)
     (run_directory / "working").mkdir()
@@ -1241,7 +1446,22 @@ def command_init(args):
     run_state.initialize_run_state(run_directory, state)
     append_source_changes(run_directory, None, manifest)
     initialize_live_repository(run_directory, config)
-    print(json.dumps({"runDirectory": str(run_directory), "sources": len(sources), "packets": len(active_packets(manifest))}, indent=2))
+    print(
+        json.dumps(
+            {
+                "runDirectory": str(run_directory),
+                "sources": len(sources),
+                "packets": len(active_packets(manifest)),
+                "foregroundAvailable": chat_configuration()["enabled"],
+                "nextAction": "inbox_status_then_process",
+                "nextCommands": [
+                    f"project-extraction.py inbox-status {run_directory}",
+                    f"project-extraction.py process {run_directory}",
+                ],
+            },
+            indent=2,
+        )
+    )
 
 
 def command_next(args):
@@ -1270,6 +1490,23 @@ def command_next(args):
                         "interpretations": sorted(INTERPRETATIONS),
                         "confidences": sorted(CONFIDENCES),
                     },
+                    "extractionSchemaVersion": EXTRACTION_SCHEMA_VERSION,
+                    "requiredResponseShape": {
+                        "documentRole": "other",
+                        "items": [
+                            {
+                                "item_type": "deliverable",
+                                "title": "Source-backed title",
+                                "date_kind": "none",
+                                "date": None,
+                                "commitment_level": "unclear",
+                                "direct_quotes": ["Exact source excerpt"],
+                                "interpretation": "explicit",
+                                "confidence": "medium",
+                            }
+                        ],
+                    },
+                    "validateCommand": f"project-extraction.py validate-extraction {run_directory} --packet-id {packet_record['packetId']} --items-file <items.json>",
                 },
                 indent=2,
             )
@@ -1293,6 +1530,24 @@ def command_record(args):
         config, _ = load_run(run_directory)
         if args.status == "excluded_by_scope" and config.get("scopeMode") != "focused":
             fail("full-project runs cannot exclude packets by scope")
+        screening = None
+        if args.status == "screened_no_controls":
+            screening_method = string_or_none(getattr(args, "screening_method", None))
+            screening_source = string_or_none(getattr(args, "disposition_source", None))
+            screening_finding = string_or_none(getattr(args, "screening_finding", None)) or args.note
+            if screening_method not in {"model", "human"}:
+                fail("screened_no_controls requires --screening-method model|human")
+            if screening_source not in {"worker", "manual"}:
+                fail("screened_no_controls requires --disposition-source worker|manual")
+            if not screening_finding or DEFERRED_SCREENING_PATTERN.search(screening_finding):
+                fail("screened_no_controls requires a substantive finding that the reviewed packet contains no project controls")
+            screening = {
+                "method": screening_method,
+                "source": screening_source,
+                "finding": screening_finding,
+                "packetSha256": packet["sha256"],
+                "documentRole": getattr(args, "document_role", None) or "other",
+            }
         result = {
             "recordedAt": utc_now(),
             "packetId": args.packet_id,
@@ -1302,6 +1557,8 @@ def command_record(args):
             "documentRole": "other",
             "items": [],
             "note": args.note,
+            "dispositionSource": getattr(args, "disposition_source", None) or "manual",
+            "screening": screening,
         }
     else:
         if not args.items_file:
@@ -1337,12 +1594,18 @@ def command_record(args):
             "documentRole": document_role,
             "items": normalized,
             "note": args.note,
+            "dispositionSource": getattr(args, "disposition_source", None) or "manual",
+            "screening": None,
         }
         packet_text = Path(packet["path"]).read_text(encoding="utf-8")
         for item in normalized:
+            exact_quotes = []
             for quote in item["direct_quotes"]:
-                if quote not in packet_text:
-                    fail(f"direct quote is not present in frozen packet {args.packet_id}: {quote[:120]}")
+                exact = exact_source_quote(packet_text, quote)
+                if exact is None:
+                    fail(f"direct quote is not uniquely present in frozen packet {args.packet_id}: {quote[:120]}")
+                exact_quotes.append(exact)
+            item["direct_quotes"] = exact_quotes
     append_jsonl(run_directory / "extraction_results.jsonl", result)
     def recorded(state):
         for item in state["items"]:
@@ -1354,6 +1617,74 @@ def command_record(args):
         return state
     run_state.update_run_state(run_directory, recorded, {"type": "item_recorded", "itemId": args.packet_id, "status": result["status"]})
     print(json.dumps({"packetId": args.packet_id, "status": result["status"], "items": len(result["items"])}, indent=2))
+
+
+def extraction_validation_errors(raw, packet_text):
+    errors = []
+    if isinstance(raw, list):
+        document_role = "other"
+        items = raw
+    elif isinstance(raw, dict):
+        document_role = raw.get("documentRole", "other")
+        items = raw.get("items")
+    else:
+        return ["items file must be an array or an object with documentRole and items"]
+    if document_role not in DOCUMENT_ROLES:
+        errors.append(f"documentRole must be one of: {', '.join(sorted(DOCUMENT_ROLES))}")
+    if not isinstance(items, list):
+        return [*errors, "items must be an array"]
+    for index, item in enumerate(items, 1):
+        label = f"item {index}"
+        if not isinstance(item, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        if item.get("item_type") not in ITEM_TYPE_SET:
+            errors.append(f"{label} item_type must be one of: {', '.join(ITEM_TYPES)}")
+        if not str(item.get("title") or "").strip():
+            errors.append(f"{label} title is required")
+        date_kind = item.get("date_kind") or "none"
+        if date_kind not in DATE_KINDS:
+            errors.append(f"{label} date_kind is invalid")
+        if date_kind == "exact" and not is_iso_date(item.get("date")):
+            errors.append(f"{label} exact date must be YYYY-MM-DD")
+        if date_kind == "exact" and item.get("date") in (None, ""):
+            errors.append(f"{label} exact date requires date")
+        if date_kind != "exact" and item.get("date") not in (None, ""):
+            errors.append(f"{label} must not normalize a non-exact date")
+        if date_kind in {"relative", "conditional"} and not item.get("trigger"):
+            errors.append(f"{label} {date_kind} date requires trigger text")
+        if date_kind == "recurring" and not item.get("recurrence"):
+            errors.append(f"{label} recurring date requires recurrence text")
+        if (item.get("commitment_level") or "unclear") not in COMMITMENT_LEVELS:
+            errors.append(f"{label} commitment_level is invalid")
+        quotes = item.get("direct_quotes")
+        if isinstance(quotes, str):
+            quotes = [quotes]
+        if not isinstance(quotes, list) or not quotes:
+            errors.append(f"{label} direct_quotes must be a nonempty array")
+        else:
+            for quote_index, quote in enumerate(quotes, 1):
+                if not isinstance(quote, str) or not quote.strip():
+                    errors.append(f"{label} direct quote {quote_index} must be nonblank text")
+                elif exact_source_quote(packet_text, quote.strip()) is None:
+                    errors.append(f"{label} direct quote {quote_index} is not uniquely present in the frozen packet")
+    return errors
+
+
+def command_validate_extraction(args):
+    run_directory = require_run_directory(args.run_directory)
+    _, manifest = load_run(run_directory)
+    _, packet = source_for_packet(manifest, args.packet_id)
+    try:
+        raw = json.loads(Path(args.items_file).expanduser().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        result = {"valid": False, "errors": [f"items file is not valid JSON: {error}"]}
+    else:
+        errors = extraction_validation_errors(raw, Path(packet["path"]).read_text(encoding="utf-8"))
+        result = {"valid": not errors, "errors": errors, "schemaVersion": EXTRACTION_SCHEMA_VERSION}
+    print(json.dumps(result, indent=2))
+    if not result["valid"]:
+        raise SystemExit(1)
 
 
 def evidence_rows(run_directory, manifest):
@@ -1386,7 +1717,7 @@ def command_reconcile(args):
     _, manifest = load_run(run_directory)
     results = current_results(run_directory, manifest)
     missing = [packet["packetId"] for packet in active_packets(manifest) if packet["packetId"] not in results]
-    if missing:
+    if missing and not getattr(args, "draft", False):
         fail(f"all extraction packets need dispositions before reconciliation; pending: {', '.join(missing[:5])}")
     rows = evidence_rows(run_directory, manifest)
     write_csv(run_directory / "evidence_items.csv", EVIDENCE_COLUMNS, rows)
@@ -1434,7 +1765,7 @@ def command_reconcile(args):
             )
     review_manifest = {"schemaVersion": 1, "createdAt": utc_now(), "packets": review_packets}
     write_json(review_manifest_path, review_manifest)
-    print(json.dumps({"evidenceItems": len(rows), "reviewPackets": len(review_packets), "pending": sum(row["status"] == "pending" for row in review_packets)}, indent=2))
+    print(json.dumps({"evidenceItems": len(rows), "reviewPackets": len(review_packets), "pending": sum(row["status"] == "pending" for row in review_packets), "draft": bool(getattr(args, "draft", False)), "undispositionedPackets": len(missing)}, indent=2))
 
 
 def review_result(run_directory, review_packet_id):
@@ -1743,7 +2074,18 @@ def markdown_control_list(controls):
     return "\n".join(lines)
 
 
-def author_markdown_briefs(run_directory, config, controls, proposal_present):
+def draft_banner(coverage):
+    if not coverage or not coverage.get("draft"):
+        return ""
+    return (
+        "> [!WARNING] Incomplete draft\n"
+        f"> Coverage: {coverage['coveredPackets']}/{coverage['packets']} packets "
+        f"({coverage['coveragePercent']}%). Blocking states: "
+        f"{json.dumps(coverage['blockingCounts'], sort_keys=True)}. Do not treat this as a complete extraction.\n\n"
+    )
+
+
+def author_markdown_briefs(run_directory, config, controls, proposal_present, coverage=None):
     by_type = {item_type: [row for row in controls if row["control_type"] == item_type] for item_type in ITEM_TYPES}
     source_note = "Document roles do not establish legal precedence. Review conflicts and source evidence before relying on these controls."
     files = {
@@ -1756,8 +2098,11 @@ def author_markdown_briefs(run_directory, config, controls, proposal_present):
     }
     if proposal_present:
         files["proposal_checklist.md"] = f"# Proposal Checklist\n\n## Eligibility and Submission Requirements\n\n{markdown_control_list(by_type['proposal_requirement'])}\n\n## Required Components\n\n{markdown_control_list(by_type['deliverable'] + by_type['requirement'])}\n\n## Review Criteria and Open Questions\n\n{markdown_control_list(by_type['acceptance_criterion'] + by_type['open_question'])}\n"
+    banner = draft_banner(coverage)
     for filename, body in files.items():
-        run_state.atomic_write_text(run_directory / filename, body)
+        lines = body.splitlines(keepends=True)
+        rendered = lines[0] + "\n" + banner + "".join(lines[1:]) if banner and lines else body
+        run_state.atomic_write_text(run_directory / filename, rendered)
 
 
 GANTT_COLUMNS = (
@@ -1802,8 +2147,12 @@ def gantt_rows(run_directory, controls):
     return rows
 
 
-def mermaid_text(rows):
-    lines = ["# Project Gantt", "", "```mermaid", "gantt", "    title Source-backed project schedule", "    dateFormat YYYY-MM-DD"]
+def mermaid_text(rows, coverage=None):
+    lines = ["# Project Gantt", ""]
+    if coverage and coverage.get("draft"):
+        lines.extend(draft_banner(coverage).rstrip().splitlines())
+        lines.append("")
+    lines.extend(["```mermaid", "gantt", "    title Source-backed project schedule", "    dateFormat YYYY-MM-DD"])
     scheduled = [row for row in rows if row["scheduled"] == "yes"]
     for section in sorted({row["section"] for row in scheduled}):
         lines.append(f"    section {section.replace(':', ' - ')}")
@@ -1818,18 +2167,26 @@ def mermaid_text(rows):
     return "\n".join(lines)
 
 
-def gantt_html(rows):
+def gantt_html(rows, coverage=None):
     safe_rows = []
     for row in rows:
         safe_rows.append({key: [html.escape(str(item), quote=True) for item in value] if isinstance(value, list) else html.escape(str(value), quote=True) if value is not None else None for key, value in row.items()})
     payload = json.dumps(safe_rows, ensure_ascii=False).replace("</", "<\\/")
+    draft_html = ""
+    if coverage and coverage.get("draft"):
+        draft_html = (
+            f'<div class="draft">Incomplete draft: {coverage["coveredPackets"]}/{coverage["packets"]} packets covered '
+            f'({coverage["coveragePercent"]}%). Do not treat this schedule as complete.</div>'
+        )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Project Gantt</title><style>
 body{{font:14px system-ui;margin:2rem;color:#17202a}} .controls{{display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:1rem}}
+.draft{{border:2px solid #a65f00;background:#fff4d6;padding:1rem;margin-bottom:1rem;font-weight:600}}
 table{{border-collapse:collapse;width:100%}} th,td{{border:1px solid #ccd1d1;padding:.45rem;text-align:left}} th{{background:#eef2f3}}
 .timeline{{min-width:24rem}} .bar{{height:1rem;background:#315b7d;border-radius:3px;transform-origin:left}} .forecast{{background:#b36b00}} .unscheduled{{color:#666}}
 </style></head><body><h1>Project Gantt</h1>
+{draft_html}
 <div class="controls"><label>Search <input id="search"></label><label>Section <select id="section"><option value="">All</option></select></label><label>Status <select id="status"><option value="">All</option></select></label><label>Zoom <input id="zoom" type="range" min="50" max="200" value="100"></label></div>
 <table><thead><tr><th>ID</th><th>Task</th><th>Section</th><th>Dates</th><th class="timeline">Timeline</th><th>Status</th><th>Dependencies</th><th>Evidence</th></tr></thead><tbody id="rows"></tbody></table>
 <script>const data={payload};const q=id=>document.getElementById(id);const unique=k=>[...new Set(data.map(x=>x[k]).filter(Boolean))].sort();
@@ -1838,11 +2195,11 @@ function render(){{const text=q('search').value.toLowerCase(),section=q('section
 for(const id of ['search','section','status','zoom'])q(id).addEventListener('input',render);render();</script></body></html>"""
 
 
-def write_gantt_outputs(run_directory, controls):
+def write_gantt_outputs(run_directory, controls, coverage=None):
     rows = gantt_rows(run_directory, controls)
     write_csv(run_directory / "gantt.csv", GANTT_COLUMNS, rows)
-    run_state.atomic_write_text(run_directory / "gantt.md", mermaid_text(rows))
-    run_state.atomic_write_text(run_directory / "gantt.html", gantt_html(rows))
+    run_state.atomic_write_text(run_directory / "gantt.md", mermaid_text(rows, coverage))
+    run_state.atomic_write_text(run_directory / "gantt.html", gantt_html(rows, coverage))
 
 
 def write_source_changes(run_directory):
@@ -1991,9 +2348,10 @@ def search_index_ready(run_directory, manifest):
     )
 
 
-def build_search_index(run_directory, force=False):
+def build_search_index(run_directory, force=False, allow_incomplete=False):
     _, manifest = load_run(run_directory)
-    if not search_index_ready(run_directory, manifest):
+    built_artifacts = all((run_directory / filename).is_file() for filename in ("controls.jsonl", "evidence_items.csv", "project_status.csv"))
+    if not search_index_ready(run_directory, manifest) and not (allow_incomplete and built_artifacts):
         fail("search indexing requires all active packets and built control artifacts")
     documents = search_index_documents(run_directory, manifest)
     model = forge_embeddings.model_name()
@@ -2037,6 +2395,7 @@ def build_search_index(run_directory, force=False):
         "documents": len(documents),
         "kinds": dict(Counter(row["kind"] for row in documents)),
         "embeddings": embedding_info,
+        "draft": allow_incomplete and not search_index_ready(run_directory, manifest),
     }
     write_json(run_directory / "search_index_meta.json", meta)
     return meta
@@ -2188,10 +2547,21 @@ def command_show(args):
 def command_build(args):
     run_directory = require_run_directory(args.run_directory)
     config, manifest = load_run(run_directory)
+    draft = bool(getattr(args, "draft", False))
+    coverage = coverage_summary(run_directory, manifest)
+    if not coverage["completionEligible"] and not draft:
+        fail(
+            "complete build requires substantive coverage for every packet and completed reconciliation; "
+            f"blocking: {json.dumps(coverage['blockingCounts'], sort_keys=True)}, pending reviews: {coverage['pendingReviewPackets']}. "
+            "Use build --draft for explicitly incomplete artifacts."
+        )
+    if not (run_directory / "review_manifest.json").is_file():
+        with contextlib.redirect_stdout(io.StringIO()):
+            command_reconcile(argparse.Namespace(run_directory=str(run_directory), draft=draft))
     review_manifest = load_review_manifest(run_directory)
     results = current_review_results(run_directory, review_manifest)
     pending = [row["reviewPacketId"] for row in review_manifest["packets"] if row["reviewPacketId"] not in results]
-    if pending:
+    if pending and not draft:
         fail(f"all reconciliation packets must be reviewed before build; pending: {', '.join(pending[:5])}")
     previous_controls = read_jsonl(run_directory / "controls.jsonl")
     current_evidence_ids = {row["evidence_id"] for row in read_csv(run_directory / "evidence_items.csv")}
@@ -2216,17 +2586,18 @@ def command_build(args):
     config["asOfDate"] = args.as_of or date.today().isoformat()
     config["updatedAt"] = utc_now()
     write_json(run_directory / "run_config.json", config)
-    author_markdown_briefs(run_directory, config, controls, proposal_present)
-    write_gantt_outputs(run_directory, controls)
-    search_meta = build_search_index(run_directory)
+    coverage = write_coverage(run_directory, manifest, draft)
+    author_markdown_briefs(run_directory, config, controls, proposal_present, coverage)
+    write_gantt_outputs(run_directory, controls, coverage)
+    search_meta = build_search_index(run_directory, allow_incomplete=draft)
     write_run_metrics(run_directory)
     def built(state):
         state["status"] = "running"
-        state["phase"] = "validating"
-        state["nextAction"] = "validate"
+        state["phase"] = "draft" if draft else "validating"
+        state["nextAction"] = "process" if draft else "validate"
         return state
-    run_state.update_run_state(run_directory, built, {"type": "build_completed", "controls": len(controls)})
-    print(json.dumps({"controls": len(controls), "asOfDate": config["asOfDate"], "proposalChecklist": proposal_present, "searchIndex": search_meta}, indent=2))
+    run_state.update_run_state(run_directory, built, {"type": "build_completed", "controls": len(controls), "draft": draft})
+    print(json.dumps({"controls": len(controls), "asOfDate": config["asOfDate"], "proposalChecklist": proposal_present, "draft": draft, "coverage": coverage, "nextAction": "process" if draft else "validate", "searchIndex": search_meta}, indent=2))
 
 
 def command_refresh(args):
@@ -2275,6 +2646,25 @@ def command_status(args):
     worker = worker_control(run_directory)
     pid = worker.get("pid")
     worker["alive"] = run_state._pid_alive(pid) if pid else False
+    coverage = coverage_summary(run_directory, manifest)
+    if state.get("status") == "complete":
+        last_successful_stage = "validate"
+    elif (run_directory / "controls.jsonl").is_file():
+        last_successful_stage = "build"
+    elif (run_directory / "review_manifest.json").is_file():
+        last_successful_stage = "reconcile"
+    elif results:
+        last_successful_stage = "extract"
+    else:
+        last_successful_stage = "init"
+    if state.get("status") == "complete":
+        exact_next_action = None
+    elif coverage["blockingCounts"] or coverage["pendingReviewPackets"]:
+        exact_next_action = f"project-extraction.py process {run_directory}"
+    elif (run_directory / "controls.jsonl").is_file():
+        exact_next_action = f"project-extraction.py validate {run_directory} --fix-hints --json"
+    else:
+        exact_next_action = f"project-extraction.py process {run_directory}"
     print(
         json.dumps(
             {
@@ -2289,6 +2679,13 @@ def command_status(args):
                 "worker": worker,
                 "scopeMode": config.get("scopeMode", "full"),
                 "inbox": inbox_status_value(run_directory),
+                "completionEligible": coverage["completionEligible"],
+                "coveragePercent": coverage["coveragePercent"],
+                "sourceCoveragePercent": coverage["sourceCoveragePercent"],
+                "blockingCounts": coverage["blockingCounts"],
+                "pendingReviewPackets": coverage["pendingReviewPackets"],
+                "lastSuccessfulStage": last_successful_stage,
+                "exactNextAction": exact_next_action,
             },
             indent=2,
         )
@@ -2409,14 +2806,30 @@ def command_inbox_sync(args):
         batch["status"] = "needs_review" if intake.get("nextAction") == "review" else "processing"
         batch["nextAction"] = intake.get("nextAction")
         write_inbox_manifest(run_directory, manifest)
+        ingest_run = Path(batch["ingestRun"])
+        review_result = subprocess.run(
+            ["node", str(document_ingest), "next-review", str(ingest_run)],
+            capture_output=True,
+            text=True,
+        )
+        review_packet = parse_command_json(review_result.stdout, "document-ingest next-review") if review_result.returncode == 0 else None
+        commands = {
+            "nextReview": f"node {document_ingest} next-review {ingest_run}",
+            "recordReview": review_packet.get("commands", {}).get("recordReview") if review_packet else None,
+            "validate": f"node {document_ingest} validate {ingest_run} --fix-hints --json",
+            "finalize": f"node {document_ingest} finalize {ingest_run} --destination {live['projectRoot']}",
+            "resumeProjectInbox": f"project-extraction.py inbox-sync {run_directory}",
+        }
         print(
             json.dumps(
                 {
                     "synced": False,
                     "batch": batch,
                     "documentIngest": intake,
+                    "reviewPacket": review_packet,
                     "archivedDuplicates": archived_duplicates,
                     "nextAction": "complete_document_ingest_review",
+                    "commands": commands,
                 },
                 indent=2,
             )
@@ -2450,13 +2863,18 @@ def command_retry(args):
     run_directory = require_run_directory(args.run_directory)
     _, manifest = load_run(run_directory)
     results = current_results(run_directory, manifest)
+    invalid_screenings = set(coverage_summary(run_directory, manifest)["invalidScreenings"])
     targets = {
         packet_id
         for packet_id, result in results.items()
-        if result.get("status") == "failed" and (args.all_failed or packet_id == args.item)
+        if (
+            (result.get("status") == "failed" and args.all_failed)
+            or (packet_id in invalid_screenings and args.invalid_screenings)
+            or (packet_id == args.item and (result.get("status") == "failed" or packet_id in invalid_screenings))
+        )
     }
     if not targets:
-        fail(f"failed item not found: {args.item}" if args.item else "run has no failed items")
+        fail(f"retryable item not found: {args.item}" if args.item else "run has no matching retryable items")
     retained = [result for result in read_jsonl(run_directory / "extraction_results.jsonl") if result.get("packetId") not in targets]
     run_state.atomic_write_text(
         run_directory / "extraction_results.jsonl",
@@ -2491,11 +2909,28 @@ def validate_run(run_directory):
         elif sha256_file(path) != source["sha256"]:
             issues.append(validation_issue("source_changed", f"source file hash differs; run refresh: {path}", "Run refresh, then process changed packets."))
     results = current_results(run_directory, manifest)
+    coverage = coverage_summary(run_directory, manifest)
+    if not coverage["completionEligible"]:
+        issues.append(
+            validation_issue(
+                "incomplete_coverage",
+                f"run is not completion-eligible; blocking packet states: {json.dumps(coverage['blockingCounts'], sort_keys=True)}, pending review packets: {coverage['pendingReviewPackets']}",
+                "Resume process or repair the listed packet and review states. Use build --draft only for labeled partial artifacts.",
+            )
+        )
+    for packet_id in coverage["invalidScreenings"]:
+        issues.append(
+            validation_issue(
+                "invalid_screening",
+                f"{packet_id} uses screened_no_controls without substantive screening provenance",
+                f"Requeue {packet_id} and process it, or record a human/model screening with packet-bound evidence.",
+            )
+        )
     for packet in active_packets(manifest):
         result = results.get(packet["packetId"])
         if result is None:
             issues.append(validation_issue("packet_pending", f"packet has no disposition: {packet['packetId']}", "Run next and record."))
-        elif result["status"] != "extracted":
+        elif result["status"] not in COMPLETION_PACKET_STATUSES:
             warnings.append(f"{packet['packetId']} is {result['status']}: {result.get('note') or 'no note'}")
     required_after_reconcile = ("evidence_items.csv", "evidence_items.jsonl", "review_manifest.json")
     for filename in required_after_reconcile:
@@ -2526,6 +2961,7 @@ def validate_run(run_directory):
         "run_metrics.json",
         "search_index.jsonl",
         "search_index_meta.json",
+        "coverage.json",
     )
     for filename in required_built:
         if not (run_directory / filename).is_file():
@@ -2572,6 +3008,8 @@ def validate_run(run_directory):
             issues.append(validation_issue("deliverable_missing", f"missing authored deliverable: {filename}", "Run build and author the scaffold."))
         elif PLACEHOLDER in path.read_text(encoding="utf-8"):
             issues.append(validation_issue("placeholder", f"{filename} contains an unresolved placeholder", "Author every scaffolded section."))
+        elif "Incomplete draft" in path.read_text(encoding="utf-8"):
+            issues.append(validation_issue("draft_artifact", f"{filename} is explicitly marked as an incomplete draft", "Complete processing and run a non-draft build."))
     return {"valid": not issues, "issues": issues, "errors": [row["message"] for row in issues], "warnings": warnings}
 
 
@@ -2600,7 +3038,7 @@ def command_validate(args):
     run_state.update_run_state(run_directory, completed, {"type": "run_completed"})
 
 
-WORKER_SYSTEM_PROMPT = """You extract source-backed project controls. Return only valid JSON. Keep each packet separate. Never invent dates, owners, obligations, quotes, teams, workstreams, or precedence. A direct quote must occur exactly in that packet. Use screened_no_controls only after reading the packet. Preserve distinct deliverables, milestones, tasks, requirements, decisions, risks, dependencies, and stakeholders as distinct items."""
+WORKER_SYSTEM_PROMPT = """You extract source-backed project controls. Return only valid JSON. Keep each packet separate. Never invent dates, owners, obligations, quotes, teams, workstreams, or precedence. A direct quote must occur exactly in that packet. Use screened_no_controls only after reading the entire packet and include a screening object with a substantive finding. Never use screened_no_controls for deferred, unavailable, truncated, or unprocessed work. Preserve distinct deliverables, milestones, tasks, requirements, decisions, risks, dependencies, and stakeholders as distinct items."""
 
 
 def focused_terms(config):
@@ -2641,7 +3079,9 @@ def extraction_prompt(batch, config):
 Focus configuration: {json.dumps(scope, ensure_ascii=False, sort_keys=True)}
 
 Return exactly:
-{{"packets":[{{"packetId":"pkt-...","documentRole":"award|funding_notice|proposal|scope_of_work|contract|amendment|work_plan|report|presentation|meeting|interview|correspondence|budget|other","disposition":"extracted|screened_no_controls|needs_review","reason":"specific reason","items":[{{"item_type":"one allowed project-control type","title":"concise distinct control","description":"source-backed description or null","party":"responsible party or null","counterparty":"recipient or null","date_text":"source wording or null","date_kind":"exact|relative|recurring|conditional|none","date":"YYYY-MM-DD only for exact dates or null","trigger":"source trigger or null","offset_days":null,"recurrence":null,"acceptance_criteria":null,"evidence_required":null,"commitment_level":"required|committed|proposed|discussed|informational|unclear","direct_quotes":["short exact quote"],"interpretation":"explicit|inferred|unclear","confidence":"high|medium|low","teams":[],"workstreams":[],"scope_relation":"direct|dependency|shared|full","start_date":null,"end_date":null,"duration_days":null,"schedule_basis":null}}]}}]}}
+{{"schemaVersion":{EXTRACTION_SCHEMA_VERSION},"packets":[{{"packetId":"pkt-...","documentRole":"award|funding_notice|proposal|scope_of_work|contract|amendment|work_plan|report|presentation|meeting|interview|correspondence|budget|other","disposition":"extracted|screened_no_controls|needs_review","reason":"specific reason","screening":null,"items":[{{"item_type":"one allowed project-control type","title":"concise distinct control","description":"source-backed description or null","party":"responsible party or null","counterparty":"recipient or null","date_text":"source wording or null","date_kind":"exact|relative|recurring|conditional|none","date":"YYYY-MM-DD only for exact dates or null","trigger":"source trigger or null","offset_days":null,"recurrence":null,"acceptance_criteria":null,"evidence_required":null,"commitment_level":"required|committed|proposed|discussed|informational|unclear","direct_quotes":["short exact quote"],"interpretation":"explicit|inferred|unclear","confidence":"high|medium|low","teams":[],"workstreams":[],"scope_relation":"direct|dependency|shared|full","start_date":null,"end_date":null,"duration_days":null,"schedule_basis":null}}]}}]}}
+
+For screened_no_controls, items must be empty and screening must be {{"method":"model","finding":"specific description of what was reviewed and why it contains no project controls"}}. For extracted packets screening must be null.
 
 Allowed item types: {', '.join(ITEM_TYPES)}.
 Packets:{''.join(packet_blocks)}
@@ -2739,23 +3179,61 @@ def record_worker_packet(run_directory, packet_id, payload):
     if disposition not in {"extracted", "screened_no_controls", "needs_review"}:
         disposition = "needs_review"
     if disposition != "extracted":
-        command_record(argparse.Namespace(run_directory=str(run_directory), packet_id=packet_id, items_file=None, status=disposition, note=payload.get("reason") or "model could not extract this packet"))
+        screening = payload.get("screening") if isinstance(payload.get("screening"), dict) else {}
+        command_record(
+            argparse.Namespace(
+                run_directory=str(run_directory),
+                packet_id=packet_id,
+                items_file=None,
+                status=disposition,
+                note=payload.get("reason") or "model could not extract this packet",
+                screening_method=screening.get("method"),
+                screening_finding=screening.get("finding"),
+                disposition_source="worker",
+                document_role=payload.get("documentRole") or "other",
+            )
+        )
         return
     path = run_directory / "working" / f"{packet_id}-worker.json"
     write_json(path, {"documentRole": payload.get("documentRole") or "other", "items": payload.get("items") or []})
-    command_record(argparse.Namespace(run_directory=str(run_directory), packet_id=packet_id, items_file=str(path), status="extracted", note=payload.get("reason")))
+    command_record(argparse.Namespace(run_directory=str(run_directory), packet_id=packet_id, items_file=str(path), status="extracted", note=payload.get("reason"), disposition_source="worker"))
 
 
-def update_worker_calibration(run_directory, config, source_characters, record):
+def validate_worker_packet(packet_text, payload):
+    disposition = payload.get("disposition")
+    if disposition == "extracted":
+        return extraction_validation_errors({"documentRole": payload.get("documentRole") or "other", "items": payload.get("items")}, packet_text)
+    if disposition == "screened_no_controls":
+        screening = payload.get("screening")
+        finding = screening.get("finding") if isinstance(screening, dict) else None
+        if not isinstance(screening, dict) or screening.get("method") != "model":
+            return ["screened_no_controls requires model screening provenance"]
+        if not isinstance(finding, str) or not finding.strip() or DEFERRED_SCREENING_PATTERN.search(finding):
+            return ["screened_no_controls requires a substantive non-deferral finding"]
+        if payload.get("items"):
+            return ["screened_no_controls must not contain extracted items"]
+        return []
+    if disposition == "needs_review":
+        return []
+    return ["disposition must be extracted, screened_no_controls, or needs_review"]
+
+
+def update_worker_calibration(run_directory, config, source_characters, generated_items, record):
     prompt_tokens = record.get("promptTokens")
     if not isinstance(prompt_tokens, int) or prompt_tokens <= 1500:
         return
     observed = max(2.5, min(5.0, source_characters / max(1, prompt_tokens - 1500)))
     prior = float(config.get("worker", {}).get("charactersPerToken") or DEFAULT_CHARS_PER_TOKEN)
     calibrated = prior * 0.7 + observed * 0.3
-    target = int(max(MIN_ADAPTIVE_PACKET_CHARACTERS, min(MAX_ADAPTIVE_PACKET_CHARACTERS, TARGET_SOURCE_TOKENS * calibrated)))
+    density_limit = MAX_ADAPTIVE_PACKET_CHARACTERS
+    if generated_items:
+        characters_per_item = source_characters / generated_items
+        density_limit = int(max(MIN_ADAPTIVE_PACKET_CHARACTERS, min(MAX_ADAPTIVE_PACKET_CHARACTERS, characters_per_item * 20)))
+    target = int(max(MIN_ADAPTIVE_PACKET_CHARACTERS, min(density_limit, TARGET_SOURCE_TOKENS * calibrated)))
     config.setdefault("worker", {})["charactersPerToken"] = round(calibrated, 4)
     config["worker"]["packetCharacters"] = target
+    config["worker"]["lastGeneratedItems"] = generated_items
+    config["worker"]["lastFinishReason"] = record.get("finishReason")
     config["updatedAt"] = utc_now()
     write_json(run_directory / "run_config.json", config)
 
@@ -2784,7 +3262,67 @@ def update_cache_health(run_directory, config, record):
     return True
 
 
-def process_extraction(run_directory, chat):
+def semantic_halves(text):
+    if len(text) < 4_000:
+        return [text]
+    midpoint = len(text) // 2
+    candidates = [
+        text.rfind("\n#", 0, midpoint),
+        text.find("\n#", midpoint),
+        text.rfind("\n\n", 0, midpoint),
+        text.find("\n\n", midpoint),
+    ]
+    candidates = [value for value in candidates if len(text) // 4 <= value <= 3 * len(text) // 4]
+    split_at = min(candidates, key=lambda value: abs(value - midpoint)) if candidates else midpoint
+    return [text[:split_at], text[split_at:]]
+
+
+def merge_segment_payloads(packet_id, payloads):
+    items = [item for payload in payloads for item in (payload.get("items") or [])]
+    document_role = next((payload.get("documentRole") for payload in payloads if payload.get("documentRole")), "other")
+    if items:
+        return {"packetId": packet_id, "documentRole": document_role, "disposition": "extracted", "reason": "combined from semantic sub-packets after output truncation", "screening": None, "items": items}
+    if all(payload.get("disposition") == "screened_no_controls" for payload in payloads):
+        return {
+            "packetId": packet_id,
+            "documentRole": document_role,
+            "disposition": "screened_no_controls",
+            "reason": "all semantic sub-packets were substantively screened",
+            "screening": {"method": "model", "finding": "; ".join((payload.get("screening") or {}).get("finding", "") for payload in payloads)},
+            "items": [],
+        }
+    return {"packetId": packet_id, "documentRole": document_role, "disposition": "needs_review", "reason": "semantic sub-packets produced incompatible dispositions", "screening": None, "items": []}
+
+
+def extract_segment(run_directory, entry, config, chat, background, depth=0):
+    source, packet, text, relation = entry
+    prompt = extraction_prompt([(source, packet, text, relation)], config)
+    value, record = post_chat_json(
+        run_directory,
+        "extract",
+        WORKER_SYSTEM_PROMPT,
+        prompt,
+        chat,
+        allow_preemption=background,
+        background=background,
+    )
+    if record.get("finishReason") == "length":
+        halves = semantic_halves(text)
+        if len(halves) == 1 or depth >= 3:
+            raise ValueError(f"model output remained truncated after {depth + 1} semantic splits")
+        append_jsonl(
+            run_directory / "inference_schedule.jsonl",
+            {"at": utc_now(), "event": "truncation_split", "packetId": packet["packetId"], "depth": depth + 1, "characters": len(text)},
+        )
+        payloads = [extract_segment(run_directory, (source, packet, half, relation), config, chat, background, depth + 1)[0] for half in halves]
+        return merge_segment_payloads(packet["packetId"], payloads), record
+    packets = value.get("packets") if isinstance(value, dict) else None
+    if not isinstance(packets, list) or len(packets) != 1 or packets[0].get("packetId") != packet["packetId"]:
+        raise ValueError("worker segment response must contain exactly the requested packet id")
+    return packets[0], record
+
+
+def process_extraction(run_directory, chat, background=False):
     config, manifest = load_run(run_directory)
     while True:
         if worker_control(run_directory).get("desiredState") != "running":
@@ -2798,7 +3336,24 @@ def process_extraction(run_directory, chat):
         last_error = None
         for attempt in range(2):
             try:
-                value, record = post_chat_json(run_directory, "extract", WORKER_SYSTEM_PROMPT, prompt if attempt == 0 else f"{prompt}\n\nPrevious output failed validation: {last_error}. Return corrected JSON only.", chat)
+                value, record = post_chat_json(
+                    run_directory,
+                    "extract",
+                    WORKER_SYSTEM_PROMPT,
+                    prompt if attempt == 0 else f"{prompt}\n\nPrevious output failed validation: {last_error}. Return corrected JSON only.",
+                    chat,
+                    allow_preemption=background,
+                    background=background,
+                )
+                if record.get("finishReason") == "length":
+                    split_payloads = []
+                    for entry in batch:
+                        source, packet, text, relation = entry
+                        halves = semantic_halves(text)
+                        append_jsonl(run_directory / "inference_schedule.jsonl", {"at": utc_now(), "event": "truncation_split", "packetId": packet["packetId"], "depth": 1, "characters": len(text)})
+                        payloads = [extract_segment(run_directory, (source, packet, half, relation), config, chat, background, 1)[0] for half in halves]
+                        split_payloads.append(merge_segment_payloads(packet["packetId"], payloads))
+                    value = {"schemaVersion": EXTRACTION_SCHEMA_VERSION, "packets": split_payloads}
                 packets = value.get("packets") if isinstance(value, dict) else None
                 if not isinstance(packets, list):
                     raise ValueError("worker response requires a packets array")
@@ -2806,9 +3361,17 @@ def process_extraction(run_directory, chat):
                 expected = {entry[1]["packetId"] for entry in batch}
                 if set(by_id) != expected:
                     raise ValueError("worker response packet ids do not exactly match the requested batch")
+                packet_text_by_id = {entry[1]["packetId"]: entry[2] for entry in batch}
+                validation_errors = [
+                    f"{packet_id}: {error}"
+                    for packet_id in [entry[1]["packetId"] for entry in batch]
+                    for error in validate_worker_packet(packet_text_by_id[packet_id], by_id[packet_id])
+                ]
+                if validation_errors:
+                    raise ValueError("; ".join(validation_errors))
                 for packet_id in [entry[1]["packetId"] for entry in batch]:
                     record_worker_packet(run_directory, packet_id, by_id[packet_id])
-                update_worker_calibration(run_directory, config, source_characters, record)
+                update_worker_calibration(run_directory, config, source_characters, sum(len(row.get("items") or []) for row in packets), record)
                 update_cache_health(run_directory, config, record)
                 break
             except InterruptedError:
@@ -2820,60 +3383,175 @@ def process_extraction(run_directory, chat):
                 if attempt == 1:
                     for _, packet, _, _ in batch:
                         if packet["packetId"] not in current_results(run_directory, manifest):
-                            command_record(argparse.Namespace(run_directory=str(run_directory), packet_id=packet["packetId"], items_file=None, status="needs_review", note=f"worker validation failed twice: {last_error}"))
+                            command_record(argparse.Namespace(run_directory=str(run_directory), packet_id=packet["packetId"], items_file=None, status="failed", note=f"worker validation failed twice; retry after correcting the response contract: {last_error}", disposition_source="worker"))
         time.sleep(max(0, chat["scheduling"]["yieldMs"]) / 1000)
         if worker_control(run_directory).get("desiredState") != "running":
             return
         config, manifest = load_run(run_directory)
 
 
-def automatic_review(run_directory):
-    manifest = load_review_manifest(run_directory)
+RECONCILIATION_SYSTEM_PROMPT = """Reconcile source-backed evidence into canonical project controls. Return JSON only. Group evidence only when it represents the same real control. Preserve different owners, dates, acceptance criteria, commitment levels, and source authority as separate or conflicting records. Do not invent facts. Use existingControlId only when the existing control still has the same semantic identity. Mark unresolved authority or merge ambiguity with needsReview=true."""
+
+
+def control_counters(run_directory):
     counters = {item_type: 0 for item_type in ITEM_TYPES}
     for control in read_jsonl(run_directory / "controls.jsonl"):
         match = re.fullmatch(r"[A-Z]+-(\d+)", control.get("control_id", ""))
         if match and control.get("control_type") in counters:
             counters[control["control_type"]] = max(counters[control["control_type"]], int(match.group(1)))
+    return counters
+
+
+def reconciliation_prompt(raw):
+    return f"""Reconcile this one control-type review packet.
+
+Return exactly:
+{{"reviewPacketId":"{raw['reviewPacketId']}","needsReview":false,"groups":[{{"existingControlId":null,"title":"canonical title","description":null,"evidenceIds":["ev-..."],"owner":null,"recipient":null,"date_text":null,"date_kind":"none","date":null,"trigger":null,"offset_days":null,"recurrence":null,"acceptance_criteria":null,"evidence_required":null,"source_status":null,"commitment_level":"unclear","teams":[],"workstreams":[],"scope_relation":"full","start_date":null,"end_date":null,"duration_days":null,"schedule_basis":null,"mergeJustification":null}}],"dispositions":[{{"evidence_id":"ev-...","disposition":"contextual|duplicate|superseded|conflicting","controlGroup":0,"note":"reason"}}],"reviewReason":null}}
+
+Every evidence id must appear exactly once in one group or disposition. A duplicate, superseded, or conflicting disposition must identify the related group. Evidence:
+{json.dumps(raw, ensure_ascii=False, sort_keys=True)}
+"""
+
+
+def automatic_review(run_directory, chat, background=False):
+    manifest = load_review_manifest(run_directory)
+    counters = control_counters(run_directory)
     for packet in manifest["packets"]:
         if packet["status"] == "complete" and review_result(run_directory, packet["reviewPacketId"]):
             continue
         raw = json.loads(Path(packet["path"]).read_text(encoding="utf-8"))
+        value, _ = post_chat_json(
+            run_directory,
+            "reconcile",
+            RECONCILIATION_SYSTEM_PROMPT,
+            reconciliation_prompt(raw),
+            chat,
+            allow_preemption=background,
+            background=background,
+        )
+        if not isinstance(value, dict) or value.get("reviewPacketId") != packet["reviewPacketId"]:
+            fail(f"reconciliation response did not match {packet['reviewPacketId']}")
+        if value.get("needsReview"):
+            set_worker_control(run_directory, "paused")
+            append_jsonl(
+                run_directory / "inference_schedule.jsonl",
+                {"at": utc_now(), "event": "reconciliation_needs_review", "reviewPacketId": packet["reviewPacketId"], "detail": value.get("reviewReason")},
+            )
+            return False
+        groups = value.get("groups")
+        dispositions = value.get("dispositions") or []
+        if not isinstance(groups, list) or not isinstance(dispositions, list):
+            fail(f"reconciliation response for {packet['reviewPacketId']} requires groups and dispositions arrays")
+        evidence_by_id = {row["evidence_id"]: row for row in raw["evidenceItems"]}
         controls = []
-        for evidence in raw["evidenceItems"]:
-            item_type = packet["controlType"]
-            counters[item_type] += 1
+        group_control_ids = []
+        for group_index, group in enumerate(groups):
+            if not isinstance(group, dict):
+                fail(f"reconciliation group {group_index + 1} must be an object")
+            evidence_ids = group.get("evidenceIds") or []
+            if not evidence_ids or any(evidence_id not in evidence_by_id for evidence_id in evidence_ids):
+                fail(f"reconciliation group {group_index + 1} has invalid evidenceIds")
+            representative = evidence_by_id[evidence_ids[0]]
+            existing_id = group.get("existingControlId")
+            existing_ids = {row.get("control_id") for row in raw.get("existingControls", [])}
+            if existing_id and existing_id not in existing_ids:
+                fail(f"reconciliation group {group_index + 1} selected an unknown existingControlId")
+            if existing_id:
+                control_id = existing_id
+            else:
+                counters[packet["controlType"]] += 1
+                control_id = f"{CONTROL_PREFIXES[packet['controlType']]}-{counters[packet['controlType']]:03d}"
+            group_control_ids.append(control_id)
+            merge_justification = string_or_none(group.get("mergeJustification"))
+            notes = merge_justification and f"Merge justification: {merge_justification}"
             controls.append(
                 {
-                    "control_id": f"{CONTROL_PREFIXES[item_type]}-{counters[item_type]:03d}",
-                    "control_type": item_type,
-                    "title": evidence["title"],
-                    "description": evidence.get("description"),
-                    "owner": evidence.get("party"),
-                    "recipient": evidence.get("counterparty"),
-                    "date_text": evidence.get("date_text"),
-                    "date_kind": evidence.get("date_kind"),
-                    "date": evidence.get("date"),
-                    "trigger": evidence.get("trigger"),
-                    "offset_days": evidence.get("offset_days"),
-                    "recurrence": evidence.get("recurrence"),
-                    "acceptance_criteria": evidence.get("acceptance_criteria"),
-                    "evidence_required": evidence.get("evidence_required"),
-                    "source_status": evidence.get("source_status"),
-                    "commitment_level": evidence.get("commitment_level"),
-                    "source_evidence_ids": [evidence["evidence_id"]],
+                    "control_id": control_id,
+                    "control_type": packet["controlType"],
+                    "title": group.get("title") or representative["title"],
+                    "description": group.get("description", representative.get("description")),
+                    "owner": group.get("owner", representative.get("party")),
+                    "recipient": group.get("recipient", representative.get("counterparty")),
+                    "date_text": group.get("date_text", representative.get("date_text")),
+                    "date_kind": group.get("date_kind", representative.get("date_kind") or "none"),
+                    "date": group.get("date", representative.get("date")),
+                    "trigger": group.get("trigger", representative.get("trigger")),
+                    "offset_days": group.get("offset_days", representative.get("offset_days")),
+                    "recurrence": group.get("recurrence", representative.get("recurrence")),
+                    "acceptance_criteria": group.get("acceptance_criteria", representative.get("acceptance_criteria")),
+                    "evidence_required": group.get("evidence_required", representative.get("evidence_required")),
+                    "source_status": group.get("source_status", representative.get("source_status")),
+                    "commitment_level": group.get("commitment_level", representative.get("commitment_level") or "unclear"),
+                    "source_evidence_ids": evidence_ids,
                     "relationships": {"parent": [], "depends_on": [], "satisfies": [], "supersedes": [], "conflicts_with": []},
-                    "teams": evidence.get("teams") or [],
-                    "workstreams": evidence.get("workstreams") or [],
-                    "scope_relation": evidence.get("scope_relation") or "full",
-                    "start_date": evidence.get("start_date"),
-                    "end_date": evidence.get("end_date"),
-                    "duration_days": evidence.get("duration_days"),
-                    "schedule_basis": evidence.get("schedule_basis"),
+                    "notes": notes,
+                    "teams": group.get("teams", representative.get("teams") or []),
+                    "workstreams": group.get("workstreams", representative.get("workstreams") or []),
+                    "scope_relation": group.get("scope_relation", representative.get("scope_relation") or "full"),
+                    "start_date": group.get("start_date", representative.get("start_date")),
+                    "end_date": group.get("end_date", representative.get("end_date")),
+                    "duration_days": group.get("duration_days", representative.get("duration_days")),
+                    "schedule_basis": group.get("schedule_basis", representative.get("schedule_basis")),
+                }
+            )
+        normalized_dispositions = []
+        for disposition in dispositions:
+            group_index = disposition.get("controlGroup")
+            control_id = group_control_ids[group_index] if isinstance(group_index, int) and 0 <= group_index < len(group_control_ids) else None
+            normalized_dispositions.append(
+                {
+                    "evidence_id": disposition.get("evidence_id"),
+                    "disposition": disposition.get("disposition"),
+                    "control_id": control_id,
+                    "note": disposition.get("note"),
                 }
             )
         review_path = run_directory / "working" / f"{packet['reviewPacketId']}-automatic.json"
-        write_json(review_path, {"reviewPacketId": packet["reviewPacketId"], "controls": controls, "dispositions": []})
+        write_json(review_path, {"reviewPacketId": packet["reviewPacketId"], "controls": controls, "dispositions": normalized_dispositions})
         command_record_review(argparse.Namespace(run_directory=str(run_directory), review_file=str(review_path)))
+    return True
+
+
+def automatic_relationship_review(run_directory, chat, background=False):
+    review_manifest = load_review_manifest(run_directory)
+    results = current_review_results(run_directory, review_manifest)
+    controls = [control for result in results.values() for control in result.get("controls", [])]
+    if len(controls) < 2:
+        return
+    prompt = f"""Review cross-control relationships. Return exactly {{"relationships":[{{"from":"CONTROL-ID","type":"parent|depends_on|satisfies|supersedes|conflicts_with","to":"CONTROL-ID","reason":"source-backed reason"}}],"needsReview":false,"reviewReason":null}}. Do not invent relationships. Mark needsReview for unresolved authority conflicts. Controls: {json.dumps(controls, ensure_ascii=False, sort_keys=True)}"""
+    value, _ = post_chat_json(
+        run_directory,
+        "relationships",
+        RECONCILIATION_SYSTEM_PROMPT,
+        prompt,
+        chat,
+        allow_preemption=background,
+        background=background,
+    )
+    if not isinstance(value, dict) or value.get("needsReview"):
+        set_worker_control(run_directory, "paused")
+        fail(f"cross-control relationship review needs human review: {value.get('reviewReason') if isinstance(value, dict) else 'invalid response'}")
+    by_id = {control["control_id"]: control for control in controls}
+    field_by_type = {
+        "parent": "parent_control_ids",
+        "depends_on": "depends_on_control_ids",
+        "satisfies": "satisfies_control_ids",
+        "supersedes": "supersedes_control_ids",
+        "conflicts_with": "conflicts_with_control_ids",
+    }
+    for relationship in value.get("relationships") or []:
+        source = by_id.get(relationship.get("from"))
+        target = relationship.get("to")
+        field = field_by_type.get(relationship.get("type"))
+        if source is None or target not in by_id or field is None:
+            fail("relationship review returned an unknown control or relationship type")
+        source[field] = sorted(set([*source.get(field, []), target]))
+        reason = string_or_none(relationship.get("reason"))
+        if reason:
+            source["notes"] = " ".join(value for value in [source.get("notes"), f"Relationship basis: {reason}"] if value)
+    for packet_id, result in results.items():
+        updated = {**result, "recordedAt": utc_now(), "controls": [by_id[control["control_id"]] for control in result.get("controls", [])]}
+        append_jsonl(run_directory / "control_review_results.jsonl", updated)
 
 
 def write_run_metrics(run_directory):
@@ -2888,7 +3566,10 @@ def write_run_metrics(run_directory):
         "generatedAt": utc_now(),
         "packets": len(active_packets(manifest)),
         "dispositions": {status: sum(row.get("status") == status for row in results.values()) for status in PACKET_STATUSES},
+        "coverage": coverage_summary(run_directory, manifest),
         "modelCalls": sum(row.get("event") == "model_call" for row in schedule),
+        "foregroundModelCalls": sum(row.get("event") == "model_call" and row.get("mode") == "foreground" for row in schedule),
+        "backgroundModelCalls": sum(row.get("event") == "model_call" and row.get("mode") == "background" for row in schedule),
         "preemptions": sum(row.get("event") == "preempted" for row in schedule),
         "promptTokens": prompt,
         "cachedTokens": cached,
@@ -2921,12 +3602,14 @@ def set_worker_control(run_directory, desired_state, pid=None):
     return value
 
 
-def require_worker_runtime(run_directory):
+def require_worker_runtime(run_directory, background=False):
     chat = chat_configuration()
     if not chat["enabled"]:
         fail("connectedServices.chat is disabled; configure the local llama.cpp chat endpoint before processing")
+    if not background:
+        return chat
     if not chat["scheduling"]["enabled"]:
-        fail("cache-aware scheduling is disabled; enable connectedServices.chat.scheduling before processing")
+        fail("background processing is unavailable because connectedServices.chat.scheduling is disabled; omit --background to process serially in the foreground")
     if chat["scheduling"]["interactiveSlot"] == chat["scheduling"]["backgroundSlot"]:
         fail("interactiveSlot and backgroundSlot must be different; reserve slot 0 for interactive work and slot 1 for background extraction")
     config, _ = load_run(run_directory)
@@ -2941,17 +3624,19 @@ def require_worker_runtime(run_directory):
     return chat
 
 
-def run_worker(run_directory):
-    chat = require_worker_runtime(run_directory)
+def run_worker(run_directory, background=False):
+    chat = require_worker_runtime(run_directory, background)
     with run_state.run_lock(run_directory):
         set_worker_control(run_directory, "running", os.getpid())
-        process_extraction(run_directory, chat)
+        process_extraction(run_directory, chat, background)
         control = worker_control(run_directory)
         if control["desiredState"] != "running":
             return
-        command_reconcile(argparse.Namespace(run_directory=str(run_directory)))
-        automatic_review(run_directory)
-        command_build(argparse.Namespace(run_directory=str(run_directory), as_of=None))
+        command_reconcile(argparse.Namespace(run_directory=str(run_directory), draft=False))
+        if not automatic_review(run_directory, chat, background):
+            return
+        automatic_relationship_review(run_directory, chat, background)
+        command_build(argparse.Namespace(run_directory=str(run_directory), as_of=None, draft=False))
         command_validate(argparse.Namespace(run_directory=str(run_directory), fix_hints=True, json=True))
         write_run_metrics(run_directory)
         set_worker_control(run_directory, "complete", os.getpid())
@@ -2959,10 +3644,13 @@ def run_worker(run_directory):
 
 def command_process(args):
     run_directory = require_run_directory(args.run_directory)
-    if args.worker or not args.background:
-        run_worker(run_directory)
+    if args.worker:
+        run_worker(run_directory, True)
         return
-    require_worker_runtime(run_directory)
+    if not args.background:
+        run_worker(run_directory, False)
+        return
+    require_worker_runtime(run_directory, True)
     logs = run_directory / "working" / "worker.log"
     handle = logs.open("a", encoding="utf-8")
     process = subprocess.Popen(
@@ -2975,6 +3663,71 @@ def command_process(args):
     handle.close()
     set_worker_control(run_directory, "running", process.pid)
     print(json.dumps({"runDirectory": str(run_directory), "background": True, "pid": process.pid, "log": str(logs)}, indent=2))
+
+
+def captured_command(handler, args):
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        handler(args)
+    return parse_command_json(buffer.getvalue(), handler.__name__)
+
+
+def command_run(args):
+    chat = chat_configuration()
+    probe = None
+    if not chat["enabled"]:
+        fail("serial foreground extraction is unavailable because connectedServices.chat is disabled; configure it before initializing the run")
+    if args.background:
+        scheduling = chat["scheduling"]
+        if not scheduling["enabled"]:
+            fail("background extraction is unavailable because scheduling is disabled; omit --background for serial foreground processing")
+        if scheduling["interactiveSlot"] == scheduling["backgroundSlot"]:
+            fail("background extraction requires different interactive and background slots")
+        probe = probe_background_slot(chat)
+        if not probe.get("available"):
+            fail(f"background slot {scheduling['backgroundSlot']} is unavailable: {probe.get('detail')}")
+    run_directory = Path(args.output).expanduser().resolve()
+    init_args = argparse.Namespace(
+        inputs=args.inputs,
+        output=str(run_directory),
+        title=args.title,
+        packet_chars=args.packet_chars,
+        inbox=args.inbox,
+        focus=args.focus,
+        team=args.team,
+        person=args.person,
+        workstream=args.workstream,
+        include_source=args.include_source,
+        exclude_source=args.exclude_source,
+        control_type=args.control_type,
+        date_from=args.date_from,
+        date_to=args.date_to,
+    )
+    initialized = captured_command(command_init, init_args)
+    if probe is not None:
+        config, _ = load_run(run_directory)
+        config.setdefault("worker", {})["slotProbe"] = {
+            "url": chat["url"],
+            "model": chat["model"],
+            "slot": chat["scheduling"]["backgroundSlot"],
+            "verifiedAt": utc_now(),
+        }
+        write_json(run_directory / "run_config.json", config)
+    inbox = inbox_status_value(run_directory)
+    intake = None
+    if inbox.get("activeBatch") or inbox.get("pendingCount"):
+        intake = captured_command(command_inbox_sync, argparse.Namespace(run_directory=str(run_directory), inbox=args.inbox))
+        if not intake.get("synced") and intake.get("nextAction") == "complete_document_ingest_review":
+            print(json.dumps({"runDirectory": str(run_directory), "initialized": initialized, "inbox": intake, "complete": False, "exactNextAction": intake.get("commands") or intake["nextAction"]}, indent=2))
+            return
+    process_output = io.StringIO()
+    with contextlib.redirect_stdout(process_output):
+        command_process(argparse.Namespace(run_directory=str(run_directory), background=args.background, worker=False))
+    if args.background:
+        print(json.dumps({"runDirectory": str(run_directory), "initialized": initialized, "inbox": intake, "background": True, "complete": False, "exactNextAction": f"project-extraction.py status {run_directory} --json"}, indent=2))
+        return
+    status = captured_command(command_status, argparse.Namespace(run_directory=str(run_directory), json=True))
+    print(json.dumps({"runDirectory": str(run_directory), "initialized": initialized, "inbox": intake, "status": status, "complete": status.get("status") == "complete", "exactNextAction": status.get("exactNextAction")}, indent=2))
 
 
 def command_worker_control(args):
@@ -3085,10 +3838,21 @@ def parser():
     record.add_argument("--items-file")
     record.add_argument("--status", choices=sorted(PACKET_STATUSES), default="extracted")
     record.add_argument("--note")
+    record.add_argument("--screening-method", choices=("model", "human"))
+    record.add_argument("--screening-finding")
+    record.add_argument("--disposition-source", choices=("worker", "manual"), default="manual")
+    record.add_argument("--document-role")
     record.set_defaults(handler=command_record)
+
+    validate_extraction = commands.add_parser("validate-extraction", help="Report every schema, date, and quote error without recording a result.")
+    validate_extraction.add_argument("run_directory")
+    validate_extraction.add_argument("--packet-id", required=True)
+    validate_extraction.add_argument("--items-file", required=True)
+    validate_extraction.set_defaults(handler=command_validate_extraction)
 
     reconcile = commands.add_parser("reconcile", help="Build evidence tables and bounded canonical-control review packets.")
     reconcile.add_argument("run_directory")
+    reconcile.add_argument("--draft", action="store_true")
     reconcile.set_defaults(handler=command_reconcile)
 
     next_review = commands.add_parser("next-review", help="Return exactly one pending control reconciliation packet.")
@@ -3103,6 +3867,7 @@ def parser():
     build = commands.add_parser("build", help="Build project registers and scaffold human-facing deliverables.")
     build.add_argument("run_directory")
     build.add_argument("--as-of", type=lambda value: validate_iso_date(value, "--as-of"))
+    build.add_argument("--draft", action="store_true")
     build.set_defaults(handler=command_build)
 
     refresh = commands.add_parser("refresh", help="Rescan inputs and queue only new or changed source revisions.")
@@ -3119,6 +3884,7 @@ def parser():
     retry_group = retry.add_mutually_exclusive_group(required=True)
     retry_group.add_argument("--item")
     retry_group.add_argument("--all-failed", action="store_true")
+    retry_group.add_argument("--invalid-screenings", action="store_true")
     retry.set_defaults(handler=command_retry)
 
     validate = commands.add_parser("validate", help="Validate sources, evidence, controls, status, and authored deliverables.")
@@ -3158,6 +3924,16 @@ def parser():
     process.add_argument("--background", action="store_true")
     process.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     process.set_defaults(handler=command_process)
+
+    run = commands.add_parser("run", help="Initialize or resume, sync Inbox, extract, reconcile, build, and validate through durable checkpoints.")
+    run.add_argument("inputs", nargs="+")
+    run.add_argument("--output", required=True)
+    run.add_argument("--title")
+    run.add_argument("--packet-chars", type=int, default=DEFAULT_PACKET_CHARACTERS)
+    run.add_argument("--inbox", help="Explicit Inbox path for multi-root or nonstandard project layouts.")
+    run.add_argument("--background", action="store_true")
+    add_scope_arguments(run)
+    run.set_defaults(handler=command_run)
 
     for name in ("pause", "resume", "stop-after-current"):
         control = commands.add_parser(name, help=f"{name.replace('-', ' ').title()} the cache-aware worker.")

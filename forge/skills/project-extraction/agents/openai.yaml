@@ -1,4 +1,4 @@
 interface:
   display_name: "Project Extraction"
   short_description: "Search and refresh live project controls"
-  default_prompt: "Use $project-extraction to check the project Inbox, search existing source-backed controls and documents, and refresh deliverables, requirements, dates, decisions, risks, focused views, and Gantt outputs."
+  default_prompt: "Use $project-extraction to initialize or resume with its orchestrated run command, sync the run Inbox, process serially, report truthful coverage, and search or refresh source-backed controls without calling artifacts complete before validation."
