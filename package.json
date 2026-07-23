@@ -15,7 +15,7 @@
 		"clean": "npm run clean --workspaces",
 		"build": "cd packages/tui && npm run build && cd ../ai && npm run build && cd ../agent && npm run build && cd ../coding-agent && npm run build",
 		"build:install": "cd packages/tui && npm run build && cd ../ai && tsgo -p tsconfig.build.json && cd ../agent && npm run build && cd ../coding-agent && npm run build",
-		"check": "biome check --write --error-on-warnings . && npm run check:pinned-deps && npm run check:ts-imports && npm run check:shrinkwrap && npm run check:forge-skills && npm run check:forge-skill-manifests && npm run check:forge-package && npm run test:forge-skills && npm run test:forge-mcp && npm run test:vault-client && npm run test:vault-workflow && tsgo --noEmit && npm run check:browser-smoke",
+		"check": "biome check --write --error-on-warnings . && npm run check:pinned-deps && npm run check:ts-imports && npm run check:shrinkwrap && npm run check:forge-skills && npm run check:forge-skill-manifests && npm run check:forge-package && npm run test:forge-skills && npm run test:forge-mcp && npm run test:vault-client && npm run test:vault-workflow && npm run test:vault-context && tsgo --noEmit && npm run check:browser-smoke",
 		"check:browser-smoke": "node scripts/check-browser-smoke.mjs",
 		"check:forge-skills": "tsx scripts/generate-forge-skill-report.ts --check",
 		"check:forge-skill-manifests": "node scripts/check-forge-skills.mjs",
@@ -44,7 +44,8 @@
 		"release:minor": "node scripts/release.mjs minor",
 		"release:major": "node scripts/release.mjs major",
 		"release:fix-links": "node scripts/release-notes.mjs fix-github-releases",
-		"prepare": "husky"
+		"prepare": "husky",
+		"test:vault-context": "tsx --test scripts/vault-context.test.ts"
 	},
 	"devDependencies": {
 		"@anthropic-ai/sandbox-runtime": "0.0.26",

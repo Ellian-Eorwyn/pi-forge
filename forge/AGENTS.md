@@ -65,6 +65,13 @@ downstream deliverables.
 
 ## Vault Workflow
 
+The `vault-context` extension detects an Obsidian vault at or above the working
+directory and injects its coordinates once per session: vault root, schema note,
+note count, and whether the `vault-connections` embedding index exists. When that
+context is present, use `vault-connections` search rather than grep for questions
+about vault content, and `vault-organizer` for filing and de-duplication. `/vault`
+re-scans and reports. Outside a vault the extension does nothing.
+
 The `vault-workflow` extension adds a plan -> execute -> verify loop for changes
 to an Obsidian vault, driven by the single local model. The user drives phases
 with `/plan`, `/execute`, `/verify` (and `/workflow off`); each phase sets the
