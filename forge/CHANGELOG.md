@@ -13,3 +13,4 @@
 - Added opt-in cache-aware local inference scheduling with isolated interactive and project-extraction slots, activity leases, worker preemption, adaptive larger batches, focused views, extraction metrics, and source-backed Gantt outputs.
 - Added hybrid search and resumable Inbox intake for live project-extraction repositories.
 - Added a serial foreground project-extraction orchestrator, truthful coverage gates and labeled drafts, adaptive truncation recovery, model-assisted reconciliation, and Zoom JSON transcript provenance intake.
+- Added a `vault-connections` skill: hybrid semantic search over an Obsidian vault, per-id reviewed connection proposals merged additively into the `related` frontmatter property, and a wiki entity layer that turns unresolved wikilinks into schema-routed stub notes and backfills links to them. Extracted the shared schema compiler into `lib/vault_schema.py` so it and `vault-organizer` derive identical folder paths.
