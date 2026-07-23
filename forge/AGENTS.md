@@ -62,3 +62,26 @@ source-backed Gantt outputs. For questions about an existing
 extraction, use its hybrid search first and load full source documents only
 when retrieved passages are insufficient. Use `report-output` only for polished
 downstream deliverables.
+
+## Vault Workflow
+
+The `vault-workflow` extension adds a plan -> execute -> verify loop for changes
+to an Obsidian vault, driven by the single local model. The user drives phases
+with `/plan`, `/execute`, `/verify` (and `/workflow off`); each phase sets the
+tools and thinking behaviour, so follow the injected phase prompt:
+
+- **plan** — read-only. Interview the user with the questionnaire tool until the
+  goal is unambiguous, ground the plan in the real vault and schema note, write a
+  detailed numbered plan, and ask for approval. Make no changes.
+- **execute** — full vault tools, one change at a time. Dry-run first, show the
+  result, and wait for an explicit "yes" before any `--apply` or file write.
+  Prefer the vetted skills; run `vault-organizer` with
+  `--base-url http://llms:8008/v1/chat/completions --think-prefill`. Run
+  `vault-organizer.py doctor` after editing the schema note. Never delete notes;
+  keep every path inside the vault.
+- **verify** — read-only. Check the result against the plan (`doctor`, `status`,
+  grep, read `report.md`) and report what passed, what did not, and follow-ups.
+
+The vault schema note (`99 Meta/99.02 Schemas/0.00 Vault Schema.md`) is the sole
+source of truth for that vault's folders and frontmatter. See
+[docs/vault-workflow.md](../docs/vault-workflow.md) for the full contract.

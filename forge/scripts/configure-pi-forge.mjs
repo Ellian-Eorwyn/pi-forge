@@ -107,6 +107,10 @@ models.providers["forge-local"] = {
 			supportsDeveloperRole: false,
 			supportsReasoningEffort: false,
 			maxTokensField: "max_tokens",
+			// The served Qwen model emits <think>...</think> in its content; parse
+			// it as reasoning so raw think tags do not leak into displayed output
+			// (and the vault-workflow execute-phase prefill stays invisible).
+			thinkingFormat: "qwen",
 		},
 		models: [
 			{
