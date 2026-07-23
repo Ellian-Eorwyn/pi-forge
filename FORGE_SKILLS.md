@@ -4,12 +4,12 @@
 
 ## Launch Context Summary
 
-- Available skills: 17
-- Model-visible skills at launch: 17
-- Managed instructions (`AGENTS.md` with its `<project_context>` wrapper): 959 tokens
-- Skills menu (metadata for all skills): 2980 tokens
-- **Total forge launch context (always processed): 3939 tokens**
-- **Maximum if every `SKILL.md` body is also loaded at once: 32713 tokens**
+- Available skills: 18
+- Model-visible skills at launch: 18
+- Managed instructions (`AGENTS.md` with its `<project_context>` wrapper): 1412 tokens
+- Skills menu (metadata for all skills): 3135 tokens
+- **Total forge launch context (always processed): 4547 tokens**
+- **Maximum if every `SKILL.md` body is also loaded at once: 34651 tokens**
 
 Of the skills menu above, the shared wrapper (instructions and XML envelope, independent of skill count) is ~92 tokens; the rest scales with the number of skills.
 
@@ -34,6 +34,7 @@ Still excluded, because they are owned by the Pi harness rather than this profil
 | [`spreadsheet-analysis`](forge/skills/spreadsheet-analysis/SKILL.md) | Analyze and enrich tabular datasets | 161 | 1767 | 1901 | Model-visible |
 | [`transcript-cleanup`](forge/skills/transcript-cleanup/SKILL.md) | Clean and structure raw transcripts | 144 | 1127 | 1244 | Model-visible |
 | [`transcription`](forge/skills/transcription/SKILL.md) | Transcribe audio or video, then correct and clean it | 185 | 1517 | 1676 | Model-visible |
+| [`vault-connections`](forge/skills/vault-connections/SKILL.md) | Search an Obsidian vault by meaning rather than filename, propose links between notes for the... | 155 | 1202 | 1330 | Model-visible |
 | [`vault-handoff`](forge/skills/vault-handoff/SKILL.md) | Send completed text artifacts to pi-vault review | 63 | 226 | 264 | Model-visible |
 | [`vault-organizer`](forge/skills/vault-organizer/SKILL.md) | Organize an Obsidian vault or vault inbox from a human-maintained schema note - classify Mark... | 181 | 1072 | 1227 | Model-visible |
 | [`web-collection`](forge/skills/web-collection/SKILL.md) | Archive and organize web sources | 138 | 1971 | 2083 | Model-visible |

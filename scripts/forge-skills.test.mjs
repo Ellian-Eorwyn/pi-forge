@@ -2758,6 +2758,10 @@ test("vault-organizer Python tests pass", () => {
 	run(python, [join(skillsRoot, "vault-organizer", "tests", "test_vault_organizer.py")]);
 });
 
+test("vault-connections Python tests pass", () => {
+	run(python, [join(skillsRoot, "vault-connections", "tests", "test_vault_connections.py")]);
+});
+
 test("document ingest, coding, and web collection expose review and safety boundaries", () => {
 	withWorkspace((workspace) => {
 		const document = join(workspace, "document.md");
