@@ -19,10 +19,11 @@ import run_state
 
 
 RUN_SCHEMA_VERSION = 1
-META_SCHEMA_VERSION = 1
+META_SCHEMA_VERSION = 2
 MAX_ALLOWED_META_CONTEXT = 256000
 DEFAULT_META_TARGET_CONTEXT = 128000
 DEFAULT_META_MAX_CONTEXT = 256000
+DEFAULT_META_RESERVED_CONTEXT = 32000
 DEFAULT_SYNTHESIS_TARGET_CONTEXT = 128000
 RUN_STATE_WORKFLOW = "literature-extraction"
 META_RUN_STATE_WORKFLOW = "literature-extraction-meta"
@@ -30,6 +31,10 @@ DEFAULT_META_BRIDGE_THRESHOLD = 0.78
 META_CLUSTER_ITEM_TYPES = ("claim", "finding", "definition", "connection")
 META_BRIDGE_ITEM_TYPES = ("claim", "finding", "definition", "connection", "quoted_evidence")
 META_ITEM_TEXT_CHARS = 2000
+META_ARTIFACT_TEXT_CHARS = 2000
+META_CITATION_PATTERN = re.compile(r"\b[ma]\d{6}\b")
+META_COVERAGE_PATTERN = re.compile(r"\b(\d+)\s+of\s+(\d+)\s+(?:documents|sources)\b", re.IGNORECASE)
+META_WORD_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{2,}")
 
 # Cross-document claim clustering groups semantically similar claims and findings
 # across sources so the model can author agreement/disagreement synthesis with
@@ -154,6 +159,7 @@ META_SOURCE_COLUMNS = [
     "document_count",
     "item_count",
     "authored_deliverables",
+    "artifact_sections",
     "warnings",
 ]
 META_BRIDGE_COLUMNS = [
@@ -258,7 +264,7 @@ META_MARKDOWN_DELIVERABLES = {
         "",
         PLACEHOLDER,
         "",
-        "<!-- Author from packet memos, bridge_candidates.csv, topic_clusters.csv, and meta_items.jsonl.",
+        "<!-- Author from authoring_context.md, which bounds the reduced packet memos and citation map.",
         "Every substantive claim needs item ids, source titles, corpus labels, and locators when available.",
         "Keep primary evidence, secondary interpretation, and generated synthesis distinct. -->",
         "",
@@ -276,7 +282,7 @@ META_MARKDOWN_DELIVERABLES = {
         "",
         PLACEHOLDER,
         "",
-        "<!-- Link primary-source evidence to secondary-source concepts. Cite item ids and locators.",
+        "<!-- Link primary-source evidence to secondary-source concepts. Cite evidence item ids and locators.",
         "If corpus labels are not literally primary/secondary, use the labels recorded in meta_sources.csv. -->",
         "",
         "| Primary evidence | Secondary concept | Relationship | Item ids | Locators |",
@@ -288,7 +294,7 @@ META_MARKDOWN_DELIVERABLES = {
         "",
         PLACEHOLDER,
         "",
-        "<!-- Separate source-native terms from analyst/theory terms. Cite item ids and corpus labels. -->",
+        "<!-- Separate source-native terms from analyst/theory terms. Cite evidence item ids and corpus labels. -->",
         "",
         "| Concept | Emic / etic / unclear | Definition or use | Source role | Item ids |",
         "|---|---|---|---|---|",
@@ -1196,6 +1202,9 @@ def command_next_output(args):
                 "name": pending["name"],
                 "targetPath": pending["path"],
                 "workingDirectory": str(run_directory / "working"),
+                "authoringContext": str(run_directory / "authoring_context.md")
+                if (run_directory / "authoring_context.md").is_file()
+                else None,
                 "recordCommand": f"literature-extraction.py record-output {run_directory} --name {pending['name']} --file <authored.md>",
             }
         )
@@ -1485,6 +1494,227 @@ def authored_deliverable_count(run_directory):
     return count
 
 
+def markdown_sections(text):
+    matches = list(re.finditer(r"^(#{1,6})\s+(.+?)\s*$", text, re.MULTILINE))
+    if not matches:
+        stripped = text.strip()
+        return [("Document", 0, stripped)] if stripped else []
+    sections = []
+    preamble = text[: matches[0].start()].strip()
+    if preamble:
+        sections.append(("Preamble", 0, preamble))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        section_text = text[match.start() : end].strip()
+        if section_text:
+            sections.append((match.group(2).strip(), len(match.group(1)), section_text))
+    return sections
+
+
+def lexical_question_score(question, text):
+    question_terms = set(META_WORD_PATTERN.findall(question.lower()))
+    if not question_terms:
+        return 0.0
+    text_terms = set(META_WORD_PATTERN.findall(text.lower()))
+    return len(question_terms & text_terms) / len(question_terms)
+
+
+def coverage_warnings(filename, text, successful_documents, total_documents):
+    warnings = []
+    for match in META_COVERAGE_PATTERN.finditer(text):
+        reported_success = int(match.group(1))
+        reported_total = int(match.group(2))
+        if reported_success != successful_documents or reported_total != total_documents:
+            warnings.append(
+                f"authored coverage mismatch in {filename}: reported {reported_success} of {reported_total}; "
+                f"structured run has {successful_documents} successful of {total_documents}"
+            )
+    return warnings
+
+
+def prior_cluster_digest(run_directory):
+    path = run_directory / "claim_clusters.md"
+    if not path.is_file():
+        return {"available": False, "crossDocumentGroups": None, "possibleContradictions": None}
+    text = path.read_text(encoding="utf-8")
+    cross = re.search(r"Cross-document groups:\s*(\d+)", text)
+    contradictions = re.search(r"Groups flagged for possible contradiction:\s*(\d+)", text)
+    return {
+        "available": True,
+        "crossDocumentGroups": int(cross.group(1)) if cross else None,
+        "possibleContradictions": int(contradictions.group(1)) if contradictions else None,
+    }
+
+
+def build_source_digest(run, results_by_id, run_directory):
+    statuses = Counter()
+    item_types = Counter()
+    documents = []
+    for document in run["documents"]:
+        result = results_by_id.get(document["documentId"])
+        status = result.get("status", "pending") if result else "pending"
+        statuses[status] += 1
+        items = (result.get("items") or []) if result and status == "success" else []
+        counts = Counter(item.get("item_type") for item in items)
+        item_types.update(counts)
+        documents.append(
+            {
+                "documentId": document["documentId"],
+                "sourceTitle": document.get("title") or Path(document["sourcePath"]).stem,
+                "status": status,
+                "itemCount": len(items),
+                "itemTypeCounts": dict(sorted(counts.items())),
+                "methods": [item["text"] for item in items if item.get("item_type") == "method"],
+                "limitations": [item["text"] for item in items if item.get("item_type") == "limitation"],
+                "researchGaps": [item["text"] for item in items if item.get("item_type") == "research_gap"],
+            }
+        )
+    return {
+        "documentCount": len(run["documents"]),
+        "statusCounts": dict(sorted(statuses.items())),
+        "itemTypeCounts": dict(sorted(item_types.items())),
+        "claimClusters": prior_cluster_digest(run_directory),
+        "documents": documents,
+    }
+
+
+def collect_prior_synthesis(run_directory, corpus_label, meta_source_id, source_run_id, artifact_start, digest):
+    artifacts = []
+    warnings = []
+    artifact_index = artifact_start
+    successful_documents = digest["statusCounts"].get("success", 0)
+    total_documents = digest["documentCount"]
+    for filename in MARKDOWN_DELIVERABLES:
+        path = run_directory / filename
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        if PLACEHOLDER in text:
+            continue
+        warnings.extend(coverage_warnings(filename, text, successful_documents, total_documents))
+        for section_index, (heading, heading_level, section_text) in enumerate(markdown_sections(text), start=1):
+            artifact_index += 1
+            artifacts.append(
+                {
+                    "artifactId": normalized_item_id("a", artifact_index),
+                    "metaSourceId": meta_source_id,
+                    "sourceRunId": source_run_id,
+                    "runDirectory": str(run_directory),
+                    "corpusLabel": corpus_label,
+                    "role": "prior_synthesis",
+                    "filename": filename,
+                    "heading": heading,
+                    "headingLevel": heading_level,
+                    "sectionIndex": section_index,
+                    "sectionText": section_text,
+                    "estimatedTokens": estimate_tokens(section_text),
+                    "questionScore": "",
+                    "retrievalMethod": "lexical",
+                }
+            )
+    return artifacts, warnings
+
+
+def write_meta_artifacts(run_directory, artifacts):
+    lines = [json.dumps(artifact, ensure_ascii=False) for artifact in artifacts]
+    run_state.atomic_write_text(run_directory / "meta_artifacts.jsonl", "" if not lines else "\n".join(lines) + "\n")
+
+
+def load_meta_artifacts(run_directory):
+    path = run_directory / "meta_artifacts.jsonl"
+    if not path.is_file():
+        fail(f"meta_artifacts.jsonl is missing: {path}")
+    artifacts = []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            artifacts.append(json.loads(line))
+        except json.JSONDecodeError as error:
+            fail(f"invalid JSON on meta_artifacts.jsonl line {line_number}: {error}")
+    return artifacts
+
+
+def rank_meta_artifacts(run_directory, research_question, artifacts, embeddings_url):
+    for artifact in artifacts:
+        artifact["questionScore"] = f"{lexical_question_score(research_question, artifact['sectionText']):.3f}"
+        artifact["retrievalMethod"] = "lexical"
+    info = {"enabled": False, "reason": None, "rankedArtifacts": len(artifacts), "method": "lexical"}
+    if not artifacts:
+        info["reason"] = "no authored prior-synthesis sections"
+        return info
+    result = forge_embeddings.embed_texts(
+        [research_question] + [artifact["sectionText"][:META_ARTIFACT_TEXT_CHARS] for artifact in artifacts],
+        url=embeddings_url,
+    )
+    if not result["ok"]:
+        info["reason"] = f"artifact embeddings unavailable; used lexical ranking: {result['reason']}"
+        return info
+    vectors = [forge_embeddings.normalize(vector) for vector in result["vectors"]]
+    question_vector = vectors[0]
+    artifact_vectors = vectors[1:]
+    for artifact, vector in zip(artifacts, artifact_vectors):
+        artifact["questionScore"] = f"{forge_embeddings.cosine(question_vector, vector):.3f}"
+        artifact["retrievalMethod"] = "embedding"
+    cache = {
+        "model": result["model"],
+        "url": result["url"],
+        "dimensions": result["dimensions"],
+        "artifacts": [
+            {"artifactId": artifact["artifactId"], "vector": vector}
+            for artifact, vector in zip(artifacts, artifact_vectors)
+        ],
+    }
+    (run_directory / "working" / "artifact_embedding_cache.json").write_text(
+        json.dumps(cache, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    info.update({"enabled": True, "method": "embedding", "model": result["model"], "url": result["url"]})
+    return info
+
+
+def render_corpus_digest(sources):
+    lines = ["# Corpus and Run Digest", ""]
+    for source in sources:
+        digest = source["digest"]
+        status_text = ", ".join(f"{name}={count}" for name, count in digest["statusCounts"].items()) or "none"
+        type_text = ", ".join(f"{name}={count}" for name, count in digest["itemTypeCounts"].items()) or "none"
+        cluster = digest["claimClusters"]
+        cluster_text = "unavailable"
+        if cluster["available"]:
+            cluster_text = (
+                f"cross-document groups={cluster['crossDocumentGroups']}; "
+                f"possible contradictions={cluster['possibleContradictions']}"
+            )
+        lines.extend(
+            [
+                f"## {source['corpusLabel']} / {source['sourceRunId']}",
+                "",
+                f"- Documents: {digest['documentCount']} ({status_text})",
+                f"- Evidence item types: {type_text}",
+                f"- Prior claim clusters: {cluster_text}",
+                "",
+            ]
+        )
+        for document in digest["documents"]:
+            counts = ", ".join(f"{name}={count}" for name, count in document["itemTypeCounts"].items()) or "none"
+            lines.append(
+                f"- `{document['documentId']}` {document['sourceTitle']} — {document['status']}; "
+                f"items={document['itemCount']}; {counts}"
+            )
+            for label, values in (
+                ("method", document["methods"]),
+                ("limitation", document["limitations"]),
+                ("research gap", document["researchGaps"]),
+            ):
+                for value in values:
+                    compact = " ".join(value.split())
+                    if len(compact) > 240:
+                        compact = compact[:237] + "..."
+                    lines.append(f"  - {label}: {compact}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def quote_probe(source_path, direct_quotes):
     if blank(source_path):
         return {"sourceAvailable": False, "sourceHashStatus": "missing", "quoteVerified": "", "sourceSnippet": None}
@@ -1516,7 +1746,7 @@ def run_source_id(run_directory):
     return f"run-{digest[:12]}"
 
 
-def collect_meta_source(run_directory, corpus_label, meta_source_id, item_start):
+def collect_meta_source(run_directory, corpus_label, meta_source_id, item_start, artifact_start):
     run = load_run(run_directory)
     results = load_results(run_directory, strict=False)
     results_by_id = {result.get("documentId"): result for result in results}
@@ -1530,6 +1760,16 @@ def collect_meta_source(run_directory, corpus_label, meta_source_id, item_start)
         warnings.append("not all first-pass Markdown deliverables are authored")
 
     source_run_id = run_source_id(run_directory)
+    digest = build_source_digest(run, results_by_id, run_directory)
+    artifacts, artifact_warnings = collect_prior_synthesis(
+        run_directory,
+        corpus_label,
+        meta_source_id,
+        source_run_id,
+        artifact_start,
+        digest,
+    )
+    warnings.extend(artifact_warnings)
     items = []
     item_index = item_start
     for document in run["documents"]:
@@ -1573,9 +1813,11 @@ def collect_meta_source(run_directory, corpus_label, meta_source_id, item_start)
         "documentCount": len(run["documents"]),
         "itemCount": len(items),
         "authoredDeliverables": authored_count,
+        "artifactCount": len(artifacts),
+        "digest": digest,
         "warnings": sorted(set(warnings)),
     }
-    return source, items
+    return source, items, artifacts
 
 
 def write_meta_sources_csv(run_directory, sources):
@@ -1592,6 +1834,7 @@ def write_meta_sources_csv(run_directory, sources):
                     source["documentCount"],
                     source["itemCount"],
                     source["authoredDeliverables"],
+                    source["artifactCount"],
                     "; ".join(source["warnings"]),
                 ]
             )
@@ -1811,61 +2054,212 @@ def render_meta_item(item):
     return " | ".join(parts)
 
 
-def write_meta_packets(run_directory, research_question, items, target_context, max_context):
-    packets_directory = run_directory / "packets"
-    packets_directory.mkdir()
-    header = "\n".join(
+def meta_packet_header(research_question, packet_kind, level):
+    instructions = {
+        "evidence": [
+            "This packet contains first-pass structured evidence. Cite packet-local m###### item ids.",
+            "Prior-synthesis excerpts, when present, are interpretive aids and never replace evidence citations.",
+        ],
+        "prior-synthesis": [
+            "This packet contains generated first-pass synthesis, not source evidence. Cite packet-local a###### artifact ids.",
+            "Record useful framing, tensions, document-level arguments, and suspected inconsistencies for later evidence checking.",
+        ],
+        "reduction": [
+            "This packet reduces earlier memos. Preserve inherited m###### and a###### citations in the reduced memo.",
+            "Do not turn prior-synthesis framing into evidence or smooth disagreement into consensus.",
+        ],
+    }
+    return "\n".join(
         [
             "# Meta Literature Extraction Packet",
             "",
             f"Research question: {research_question}",
+            f"Packet kind: {packet_kind}",
+            f"Hierarchy level: {level}",
             "",
-            "Use this bounded packet with meta_items.jsonl, bridge_candidates.csv, and topic_clusters.csv.",
-            "Write a memo that cites item ids for every substantive analytic claim.",
-            "Preserve corpus roles, disagreements, silences, and limits; do not reconcile conflicts silently.",
-            "",
-            "## Evidence Items",
+            *instructions[packet_kind],
+            "Preserve corpus roles, disagreements, silences, uncertainty, and source limits.",
             "",
         ]
     )
-    ordered = balanced_meta_items(items)
+
+
+def split_artifact_blocks(artifact, research_question, payload_context):
+    metadata = (
+        f"artifact:{artifact['artifactId']} | corpus:{artifact['corpusLabel']} | role:prior_synthesis | "
+        f"file:{artifact['filename']} | heading:{artifact['heading']} | relevance:{artifact['questionScore']}"
+    )
+    header_tokens = estimate_tokens(meta_packet_header(research_question, "prior-synthesis", 1) + metadata)
+    available_chars = max(64, (payload_context - header_tokens - 64) * 4)
+    text = artifact["sectionText"]
+    chunks = [text[index : index + available_chars] for index in range(0, len(text), available_chars)] or [""]
+    return [
+        {
+            "text": f"## Prior Synthesis Section\n\n{metadata} | part:{index}/{len(chunks)}\n\n{chunk}",
+            "itemIds": [],
+            "artifactIds": [artifact["artifactId"]],
+        }
+        for index, chunk in enumerate(chunks, start=1)
+    ]
+
+
+def write_meta_packet_series(
+    run_directory,
+    research_question,
+    packet_kind,
+    level,
+    entries,
+    payload_context,
+    max_context,
+    content_limit=None,
+):
+    limit = content_limit or payload_context
+    header = meta_packet_header(research_question, packet_kind, level)
     packets = []
-    current_lines = [header]
-    current_items = []
+    current_entries = []
 
     def flush_packet():
-        if not current_items:
+        if not current_entries:
             return
-        packet_id = f"packet-{len(packets) + 1:04d}"
-        content = "\n".join(current_lines).rstrip() + "\n"
+        packet_id = f"l{level}-{packet_kind}-{len(packets) + 1:04d}"
+        body = "\n\n".join(entry["text"] for entry in current_entries)
+        content = f"{header}{body}".rstrip() + "\n"
         token_count = estimate_tokens(content)
-        if token_count > max_context:
-            fail(f"{packet_id} exceeds --max-context after truncation estimate: {token_count}")
-        path = packets_directory / f"{packet_id}.md"
-        path.write_text(content, encoding="utf-8")
+        if token_count > payload_context or token_count > max_context:
+            fail(f"{packet_id} exceeds its context budget: {token_count} estimated tokens")
+        item_ids = list(dict.fromkeys(item_id for entry in current_entries for item_id in entry["itemIds"]))
+        artifact_ids = list(dict.fromkeys(artifact_id for entry in current_entries for artifact_id in entry["artifactIds"]))
+        packet_directory = run_directory / "packets" / f"level-{level}"
+        packet_directory.mkdir(parents=True, exist_ok=True)
+        path = packet_directory / f"{packet_id}.md"
+        run_state.atomic_write_text(path, content)
         packets.append(
             {
                 "packetId": packet_id,
+                "packetKind": packet_kind,
+                "level": level,
                 "path": str(path),
-                "itemCount": len(current_items),
+                "itemCount": len(item_ids),
+                "artifactCount": len(artifact_ids),
                 "estimatedTokens": token_count,
-                "itemIds": list(current_items),
+                "componentTokens": {
+                    "instructions": estimate_tokens(header),
+                    "evidence": estimate_tokens(body) if packet_kind == "evidence" else 0,
+                    "priorSynthesis": estimate_tokens(body) if packet_kind == "prior-synthesis" else 0,
+                    "reductionMemos": estimate_tokens(body) if packet_kind == "reduction" else 0,
+                },
+                "itemIds": item_ids,
+                "artifactIds": artifact_ids,
             }
         )
 
-    for item in ordered:
-        line = render_meta_item(item)
-        candidate = "\n".join(current_lines + [line]).rstrip() + "\n"
-        if current_items and estimate_tokens(candidate) > target_context:
+    for entry in entries:
+        candidate_body = "\n\n".join(value["text"] for value in [*current_entries, entry])
+        candidate_tokens = estimate_tokens(f"{header}{candidate_body}\n")
+        if current_entries and candidate_tokens > limit:
             flush_packet()
-            current_lines = [header]
-            current_items = []
-        current_lines.append(line)
-        current_items.append(item["itemId"])
+            current_entries = []
+            candidate_tokens = estimate_tokens(f"{header}{entry['text']}\n")
+        if candidate_tokens > payload_context:
+            fail(f"one {packet_kind} block exceeds the payload context budget")
+        current_entries.append(entry)
     flush_packet()
+    return packets
+
+
+def add_retrieved_artifacts_to_evidence_packets(packets, artifacts, payload_context):
+    ranked = sorted(artifacts, key=lambda artifact: (-float(artifact["questionScore"]), artifact["artifactId"]))
+    for packet in packets:
+        path = Path(packet["path"])
+        content = path.read_text(encoding="utf-8").rstrip()
+        retrieved = []
+        additions = []
+        for artifact in ranked:
+            compact = " ".join(artifact["sectionText"].split())
+            if len(compact) > 2000:
+                compact = compact[:1997] + "..."
+            block = (
+                f"### Retrieved {artifact['artifactId']} — {artifact['filename']} / {artifact['heading']}\n\n"
+                f"Prior synthesis only: {compact}"
+            )
+            candidate = f"{content}\n\n## Retrieved Prior Synthesis\n\n" + "\n\n".join([*additions, block]) + "\n"
+            if estimate_tokens(candidate) > payload_context:
+                continue
+            additions.append(block)
+            retrieved.append(artifact["artifactId"])
+            if len(retrieved) == 2:
+                break
+        if not additions:
+            packet["retrievedArtifactIds"] = []
+            continue
+        content = f"{content}\n\n## Retrieved Prior Synthesis\n\n" + "\n\n".join(additions) + "\n"
+        run_state.atomic_write_text(path, content)
+        packet["estimatedTokens"] = estimate_tokens(content)
+        packet["componentTokens"]["priorSynthesis"] = estimate_tokens("\n\n".join(additions))
+        packet["retrievedArtifactIds"] = retrieved
+
+
+def write_leaf_meta_packets(run_directory, research_question, items, artifacts, payload_context, max_context):
+    evidence_entries = [
+        {"text": render_meta_item(item), "itemIds": [item["itemId"]], "artifactIds": []}
+        for item in balanced_meta_items(items)
+    ]
+    evidence_limit = max(1, int(payload_context * 0.85))
+    evidence_packets = write_meta_packet_series(
+        run_directory,
+        research_question,
+        "evidence",
+        1,
+        evidence_entries,
+        payload_context,
+        max_context,
+        content_limit=evidence_limit,
+    )
+    add_retrieved_artifacts_to_evidence_packets(evidence_packets, artifacts, payload_context)
+    artifact_entries = []
+    for artifact in sorted(artifacts, key=lambda value: (value["metaSourceId"], value["filename"], value["sectionIndex"])):
+        artifact_entries.extend(split_artifact_blocks(artifact, research_question, payload_context))
+    synthesis_packets = write_meta_packet_series(
+        run_directory,
+        research_question,
+        "prior-synthesis",
+        1,
+        artifact_entries,
+        payload_context,
+        max_context,
+    ) if artifact_entries else []
+    packets = [*evidence_packets, *synthesis_packets]
     if not packets:
         fail("no meta packets were generated")
     return packets
+
+
+def write_reduction_packets(run_directory, config, level, memos):
+    entries = []
+    packet_by_id = {packet["packetId"]: packet for packet in config["packets"]}
+    for memo in memos:
+        source_packet = packet_by_id[memo["packetId"]]
+        entries.append(
+            {
+                "text": (
+                    f"## Memo from {memo['packetId']}\n\n"
+                    f"Inherited evidence ids: {', '.join(memo.get('citedItemIds', [])) or 'none'}\n\n"
+                    f"Inherited artifact ids: {', '.join(memo.get('citedArtifactIds', [])) or 'none'}\n\n"
+                    f"{memo['memoText']}"
+                ),
+                "itemIds": memo.get("citedItemIds", source_packet.get("itemIds", [])),
+                "artifactIds": memo.get("citedArtifactIds", source_packet.get("artifactIds", [])),
+            }
+        )
+    return write_meta_packet_series(
+        run_directory,
+        config["researchQuestion"],
+        "reduction",
+        level,
+        entries,
+        config["payloadContext"],
+        config["maxContext"],
+    )
 
 
 def load_meta_config(run_directory):
@@ -1874,7 +2268,10 @@ def load_meta_config(run_directory):
     except (OSError, json.JSONDecodeError) as error:
         fail(f"could not read meta_config.json: {error}")
     if config.get("schemaVersion") != META_SCHEMA_VERSION:
-        fail(f"unsupported meta schema version: {config.get('schemaVersion')}")
+        fail(
+            f"meta schema version {config.get('schemaVersion')} is incompatible with version {META_SCHEMA_VERSION}; "
+            "re-run meta-init into a new directory"
+        )
     return config
 
 
@@ -1912,7 +2309,185 @@ def next_pending_packet(config, memos):
     return None
 
 
+def memo_citations(text):
+    citations = sorted(set(META_CITATION_PATTERN.findall(text)))
+    return [value for value in citations if value.startswith("m")], [value for value in citations if value.startswith("a")]
+
+
+def meta_warnings(config):
+    warnings = sorted({warning for source in config.get("sources", []) for warning in source.get("warnings", [])})
+    for info_name in ("embeddingInfo", "artifactRankingInfo"):
+        reason = config.get(info_name, {}).get("reason")
+        if reason:
+            warnings.append(reason)
+    return sorted(set(warnings))
+
+
+def update_context_budget(run_directory, config):
+    packets = config.get("packets", [])
+    context_budget = {
+        "targetContext": config["targetContext"],
+        "reservedContext": config["reservedContext"],
+        "payloadContext": config["payloadContext"],
+        "maxContext": config["maxContext"],
+        "estimatedTokensMethod": "ceil(characters / 4)",
+        "packetCount": len(packets),
+        "levels": sorted({packet["level"] for packet in packets}),
+        "packets": packets,
+        "authoringContext": config.get("authoringContext"),
+        "warnings": meta_warnings(config),
+    }
+    run_state.atomic_write_json(run_directory / "context_budget.json", context_budget)
+
+
+def citation_map_lines(items, artifacts, cited_item_ids, cited_artifact_ids):
+    item_by_id = {item["itemId"]: item for item in items}
+    artifact_by_id = {artifact["artifactId"]: artifact for artifact in artifacts}
+    lines = ["## Citation Map", ""]
+    for item_id in cited_item_ids:
+        item = item_by_id.get(item_id)
+        if not item:
+            continue
+        lines.append(
+            f"- `{item_id}` evidence — {item['corpusLabel']} / {item['sourceTitle']} / "
+            f"{item.get('locator') or 'unknown locator'} / {item.get('itemType')}"
+        )
+    for artifact_id in cited_artifact_ids:
+        artifact = artifact_by_id.get(artifact_id)
+        if not artifact:
+            continue
+        lines.append(
+            f"- `{artifact_id}` prior synthesis — {artifact['corpusLabel']} / "
+            f"{artifact['filename']} / {artifact['heading']}"
+        )
+    lines.append("")
+    return lines
+
+
+def compact_corpus_digest(sources, token_budget):
+    lines = ["## Corpus Digest", ""]
+    omitted = 0
+    for source in sources:
+        digest = source["digest"]
+        status_text = ", ".join(f"{name}={count}" for name, count in digest["statusCounts"].items()) or "none"
+        type_text = ", ".join(f"{name}={count}" for name, count in digest["itemTypeCounts"].items()) or "none"
+        source_lines = [
+            f"- {source['corpusLabel']} / {source['sourceRunId']}: documents={digest['documentCount']}; {status_text}; {type_text}"
+        ]
+        for document in digest["documents"]:
+            counts = ", ".join(f"{name}={count}" for name, count in document["itemTypeCounts"].items()) or "none"
+            source_lines.append(
+                f"  - {document['sourceTitle']}: {document['status']}; items={document['itemCount']}; {counts}"
+            )
+        for line in source_lines:
+            candidate = "\n".join([*lines, line, ""])
+            if estimate_tokens(candidate) > token_budget:
+                omitted += 1
+                continue
+            lines.append(line)
+    if omitted:
+        lines.extend([f"- {omitted} digest lines omitted from this compact view; see `corpus_digest.md`.", ""])
+    else:
+        lines.append("")
+    return lines
+
+
+def render_authoring_context(run_directory, config, final_memos):
+    items = load_meta_items(run_directory)
+    artifacts = load_meta_artifacts(run_directory)
+    cited_item_ids = sorted({item_id for memo in final_memos for item_id in memo.get("citedItemIds", [])})
+    cited_artifact_ids = sorted({artifact_id for memo in final_memos for artifact_id in memo.get("citedArtifactIds", [])})
+    lines = [
+        "# Meta Literature Authoring Context",
+        "",
+        f"Research question: {config['researchQuestion']}",
+        "",
+        "This is the bounded final context for authoring the five meta deliverables.",
+        "Prior-synthesis citations (`a######`) are interpretive aids; substantive claims require evidence citations (`m######`).",
+        "",
+    ]
+    lines.extend(compact_corpus_digest(config["sources"], max(64, config["payloadContext"] // 4)))
+    lines.extend(["## Provenance Warnings", ""])
+    warnings = meta_warnings(config)
+    lines.extend([f"- {warning}" for warning in warnings] or ["- None."])
+    lines.extend(["", "## Reduced Packet Memos", ""])
+    for memo in final_memos:
+        lines.extend([f"### {memo['packetId']}", "", memo["memoText"].strip(), ""])
+    lines.extend(citation_map_lines(items, artifacts, cited_item_ids, cited_artifact_ids))
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def append_reduction_state(run_directory, packets):
+    run_state.update_run_state(
+        run_directory,
+        lambda state: {
+            **state,
+            "items": [
+                *state.get("items", []),
+                *[
+                    {
+                        "id": packet["packetId"],
+                        "path": packet["path"],
+                        "status": "pending",
+                        "attempts": 0,
+                        "transient": False,
+                    }
+                    for packet in packets
+                ],
+            ],
+            "phase": "meta-reducing",
+            "nextAction": "meta-next",
+        },
+        {"type": "meta_reduction_level_created", "level": packets[0]["level"], "packets": len(packets)},
+    )
+
+
+def advance_meta_reduction(run_directory, config, memos):
+    if config.get("reductionComplete"):
+        return config
+    current_level = max(packet["level"] for packet in config["packets"])
+    level_packets = [packet for packet in config["packets"] if packet["level"] == current_level]
+    memo_by_packet = {memo["packetId"]: memo for memo in memos}
+    if any(packet["packetId"] not in memo_by_packet for packet in level_packets):
+        return config
+    final_memos = [memo_by_packet[packet["packetId"]] for packet in level_packets]
+    authoring_context = render_authoring_context(run_directory, config, final_memos)
+    if estimate_tokens(authoring_context) <= config["payloadContext"]:
+        path = run_directory / "authoring_context.md"
+        run_state.atomic_write_text(path, authoring_context)
+        config["reductionComplete"] = True
+        config["finalMemoPacketIds"] = [memo["packetId"] for memo in final_memos]
+        config["authoringContext"] = {
+            "path": str(path),
+            "estimatedTokens": estimate_tokens(authoring_context),
+            "evidenceCitations": len({item_id for memo in final_memos for item_id in memo.get("citedItemIds", [])}),
+            "artifactCitations": len({artifact_id for memo in final_memos for artifact_id in memo.get("citedArtifactIds", [])}),
+        }
+        run_state.atomic_write_json(run_directory / "meta_config.json", config)
+        update_context_budget(run_directory, config)
+        run_state.update_run_state(
+            run_directory,
+            lambda state: {**state, "phase": "meta-building", "nextAction": "meta-build"},
+            {"type": "meta_reduction_completed", "levels": current_level},
+        )
+        return config
+    next_level = current_level + 1
+    packets = write_reduction_packets(run_directory, config, next_level, final_memos)
+    config["packets"].extend(packets)
+    config["levels"].append({"level": next_level, "packetIds": [packet["packetId"] for packet in packets]})
+    run_state.atomic_write_json(run_directory / "meta_config.json", config)
+    update_context_budget(run_directory, config)
+    append_reduction_state(run_directory, packets)
+    return config
+
+
 def command_meta_init(args):
+    if args.target_context < 1:
+        fail("--target-context must be positive")
+    if args.reserved_context < 0:
+        fail("--reserved-context cannot be negative")
+    if args.reserved_context >= args.target_context:
+        fail("--reserved-context must be smaller than --target-context")
     if args.max_context > MAX_ALLOWED_META_CONTEXT:
         fail(f"--max-context cannot exceed {MAX_ALLOWED_META_CONTEXT}")
     if args.target_context > args.max_context:
@@ -1932,6 +2507,7 @@ def command_meta_init(args):
         "options": {
             "researchQuestion": research_question,
             "targetContext": args.target_context,
+            "reservedContext": args.reserved_context,
             "maxContext": args.max_context,
             "embeddingsUrl": args.embeddings_url,
         },
@@ -1939,9 +2515,9 @@ def command_meta_init(args):
     requested_output = Path(args.output).expanduser().resolve()
     if requested_output.exists():
         try:
+            config = load_meta_config(requested_output)
             state = run_state.load_run_state(requested_output, META_RUN_STATE_WORKFLOW)
             run_state.assert_compatible_run(state, configuration)
-            config = load_meta_config(requested_output)
             memos = load_packet_memos(requested_output)
         except (OSError, ValueError, json.JSONDecodeError) as error:
             fail(str(error))
@@ -1952,48 +2528,56 @@ def command_meta_init(args):
 
     sources = []
     items = []
+    artifacts = []
     source_index = 0
     for corpus_label, raw_path in groups:
         for run_directory in discover_literature_runs(raw_path):
             source_index += 1
-            source, source_items = collect_meta_source(
+            source, source_items, source_artifacts = collect_meta_source(
                 run_directory,
                 corpus_label,
                 f"s{source_index:04d}",
                 len(items),
+                len(artifacts),
             )
             sources.append(source)
             items.extend(source_items)
+            artifacts.extend(source_artifacts)
     if not items:
         fail("meta-init found no successful extracted items in the supplied runs")
 
     embedding_info = compute_meta_embedding_artifacts(output, research_question, items, args.embeddings_url)
+    artifact_ranking_info = rank_meta_artifacts(output, research_question, artifacts, args.embeddings_url)
     write_meta_items(output, items)
+    write_meta_artifacts(output, artifacts)
     write_meta_sources_csv(output, sources)
-    packets = write_meta_packets(output, research_question, items, args.target_context, args.max_context)
-    warnings = sorted({warning for source in sources for warning in source["warnings"]})
-    if embedding_info.get("reason"):
-        warnings.append(embedding_info["reason"])
-    context_budget = {
-        "targetContext": args.target_context,
-        "maxContext": args.max_context,
-        "estimatedTokensMethod": "ceil(characters / 4)",
-        "packetCount": len(packets),
-        "packets": packets,
-        "warnings": warnings,
-    }
-    run_state.atomic_write_json(output / "context_budget.json", context_budget)
+    run_state.atomic_write_text(output / "corpus_digest.md", render_corpus_digest(sources))
+    payload_context = args.target_context - args.reserved_context
+    packets = write_leaf_meta_packets(
+        output,
+        research_question,
+        items,
+        artifacts,
+        payload_context,
+        args.max_context,
+    )
     config = {
         "schemaVersion": META_SCHEMA_VERSION,
         "createdAt": utc_now(),
         "researchQuestion": research_question,
         "targetContext": args.target_context,
+        "reservedContext": args.reserved_context,
+        "payloadContext": payload_context,
         "maxContext": args.max_context,
         "sources": sources,
         "packets": packets,
+        "levels": [{"level": 1, "packetIds": [packet["packetId"] for packet in packets]}],
+        "reductionComplete": False,
         "embeddingInfo": embedding_info,
+        "artifactRankingInfo": artifact_ranking_info,
     }
     run_state.atomic_write_json(output / "meta_config.json", config)
+    update_context_budget(output, config)
     run_state.atomic_write_text(output / "packet_memos.jsonl", "")
     state = run_state.create_run_state(
         META_RUN_STATE_WORKFLOW,
@@ -2011,9 +2595,12 @@ def command_meta_init(args):
                 "metaRunDirectory": str(output),
                 "sources": len(sources),
                 "items": len(items),
+                "artifacts": len(artifacts),
                 "packets": len(packets),
+                "payloadContext": payload_context,
                 "embeddingInfo": embedding_info,
-                "warnings": warnings,
+                "artifactRankingInfo": artifact_ranking_info,
+                "warnings": meta_warnings(config),
             },
             ensure_ascii=False,
         )
@@ -2025,9 +2612,23 @@ def command_meta_next(args):
     config = load_meta_config(run_directory)
     memos = load_packet_memos(run_directory)
     packet = next_pending_packet(config, memos)
+    if packet is None and not config.get("reductionComplete"):
+        config = advance_meta_reduction(run_directory, config, memos)
+        packet = next_pending_packet(config, memos)
     total = len(config.get("packets", []))
     if packet is None:
-        print(json.dumps({"complete": True, "processed": len(memos), "total": total}))
+        print(
+            json.dumps(
+                {
+                    "complete": True,
+                    "processed": len(memos),
+                    "total": total,
+                    "levels": len(config.get("levels", [])),
+                    "authoringContext": config.get("authoringContext"),
+                    "nextAction": "meta-build",
+                }
+            )
+        )
         return
     print(
         json.dumps(
@@ -2035,8 +2636,18 @@ def command_meta_next(args):
                 "complete": False,
                 "packetId": packet["packetId"],
                 "packetPath": packet["path"],
+                "packetKind": packet["packetKind"],
+                "level": packet["level"],
                 "estimatedTokens": packet["estimatedTokens"],
+                "componentTokens": packet["componentTokens"],
                 "itemCount": packet["itemCount"],
+                "artifactCount": packet["artifactCount"],
+                "itemIds": packet["itemIds"],
+                "artifactIds": packet["artifactIds"],
+                "retrievedArtifactIds": packet.get("retrievedArtifactIds", []),
+                "targetContext": config["targetContext"],
+                "reservedContext": config["reservedContext"],
+                "payloadContext": config["payloadContext"],
                 "researchQuestion": config["researchQuestion"],
                 "progress": {"processed": len(memos), "total": total},
             },
@@ -2047,8 +2658,8 @@ def command_meta_next(args):
 
 def command_meta_status(args):
     run_directory = require_meta_run_directory(args.run_directory)
-    state = run_state.load_run_state(run_directory, META_RUN_STATE_WORKFLOW)
     config = load_meta_config(run_directory)
+    state = run_state.load_run_state(run_directory, META_RUN_STATE_WORKFLOW)
     memos = load_packet_memos(run_directory)
     pending = next_pending_packet(config, memos)
     print(
@@ -2059,6 +2670,9 @@ def command_meta_status(args):
                 "phase": state["phase"],
                 "nextAction": state.get("nextAction"),
                 "packets": {"total": len(config.get("packets", [])), "recorded": len(memos)},
+                "levels": config.get("levels", []),
+                "reductionComplete": config.get("reductionComplete", False),
+                "authoringContext": config.get("authoringContext"),
                 "nextPacketId": pending["packetId"] if pending else None,
                 "deliverables": state.get("deliverables", []),
             },
@@ -2082,10 +2696,33 @@ def command_meta_record(args):
     memo_text = read_text(memo_path).strip()
     if not memo_text:
         fail("memo file cannot be blank")
+    if estimate_tokens(memo_text) > max(1, config["payloadContext"] // 2):
+        fail("memo exceeds half of the payload context budget; reduce it before recording")
+    cited_item_ids, cited_artifact_ids = memo_citations(memo_text)
+    valid_item_ids = {item["itemId"] for item in load_meta_items(run_directory)}
+    valid_artifact_ids = {artifact["artifactId"] for artifact in load_meta_artifacts(run_directory)}
+    unknown = sorted((set(cited_item_ids) - valid_item_ids) | (set(cited_artifact_ids) - valid_artifact_ids))
+    if unknown:
+        fail(f"memo cites unknown ids: {', '.join(unknown)}")
+    if expected["packetKind"] == "evidence" and not (set(cited_item_ids) & set(expected["itemIds"])):
+        fail("evidence packet memo must cite at least one packet-local m###### item id")
+    if expected["packetKind"] == "prior-synthesis" and not (set(cited_artifact_ids) & set(expected["artifactIds"])):
+        fail("prior-synthesis packet memo must cite at least one packet-local a###### artifact id")
+    if expected["packetKind"] == "reduction":
+        if expected["itemIds"] and not (set(cited_item_ids) & set(expected["itemIds"])):
+            fail("reduction memo with inherited evidence must preserve at least one inherited m###### citation")
+        if not expected["itemIds"] and expected["artifactIds"] and not (
+            set(cited_artifact_ids) & set(expected["artifactIds"])
+        ):
+            fail("artifact-only reduction memo must preserve at least one inherited a###### citation")
     record = {
         "packetId": args.packet_id,
         "memoPath": str(memo_path),
         "memoText": memo_text,
+        "packetKind": expected["packetKind"],
+        "level": expected["level"],
+        "citedItemIds": cited_item_ids,
+        "citedArtifactIds": cited_artifact_ids,
         "recordedAt": utc_now(),
     }
     run_state.append_jsonl_fsync(run_directory / "packet_memos.jsonl", record)
@@ -2104,8 +2741,8 @@ def _record_meta_packet_state(state, packet_id, remaining):
             item["status"] = "success"
             item["attempts"] = item.get("attempts", 0) + 1
             break
-    state["phase"] = "meta-extracting" if remaining else "meta-building"
-    state["nextAction"] = "meta-next" if remaining else "meta-build"
+    state["phase"] = "meta-extracting" if remaining else "meta-reducing"
+    state["nextAction"] = "meta-next"
     return state
 
 
@@ -2127,6 +2764,8 @@ def command_meta_build(args):
     pending = next_pending_packet(config, memos)
     if pending is not None:
         fail(f"meta run is incomplete; next pending packet is {pending['packetId']}")
+    if not config.get("reductionComplete") or not (run_directory / "authoring_context.md").is_file():
+        fail("meta reduction is incomplete; call meta-next to create the bounded authoring context")
     created = scaffold_meta_markdown(run_directory)
     state = run_state.load_run_state(run_directory, META_RUN_STATE_WORKFLOW)
     existing = {item["name"]: item for item in state.get("deliverables", [])}
@@ -2140,18 +2779,31 @@ def command_meta_build(args):
         lambda draft: _set_deliverable_state(draft, deliverables, any(item["status"] != "complete" for item in deliverables)),
         {"type": "meta_build_completed", "packetMemos": len(memos), "deliverables": len(deliverables)},
     )
-    print(json.dumps({"packetMemos": len(memos), "scaffolded": created, "nextAction": "next-output"}))
+    print(
+        json.dumps(
+            {
+                "packetMemos": len(memos),
+                "levels": len(config.get("levels", [])),
+                "authoringContext": config["authoringContext"],
+                "scaffolded": created,
+                "nextAction": "next-output",
+            }
+        )
+    )
 
 
 def command_meta_validate(args):
     run_directory = require_meta_run_directory(args.run_directory)
     config = load_meta_config(run_directory)
     items = load_meta_items(run_directory)
+    artifacts = load_meta_artifacts(run_directory)
     memos = load_packet_memos(run_directory, strict=False)
     errors = []
     warnings = []
     item_ids = {item["itemId"] for item in items}
+    artifact_ids = {artifact["artifactId"] for artifact in artifacts}
     packet_ids = [packet["packetId"] for packet in config.get("packets", [])]
+    packet_by_id = {packet["packetId"]: packet for packet in config.get("packets", [])}
     memo_ids = [memo.get("packetId") for memo in memos]
     valid_packet_ids = set(packet_ids)
     for memo_id in memo_ids:
@@ -2165,9 +2817,60 @@ def command_meta_validate(args):
     missing = [packet_id for packet_id in packet_ids if packet_id not in set(memo_ids)]
     if missing:
         errors.append(f"meta run is incomplete; {len(missing)} packets remain, beginning with {missing[0]}")
-    for required in ("meta_sources.csv", "meta_items.jsonl", "context_budget.json", "bridge_candidates.csv", "topic_clusters.csv"):
+    for required in (
+        "meta_sources.csv",
+        "meta_items.jsonl",
+        "meta_artifacts.jsonl",
+        "corpus_digest.md",
+        "context_budget.json",
+        "bridge_candidates.csv",
+        "topic_clusters.csv",
+    ):
         if not (run_directory / required).is_file():
             errors.append(f"meta artifact is missing: {required}")
+    payload_context = config.get("payloadContext", 0)
+    for packet in config.get("packets", []):
+        if packet.get("estimatedTokens", payload_context + 1) > payload_context:
+            errors.append(f"packet exceeds payload context budget: {packet['packetId']}")
+        if packet.get("estimatedTokens", 0) + config.get("reservedContext", 0) > config.get("targetContext", 0):
+            errors.append(f"packet plus reserved context exceeds target: {packet['packetId']}")
+    evidence_coverage = {
+        item_id
+        for packet in config.get("packets", [])
+        if packet.get("level") == 1 and packet.get("packetKind") == "evidence"
+        for item_id in packet.get("itemIds", [])
+    }
+    artifact_coverage = {
+        artifact_id
+        for packet in config.get("packets", [])
+        if packet.get("level") == 1 and packet.get("packetKind") == "prior-synthesis"
+        for artifact_id in packet.get("artifactIds", [])
+    }
+    if evidence_coverage != item_ids:
+        errors.append("level-one evidence packets do not cover every meta item")
+    if artifact_coverage != artifact_ids:
+        errors.append("level-one prior-synthesis packets do not cover every authored artifact section")
+    for memo in memos:
+        packet = packet_by_id.get(memo.get("packetId"))
+        if not packet:
+            continue
+        cited_items, cited_artifacts = memo_citations(memo.get("memoText") or "")
+        unknown = sorted((set(cited_items) - item_ids) | (set(cited_artifacts) - artifact_ids))
+        if unknown:
+            errors.append(f"memo {memo['packetId']} cites unknown ids: {', '.join(unknown)}")
+        if packet.get("packetKind") == "evidence" and not (set(cited_items) & set(packet.get("itemIds", []))):
+            errors.append(f"evidence packet memo has no packet-local item citation: {memo['packetId']}")
+        if packet.get("packetKind") == "prior-synthesis" and not (
+            set(cited_artifacts) & set(packet.get("artifactIds", []))
+        ):
+            errors.append(f"prior-synthesis memo has no packet-local artifact citation: {memo['packetId']}")
+        if packet.get("packetKind") == "reduction":
+            if packet.get("itemIds") and not (set(cited_items) & set(packet["itemIds"])):
+                errors.append(f"reduction memo dropped inherited evidence citations: {memo['packetId']}")
+            elif not packet.get("itemIds") and packet.get("artifactIds") and not (
+                set(cited_artifacts) & set(packet["artifactIds"])
+            ):
+                errors.append(f"artifact-only reduction memo has no inherited citation: {memo['packetId']}")
     for source in config.get("sources", []):
         for warning in source.get("warnings", []):
             warnings.append(f"{source['metaSourceId']}: {warning}")
@@ -2175,6 +2878,17 @@ def command_meta_validate(args):
         if not item.get("sourceAvailable", True):
             warnings.append(f"source unavailable for {item['itemId']}: {item.get('sourcePath')}")
     if not missing:
+        if not config.get("reductionComplete"):
+            errors.append("meta reduction levels are incomplete; call meta-next")
+        authoring_context_path = run_directory / "authoring_context.md"
+        if not authoring_context_path.is_file():
+            errors.append("meta artifact is missing: authoring_context.md")
+        else:
+            authoring_context_text = authoring_context_path.read_text(encoding="utf-8")
+            if estimate_tokens(authoring_context_text) > payload_context:
+                errors.append("authoring_context.md exceeds the payload context budget")
+            if item_ids and not memo_citations(authoring_context_text)[0]:
+                errors.append("authoring_context.md has no evidence item citation")
         for required in META_MARKDOWN_DELIVERABLES:
             path = run_directory / required
             if not path.is_file():
@@ -2183,13 +2897,21 @@ def command_meta_validate(args):
             text = path.read_text(encoding="utf-8")
             if PLACEHOLDER in text:
                 errors.append(f"meta deliverable still has an unresolved placeholder: {required}")
-            elif item_ids and not any(re.search(r"\b" + re.escape(item_id) + r"\b", text) for item_id in item_ids):
-                errors.append(f"meta deliverable has no item citation: {required}")
+            else:
+                cited_items, cited_artifacts = memo_citations(text)
+                unknown = sorted((set(cited_items) - item_ids) | (set(cited_artifacts) - artifact_ids))
+                if unknown:
+                    errors.append(f"meta deliverable cites unknown ids in {required}: {', '.join(unknown)}")
+                if item_ids and not cited_items:
+                    errors.append(f"meta deliverable has no evidence item citation: {required}")
     result = {
         "valid": not errors,
         "complete": not missing,
         "packets": {"total": len(packet_ids), "recorded": len(memos)},
         "items": len(items),
+        "artifacts": len(artifacts),
+        "levels": len(config.get("levels", [])),
+        "authoringContext": config.get("authoringContext"),
         "errors": errors,
         "warnings": sorted(set(warnings)),
     }
@@ -2213,11 +2935,11 @@ def meta_validation_issue(message):
             "message": message,
             "command": "Author the scaffolded meta Markdown from packet memos, bridge candidates, topic clusters, and meta items.",
         }
-    if "no item citation" in message:
+    if "no evidence item citation" in message or "no packet-local item citation" in message:
         return {
             "code": "meta_deliverable_uncited",
             "message": message,
-            "command": "Cite item ids such as m000001 in every substantive meta synthesis deliverable.",
+            "command": "Cite evidence item ids such as m000001 in packet memos and every substantive meta deliverable.",
         }
     if "incomplete" in message:
         return {
@@ -2517,7 +3239,13 @@ def parser():
         "--target-context",
         type=int,
         default=DEFAULT_META_TARGET_CONTEXT,
-        help="Target maximum estimated tokens per packet using ceil(characters / 4).",
+        help="Total intended model-call context using ceil(characters / 4).",
+    )
+    meta_init.add_argument(
+        "--reserved-context",
+        type=int,
+        default=DEFAULT_META_RESERVED_CONTEXT,
+        help="Tokens reserved inside --target-context for system instructions and model output.",
     )
     meta_init.add_argument(
         "--max-context",

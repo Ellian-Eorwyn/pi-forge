@@ -43,7 +43,8 @@ surface.
 - `validate <run-directory> --fix-hints --json`: machine-readable quality gate with repair hints.
 - `meta-init <folder-or-run...> --output <run-directory> --research-question <text|file>`: discover completed prior literature runs and create context-bounded meta packets.
 - `meta-init --group primary=<path> --group secondary=<path> ...`: explicitly label corpora instead of inferring labels from folder names.
-- `meta-next <run-directory>`: one pending meta packet with budget and progress.
+- `meta-init --reserved-context <tokens>`: reserve part of the total target context for instructions and model output; defaults to 32,000 of 128,000.
+- `meta-next <run-directory>`: one pending typed leaf or reduction packet with component budgets, citations, and progress.
 - `meta-status <run-directory> --json`: report durable meta-run progress.
 - `meta-record <run-directory> --packet-id <id> --memo-file <memo.md>`: append one model-authored packet memo.
 - `meta-build <run-directory>`: scaffold cross-corpus meta deliverables.
@@ -160,31 +161,47 @@ concepts.
      --output <new-meta-run-directory>
    ```
 
-   The default packet target is `128000` estimated tokens with a hard
-   `256000` maximum using Pi's conservative `ceil(characters / 4)` heuristic.
-   The script uses prior structured artifacts first and only reopens source
-   text for targeted quote/snippet checks when the source files still exist.
+   The default total model-call target is `128000` estimated tokens with
+   `32000` reserved for instructions and output, leaving a `96000` packet
+   payload. The hard maximum remains `256000`, using Pi's conservative
+   `ceil(characters / 4)` heuristic. The script uses prior structured evidence
+   first and only reopens source text for targeted quote/snippet checks when the
+   source files still exist.
+
+   Meta schema v2 also parses authored `literature_summary.md`,
+   `claims_matrix.md`, `key_terms.md`, `research_gaps.md`, and
+   `citation_notes.md` into section-level `prior_synthesis` records in
+   `meta_artifacts.jsonl`. These records retain their generated-synthesis role;
+   they guide retrieval and interpretation but never replace `m######` evidence
+   citations.
 2. Process one packet at a time:
 
    ```bash
    python3 <skill-directory>/scripts/literature-extraction.py meta-next <meta-run>
    ```
 
-   Read the returned packet, `meta_items.jsonl`, `bridge_candidates.csv`, and
-   `topic_clusters.csv` as needed. Write a memo that cites item ids such as
-   `m000001` for every substantive analytic claim, then record it:
+   Read the returned packet. Evidence packets require packet-local `m######`
+   citations. Prior-synthesis packets require packet-local `a######` citations.
+   Reduction packets must preserve inherited citations. Write and record one
+   bounded memo:
 
    ```bash
    python3 <skill-directory>/scripts/literature-extraction.py meta-record <meta-run> \
      --packet-id <packet-id> --memo-file <memo.md>
    ```
-3. After every packet has a memo, scaffold the final cross-corpus deliverables:
+   Continue `meta-next` after the leaf packets. When their combined memos exceed
+   the payload budget, it creates higher reduction levels automatically. When
+   reduction completes it writes bounded `authoring_context.md` with the
+   research question, compact corpus digest, final memos, warnings, and citation
+   map.
+3. After `meta-next` reports complete, scaffold the final cross-corpus deliverables:
 
    ```bash
    python3 <skill-directory>/scripts/literature-extraction.py meta-build <meta-run>
    ```
 
-   Author `meta_synthesis.md`, `primary_secondary_matrix.md`,
+   Author from `authoring_context.md`, not from every leaf packet at once.
+   Produce `meta_synthesis.md`, `primary_secondary_matrix.md`,
    `concept_register.md`, `negative_cases.md`, and `methods_and_limits.md`.
    Preserve source roles, separate primary evidence from secondary
    interpretation, distinguish emic and etic concepts, and surface disagreement,
@@ -217,4 +234,7 @@ concepts.
 - In meta runs, treat `bridge_candidates.csv` and `topic_clusters.csv` as
   advisory retrieval aids, not conclusions. Judge every proposed connection
   against item ids, source titles, corpus labels, locators, and quotes/snippets.
+- Treat `a######` records as prior generated synthesis. They can identify
+  argument structure, concepts, and candidate tensions, but every substantive
+  final claim still requires an `m######` evidence citation.
 - Do not assume Obsidian schemas or frontmatter unless the user requests them.

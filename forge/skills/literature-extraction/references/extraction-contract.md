@@ -62,12 +62,15 @@ then committed one at a time with `record-output`.
   meta_config.json           # schema version, research question, corpus sources, packets
   meta_sources.csv           # prior runs and inferred/explicit corpus labels
   meta_items.jsonl           # normalized extracted items across prior runs
+  meta_artifacts.jsonl       # section-level authored prior synthesis; never evidence
+  corpus_digest.md           # deterministic run/document coverage and item-type digest
   context_budget.json        # packet token estimates and warnings
   bridge_candidates.csv      # advisory cross-corpus embedding matches
   topic_clusters.csv         # advisory topic/claim/definition clusters
   packets/
     packet-####.md           # bounded model work packets
   packet_memos.jsonl         # append-only, one model-authored memo per packet
+  authoring_context.md       # bounded final memos, digest, warnings, and citation map
   working/
     embedding_cache.json     # per-run embedding cache when embeddings ran
   meta_synthesis.md          # model-authored
@@ -77,11 +80,16 @@ then committed one at a time with `record-output`.
   methods_and_limits.md
 ```
 
-`meta_config.json`, `meta_sources.csv`, `meta_items.jsonl`,
+`meta_config.json`, `meta_sources.csv`, `meta_items.jsonl`, `meta_artifacts.jsonl`,
 `context_budget.json`, `bridge_candidates.csv`, `topic_clusters.csv`,
-`packets/`, and `packet_memos.jsonl` are managed by the script. The Markdown
-deliverables are scaffolded by `meta-build` only when absent, then authored by
-the model.
+`corpus_digest.md`, `packets/`, `packet_memos.jsonl`, and
+`authoring_context.md` are managed by the script. The Markdown deliverables are
+scaffolded by `meta-build` only when absent, then authored by the model from the
+bounded authoring context.
+
+Meta runs use schema version 2. Existing completed first-pass literature runs
+remain valid inputs, but schema-version-1 meta directories must be reinitialized
+in a new output directory rather than resumed.
 
 ## Extraction Schema
 
@@ -184,18 +192,31 @@ the difference between first-pass evidence and generated synthesis:
   item id, corpus label, prior run id, document id, source title, source path,
   item type, item text, quote support, locator, interpretation, confidence, and
   source availability.
+- Treat `meta_artifacts.jsonl` as prior generated synthesis. Each `a######`
+  section preserves its run, corpus, filename, heading, text, relevance score,
+  and estimated size. It can guide interpretation and retrieval but cannot
+  support a substantive final claim without an `m######` evidence citation.
 - Use `bridge_candidates.csv` and `topic_clusters.csv` as retrieval aids. They
   can suggest conceptual links and tensions, but they never prove a connection
   or contradiction.
-- Meta packets must remain under the configured context budget. The default
-  target is `128000` estimated tokens, with a hard maximum of `256000`, using
-  `ceil(characters / 4)`.
+- Meta packets must remain under the configured payload budget. The default
+  total model-call target is `128000` estimated tokens, with `32000` reserved
+  for instructions and output and therefore `96000` available to packet
+  material. The hard maximum is `256000`, using `ceil(characters / 4)`.
+- Level-one `evidence` packets cover every structured item. Level-one
+  `prior-synthesis` packets cover every authored section, and relevant sections
+  may also be repeated in evidence packets. When leaf memos do not fit the final
+  authoring budget, `meta-next` recursively creates `reduction` packets until
+  `authoring_context.md` fits.
 - Normal synthesis uses the same 128,000-token target and recursively reduces
   packet memos into higher levels when the corpus still exceeds the target.
 - Missing original source files are warnings, not fatal errors, when prior
   structured artifacts are intact. Quote verification and snippets degrade to
   artifact-only provenance.
-- Final meta deliverables must cite item ids. Uncited synthesis is invalid.
+- Evidence-packet memos must cite packet-local item ids; prior-synthesis memos
+  must cite packet-local artifact ids; reduction memos must preserve inherited
+  citations. Final meta deliverables require valid evidence item ids. Unknown
+  citations and artifact-only substantive support are invalid.
 - For social sciences and humanities work, keep primary evidence, secondary
   interpretation, source-native terms, analyst/theory terms, negative cases,
   silences, uncertainty, and methodological limits visible.

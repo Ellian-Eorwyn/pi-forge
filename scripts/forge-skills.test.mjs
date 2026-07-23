@@ -2328,6 +2328,10 @@ test("literature meta extraction packets completed prior runs", async () => {
 					notes: null,
 				},
 			]);
+			writeFileSync(
+				join(primary.runDirectory, "literature_summary.md"),
+				`${readFileSync(join(primary.runDirectory, "literature_summary.md"), "utf8")}\n99 of 100 documents processed.\n\n## Expanded Analysis\n\n${"Expanded prior synthesis with document-level argument structure. ".repeat(400)}\n`,
+			);
 			const secondary = createCompletedLiteratureRun("secondary", "Archive labor shapes memory as a theory of record keeping.", [
 				{
 					item_type: "definition",
@@ -2364,9 +2368,11 @@ test("literature meta extraction packets completed prior runs", async () => {
 						"--research-question",
 						"How do secondary concepts explain primary archive labor?",
 						"--target-context",
-						"220",
-						"--max-context",
 						"1000",
+						"--reserved-context",
+						"200",
+						"--max-context",
+						"2000",
 						"--output",
 						metaRun,
 					],
@@ -2375,19 +2381,45 @@ test("literature meta extraction packets completed prior runs", async () => {
 			);
 			assert.equal(initialized.sources, 2);
 			assert.equal(initialized.items, 4);
+			assert.ok(initialized.artifacts > 0);
+			assert.equal(initialized.payloadContext, 800);
 			assert.equal(initialized.embeddingInfo.enabled, true);
 			assert.match(readFileSync(join(metaRun, "bridge_candidates.csv"), "utf8"), /b0001/);
 			assert.match(readFileSync(join(metaRun, "topic_clusters.csv"), "utf8"), /m000001/);
 			assert.equal(existsSync(join(metaRun, "working", "embedding_cache.json")), true);
+			assert.equal(existsSync(join(metaRun, "working", "artifact_embedding_cache.json")), true);
+			assert.match(readFileSync(join(metaRun, "meta_artifacts.jsonl"), "utf8"), /"artifactId": "a000001"/);
 			const budget = JSON.parse(readFileSync(join(metaRun, "context_budget.json"), "utf8"));
 			assert.ok(budget.packets.length > 1);
-			assert.ok(budget.packets.every((packet) => packet.estimatedTokens <= 220));
+			assert.equal(budget.reservedContext, 200);
+			assert.equal(budget.payloadContext, 800);
+			assert.ok(budget.packets.every((packet) => packet.estimatedTokens <= 800));
+			assert.ok(budget.packets.some((packet) => packet.packetKind === "evidence"));
+			assert.ok(budget.packets.some((packet) => packet.packetKind === "prior-synthesis"));
+			const priorArtifactIds = budget.packets
+				.filter((packet) => packet.packetKind === "prior-synthesis")
+				.flatMap((packet) => packet.artifactIds);
+			assert.ok(priorArtifactIds.length > new Set(priorArtifactIds).size, "an oversized authored section should span packets");
 
+			let rejectedUnknownCitation = false;
 			while (true) {
 				const next = jsonOutput(run(python, [script("literature-extraction", "literature-extraction.py"), "meta-next", metaRun]));
 				if (next.complete) break;
+				assert.equal(next.estimatedTokens <= next.payloadContext, true);
+				assert.ok(["evidence", "prior-synthesis", "reduction"].includes(next.packetKind));
+				const citation = next.itemIds[0] ?? next.artifactIds[0];
 				const memoPath = join(metaRun, "working", `${next.packetId}-memo.md`);
-				writeFileSync(memoPath, `Memo for ${next.packetId}. Cites m000001 and m000003 for the analytic link.\n`);
+				if (!rejectedUnknownCitation) {
+					writeFileSync(memoPath, "Unknown citation m999999.\n");
+					runFailure(
+						python,
+						[script("literature-extraction", "literature-extraction.py"), "meta-record", metaRun, "--packet-id", next.packetId, "--memo-file", memoPath],
+						/cites unknown ids/,
+					);
+					rejectedUnknownCitation = true;
+				}
+				const detail = next.level === 1 ? " Preserve corpus roles, disagreements, methods, and limits.".repeat(20) : " Preserve inherited provenance.";
+				writeFileSync(memoPath, `Memo for ${next.packetId}. Cites ${citation}.${detail}\n`);
 				run(python, [
 					script("literature-extraction", "literature-extraction.py"),
 					"meta-record",
@@ -2398,20 +2430,59 @@ test("literature meta extraction packets completed prior runs", async () => {
 					memoPath,
 				]);
 			}
+			const completedBudget = JSON.parse(readFileSync(join(metaRun, "context_budget.json"), "utf8"));
+			assert.ok(completedBudget.levels.length > 1);
+			assert.ok(completedBudget.packets.every((packet) => packet.estimatedTokens <= 800));
+			assert.equal(completedBudget.authoringContext.estimatedTokens <= 800, true);
+			assert.equal(existsSync(join(metaRun, "authoring_context.md")), true);
 			run(python, [script("literature-extraction", "literature-extraction.py"), "meta-build", metaRun]);
 			runFailure(python, [script("literature-extraction", "literature-extraction.py"), "meta-validate", metaRun], /unresolved placeholder/);
 			for (const name of ["meta_synthesis.md", "primary_secondary_matrix.md", "concept_register.md", "negative_cases.md", "methods_and_limits.md"]) {
 				const path = join(metaRun, name);
-				writeFileSync(path, readFileSync(path, "utf8").replace(placeholder, "Authored synthesis without item support."));
+				writeFileSync(path, readFileSync(path, "utf8").replace(placeholder, "Authored prior synthesis citing a000001 without evidence support."));
 			}
-			runFailure(python, [script("literature-extraction", "literature-extraction.py"), "meta-validate", metaRun], /no item citation/);
+			runFailure(python, [script("literature-extraction", "literature-extraction.py"), "meta-validate", metaRun], /no evidence item citation/);
 			for (const name of ["meta_synthesis.md", "primary_secondary_matrix.md", "concept_register.md", "negative_cases.md", "methods_and_limits.md"]) {
 				const path = join(metaRun, name);
-				writeFileSync(path, readFileSync(path, "utf8").replace("Authored synthesis without item support.", "Authored synthesis citing m000001 and m000003."));
+				writeFileSync(path, readFileSync(path, "utf8").replace("Authored prior synthesis citing a000001 without evidence support.", "Authored synthesis citing m000001 and m000003 with optional context from a000001."));
 			}
 			const validation = jsonOutput(run(python, [script("literature-extraction", "literature-extraction.py"), "meta-validate", metaRun]));
 			assert.equal(validation.valid, true);
 			assert.match(validation.warnings.join("\n"), /source unavailable for m000001/);
+			assert.match(validation.warnings.join("\n"), /authored coverage mismatch/);
+
+			const lexicalRun = join(workspace, "meta-run-lexical");
+			const lexical = jsonOutput(
+				run(python, [
+					script("literature-extraction", "literature-extraction.py"),
+					"meta-init",
+					primary.runDirectory,
+					"--research-question",
+					"How does archive labor shape memory?",
+					"--target-context",
+					"1000",
+					"--reserved-context",
+					"200",
+					"--max-context",
+					"2000",
+					"--embeddings-url",
+					"http://127.0.0.1:1/v1/embeddings",
+					"--output",
+					lexicalRun,
+				]),
+			);
+			assert.equal(lexical.artifactRankingInfo.enabled, false);
+			assert.equal(lexical.artifactRankingInfo.method, "lexical");
+			assert.match(lexical.warnings.join("\n"), /used lexical ranking/);
+
+			const schemaOneRun = join(workspace, "schema-one-meta-run");
+			mkdirSync(schemaOneRun);
+			writeFileSync(join(schemaOneRun, "meta_config.json"), '{"schemaVersion":1}\n');
+			runFailure(
+				python,
+				[script("literature-extraction", "literature-extraction.py"), "meta-status", schemaOneRun],
+				/meta schema version 1 is incompatible with version 2; re-run meta-init/,
+			);
 		} finally {
 			await server.close();
 		}
