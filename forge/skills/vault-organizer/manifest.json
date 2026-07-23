@@ -1,15 +1,16 @@
 {
 	"name": "vault-organizer",
 	"type": "pi-forge-skill",
-	"version": "0.1.0",
-	"description": "Classify and organize Obsidian vault notes from a schema note.",
+	"version": "0.2.0",
+	"description": "Classify, de-duplicate, and organize Obsidian vault notes from a schema note with restart-safe runs.",
 	"skill_file": "SKILL.md",
 	"scripts_dir": "scripts",
 	"references_dir": "references",
+	"restart_safe": true,
 	"tools": [
 		{
 			"name": "vault_organizer",
-			"description": "Classify Obsidian notes against the vault schema, produce a dry-run plan, and apply approved frontmatter/move changes.",
+			"description": "Classify Obsidian notes against the vault schema, de-duplicate exact and near-duplicate notes into a recoverable quarantine, produce a dry-run plan, and apply approved frontmatter/move changes; runs are resumable with --run and inspectable with status/doctor.",
 			"command": "python3 scripts/vault-organizer.py",
 			"destructive": true
 		}
@@ -17,6 +18,7 @@
 	"safety": {
 		"destructive_by_default": false,
 		"requires_review_for_filesystem_changes": true,
-		"preserve_provenance_when_applicable": true
+		"preserve_provenance_when_applicable": true,
+		"never_deletes_notes": true
 	}
 }

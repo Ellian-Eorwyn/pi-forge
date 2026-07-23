@@ -27,6 +27,6 @@ reconciles it.
 - `transcript-cleanup`: Clean raw transcripts into readable, structured documents.
 - `transcription`: Transcribe audio/video with per-chunk checkpoints, then correct and clean the transcript.
 - `vault-handoff`: Prepare completed artifacts for pi-vault or Obsidian review.
-- `vault-organizer`: Classify and organize Obsidian notes from a human-maintained vault schema note.
+- `vault-organizer`: Classify, de-duplicate, and organize Obsidian notes from a human-maintained vault schema note, with restart-safe resumable runs and a recoverable duplicate quarantine.
 - `web-collection`: Archive, organize, and preserve web sources with per-URL checkpoints.
 - `web-research`: Perform resumable quick, deep, or academic web research with URL/provider/iteration checkpoints, direct-first acquisition, local-first scheduling, embedding-ranked source triage, browser fallback/discovery, provenance, evidence, claims, and validation.
