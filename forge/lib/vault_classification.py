@@ -2,10 +2,8 @@
 
 import json
 import re
-import time
-import urllib.error
-import urllib.request
 
+import forge_llm
 import run_state
 from vault_schema import UserError, has_control_character, normalize_project_value, valid_wikilink
 
@@ -15,8 +13,11 @@ MAX_ADVISORY_FRONTMATTER_CHARS = 2000
 MAX_SUGGESTIONS = 8
 MAX_SUGGESTION_CHARS = 200
 MAX_TRANSIENT_ATTEMPTS = 3
+# Classification runs on the non-thinking backend, where a note costs one short
+# completion instead of a few hundred hidden reasoning tokens. --think-prefill
+# remains for pointing a thinking server at this work by hand.
 THINK_PREFILL = "<think>\n\n</think>\n\n"
-THINK_BLOCK_RE = re.compile(r"^\s*<think>.*?</think>\s*", re.DOTALL)
+THINK_BLOCK_RE = forge_llm.THINK_BLOCK_RE
 
 SYSTEM_INSTRUCTIONS = (
     "You classify Obsidian Markdown notes. Return exactly one JSON object. "
@@ -83,70 +84,38 @@ def build_messages(schema, title, current_path, frontmatter_text, body_excerpt, 
 
 
 def normalize_base_url(value):
-    url = (value or DEFAULT_BASE_URL).strip().rstrip("/")
-    if url.endswith("/chat/completions"):
-        return url
-    if url.endswith("/v1"):
-        return f"{url}/chat/completions"
-    return url
+    return forge_llm.normalize_base_url(value, DEFAULT_BASE_URL)
 
 
 def extract_json_content(content):
-    text = THINK_BLOCK_RE.sub("", content).strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-    return text
+    return forge_llm.extract_json_content(content)
 
 
-def request_json(base_url, model, api_key, timeout, messages, cache_prompt=True):
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": 0,
-        "stream": False,
-        "response_format": {"type": "json_object"},
+def chat_service(args):
+    return {
+        "name": "chat",
+        "enabled": True,
+        "url": args.base_url,
+        "model": args.model,
+        "scheduling": forge_llm.DEFAULT_SERVICES["chat"]["scheduling"],
     }
-    if cache_prompt:
-        payload["cache_prompt"] = True
-    request = urllib.request.Request(base_url, data=json.dumps(payload).encode("utf-8"), method="POST")
-    request.add_header("Content-Type", "application/json")
-    if api_key:
-        request.add_header("Authorization", f"Bearer {api_key}")
+
+
+def request_json_with_retry(args, messages, service=None):
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            response_body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise UserError(f"model endpoint returned HTTP {error.code}: {detail}") from error
-    except urllib.error.URLError as error:
-        raise UserError(f"model endpoint request failed: {error.reason}") from error
-    parsed = json.loads(response_body)
-    content = parsed.get("choices", [{}])[0].get("message", {}).get("content")
-    if not isinstance(content, str):
-        raise UserError("model response did not contain choices[0].message.content")
-    return json.loads(extract_json_content(content))
-
-
-def request_json_with_retry(args, messages):
-    last_error = None
-    for attempt in range(1, MAX_TRANSIENT_ATTEMPTS + 1):
-        try:
-            return request_json(
-                args.base_url,
-                args.model,
-                args.api_key,
-                args.request_timeout,
-                messages,
-                cache_prompt=args.cache_prompt,
-            )
-        except UserError as error:
-            last_error = error
-            if attempt < MAX_TRANSIENT_ATTEMPTS and run_state.is_transient_failure(error):
-                time.sleep(min(2.0 * attempt, 10.0))
-                continue
-            raise
-    raise last_error
+        value, _record = forge_llm.call_json_with_retry(
+            service or chat_service(args),
+            messages,
+            attempts=MAX_TRANSIENT_ATTEMPTS,
+            response_format={"type": "json_object"},
+            cache_prompt=args.cache_prompt,
+            timeout=args.request_timeout,
+            api_key=args.api_key,
+            task="classify",
+        )
+    except forge_llm.ChatError as error:
+        raise UserError(str(error)) from error
+    return value
 
 
 def normalize_metadata(metadata, schema):
