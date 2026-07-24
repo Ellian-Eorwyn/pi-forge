@@ -1,15 +1,15 @@
 ---
 name: vault-connections
-description: Search an Obsidian vault by meaning rather than filename, propose links between notes for the user to approve one by one, and maintain a wiki layer of concept/place/event/term/work entity notes. Use when the user asks to search my vault, find notes about a topic, suggest connections between my notes, link related notes, fill in the related property, turn unresolved wikilinks into notes, create a concept note, or connect wiki notes to the notes that mention them.
+description: Search an Obsidian vault by meaning, propose links for per-id review, publish completed literature or deep-research runs into the inbox, and create schema-routed wiki entity notes from research evidence or unresolved links. Use when the user asks to search my vault, suggest connections, fill related, send or import a literature or research run to my vault, turn research outputs into concept or term notes, create a wiki note, or resolve wikilinks.
 ---
 
 # Vault Connections
 
-The companion to `vault-organizer`. The organizer decides where a note *lives*;
-this decides what a note is *connected to*. It never moves, renames, deletes, or
-reclassifies a note, and it never edits a note body — the only write is appending
-quoted wikilinks to the `related` frontmatter property, plus creating new wiki
-stub notes.
+The companion to `vault-organizer`. The organizer decides where existing notes
+live; this searches and connects them, and publishes reviewed copies of completed
+research outputs. It never moves, renames, deletes, or replaces an existing note.
+Existing-note writes only append quoted wikilinks to `related`. Accepted imports
+create new inbox or wiki files.
 
 Nothing is written without the user naming the proposal ids they approve.
 
@@ -23,8 +23,9 @@ Nothing is written without the user naming the proposal ids they approve.
    python3 <skill-directory>/scripts/vault-connections.py doctor --vault <vault>
    ```
 
-   This verifies the schema note parses, reports whether the schema has a `wiki`
-   domain yet, and probes both endpoints. The default chat endpoint is the
+   This verifies the schema note parses, reports wiki-template readiness without
+   making missing templates a general doctor failure, and probes both endpoints.
+   The default chat endpoint is the
    non-thinking `llms:8004`; for a thinking backend add
    `--base-url http://llms:8008/v1/chat/completions --think-prefill`.
 3. Build or refresh the index. Every command does this on its own, so run it
@@ -42,14 +43,28 @@ Nothing is written without the user naming the proposal ids they approve.
 
    Results are hybrid-ranked. Read the full note only when the snippets are
    insufficient.
-5. Propose connections. Start with `--limit` on a first run so the user sees the
+5. When the user asks to send a completed literature, meta-literature, or deep
+   research run to the vault, use `import-run`:
+
+   ```bash
+   python3 <skill-directory>/scripts/vault-connections.py import-run <run-directory> --vault <vault>
+   ```
+
+   The defaults propose the primary report artifacts for `00 Inbox` and
+   evidence-backed `concept,term` wiki notes. Use `--include-artifact
+   <run-relative.md>` for another Markdown artifact, `--wiki-kinds` to select
+   from `concept,practice,place,event,term,work,figure`, `--title-prefix` to
+   override the derived filename prefix, and `--limit` to cap wiki candidates.
+   The command invokes the source workflow's validator in read-only mode and
+   fails closed on an incomplete run or a missing selected-kind template.
+6. Propose connections. Start with `--limit` on a first run so the user sees the
    shape of the output before committing to a long batch:
 
    ```bash
    python3 <skill-directory>/scripts/vault-connections.py propose --vault <vault> --limit 40
    ```
 
-6. **Review with the user, ten at a time.** This is the point of the skill — do
+7. **Review with the user, ten at a time.** This is the point of the skill — do
    not dump the whole list. For each proposal give both note titles, the
    strength, and the one-line reason. Ask which ones to apply. Then:
 
@@ -60,7 +75,7 @@ Nothing is written without the user naming the proposal ids they approve.
    Pass the declined ids to `--reject` in the same call, so they are recorded and
    never proposed again. Use `--dry-run` first if the user wants to see the exact
    edits before anything is written. Continue to the next ten.
-7. Maintain the wiki layer:
+8. Maintain the unresolved-link wiki layer:
 
    ```bash
    python3 <skill-directory>/scripts/vault-connections.py wiki --vault <vault>
@@ -69,13 +84,18 @@ Nothing is written without the user naming the proposal ids they approve.
    This proposes stub notes for unresolved wikilink targets, and proposes links
    from existing wiki notes into the notes that correspond to them. Review and
    apply through the same accept/reject loop.
-8. Report the run directory and the final counts.
+9. Report the run directory and the final counts.
 
 ## Guarantees
 
-- Only `related` is ever written, and only by appending. Every other property,
-  every unapproved key, the body, the BOM, and the line endings are preserved
-  byte-for-byte.
+- Existing-note writes only append `related`. Every other property, every
+  unapproved key, the body, the BOM, and line endings are preserved byte-for-byte.
+- Imported reports preserve their Markdown body exactly while replacing old
+  frontmatter with canonical schema-ordered metadata. They are proposed for
+  `00 Inbox`; no source-run file is changed.
+- Imported wiki notes use vault-owned templates from the schema-compiled
+  `meta/templates` route. Pi-Forge documents the required template shape but
+  never creates or edits those templates.
 - A note with no frontmatter, or with an unclosed frontmatter block, is refused
   and reported — never given frontmatter. Run `vault-organizer` on those first.
 - Both notes in an approved pair are linked to each other.
@@ -87,14 +107,19 @@ Nothing is written without the user naming the proposal ids they approve.
   project is reported as a missing project note, never turned into a wiki note.
 - Every rewritten note is backed up under the run directory first, and every
   operation is journaled. Re-applying the same ids is a no-op.
-- Accepted and rejected pairs are recorded in `.vault-connections/decisions.jsonl`
-  and are never proposed again.
+- Apply verifies the reviewed proposal manifest and original note hashes;
+  research imports are additionally bound to the vault used to generate them.
+- Accepted and rejected pairs and source-run-scoped import proposals are recorded
+  in `.vault-connections/decisions.jsonl`.
 
 ## Rules
 
 - Never hand-edit `related`, proposals, or the decisions ledger outside the script.
 - Never apply a proposal the user has not named. "Apply the strong ones" is not an
   approval — list them and get the ids.
+- Never create a missing `Wiki Concept.md`, `Wiki Practice.md`, `Wiki Place.md`,
+  `Wiki Event.md`, `Wiki Term.md`, `Wiki Work.md`, or `Wiki Figure.md` template.
+  Report the exact schema-compiled path and let the vault owner create it.
 - Never claim a refused or skipped note was updated; the `warnings` array says
   what was skipped and why.
 - Never add a `wiki` domain, subdomain, or note type to the schema note yourself.

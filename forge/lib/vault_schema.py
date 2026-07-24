@@ -18,8 +18,8 @@ Design rules:
   Markdown note always wins.
 
 Consumers: ``skills/vault-organizer`` (classify, route, replace frontmatter) and
-``skills/vault-connections`` (search, connection proposals, additive frontmatter
-merge).
+``skills/vault-connections`` (search, connection/import proposals, schema-routed
+note creation, and additive frontmatter merge).
 """
 
 import hashlib

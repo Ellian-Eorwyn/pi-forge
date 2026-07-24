@@ -134,8 +134,20 @@ given one: that is `vault-organizer`'s job.
 ## Wiki layer
 
 Requires a `wiki` domain in the schema note with subdomains `concepts`,
-`practices`, `places`, `events`, `terms`, and `works`. Without them the command
+`practices`, `places`, `events`, `terms`, `works`, and `figures`. Without them the command
 fails closed and names what is missing; the skill never edits the schema itself.
+
+The schema mappings are fixed:
+
+| Wiki kind | Frontmatter type | Schema route |
+| --- | --- | --- |
+| concept | `concept` | `wiki/concepts` |
+| practice | `concept` | `wiki/practices` |
+| place | `place` | `wiki/places` |
+| event | `event` | `wiki/events` |
+| term | `concept` | `wiki/terms` |
+| work | `work` | `wiki/works` |
+| figure | `person` | `wiki/figures` |
 
 **Stub candidates.** Wikilink targets with no note of that basename, appearing in
 at least `--min-mentions` (default 2) notes. The model classifies each target as
@@ -152,8 +164,8 @@ stub is proposed, because they belong to `vault-organizer`'s routing rules:
   registry is never made a wiki note. Its link resolving to nothing means the
   project note itself is missing — a gap in the project tree, reported under
   "Registered projects whose project note is missing". Without this guard the
-  model, seeing only mention context, invents a plausible definition for a
-  project name and files it under Works.
+model, seeing only mention context, invents a plausible definition for a
+project name and files it under Works.
 - **People and organizations.** Reported as `08 Directory` candidates.
 
 **Collision guard.** A proposed stub whose title matches any existing note
@@ -167,6 +179,94 @@ name it literally in their text or exceed `--min-similarity` become link
 proposals, capped at `--per-note` each. Literal mentions rank first and are
 labeled `strong`.
 
+## Research-to-vault import
+
+`import-run` recognizes completed literature, meta-literature, and deep-research
+runs from their durable artifacts. It invokes the owning workflow's validator in
+read-only mode before proposing anything:
+
+- literature defaults: `literature_summary.md`, `key_terms.md`;
+- meta-literature defaults: `meta_synthesis.md`, `concept_register.md`;
+- deep-research default: `deep_research_report.md`.
+
+`--include-artifact` adds another run-relative Markdown file. Absolute paths,
+parent traversal, non-Markdown files, and symlink escapes are refused. Inbox
+filenames combine the input/corpus name or research question with the artifact
+role. Unsafe names and case-insensitive basename collisions anywhere in the
+vault are blocked.
+
+For each inbox proposal, existing frontmatter is discarded and the body after
+its closing delimiter is preserved exactly. The shared schema-classification
+helper chooses metadata, then `status: complete` and
+`capture_type: generated` are forced. A classified `type: source` also receives
+`source_kind: generated`. Frontmatter is serialized in schema order.
+
+Wiki candidates are harvested from structured item, claim, evidence, and source
+records. Model output must cite real upstream identifiers; unsupported
+candidates are discarded. Candidates are deduplicated by canonical
+case-insensitive title and their evidence is merged before proposal creation.
+Defaults are `concept,term`; all seven kinds in the table above may be selected.
+
+### Vault-owned templates
+
+The template directory is compiled from the schema's `meta/templates` route.
+These exact files are required only for selected import kinds:
+
+```text
+Wiki Concept.md
+Wiki Practice.md
+Wiki Place.md
+Wiki Event.md
+Wiki Term.md
+Wiki Work.md
+Wiki Figure.md
+```
+
+Every template must classify as:
+
+```yaml
+---
+type: template
+status: active
+domain: meta
+subdomain: templates
+capture_type: manual
+---
+```
+
+Its body must contain each placeholder exactly as a replaceable token:
+
+```markdown
+# {{title}}
+
+{{summary}}
+
+## Evidence
+
+{{evidence}}
+
+## Sources
+
+{{sources}}
+
+## Provenance
+
+{{provenance}}
+```
+
+Additional prose is allowed, but unknown placeholders are refused. Generated
+entity frontmatter is always produced from the schema, never copied from the
+template. `doctor` reports readiness without making missing templates a
+non-import failure. Pi-Forge never creates or edits these vault-owned files.
+
+Proposal generation writes only under `.vault-connections/runs`. The source
+run's structured inputs and selected artifacts, the schema, every selected
+template, import options, and the completed proposal manifest are hashed into
+run state. Rejections are keyed by the source-run fingerprint. At apply time
+the full accepted creation batch is bound to the originating vault and
+preflighted before any write; proposal tampering, schema, source, or template
+drift, an invalid schema-compiled route, and new collisions refuse the batch.
+
 ## Apply
 
 `apply` needs `--accept` and/or `--reject`; unknown proposal ids are refused
@@ -175,15 +275,18 @@ without touching the vault.
 
 - Link edits are grouped by file, so a note named by several accepted proposals
   is read once, merged once, and written once.
+- Link-source hashes are checked before any accepted link edit. A changed note
+  refuses the batch unless it already contains the reviewed link.
 - Every rewritten note is copied to `<run>/backup/<relative-path>` first.
 - Writes go through a temporary file with `fsync` and an atomic rename, as raw
   bytes so a BOM survives.
-- New wiki notes are created only at paths that do not exist; an existing path is
-  reported and skipped, never overwritten.
+- New notes use an atomic no-overwrite create. Import batches roll back files
+  created by that invocation if a later create fails.
 - Every operation is journaled to `apply-log.jsonl`.
 - Accepted and rejected ids are appended to `decisions.jsonl` keyed by the note
   pair, so a rejected pair never returns in a later `propose` run.
 - The note index is refreshed afterward.
 
-Re-applying the same ids adds nothing: the merge reports `already linked` and the
-operation is counted as skipped. Nothing is ever deleted, moved, or renamed.
+Re-applying the same ids adds nothing: link merges report `already linked`, and
+an imported destination with byte-identical content is treated as already
+applied. Nothing is ever deleted, moved, or renamed.

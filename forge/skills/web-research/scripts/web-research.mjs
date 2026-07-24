@@ -1686,7 +1686,7 @@ function validateAcademicRun(runDirectory, options = {}) {
 	if (recordCount !== works.length) errors.push(`works.ris contains ${recordCount} records for ${works.length} works`);
 	if (endCount !== recordCount) errors.push("works.ris has records without ER terminators");
 	const result = { valid: errors.length === 0, errors, warnings };
-	writeJson(join(runDirectory, "validation_report.json"), result);
+	if (options.writeReport !== false) writeJson(join(runDirectory, "validation_report.json"), result);
 	if (options.emit !== false) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 	if (errors.length > 0 && options.exitOnError) process.exit(1);
 	return result;
@@ -2983,7 +2983,7 @@ function validateDeepRun(runDirectory, options = {}) {
 		if (headers.join(",") !== DEEP_MANIFEST_COLUMNS.join(",")) errors.push("web_manifest.csv columns do not match the required contract");
 	}
 	const result = { valid: errors.length === 0, errors, warnings };
-	writeJson(join(runDirectory, "validation_report.json"), result);
+	if (options.writeReport !== false) writeJson(join(runDirectory, "validation_report.json"), result);
 	if (options.emit !== false) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 	if (errors.length > 0 && options.exitOnError) process.exit(1);
 	return result;
@@ -3942,6 +3942,7 @@ const FLAG_SPECS = {
 	"--json": { key: "json", value: false },
 	"--item": { key: "item", value: true },
 	"--all-failed": { key: "allFailed", value: false },
+	"--read-only": { key: "readOnly", value: false },
 };
 
 function parseArguments(args) {
@@ -4009,7 +4010,7 @@ function usage() {
       [--cache-dir <dir>] [--force-refresh] [--playwright-ws <ws-endpoint>] [--timeout-ms N]
   web-research.mjs academic <query...> --output <dir> [--limit N]
       [--providers <comma-separated>] [--contact-email <email>] [--timeout-ms N]
-  web-research.mjs validate <run-directory>
+  web-research.mjs validate <run-directory> [--read-only]
   web-research.mjs status <run-directory> [--json]
   web-research.mjs refresh <run-directory>
   web-research.mjs retry <run-directory> (--item <id> | --all-failed)
@@ -4039,8 +4040,9 @@ async function main() {
 	else if (command === "validate") {
 		if (positionals.length !== 1) fail("validate requires exactly one run directory");
 		const runDirectory = resolve(positionals[0]);
-		if (existsSync(join(runDirectory, "academic_run.json"))) validateAcademicRun(runDirectory, { exitOnError: true });
-		else validateDeepRun(runDirectory, { exitOnError: true });
+		const validationOptions = { exitOnError: true, writeReport: !flags.readOnly };
+		if (existsSync(join(runDirectory, "academic_run.json"))) validateAcademicRun(runDirectory, validationOptions);
+		else validateDeepRun(runDirectory, validationOptions);
 	}
 	else fail(`unknown command: ${command}`, 2);
 }

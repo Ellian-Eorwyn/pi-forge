@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Semantic search, connection proposals, and a wiki entity layer for an Obsidian vault.
+"""Semantic search, reviewed research imports, and a wiki entity layer for an Obsidian vault.
 
 Companion to ``vault-organizer``. The organizer decides where a note *lives*;
-this decides what a note is *connected to*. It never moves, renames, deletes, or
-reclassifies anything, and it never rewrites a note body.
+this decides what a note is *connected to* and can propose completed research
+artifacts as new vault notes. It never moves, renames, or deletes existing notes.
 
-Every mutation is an additive frontmatter merge: quoted wikilinks are appended to
-the ``related`` property of an existing frontmatter block, with every other byte
-of the file preserved. Notes without frontmatter are refused rather than given
-one — run ``vault-organizer`` on those first.
+Existing-note mutations remain additive frontmatter merges. Imported notes are
+new, explicitly accepted files with schema-ordered frontmatter and source bodies
+preserved exactly.
 """
 
 import argparse
@@ -20,6 +19,7 @@ import math
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -32,20 +32,29 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import forge_embeddings
 import run_state
+from vault_classification import (
+    build_messages as classification_messages,
+    request_json_with_retry as classification_request,
+    validate_classification,
+)
 from vault_schema import (
     INBOX_DIR,
+    RESERVED_WINDOWS_NAMES,
     UserError,
     compile_destination,
     compiled_schema_for,
     link_basename,
     normalize_body_for_hash,
     note_title,
+    parse_schema_note,
+    path_is_inside,
     project_name,
     relative_path,
     resolve_schema_path,
     selected_notes,
     serialize_frontmatter,
     sha256_bytes,
+    sha256_file,
     sha256_text,
     split_frontmatter,
     valid_wikilink,
@@ -87,6 +96,8 @@ MAX_REASON_CHARS = 200
 MAX_TRANSIENT_ATTEMPTS = 3
 MAX_STUB_RELATED = 8
 JUDGE_BATCH_STATE = 20
+ENTITY_BATCH_MAX_RECORDS = 100
+ENTITY_BATCH_MAX_CHARS = 30000
 
 STRENGTHS = ("strong", "moderate", "weak")
 CONNECTION_KINDS = ("same-topic", "generalization", "application", "contrast", "shared-entity")
@@ -98,6 +109,39 @@ WIKI_KIND_SUBDOMAIN = {
     "event": "events",
     "term": "terms",
     "work": "works",
+    "figure": "figures",
+}
+WIKI_KIND_TYPE = {
+    "concept": "concept",
+    "practice": "concept",
+    "place": "place",
+    "event": "event",
+    "term": "concept",
+    "work": "work",
+    "figure": "person",
+}
+WIKI_TEMPLATE_NAMES = {
+    "concept": "Wiki Concept.md",
+    "practice": "Wiki Practice.md",
+    "place": "Wiki Place.md",
+    "event": "Wiki Event.md",
+    "term": "Wiki Term.md",
+    "work": "Wiki Work.md",
+    "figure": "Wiki Figure.md",
+}
+WIKI_TEMPLATE_FIELDS = ("title", "summary", "evidence", "sources", "provenance")
+DEFAULT_WIKI_KINDS = ("concept", "term")
+IMPORT_DEFAULT_ARTIFACTS = {
+    "literature": ("literature_summary.md", "key_terms.md"),
+    "meta-literature": ("meta_synthesis.md", "concept_register.md"),
+    "deep-research": ("deep_research_report.md",),
+}
+IMPORT_ARTIFACT_ROLES = {
+    "literature_summary.md": "Literature Overview",
+    "key_terms.md": "Key Terms",
+    "meta_synthesis.md": "Meta Synthesis",
+    "concept_register.md": "Concept Register",
+    "deep_research_report.md": "Deep Research Report",
 }
 DIRECTORY_KINDS = ("person", "organization")
 
@@ -152,6 +196,24 @@ def atomic_write_bytes(path, data):
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, destination)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary)
+        raise
+
+
+def atomic_create_bytes(path, data):
+    """Atomically publish a new file without ever replacing an existing path."""
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temporary, destination)
+        os.unlink(temporary)
     except BaseException:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(temporary)
@@ -776,6 +838,7 @@ WIKI_SYSTEM = (
     "- event: a named or dated happening — a conference, retreat, trip, or historical event.\n"
     "- term: jargon, an acronym, a program name, or a piece of domain vocabulary.\n"
     "- work: a named book, film, game, album, or text treated as a recurring subject.\n"
+    "- figure: a person treated as a recurring subject in the wiki.\n"
     "- person / organization: an individual human, or an institution, company, lab, or group.\n"
     "- skip: a file path, a date, a fragment, a typo, or anything too vague to define.\n"
     "\n"
@@ -919,8 +982,8 @@ def already_linked(left, right):
     return bool(left_links & right_keys) or bool(right_links & left_keys)
 
 
-def load_decisions(vault):
-    rows, _ = run_state.read_jsonl_recover_tail(decisions_path(vault), repair=True)
+def load_decisions(vault, repair=True):
+    rows, _ = run_state.read_jsonl_recover_tail(decisions_path(vault), repair=repair)
     return {row["key"] for row in rows if isinstance(row, dict) and row.get("key")}
 
 
@@ -931,6 +994,8 @@ def pair_key(left, right):
 def decision_key(proposal):
     if proposal.get("action") == "link":
         return pair_key(proposal["left"], proposal["right"])
+    if proposal.get("sourceRunFingerprint") and proposal.get("destination"):
+        return f"import:{proposal['sourceRunFingerprint']}:{proposal['destination'].casefold()}"
     if proposal.get("destination"):
         return f"wiki:{proposal['destination']}"
     return f"proposal:{proposal.get('id')}"
@@ -1002,7 +1067,7 @@ def clean_summary(value):
 
 def stub_note_text(schema, title, kind, summary, mentions):
     metadata = {
-        "type": kind if kind in schema["types"] else "note",
+        "type": WIKI_KIND_TYPE[kind],
         "status": "active",
         "domain": WIKI_DOMAIN,
         "subdomain": WIKI_KIND_SUBDOMAIN[kind],
@@ -1034,6 +1099,698 @@ def wiki_notes(schema, entries):
 
 
 # --------------------------------------------------------------------------- #
+# Reviewed research imports
+# --------------------------------------------------------------------------- #
+
+
+def read_json(path):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise UserError(f"could not read JSON from {path}: {error}") from error
+
+
+def read_jsonl(path):
+    try:
+        rows, warnings = run_state.read_jsonl_recover_tail(path)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise UserError(f"could not read JSONL from {path}: {error}") from error
+    if warnings:
+        raise UserError(f"{path} has an incomplete JSONL record")
+    return rows
+
+
+def detect_source_run(run_directory):
+    markers = []
+    if (run_directory / "meta_config.json").is_file() and (run_directory / "meta_items.jsonl").is_file():
+        markers.append("meta-literature")
+    if (run_directory / "run_config.json").is_file() and (run_directory / "item_index.jsonl").is_file():
+        markers.append("literature")
+    if (run_directory / "research_run.json").is_file() and (run_directory / "claim_register.jsonl").is_file():
+        markers.append("deep-research")
+    if not markers:
+        raise UserError(
+            f"unsupported run directory: {run_directory}; expected a completed literature, "
+            "meta-literature, or deep-research run"
+        )
+    if len(markers) != 1:
+        raise UserError(f"ambiguous run directory has markers for: {', '.join(markers)}")
+    return markers[0]
+
+
+def invoke_upstream_validator(run_directory, run_type):
+    skills_root = Path(__file__).resolve().parents[2]
+    if run_type == "literature":
+        command = [
+            sys.executable,
+            str(skills_root / "literature-extraction" / "scripts" / "literature-extraction.py"),
+            "validate",
+            str(run_directory),
+            "--json",
+            "--read-only",
+        ]
+    elif run_type == "meta-literature":
+        command = [
+            sys.executable,
+            str(skills_root / "literature-extraction" / "scripts" / "literature-extraction.py"),
+            "meta-validate",
+            str(run_directory),
+            "--json",
+            "--read-only",
+        ]
+    else:
+        command = [
+            "node",
+            str(skills_root / "web-research" / "scripts" / "web-research.mjs"),
+            "validate",
+            str(run_directory),
+            "--read-only",
+        ]
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    output = completed.stdout.strip()
+    try:
+        validation = json.loads(output) if output else {}
+    except json.JSONDecodeError as error:
+        raise UserError(f"{run_type} validator returned invalid JSON: {output[:300]}") from error
+    if completed.returncode != 0 or not validation.get("valid"):
+        details = validation.get("errors") or [completed.stderr.strip() or "validator failed"]
+        raise UserError(f"{run_type} run is invalid: {'; '.join(str(item) for item in details)}")
+    if run_type != "deep-research" and not validation.get("complete"):
+        raise UserError(f"{run_type} run is incomplete")
+    if run_type == "deep-research":
+        state_path = run_directory / "run_state.json"
+        if not state_path.is_file():
+            raise UserError("deep-research run has no run_state.json")
+        if read_json(state_path).get("status") != "complete":
+            raise UserError("deep-research run is not complete")
+    return validation
+
+
+def template_folder(schema):
+    if "meta" not in schema["domains"] or "templates" not in schema["subdomains"].get("meta", {}):
+        raise UserError("the schema does not define the required meta/templates route")
+    return compile_destination(schema, {"domain": "meta", "subdomain": "templates"})
+
+
+def inspect_wiki_template(vault, schema, kind):
+    relative = template_folder(schema) / WIKI_TEMPLATE_NAMES[kind]
+    path = vault / relative
+    result = {"kind": kind, "path": relative.as_posix(), "ok": False, "errors": []}
+    if not path.is_file():
+        result["errors"].append(f"missing template: {path}")
+        return result
+    if path.is_symlink() or not path_is_inside(vault, path.resolve()):
+        result["errors"].append(f"template must be a vault-owned regular file: {path}")
+        return result
+    split = split_frontmatter(path.read_bytes())
+    if not split["had_frontmatter"] or split["malformed"]:
+        result["errors"].append(f"template has invalid frontmatter: {path}")
+        return result
+    metadata = parse_frontmatter(split["frontmatter_text"])
+    required = {
+        "type": "template",
+        "status": "active",
+        "domain": "meta",
+        "subdomain": "templates",
+        "capture_type": "manual",
+    }
+    for key, value in required.items():
+        if metadata.get(key) != value:
+            result["errors"].append(f"{path} requires {key}: {value}")
+    body = split["body"]
+    for field in WIKI_TEMPLATE_FIELDS:
+        if f"{{{{{field}}}}}" not in body:
+            result["errors"].append(f"{path} is missing {{{{{field}}}}}")
+    unknown = sorted(set(re.findall(r"\{\{([^{}\r\n]+)\}\}", body)) - set(WIKI_TEMPLATE_FIELDS))
+    if unknown:
+        result["errors"].append(f"{path} has unknown placeholders: {', '.join(unknown)}")
+    result["ok"] = not result["errors"]
+    result["sha256"] = sha256_file(path)
+    result["body"] = body
+    return result
+
+
+def require_wiki_templates(vault, schema, kinds):
+    templates = {}
+    errors = []
+    for kind in kinds:
+        result = inspect_wiki_template(vault, schema, kind)
+        if result["ok"]:
+            templates[kind] = result
+        else:
+            errors.extend(result["errors"])
+    if errors:
+        raise UserError("wiki template readiness failed: " + "; ".join(errors))
+    return templates
+
+
+def existing_basenames(vault, schema_path):
+    return {
+        path.stem.casefold(): relative_path(vault, path)
+        for path in selected_notes(vault, schema_path, "vault", None)
+    }
+
+
+def validate_filename_title(value, label):
+    if not isinstance(value, str) or not value.strip():
+        raise UserError(f"{label} is empty")
+    cleaned = safe_title(value)
+    if cleaned != value.strip() or not cleaned:
+        raise UserError(f"{label} contains filename-unsafe characters: {value}")
+    if cleaned.casefold() in RESERVED_WINDOWS_NAMES:
+        raise UserError(f"{label} is a reserved filename: {value}")
+    return cleaned
+
+
+def source_title_prefix(run_directory, run_type, explicit):
+    if explicit is not None:
+        return validate_filename_title(explicit, "--title-prefix")
+    if run_type == "literature":
+        config = read_json(run_directory / "run_config.json")
+        source = config.get("input")
+        if isinstance(source, dict):
+            source = source.get("path") or source.get("root") or source.get("name")
+        candidate = Path(str(source)).stem if source else run_directory.name
+    elif run_type == "meta-literature":
+        config = read_json(run_directory / "meta_config.json")
+        candidate = config.get("researchQuestion") or config.get("research_question") or run_directory.name
+    else:
+        config = read_json(run_directory / "research_run.json")
+        candidate = config.get("question") or config.get("researchQuestion") or run_directory.name
+    cleaned = safe_title(str(candidate))
+    if not cleaned:
+        raise UserError(f"could not derive a safe title from {run_directory}")
+    return cleaned
+
+
+def selected_import_artifacts(run_directory, run_type, additions):
+    names = list(IMPORT_DEFAULT_ARTIFACTS[run_type])
+    for value in additions or []:
+        if value not in names:
+            names.append(value)
+    selected = []
+    for name in names:
+        relative = Path(name)
+        if relative.is_absolute() or ".." in relative.parts or relative.suffix.casefold() != ".md":
+            raise UserError(f"unsafe import artifact path: {name}")
+        path = (run_directory / relative).resolve()
+        if not path_is_inside(run_directory, path) or not path.is_file():
+            raise UserError(f"import artifact is missing or outside the run: {name}")
+        selected.append((relative.as_posix(), path))
+    return selected
+
+
+def source_support_files(run_directory, run_type, artifacts):
+    names = {
+        "literature": ("run_config.json", "run_state.json", "item_index.jsonl"),
+        "meta-literature": ("meta_config.json", "run_state.json", "meta_items.jsonl", "meta_artifacts.jsonl"),
+        "deep-research": (
+            "research_run.json",
+            "run_state.json",
+            "source_index.json",
+            "evidence_items.jsonl",
+            "claim_register.jsonl",
+        ),
+    }[run_type]
+    paths = {name: run_directory / name for name in names if (run_directory / name).is_file()}
+    paths.update({name: path for name, path in artifacts})
+    return [{"path": str(path), "relativePath": name, "sha256": sha256_file(path)} for name, path in sorted(paths.items())]
+
+
+def add_markdown_table_context(records, path):
+    if not path.is_file() or not records:
+        return
+    record_by_id = {record["id"]: record for record in records}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as error:
+        raise UserError(f"could not read candidate table {path}: {error}") from error
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith("|") or re.fullmatch(r"[\s|:-]+", stripped):
+            continue
+        for identifier, record in record_by_id.items():
+            if identifier not in stripped:
+                continue
+            text = re.sub(r"\s+", " ", stripped.strip("|").replace("|", " — ")).strip()
+            if text and text not in record["text"]:
+                record["text"] = f"{record['text']}\nTable context: {text}".strip()
+
+
+def import_source_records(run_directory, run_type):
+    records = []
+    if run_type == "literature":
+        for row in read_jsonl(run_directory / "item_index.jsonl"):
+            item_id = row.get("itemId")
+            if not item_id:
+                continue
+            records.append(
+                {
+                    "id": item_id,
+                    "kind": row.get("itemType"),
+                    "text": row.get("itemText") or row.get("interpretation") or "",
+                    "quote": row.get("directQuotes") or "",
+                    "sourceIds": [value for value in [row.get("documentId")] if value],
+                    "source": row.get("sourceTitle") or row.get("sourcePath") or "",
+                }
+            )
+        add_markdown_table_context(records, run_directory / "key_terms.md")
+    elif run_type == "meta-literature":
+        for row in read_jsonl(run_directory / "meta_items.jsonl"):
+            item_id = row.get("itemId")
+            if not item_id:
+                continue
+            records.append(
+                {
+                    "id": item_id,
+                    "kind": row.get("itemType"),
+                    "text": row.get("itemText") or row.get("text") or "",
+                    "quote": row.get("directQuotes") or row.get("directQuote") or "",
+                    "sourceIds": [value for value in [row.get("documentId"), row.get("metaSourceId")] if value],
+                    "source": row.get("sourceTitle") or row.get("sourcePath") or "",
+                }
+            )
+        add_markdown_table_context(records, run_directory / "concept_register.md")
+    else:
+        evidence = read_jsonl(run_directory / "evidence_items.jsonl")
+        claims = read_jsonl(run_directory / "claim_register.jsonl")
+        for row in claims:
+            if row.get("claimId"):
+                records.append(
+                    {
+                        "id": row["claimId"],
+                        "kind": "claim",
+                        "text": row.get("text") or "",
+                        "quote": "",
+                        "sourceIds": row.get("sourceIds") or [],
+                        "evidenceIds": row.get("evidenceIds") or [],
+                        "source": "",
+                    }
+                )
+        for row in evidence:
+            if row.get("evidenceId"):
+                records.append(
+                    {
+                        "id": row["evidenceId"],
+                        "kind": "evidence",
+                        "text": row.get("text") or "",
+                        "quote": row.get("directQuote") or "",
+                        "sourceIds": [value for value in [row.get("sourceId")] if value],
+                        "source": "",
+                    }
+                )
+    return records
+
+
+ENTITY_SYSTEM = (
+    "You identify wiki entities in validated research records. Return exactly one JSON object with an entities array. "
+    "Every entity must contain kind, title, summary, evidenceIds, and sourceIds. Use only the allowed kinds and IDs "
+    "provided by the user. evidenceIds must cite at least one record ID; sourceIds may contain only source IDs attached "
+    "to those cited records. "
+    "Do not infer unsupported facts or invent identifiers. Return no entity when the records do not support one."
+)
+
+
+def entity_record_batches(records, limit):
+    max_records = ENTITY_BATCH_MAX_RECORDS
+    if limit:
+        max_records = min(max_records, max(1, limit * 10))
+    batches = []
+    current = []
+    current_chars = 0
+    for record in records:
+        prompt_record = dict(record)
+        for key, maximum in (("text", 8000), ("quote", 4000), ("source", 1000)):
+            value = prompt_record.get(key)
+            if isinstance(value, str):
+                prompt_record[key] = value[:maximum]
+            elif value is not None:
+                prompt_record[key] = json.dumps(value, ensure_ascii=False)[:maximum]
+        record_chars = len(json.dumps(prompt_record, ensure_ascii=False))
+        if current and (len(current) >= max_records or current_chars + record_chars > ENTITY_BATCH_MAX_CHARS):
+            batches.append(current)
+            current = []
+            current_chars = 0
+        current.append((record, prompt_record))
+        current_chars += record_chars
+    if current:
+        batches.append(current)
+    return batches
+
+
+def harvest_entity_candidates(args, records, kinds, limit=None):
+    if not records:
+        return [], ["no structured records were available for wiki candidate harvesting"]
+    warnings = []
+    merged = {}
+    entity_number = 0
+    for batch in entity_record_batches(records, limit):
+        batch_records = [record for record, _ in batch]
+        payload = {
+            "allowedKinds": list(kinds),
+            "records": [prompt_record for _, prompt_record in batch],
+            "responseShape": {
+                "entities": [
+                    {
+                        "kind": "concept",
+                        "title": "Canonical title",
+                        "summary": "Evidence-grounded summary",
+                        "evidenceIds": ["upstream-record-id"],
+                        "sourceIds": ["source-id-attached-to-that-record"],
+                    }
+                ]
+            },
+        }
+        raw = request_with_retry(
+            args,
+            with_prefill(
+                args,
+                [
+                    {"role": "system", "content": ENTITY_SYSTEM},
+                    {"role": "user", "content": "RESEARCH ENTITY CANDIDATES\n" + json.dumps(payload, ensure_ascii=False)},
+                ],
+            ),
+        )
+        entities = raw.get("entities") if isinstance(raw, dict) else None
+        if not isinstance(entities, list):
+            raise UserError("entity harvesting response must contain an entities array")
+        record_by_id = {record["id"]: record for record in batch_records}
+        record_ids = set(record_by_id)
+        known_source_ids = {
+            source_id
+            for record in batch_records
+            for source_id in (record.get("sourceIds") or [])
+            if isinstance(source_id, str)
+        }
+        for raw_entity in entities:
+            entity_number += 1
+            if not isinstance(raw_entity, dict) or raw_entity.get("kind") not in kinds:
+                warnings.append(f"discarded entity {entity_number}: kind is not selected")
+                continue
+            raw_title = raw_entity.get("title")
+            if not isinstance(raw_title, str) or safe_title(raw_title) != raw_title.strip():
+                warnings.append(f"discarded entity {entity_number}: title is filename-unsafe")
+                continue
+            title = raw_title.strip()
+            if not title or title.casefold() in RESERVED_WINDOWS_NAMES:
+                warnings.append(f"discarded entity {entity_number}: title is empty or reserved")
+                continue
+            evidence_ids = raw_entity.get("evidenceIds")
+            source_ids = raw_entity.get("sourceIds") or []
+            if (
+                not isinstance(evidence_ids, list)
+                or not evidence_ids
+                or any(not isinstance(value, str) or value not in record_ids for value in evidence_ids)
+                or not isinstance(source_ids, list)
+                or any(not isinstance(value, str) or value not in known_source_ids for value in source_ids)
+            ):
+                warnings.append(f"discarded entity {title}: unsupported provenance IDs")
+                continue
+            related_source_ids = {
+                source_id
+                for identifier in evidence_ids
+                for source_id in (record_by_id[identifier].get("sourceIds") or [])
+            }
+            if any(source_id not in related_source_ids for source_id in source_ids):
+                warnings.append(f"discarded entity {title}: source IDs are unrelated to cited records")
+                continue
+            summary = clean_summary(raw_entity.get("summary"))
+            if not summary:
+                warnings.append(f"discarded entity {title}: summary is empty")
+                continue
+            key = title.casefold()
+            candidate = merged.setdefault(
+                key,
+                {
+                    "kind": raw_entity["kind"],
+                    "title": title,
+                    "summary": summary,
+                    "evidenceIds": [],
+                    "sourceIds": [],
+                },
+            )
+            if candidate["kind"] != raw_entity["kind"]:
+                warnings.append(f"merged duplicate entity {title} using kind {candidate['kind']}")
+            for value in evidence_ids:
+                if value not in candidate["evidenceIds"]:
+                    candidate["evidenceIds"].append(value)
+            for value in source_ids:
+                if value not in candidate["sourceIds"]:
+                    candidate["sourceIds"].append(value)
+        if limit and len(merged) >= limit:
+            break
+    candidates = list(merged.values())
+    return candidates[:limit] if limit else candidates, warnings
+
+
+def render_wiki_entity(schema, template, candidate, records, source_run, source_fingerprint):
+    record_by_id = {record["id"]: record for record in records}
+    evidence_lines = []
+    for identifier in candidate["evidenceIds"]:
+        record = record_by_id.get(identifier)
+        text = clean_summary((record or {}).get("quote") or (record or {}).get("text") or "")
+        evidence_lines.append(f"- `{identifier}`" + (f" — {text}" if text else ""))
+    sources = candidate["sourceIds"]
+    if not sources:
+        sources = sorted(
+            {
+                source_id
+                for identifier in candidate["evidenceIds"]
+                for source_id in (record_by_id.get(identifier) or {}).get("sourceIds", [])
+            }
+        )
+    replacements = {
+        "title": candidate["title"],
+        "summary": candidate["summary"],
+        "evidence": "\n".join(evidence_lines) or "- No supported evidence.",
+        "sources": "\n".join(f"- `{identifier}`" for identifier in sources) or "- No separate source ID.",
+        "provenance": (
+            f"- Source run: `{source_run}`\n"
+            f"- Source fingerprint: `{source_fingerprint}`\n"
+            f"- Upstream IDs: {', '.join(f'`{value}`' for value in candidate['evidenceIds'])}"
+        ),
+    }
+    body = template["body"]
+    for key, value in replacements.items():
+        body = body.replace(f"{{{{{key}}}}}", value)
+    metadata = {
+        "type": WIKI_KIND_TYPE[candidate["kind"]],
+        "status": "active",
+        "domain": WIKI_DOMAIN,
+        "subdomain": WIKI_KIND_SUBDOMAIN[candidate["kind"]],
+        "capture_type": "generated",
+    }
+    return serialize_frontmatter(
+        {key: value for key, value in metadata.items() if key in schema["properties"]},
+        schema,
+    ) + body
+
+
+def classify_import_artifact(args, schema, relative_name, path):
+    split = split_frontmatter(path.read_bytes())
+    if split["malformed"]:
+        raise UserError(f"artifact has malformed frontmatter: {relative_name}")
+    title = note_title(path, split["body"])
+    messages = classification_messages(
+        schema,
+        title,
+        relative_name,
+        split["frontmatter_text"],
+        split["body"][:30000],
+        think_prefill=args.think_prefill,
+    )
+    raw = classification_request(args, messages)
+    prepared = prepare_import_classification(raw)
+    classified, warnings, errors = validate_classification(prepared, schema)
+    if errors:
+        repair = {"original_response": raw, "validation_errors": errors}
+        raw = classification_request(
+            args,
+            classification_messages(
+                schema,
+                title,
+                relative_name,
+                split["frontmatter_text"],
+                split["body"][:30000],
+                repair=repair,
+                think_prefill=args.think_prefill,
+            ),
+        )
+        prepared = prepare_import_classification(raw)
+        classified, repair_warnings, errors = validate_classification(prepared, schema)
+        warnings.extend(repair_warnings)
+    if errors:
+        raise UserError(f"schema classification failed for {relative_name}: {'; '.join(errors)}")
+    if classified["needs_review"]:
+        raise UserError(
+            f"schema classification needs review for {relative_name}: "
+            f"{classified.get('review_reason') or 'no reason supplied'}"
+        )
+    return serialize_frontmatter(classified["metadata"], schema) + split["body"], warnings
+
+
+def prepare_import_classification(response):
+    if not isinstance(response, dict) or not isinstance(response.get("metadata"), dict):
+        return response
+    prepared = json.loads(json.dumps(response))
+    metadata = prepared["metadata"]
+    metadata["status"] = "complete"
+    metadata["capture_type"] = "generated"
+    if metadata.get("type") == "source":
+        metadata["source_kind"] = "generated"
+    else:
+        metadata.pop("source_kind", None)
+    return prepared
+
+
+def command_import_run(args):
+    vault = resolve_vault(args, initialize_state=False)
+    schema_path, schema, schema_hash = load_schema(args, vault, use_cache=False)
+    run_directory = Path(args.query).expanduser().resolve()
+    if not run_directory.is_dir():
+        raise UserError(f"run directory does not exist: {run_directory}")
+    if args.limit is not None and args.limit < 1:
+        raise UserError("--limit must be at least 1")
+    run_type = detect_source_run(run_directory)
+    validation = invoke_upstream_validator(run_directory, run_type)
+    warnings = [f"validator: {warning}" for warning in validation.get("warnings") or []]
+    kinds = tuple(dict.fromkeys(split_ids(args.wiki_kinds)))
+    unknown_kinds = sorted(set(kinds) - set(WIKI_KIND_SUBDOMAIN))
+    if unknown_kinds:
+        raise UserError(f"unknown --wiki-kinds: {', '.join(unknown_kinds)}")
+    if not kinds:
+        raise UserError("--wiki-kinds must select at least one kind")
+    templates = require_wiki_templates(vault, schema, kinds)
+    artifacts = selected_import_artifacts(run_directory, run_type, args.include_artifact)
+    source_files = source_support_files(run_directory, run_type, artifacts)
+    source_fingerprint = run_state.configuration_fingerprint(
+        {"runType": run_type, "files": [{"path": item["relativePath"], "sha256": item["sha256"]} for item in source_files]}
+    )
+    prefix = source_title_prefix(run_directory, run_type, args.title_prefix)
+    basenames = existing_basenames(vault, schema_path)
+    planned = set()
+    decided = load_decisions(vault, repair=False)
+    inbox_proposals = []
+    blocked = []
+    for relative_name, path in artifacts:
+        role = IMPORT_ARTIFACT_ROLES.get(Path(relative_name).name) or safe_title(Path(relative_name).stem.replace("_", " ").title())
+        filename = f"{prefix} - {role}.md"
+        validate_filename_title(Path(filename).stem, f"destination for {relative_name}")
+        destination = (Path(INBOX_DIR) / filename).as_posix()
+        collision = basenames.get(Path(filename).stem.casefold())
+        if collision or Path(filename).stem.casefold() in planned:
+            blocked.append(
+                {
+                    "action": "blocked",
+                    "title": Path(filename).stem,
+                    "reason": f"case-insensitive basename collision with `{collision or destination}`",
+                }
+            )
+            continue
+        content, classification_warnings = classify_import_artifact(args, schema, relative_name, path)
+        warnings.extend(f"{relative_name}: {warning}" for warning in classification_warnings)
+        proposal = {
+            "id": f"i-{len(inbox_proposals) + 1:03d}",
+            "action": "create_inbox_note",
+            "title": Path(filename).stem,
+            "destination": destination,
+            "sourceArtifact": relative_name,
+            "sourceArtifactSha256": sha256_file(path),
+            "sourceRunFingerprint": source_fingerprint,
+            "content": content,
+        }
+        if decision_key(proposal) in decided:
+            warnings.append(f"previously decided import proposal suppressed: {destination}")
+            continue
+        planned.add(Path(filename).stem.casefold())
+        inbox_proposals.append(proposal)
+
+    records = import_source_records(run_directory, run_type)
+    candidates, candidate_warnings = harvest_entity_candidates(args, records, kinds, limit=args.limit)
+    warnings.extend(candidate_warnings)
+    wiki_proposals = []
+    for candidate in candidates:
+        key = candidate["title"].casefold()
+        destination = wiki_destination(schema, candidate["kind"], candidate["title"])
+        collision = basenames.get(key)
+        if collision or key in planned:
+            blocked.append(
+                {
+                    "action": "blocked",
+                    "title": candidate["title"],
+                    "reason": f"case-insensitive basename collision with `{collision or destination}`",
+                }
+            )
+            continue
+        content = render_wiki_entity(
+            schema,
+            templates[candidate["kind"]],
+            candidate,
+            records,
+            run_directory,
+            source_fingerprint,
+        )
+        proposal = {
+            "id": f"w-{len(wiki_proposals) + 1:03d}",
+            "action": "create_wiki_note",
+            "title": candidate["title"],
+            "kind": candidate["kind"],
+            "summary": candidate["summary"],
+            "destination": destination,
+            "evidenceIds": candidate["evidenceIds"],
+            "sourceIds": candidate["sourceIds"],
+            "mentionCount": len(candidate["evidenceIds"]),
+            "sourceRunFingerprint": source_fingerprint,
+            "content": content,
+        }
+        if decision_key(proposal) in decided:
+            warnings.append(f"previously decided import proposal suppressed: {destination}")
+            continue
+        planned.add(key)
+        wiki_proposals.append(proposal)
+
+    proposals = inbox_proposals + wiki_proposals
+    run_dir = unique_run_directory(vault)
+    input_config = {
+        "vault": str(vault),
+        "schemaPath": str(schema_path),
+        "schemaHash": schema_hash,
+        "sourceRun": str(run_directory),
+        "sourceRunType": run_type,
+        "sourceRunFingerprint": source_fingerprint,
+        "sourceFiles": source_files,
+        "templateFiles": [
+            {"kind": kind, "path": templates[kind]["path"], "sha256": templates[kind]["sha256"]}
+            for kind in kinds
+        ],
+    }
+    run_state.initialize_run_state(
+        run_dir,
+        run_state.create_run_state(WORKFLOW, "import-run", input_config, resolved_options(args), phase="proposed"),
+    )
+    counts = {
+        "inbox_notes_proposed": len(inbox_proposals),
+        "wiki_notes_proposed": len(wiki_proposals),
+        "blocked_by_collision": len(blocked),
+        "validator_warnings": len(validation.get("warnings") or []),
+    }
+    finish_run(run_dir, proposals + blocked, counts, None, warnings, vault, f"{run_type} import")
+    return structured(
+        "ok",
+        artifacts=[str(run_dir / "report.md"), str(run_dir / "proposals.jsonl")],
+        warnings=warnings,
+        data={
+            "runDirectory": str(run_dir),
+            "sourceRunType": run_type,
+            "sourceRunFingerprint": source_fingerprint,
+            "counts": counts,
+            "proposals": proposals,
+            "blocked": blocked,
+        },
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Reports
 # --------------------------------------------------------------------------- #
 
@@ -1052,7 +1809,14 @@ def write_report(run_dir, proposals, counts, histogram, warnings, vault, mode, e
     for key, value in counts.items():
         report.append(f"- {key.replace('_', ' ')}: {value}")
     links = [item for item in proposals if item["action"] == "link"]
+    inbox = [item for item in proposals if item["action"] == "create_inbox_note"]
     stubs = [item for item in proposals if item["action"] == "create_wiki_note"]
+    if inbox:
+        report.extend(["", f"## Proposed inbox notes ({len(inbox)})", ""])
+        for item in inbox:
+            report.append(
+                f"- `{item['id']}` **{item['title']}** from `{item['sourceArtifact']}` → `{item['destination']}`"
+            )
     for strength in STRENGTHS:
         group = [item for item in links if item.get("strength") == strength]
         if not group:
@@ -1107,17 +1871,23 @@ def write_report(run_dir, proposals, counts, histogram, warnings, vault, mode, e
 # --------------------------------------------------------------------------- #
 
 
-def resolve_vault(args):
+def resolve_vault(args, initialize_state=True):
     vault = Path(args.vault).expanduser().resolve()
     if not vault.is_dir():
         raise UserError(f"vault directory does not exist: {vault}")
-    cache_dir(vault).mkdir(parents=True, exist_ok=True)
+    if initialize_state:
+        cache_dir(vault).mkdir(parents=True, exist_ok=True)
     return vault
 
 
-def load_schema(args, vault):
+def load_schema(args, vault, use_cache=True):
     schema_path = resolve_schema_path(vault, args.schema)
-    schema, schema_hash = compiled_schema_for(vault, schema_path, cache_dir=cache_dir(vault))
+    if use_cache:
+        schema, schema_hash = compiled_schema_for(vault, schema_path, cache_dir=cache_dir(vault))
+    else:
+        schema_bytes = schema_path.read_bytes()
+        schema = parse_schema_note(schema_bytes.decode("utf-8-sig"))
+        schema_hash = sha256_bytes(schema_bytes)
     return schema_path, schema, schema_hash
 
 
@@ -1453,24 +2223,148 @@ def finish_run(run_dir, proposals, counts, histogram, warnings, vault, mode, ext
     for proposal in proposals:
         run_state.append_jsonl_fsync(run_dir / "proposals.jsonl", proposal)
     write_report(run_dir, proposals, counts, histogram, warnings, vault, mode, extra)
+    proposals_sha256 = sha256_file(run_dir / "proposals.jsonl")
     run_state.update_run_state(
         run_dir,
-        lambda state: state.update({"phase": "proposed", "status": "awaiting-review", "nextAction": "apply --accept <ids>"}) or state,
+        lambda state: state.update(
+            {
+                "phase": "proposed",
+                "status": "awaiting-review",
+                "nextAction": "apply --accept <ids>",
+                "input": {**(state.get("input") or {}), "proposalsSha256": proposals_sha256},
+            }
+        )
+        or state,
         event={"type": "proposals_written", "count": len(proposals)},
     )
 
 
+def verify_import_state(vault, schema_hash, state):
+    recorded = state.get("input") or {}
+    errors = []
+    recorded_vault = recorded.get("vault")
+    if not recorded_vault or Path(recorded_vault).expanduser().resolve() != vault.resolve():
+        errors.append(f"apply vault differs from originating vault: {recorded_vault or '<missing>'}")
+    if recorded.get("schemaHash") != schema_hash:
+        errors.append("schema hash changed after proposal generation")
+    for item in recorded.get("sourceFiles") or []:
+        path = Path(item.get("path") or "")
+        if not path.is_file():
+            errors.append(f"source artifact is missing: {path}")
+        elif sha256_file(path) != item.get("sha256"):
+            errors.append(f"source artifact changed: {path}")
+    for item in recorded.get("templateFiles") or []:
+        path = vault / str(item.get("path") or "")
+        if not path.is_file():
+            errors.append(f"wiki template is missing: {path}")
+        elif path.is_symlink() or not path_is_inside(vault, path.resolve()):
+            errors.append(f"wiki template is not a vault-owned regular file: {path}")
+        elif sha256_file(path) != item.get("sha256"):
+            errors.append(f"wiki template changed: {path}")
+    if errors:
+        raise UserError("import apply preflight failed: " + "; ".join(errors))
+
+
+def preflight_import_creates(vault, schema_path, schema, state, creates):
+    errors = []
+    seen_destinations = set()
+    accepted_stems = {}
+    existing = existing_basenames(vault, schema_path)
+    already_present = set()
+    source_fingerprint = (state.get("input") or {}).get("sourceRunFingerprint")
+    for proposal in creates:
+        destination_rel = proposal.get("destination") or ""
+        destination = (vault / destination_rel).resolve()
+        key = destination_rel.casefold()
+        stem = destination.stem.casefold()
+        if not isinstance(proposal.get("content"), str):
+            errors.append(f"{proposal['id']} content is not text")
+            continue
+        if proposal.get("sourceRunFingerprint") != source_fingerprint:
+            errors.append(f"{proposal['id']} source-run fingerprint does not match the import run")
+        try:
+            title = validate_filename_title(proposal.get("title"), f"{proposal['id']} title")
+        except UserError as error:
+            errors.append(str(error))
+            continue
+        if proposal.get("action") == "create_inbox_note":
+            expected = (Path(INBOX_DIR) / f"{title}.md").as_posix()
+        elif proposal.get("action") == "create_wiki_note" and proposal.get("kind") in WIKI_KIND_SUBDOMAIN:
+            expected = wiki_destination(schema, proposal["kind"], title)
+        else:
+            errors.append(f"{proposal['id']} has an invalid import action or wiki kind")
+            continue
+        if destination_rel != expected:
+            errors.append(f"{proposal['id']} destination does not match its schema-compiled route: {destination_rel}")
+        if not path_is_inside(vault, destination):
+            errors.append(f"{proposal['id']} destination escapes the vault: {destination_rel}")
+            continue
+        if key in seen_destinations:
+            errors.append(f"duplicate accepted destination: {destination_rel}")
+        seen_destinations.add(key)
+        if stem in accepted_stems and accepted_stems[stem] != key:
+            errors.append(f"case-insensitive accepted basename collision: {destination.name}")
+        accepted_stems[stem] = key
+        collision = existing.get(stem)
+        if destination.is_file():
+            if destination.read_bytes() == proposal["content"].encode("utf-8"):
+                already_present.add(proposal["id"])
+                continue
+            errors.append(f"{proposal['id']} destination already exists with different content: {destination_rel}")
+        elif destination.exists():
+            errors.append(f"{proposal['id']} destination exists and is not a file: {destination_rel}")
+        elif collision:
+            errors.append(f"{proposal['id']} basename collides with existing note: {collision}")
+    if errors:
+        raise UserError("import apply preflight failed: " + "; ".join(errors))
+    return already_present
+
+
+def preflight_link_edits(vault, schema, proposals):
+    errors = []
+    for proposal in proposals:
+        for path_key, hash_key, link_key in (
+            ("left", "leftSha256", "rightLink"),
+            ("right", "rightSha256", "leftLink"),
+        ):
+            relative = proposal.get(path_key) or ""
+            path = (vault / relative).resolve()
+            if not path_is_inside(vault, path):
+                errors.append(f"{proposal['id']} link destination escapes the vault: {relative}")
+                continue
+            if not path.is_file():
+                errors.append(f"{proposal['id']} link source is missing: {relative}")
+                continue
+            data = path.read_bytes()
+            if sha256_bytes(data) == proposal.get(hash_key):
+                continue
+            _, _, reason = merge_related(data, [proposal.get(link_key) or ""], schema)
+            if reason != "already linked":
+                errors.append(f"{proposal['id']} link source changed after proposal generation: {relative}")
+    if errors:
+        raise UserError("link apply preflight failed: " + "; ".join(errors))
+
+
 def command_apply(args):
     vault = resolve_vault(args)
-    schema_path, schema, _ = load_schema(args, vault)
+    schema_path, schema, schema_hash = load_schema(args, vault)
     run_dir = Path(args.run).expanduser().resolve()
     if not (run_dir / "proposals.jsonl").is_file():
         raise UserError(f"no proposals.jsonl in {run_dir}")
+    state = run_state.load_run_state(run_dir, WORKFLOW)
+    recorded_proposals_hash = (state.get("input") or {}).get("proposalsSha256")
+    if state.get("command") == "import-run" and not recorded_proposals_hash:
+        raise UserError("import apply preflight failed: proposal manifest hash is missing")
+    if recorded_proposals_hash and sha256_file(run_dir / "proposals.jsonl") != recorded_proposals_hash:
+        raise UserError("apply preflight failed: proposals changed after proposal generation")
     rows, _ = run_state.read_jsonl_recover_tail(run_dir / "proposals.jsonl", repair=True)
     by_id = {row["id"]: row for row in rows if isinstance(row, dict) and row.get("id")}
 
     accepted_ids = split_ids(args.accept)
     rejected_ids = split_ids(args.reject)
+    conflicting = sorted(set(accepted_ids) & set(rejected_ids))
+    if conflicting:
+        raise UserError(f"proposal ids cannot be both accepted and rejected: {', '.join(conflicting)}")
     unknown = sorted((set(accepted_ids) | set(rejected_ids)) - set(by_id))
     if unknown:
         raise UserError(f"unknown proposal ids: {', '.join(unknown)}")
@@ -1481,32 +2375,66 @@ def command_apply(args):
     applied = []
     edits = {}
     creates = []
+    link_proposals = []
     for proposal_id in accepted_ids:
         proposal = by_id[proposal_id]
         if proposal["action"] == "link":
+            link_proposals.append(proposal)
             edits.setdefault(proposal["left"], []).append((proposal_id, proposal["rightLink"]))
             edits.setdefault(proposal["right"], []).append((proposal_id, proposal["leftLink"]))
-        elif proposal["action"] == "create_wiki_note":
+        elif proposal["action"] in {"create_wiki_note", "create_inbox_note"}:
             creates.append(proposal)
         else:
             warnings.append(f"{proposal_id} is not an applicable proposal ({proposal['action']})")
 
+    import_apply = state.get("command") == "import-run"
+    already_present = set()
+    if link_proposals:
+        preflight_link_edits(vault, schema, link_proposals)
+    if import_apply and creates:
+        verify_import_state(vault, schema_hash, state)
+        already_present = preflight_import_creates(vault, schema_path, schema, state, creates)
+
     results = {"notes_updated": 0, "links_added": 0, "notes_created": 0, "skipped": 0}
-    for proposal in creates:
-        destination = vault / proposal["destination"]
-        if destination.exists():
-            warnings.append(f"{proposal['id']}: {proposal['destination']} already exists; not overwritten")
-            results["skipped"] += 1
-            continue
-        if args.dry_run:
-            applied.append({"id": proposal["id"], "action": "create", "path": proposal["destination"], "dryRun": True})
+    created_paths = []
+    try:
+        for proposal in creates:
+            destination = vault / proposal["destination"]
+            if proposal["id"] in already_present:
+                warnings.append(f"{proposal['id']}: identical destination already exists; treated as applied")
+                applied.append({"id": proposal["id"], "action": "already-present", "path": proposal["destination"]})
+                results["skipped"] += 1
+                continue
+            if destination.exists():
+                warnings.append(f"{proposal['id']}: {proposal['destination']} already exists; not overwritten")
+                results["skipped"] += 1
+                continue
+            if args.dry_run:
+                applied.append({"id": proposal["id"], "action": "create", "path": proposal["destination"], "dryRun": True})
+                results["notes_created"] += 1
+                continue
+            atomic_create_bytes(destination, proposal["content"].encode("utf-8"))
+            created_paths.append(destination)
+            if not import_apply:
+                run_state.append_jsonl_fsync(
+                    run_dir / "apply-log.jsonl",
+                    {"id": proposal["id"], "operation": "create", "path": proposal["destination"], "status": "ok"},
+                )
+            applied.append({"id": proposal["id"], "action": "create", "path": proposal["destination"]})
             results["notes_created"] += 1
-            continue
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        run_state.atomic_write_text(destination, proposal["content"])
-        run_state.append_jsonl_fsync(run_dir / "apply-log.jsonl", {"id": proposal["id"], "operation": "create", "path": proposal["destination"], "status": "ok"})
-        applied.append({"id": proposal["id"], "action": "create", "path": proposal["destination"]})
-        results["notes_created"] += 1
+    except BaseException:
+        if import_apply:
+            for path in reversed(created_paths):
+                with contextlib.suppress(FileNotFoundError):
+                    path.unlink()
+        raise
+    if import_apply and not args.dry_run:
+        for operation in applied:
+            if operation["action"] == "create":
+                run_state.append_jsonl_fsync(
+                    run_dir / "apply-log.jsonl",
+                    {"id": operation["id"], "operation": "create", "path": operation["path"], "status": "ok"},
+                )
 
     for rel, items in sorted(edits.items()):
         path = vault / rel
@@ -1606,6 +2534,22 @@ def command_doctor(args):
         }
         if WIKI_DOMAIN not in schema["domains"]:
             checks["schema"]["detail"] = f"no '{WIKI_DOMAIN}' domain yet; search and propose work, wiki does not"
+        try:
+            template_checks = [inspect_wiki_template(vault, schema, kind) for kind in WIKI_KIND_SUBDOMAIN]
+        except UserError as error:
+            template_checks = [
+                {"kind": kind, "path": WIKI_TEMPLATE_NAMES[kind], "ok": False, "errors": [str(error)]}
+                for kind in WIKI_KIND_SUBDOMAIN
+            ]
+        checks["wikiTemplates"] = {
+            "ok": all(item["ok"] for item in template_checks),
+            "ready": [item["kind"] for item in template_checks if item["ok"]],
+            "details": [
+                {key: value for key, value in item.items() if key not in {"body", "sha256"}}
+                for item in template_checks
+            ],
+            "requiredFor": "import-run only",
+        }
     except UserError as error:
         checks["schema"] = {"ok": False, "detail": str(error)}
         ok = False
@@ -1659,21 +2603,30 @@ def resolved_options(args):
         "maxCandidates": args.max_candidates,
         "minMentions": args.min_mentions,
         "limit": args.limit,
+        "wikiKinds": split_ids(args.wiki_kinds),
+        "includeArtifacts": args.include_artifact,
+        "titlePrefix": args.title_prefix,
         "promptVersion": PROMPT_VERSION,
     }
 
 
 def parse_args(argv):
-    parser = argparse.ArgumentParser(description="Search an Obsidian vault, propose note connections, and maintain a wiki entity layer.")
-    parser.add_argument("command", choices=["index", "search", "propose", "wiki", "apply", "status", "doctor"])
-    parser.add_argument("query", nargs="?", help="search query (search only)")
+    parser = argparse.ArgumentParser(
+        description="Search an Obsidian vault, propose connections, import completed research, and maintain a wiki layer."
+    )
+    parser.add_argument("command", choices=["index", "search", "propose", "wiki", "import-run", "apply", "status", "doctor"])
+    parser.add_argument("query", nargs="?", help="search query, or source run directory for import-run")
     parser.add_argument("--vault")
     parser.add_argument("--schema")
     parser.add_argument("--run", help="run directory (apply, status)")
     parser.add_argument("--accept", help="comma-separated proposal ids to apply")
     parser.add_argument("--reject", help="comma-separated proposal ids to record as rejected")
     parser.add_argument("--dry-run", action="store_true", help="show what apply would write without writing")
-    parser.add_argument("--limit", type=int, help="cap judged pairs (propose) or classified targets (wiki)")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help="cap judged pairs (propose), classified targets (wiki), or harvested entities (import-run)",
+    )
     parser.add_argument("--search-limit", type=int, default=DEFAULT_SEARCH_LIMIT)
     parser.add_argument("--per-note", type=int, default=DEFAULT_PER_NOTE)
     parser.add_argument("--min-similarity", type=float, default=DEFAULT_MIN_SIMILARITY)
@@ -1686,6 +2639,14 @@ def parse_args(argv):
         help="rank candidates by cross-cutting interest (default) or by raw similarity",
     )
     parser.add_argument("--min-mentions", type=int, default=DEFAULT_MIN_MENTIONS)
+    parser.add_argument("--wiki-kinds", default=",".join(DEFAULT_WIKI_KINDS), help="comma-separated wiki kinds for import-run")
+    parser.add_argument(
+        "--include-artifact",
+        action="append",
+        default=[],
+        help="additional run-relative Markdown artifact for import-run; may be repeated",
+    )
+    parser.add_argument("--title-prefix", help="filename prefix for imported inbox notes")
     parser.add_argument("--base-url")
     parser.add_argument("--model")
     parser.add_argument("--api-key")
@@ -1698,6 +2659,8 @@ def parse_args(argv):
 
     if args.command == "search" and not args.query:
         raise UserError("search requires a query argument")
+    if args.command == "import-run" and not args.query:
+        raise UserError("import-run requires a run-directory argument")
     if args.command in {"apply", "status"} and not args.run:
         raise UserError(f"{args.command} requires --run <run-directory>")
     if args.command == "status":
@@ -1727,6 +2690,7 @@ COMMANDS = {
     "search": command_search,
     "propose": command_propose,
     "wiki": command_wiki,
+    "import-run": command_import_run,
     "apply": command_apply,
     "status": command_status,
     "doctor": command_doctor,

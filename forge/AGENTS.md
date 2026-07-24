@@ -72,6 +72,15 @@ context is present, use `vault-connections` search rather than grep for question
 about vault content, and `vault-organizer` for filing and de-duplication. `/vault`
 re-scans and reports. Outside a vault the extension does nothing.
 
+Route requests such as "send this literature run to my vault", "publish this
+deep research to Obsidian", or "turn these extraction outputs into concept
+notes" to `vault-connections import-run`. It validates the source run without
+mutating it, proposes report copies for `00 Inbox`, and separately proposes
+schema-routed wiki notes. Default wiki kinds are `concept,term`; all seven kinds
+are explicit options. Never create or edit its required vault-owned wiki
+templates. Nothing enters the vault until the user accepts exact `i-NNN` or
+`w-NNN` proposal ids.
+
 The `vault-workflow` extension adds a plan -> execute -> verify loop for changes
 to an Obsidian vault, driven by the single local model. The user drives phases
 with `/plan`, `/execute`, `/verify` (and `/workflow off`); each phase sets the
