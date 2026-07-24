@@ -310,8 +310,12 @@ class StubEmbeddingsServer:
         return StubEmbeddingsHandler.requests
 
 
-def run_script(*args):
-    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+def run_script(*args, environment=None):
+    # Point the agent directory at nothing by default so endpoint resolution
+    # cannot pick up the settings of whoever is running the tests.
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PI_FORGE_AGENT_DIR": "/nonexistent-agent-directory"}
+    if environment:
+        env.update(environment)
     return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True, env=env)
 
 
@@ -547,8 +551,8 @@ class VaultOrganizerV2Tests(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         return path
 
-    def run_ok(self, *args):
-        result = run_script(*args)
+    def run_ok(self, *args, environment=None):
+        result = run_script(*args, environment=environment)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         return json.loads(result.stdout)
 
@@ -578,6 +582,26 @@ class VaultOrganizerV2Tests(unittest.TestCase):
             prefill = server.requests[0]["messages"][-1]
             self.assertEqual(prefill["role"], "assistant")
             self.assertIn("<think>", prefill["content"])
+
+    def test_classification_requests_the_non_thinking_model_by_default(self):
+        self.write_note("00 Inbox/Default.md", "# Default\n\nBody.\n")
+        with StubServer([ok_response()]) as server:
+            self.run_ok("inbox", "--vault", str(self.vault), "--base-url", server.url, "--no-embeddings")
+            self.assertEqual(server.requests[0]["model"], "chat")
+            self.assertNotEqual(server.requests[0]["messages"][-1]["role"], "assistant")
+
+    def test_endpoint_falls_back_to_the_configured_chat_service(self):
+        with StubServer([ok_response()]) as server:
+            agent = self.root / "agent"
+            agent.mkdir(exist_ok=True)
+            (agent / "settings.json").write_text(
+                json.dumps({"connectedServices": {"chat": {"baseUrl": server.url, "model": "configured"}}}),
+                encoding="utf-8",
+            )
+            environment = dict(os.environ, PI_FORGE_AGENT_DIR=str(agent))
+            self.write_note("00 Inbox/Configured.md", "# Configured\n\nBody.\n")
+            self.run_ok("inbox", "--vault", str(self.vault), "--no-embeddings", environment=environment)
+            self.assertEqual(server.requests[0]["model"], "configured")
 
     def test_extract_json_content_strips_think_and_fences(self):
         wrapped = "<think>\n\nreasoning here\n</think>\n\n{\"ok\": true}"

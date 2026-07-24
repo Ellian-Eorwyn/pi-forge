@@ -10,13 +10,12 @@ import shutil
 import sys
 import tempfile
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import forge_embeddings
+import forge_llm
 import run_state
 from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
     COMPILED_SCHEMA_VERSION,
@@ -75,7 +74,7 @@ from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
 
 WORKFLOW = "vault-organizer"
 DEFAULT_BASE_URL = "http://llms:8004/v1/chat/completions"
-DEFAULT_MODEL = "code"
+DEFAULT_MODEL = "chat"
 PROMPT_VERSION = "vault-organizer-v3"
 MAX_BODY_CHARS = 30000
 MAX_ADVISORY_FRONTMATTER_CHARS = 2000
@@ -89,13 +88,13 @@ MAX_SUGGESTIONS = 8
 MAX_SUGGESTION_CHARS = 200
 MAX_TRANSIENT_ATTEMPTS = 3
 RUN_STATE_BATCH = 25
-# The default backend (:8004) is a non-thinking configuration. Pointing at a
-# thinking backend (e.g. :8008) instead needs --think-prefill: a closed empty
-# think block prefilled as the assistant turn so the server skips reasoning.
-# The response parser strips a stray leading think block regardless, so a
-# thinking backend used without the flag still parses (just slowly).
+# Classification runs on the non-thinking backend, where a note costs one short
+# completion instead of a few hundred hidden reasoning tokens. --think-prefill
+# remains for pointing this at a thinking backend by hand: it prefills a closed
+# empty think block so the server continues past reasoning. The response parser
+# strips a stray think block regardless.
 THINK_PREFILL = "<think>\n\n</think>\n\n"
-THINK_BLOCK_RE = re.compile(r"^\s*<think>.*?</think>\s*", re.DOTALL)
+THINK_BLOCK_RE = forge_llm.THINK_BLOCK_RE
 QUARANTINE_SUBDIR = "duplicates"
 TEMP_NAME_RE = re.compile(
     r"^(untitled|document|extracted|extraction_report|chunk[-_ ]?\d+|new note|note)"
@@ -367,64 +366,38 @@ def build_messages(schema, title, current_path, frontmatter_text, body_excerpt, 
 
 
 def normalize_base_url(value):
-    url = (value or DEFAULT_BASE_URL).strip().rstrip("/")
-    if url.endswith("/chat/completions"):
-        return url
-    if url.endswith("/v1"):
-        return f"{url}/chat/completions"
-    return url
-
-
-def request_json(base_url, model, api_key, timeout, messages, cache_prompt=True):
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": 0,
-        "stream": False,
-        "response_format": {"type": "json_object"},
-    }
-    if cache_prompt:
-        payload["cache_prompt"] = True
-    data = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(base_url, data=data, method="POST")
-    request.add_header("Content-Type", "application/json")
-    if api_key:
-        request.add_header("Authorization", f"Bearer {api_key}")
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            response_body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise UserError(f"model endpoint returned HTTP {error.code}: {detail}") from error
-    except urllib.error.URLError as error:
-        raise UserError(f"model endpoint request failed: {error.reason}") from error
-    parsed = json.loads(response_body)
-    content = parsed.get("choices", [{}])[0].get("message", {}).get("content")
-    if not isinstance(content, str):
-        raise UserError("model response did not contain choices[0].message.content")
-    return json.loads(extract_json_content(content))
+    return forge_llm.normalize_base_url(value, DEFAULT_BASE_URL)
 
 
 def extract_json_content(content):
-    text = THINK_BLOCK_RE.sub("", content).strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-    return text
+    return forge_llm.extract_json_content(content)
 
 
-def request_json_with_retry(args, messages):
-    last_error = None
-    for attempt in range(1, MAX_TRANSIENT_ATTEMPTS + 1):
-        try:
-            return request_json(args.base_url, args.model, args.api_key, args.request_timeout, messages, cache_prompt=args.cache_prompt)
-        except UserError as error:
-            last_error = error
-            if attempt < MAX_TRANSIENT_ATTEMPTS and run_state.is_transient_failure(error):
-                time.sleep(min(2.0 * attempt, 10.0))
-                continue
-            raise
-    raise last_error
+def chat_service(args):
+    return {
+        "name": "chat",
+        "enabled": True,
+        "url": args.base_url,
+        "model": args.model,
+        "scheduling": forge_llm.DEFAULT_SERVICES["chat"]["scheduling"],
+    }
+
+
+def request_json_with_retry(args, messages, service=None):
+    try:
+        value, _record = forge_llm.call_json_with_retry(
+            service or chat_service(args),
+            messages,
+            attempts=MAX_TRANSIENT_ATTEMPTS,
+            response_format={"type": "json_object"},
+            cache_prompt=args.cache_prompt,
+            timeout=args.request_timeout,
+            api_key=args.api_key,
+            task="classify",
+        )
+    except forge_llm.ChatError as error:
+        raise UserError(str(error)) from error
+    return value
 
 
 def normalize_metadata(metadata, schema):
@@ -1687,6 +1660,7 @@ def status(args):
 def doctor(args):
     vault = Path(args.vault).expanduser().resolve()
     checks = {}
+    warnings = []
     ok = True
     if vault.is_dir() and os.access(vault, os.W_OK):
         checks["vault"] = {"ok": True, "path": str(vault)}
@@ -1711,41 +1685,37 @@ def doctor(args):
             schema_check = {"ok": False, "detail": str(error)}
     checks["schema"] = schema_check
     ok = ok and schema_check["ok"]
-    chat_check = {"ok": False, "url": args.base_url, "model": args.model}
-    try:
-        started = time.time()
-        probe_messages = [
-            {"role": "system", "content": "Reply with exactly {\"ok\": true} as JSON."},
-            {"role": "user", "content": "ping"},
-        ]
-        if args.think_prefill:
-            probe_messages.append({"role": "assistant", "content": THINK_PREFILL})
-        request_json(
-            args.base_url,
-            args.model,
-            args.api_key,
-            min(args.request_timeout, 60),
-            probe_messages,
-            cache_prompt=False,
-        )
-        chat_check["ok"] = True
-        chat_check["seconds"] = round(time.time() - started, 2)
-    except (UserError, json.JSONDecodeError) as error:
-        chat_check["detail"] = str(error)
+    # Classification is one call per note, so a backend that reasons before
+    # answering costs hundreds of hidden tokens per note. Report that here
+    # rather than letting a whole-vault run discover it slowly.
+    chat_probe = forge_llm.service_doctor(
+        chat_service(args), expect_non_thinking=not args.think_prefill, timeout=min(args.request_timeout, 60)
+    )
+    chat_check = {
+        "ok": chat_probe["reachable"],
+        "url": chat_probe["url"],
+        "model": chat_probe["model"],
+        "detail": chat_probe.get("detail"),
+    }
+    for key in ("thinking", "hiddenTokens", "modelMismatch", "servedModels"):
+        if key in chat_probe:
+            chat_check[key] = chat_probe[key]
     checks["chat"] = chat_check
     ok = ok and chat_check["ok"]
+    if chat_probe.get("warning"):
+        warnings.append(chat_probe["warning"])
     if args.no_embeddings:
         checks["embeddings"] = {"ok": True, "skipped": True}
     else:
-        probe = forge_embeddings.embeddings_doctor(url=args.embeddings_url, model=args.embeddings_model)
+        embeddings_probe = forge_embeddings.embeddings_doctor(url=args.embeddings_url, model=args.embeddings_model)
         checks["embeddings"] = {
-            "ok": probe["reachable"],
-            "url": probe["url"],
-            "model": probe["model"],
-            "detail": probe["detail"],
+            "ok": embeddings_probe["reachable"],
+            "url": embeddings_probe["url"],
+            "model": embeddings_probe["model"],
+            "detail": embeddings_probe["detail"],
         }
-        ok = ok and probe["reachable"]
-    return structured("ok" if ok else "error", data={"checks": checks})
+        ok = ok and embeddings_probe["reachable"]
+    return structured("ok" if ok else "error", warnings=warnings, data={"checks": checks})
 
 
 class TrackingAction(argparse.Action):
@@ -1787,13 +1757,15 @@ def parse_args(argv):
         return args
     if not args.vault:
         raise UserError(f"{args.mode} requires --vault")
-    args.base_url = normalize_base_url(
-        args.base_url
-        or os.environ.get("VAULT_ORGANIZER_BASE_URL")
-        or os.environ.get("OPENAI_BASE_URL")
-        or DEFAULT_BASE_URL
+    # Skill-specific settings win, then the agent's configured chat service, then
+    # the built-in non-thinking default.
+    resolved = forge_llm.resolve_service(
+        "chat",
+        base_url=args.base_url or os.environ.get("VAULT_ORGANIZER_BASE_URL") or os.environ.get("OPENAI_BASE_URL"),
+        model=args.model or os.environ.get("VAULT_ORGANIZER_MODEL") or os.environ.get("OPENAI_MODEL"),
     )
-    args.model = args.model or os.environ.get("VAULT_ORGANIZER_MODEL") or os.environ.get("OPENAI_MODEL") or DEFAULT_MODEL
+    args.base_url = resolved["url"]
+    args.model = resolved["model"]
     args.api_key = args.api_key or os.environ.get("VAULT_ORGANIZER_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
     args.schema = args.schema or os.environ.get("VAULT_ORGANIZER_SCHEMA") or None
     args.embeddings_url = forge_embeddings.endpoint_url(args.embeddings_url)

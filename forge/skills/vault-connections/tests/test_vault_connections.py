@@ -133,6 +133,7 @@ class StubHandler(BaseHTTPRequestHandler):
     embeddings_ok = True
     canonical_titles = {}
     kinds = {}
+    chat_requests = []
 
     def log_message(self, *args):
         pass
@@ -155,6 +156,7 @@ class StubHandler(BaseHTTPRequestHandler):
             vectors = [{"index": index, "embedding": stub_vector(text)} for index, text in enumerate(payload["input"])]
             self._send(200, {"data": vectors})
             return
+        StubHandler.chat_requests.append(payload)
         message = payload["messages"][-1]["content"]
         if "LINK TARGET" in message:
             target = message.splitlines()[0].replace("LINK TARGET:", "").strip()
@@ -188,6 +190,7 @@ class VaultConnectionsTest(unittest.TestCase):
         StubHandler.embeddings_ok = True
         StubHandler.canonical_titles = {}
         StubHandler.kinds = {}
+        StubHandler.chat_requests = []
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.vault = Path(self.temporary.name) / "vault"
@@ -214,6 +217,8 @@ class VaultConnectionsTest(unittest.TestCase):
                 "FORGE_EMBEDDINGS_URL": f"{self.base}/v1/embeddings",
                 "FORGE_EMBEDDINGS_MODEL": "stub-embed",
                 "PATH": "/usr/bin:/bin",
+                # Never resolve endpoints from the settings of whoever runs the tests.
+                "PI_FORGE_AGENT_DIR": "/nonexistent-agent-directory",
             },
         )
         self.assertTrue(process.stdout.strip(), f"no stdout; stderr={process.stderr[-2000:]}")
@@ -349,6 +354,14 @@ class VaultConnectionsTest(unittest.TestCase):
         self.assertTrue(any("semantic ranking unavailable" in warning for warning in result["warnings"]))
 
     # -- propose / apply --------------------------------------------------- #
+
+    def test_pair_judgments_use_the_non_thinking_model(self):
+        self.seed_pair()
+        self.run_command("propose")
+        self.assertTrue(StubHandler.chat_requests)
+        for request in StubHandler.chat_requests:
+            self.assertEqual(request["model"], "chat")
+            self.assertNotEqual(request["messages"][-1]["role"], "assistant")
 
     def test_propose_apply_writes_both_sides_and_is_idempotent(self):
         self.seed_pair()

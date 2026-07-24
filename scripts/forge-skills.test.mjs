@@ -2754,6 +2754,10 @@ test("extracted organize-folder and spreadsheet tools expose structured executio
 	});
 });
 
+test("shared library Python tests pass", () => {
+	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_forge_llm.py")]);
+});
+
 test("vault-organizer Python tests pass", () => {
 	run(python, [join(skillsRoot, "vault-organizer", "tests", "test_vault_organizer.py")]);
 });
