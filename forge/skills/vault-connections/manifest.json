@@ -1,8 +1,8 @@
 {
 	"name": "vault-connections",
 	"type": "pi-forge-skill",
-	"version": "0.1.0",
-	"description": "Semantic search over an Obsidian vault, reviewed connection proposals written into the related property, and a wiki layer of concept entity notes.",
+	"version": "0.2.0",
+	"description": "Semantic vault search, reviewed note connections, and schema-driven publication of validated research outputs into inbox and wiki notes.",
 	"skill_file": "SKILL.md",
 	"scripts_dir": "scripts",
 	"references_dir": "references",
@@ -10,7 +10,7 @@
 	"tools": [
 		{
 			"name": "vault_connections",
-			"description": "Search vault notes by meaning, propose links between notes for per-id approval, create wiki entity notes from unresolved wikilinks, and append approved wikilinks to the related frontmatter property; runs are inspectable with status/doctor.",
+			"description": "Search vault notes, propose links, validate and publish completed research runs as per-id inbox/wiki proposals, and apply accepted notes with drift and collision preflight; runs are inspectable with status/doctor.",
 			"command": "python3 scripts/vault-connections.py",
 			"destructive": true
 		}
@@ -20,6 +20,8 @@
 		"requires_review_for_filesystem_changes": true,
 		"preserve_provenance_when_applicable": true,
 		"never_deletes_notes": true,
-		"never_modifies_note_bodies": true
+		"never_modifies_existing_note_bodies": true,
+		"never_modifies_source_runs": true,
+		"atomic_no_overwrite_imports": true
 	}
 }

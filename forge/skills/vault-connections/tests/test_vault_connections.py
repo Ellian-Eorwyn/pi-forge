@@ -10,6 +10,8 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "vault-connections.py"
 sys.dont_write_bytecode = True
@@ -37,6 +39,7 @@ subdomain: schemas
 | `subdomain` | no | controlled scalar | Nested area. |
 | `parent` | no | quoted wikilink | Nearest hub. |
 | `related` | no | list of quoted wikilinks | Cross-cutting links. |
+| `source_kind` | no | controlled scalar | Source format. |
 | `capture_type` | no | controlled scalar | How it arrived. |
 
 ## Note types
@@ -46,11 +49,15 @@ subdomain: schemas
 - `place` — A location.
 - `event` — A happening.
 - `work` — A named work.
+- `person` — A named person.
+- `source` — A source artifact.
+- `template` — A reusable template.
 
 ## Status values
 
 - `active` — Current.
 - `raw` — Unprocessed.
+- `complete` — Finished.
 
 ## Domains
 
@@ -79,12 +86,14 @@ subdomain: schemas
 | `events` | `4` | `Events` | Happenings. |
 | `terms` | `5` | `Terms` | Jargon. |
 | `works` | `6` | `Works` | Named works. |
+| `figures` | `7` | `Figures` | Named figures. |
 
 ### meta
 
 | Value | Number | Label | Definition |
 | --- | --- | --- | --- |
 | `schemas` | `2` | `Schemas` | Schema notes. |
+| `templates` | `3` | `Templates` | Reusable note templates. |
 
 ## Project registry
 
@@ -95,6 +104,7 @@ subdomain: schemas
 ## Source kinds
 
 - `book` — A book.
+- `generated` — A generated research artifact.
 
 ## Capture types
 
@@ -143,6 +153,8 @@ class StubHandler(BaseHTTPRequestHandler):
     embeddings_ok = True
     canonical_titles = {}
     kinds = {}
+    entities = []
+    classification_type = "note"
     chat_requests = []
     flags = {}
 
@@ -181,6 +193,27 @@ class StubHandler(BaseHTTPRequestHandler):
             ]
             self._send(200, {"choices": [{"message": {"content": json.dumps({"verdicts": verdicts})}}]})
             return
+        messages = payload["messages"]
+        joined = "\n".join(message["content"] for message in messages)
+        message = messages[-1]["content"]
+        if "RESEARCH ENTITY CANDIDATES" in joined:
+            self._send(200, {"choices": [{"message": {"content": json.dumps({"entities": StubHandler.entities})}}]})
+            return
+        if "You classify Obsidian Markdown notes" in joined:
+            classification = {
+                "metadata": {
+                    "type": StubHandler.classification_type,
+                    "status": "active",
+                    "domain": "personal",
+                    "capture_type": "manual",
+                },
+                "needs_review": False,
+                "review_reason": None,
+                "suggestions": [],
+            }
+            self._send(200, {"choices": [{"message": {"content": json.dumps(classification)}}]})
+            return
+            return
         if "LINK TARGET" in message:
             target = message.splitlines()[0].replace("LINK TARGET:", "").strip()
             title = StubHandler.canonical_titles.get(target.lower(), target)
@@ -213,6 +246,8 @@ class VaultConnectionsTest(unittest.TestCase):
         StubHandler.embeddings_ok = True
         StubHandler.canonical_titles = {}
         StubHandler.kinds = {}
+        StubHandler.entities = []
+        StubHandler.classification_type = "note"
         StubHandler.chat_requests = []
         StubHandler.flags = {}
         self.temporary = tempfile.TemporaryDirectory()
@@ -231,6 +266,76 @@ class VaultConnectionsTest(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
         return path
+
+    def seed_wiki_templates(self):
+        body = "# {{title}}\n\n{{summary}}\n\n## Evidence\n\n{{evidence}}\n\n## Sources\n\n{{sources}}\n\n## Provenance\n\n{{provenance}}\n"
+        frontmatter = (
+            "---\ntype: template\nstatus: active\ndomain: meta\nsubdomain: templates\n"
+            "capture_type: manual\n---\n"
+        )
+        for name in vault_connections.WIKI_TEMPLATE_NAMES.values():
+            self.write(f"99 Meta/99.03 Templates/{name}", frontmatter + body)
+
+    def import_args(self, run_directory, **overrides):
+        values = {
+            "vault": str(self.vault),
+            "schema": None,
+            "query": str(run_directory),
+            "wiki_kinds": "concept,term",
+            "include_artifact": [],
+            "title_prefix": None,
+            "limit": None,
+            "base_url": f"{self.base}/v1/chat/completions",
+            "model": "stub",
+            "api_key": "",
+            "request_timeout": 30,
+            "cache_prompt": True,
+            "think_prefill": False,
+            "embeddings_model": "stub-embed",
+            "embeddings_url": f"{self.base}/v1/embeddings",
+            "per_note": 5,
+            "min_similarity": 0.75,
+            "max_similarity": 0.97,
+            "prefer": "cross-domain",
+            "max_candidates": 400,
+            "min_mentions": 2,
+        }
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def make_literature_run(self):
+        root = Path(self.temporary.name) / "literature-run"
+        root.mkdir()
+        (root / "run_config.json").write_text(
+            json.dumps({"input": {"path": "/research/Climate Corpus"}}) + "\n",
+            encoding="utf-8",
+        )
+        (root / "run_state.json").write_text(json.dumps({"status": "complete"}) + "\n", encoding="utf-8")
+        (root / "item_index.jsonl").write_text(
+            json.dumps(
+                {
+                    "itemId": "item-1",
+                    "documentId": "doc-1",
+                    "sourceTitle": "Study One",
+                    "itemType": "definition",
+                    "itemText": "Thermal justice describes unequal exposure to heat.",
+                    "directQuotes": "unequal exposure to heat",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (root / "literature_summary.md").write_text(
+            "---\nold: metadata\n---\n# Literature Summary\r\n\r\nBody  with  spaces.\r\n",
+            encoding="utf-8",
+            newline="",
+        )
+        (root / "key_terms.md").write_text(
+            "# Key Terms\n\n| Term | Definition | Evidence |\n| --- | --- | --- |\n"
+            "| Thermal justice | Unequal heat exposure. | item-1 |\n",
+            encoding="utf-8",
+        )
+        return root
 
     def run_command(self, *argv):
         # Review talks to a second endpoint. Tests that are not about it opt
@@ -451,6 +556,24 @@ class VaultConnectionsTest(unittest.TestCase):
         self.assertTrue(backup.is_file())
         self.assertEqual(backup.read_bytes(), original)
 
+    def test_apply_refuses_link_source_drift_before_rewriting_either_note(self):
+        self.seed_pair()
+        result, _ = self.run_command("propose")
+        left = self.vault / "01 Personal/Emptiness Practice.md"
+        right = self.vault / "01 Personal/Meditation Log.md"
+        original_right = right.read_bytes()
+        left.write_text(left.read_text(encoding="utf-8") + "\nChanged after review.\n", encoding="utf-8")
+        rejected, process = self.run_command(
+            "apply",
+            "--run",
+            result["data"]["runDirectory"],
+            "--accept",
+            result["data"]["proposals"][0]["id"],
+        )
+        self.assertEqual(process.returncode, 1)
+        self.assertIn("link source changed", rejected["errors"][0]["message"])
+        self.assertEqual(right.read_bytes(), original_right)
+
     def test_already_linked_pairs_are_never_proposed(self):
         self.seed_pair()
         path = self.vault / "01 Personal/Emptiness Practice.md"
@@ -587,6 +710,515 @@ class VaultConnectionsTest(unittest.TestCase):
         self.assertEqual(process.returncode, 1)
         self.assertIn("no 'wiki' domain", result["errors"][0]["message"])
 
+    # -- reviewed research import ---------------------------------------- #
+
+    def test_import_run_proposes_inbox_and_supported_wiki_notes(self):
+        self.seed_wiki_templates()
+        source_run = self.make_literature_run()
+        StubHandler.classification_type = "source"
+        StubHandler.entities = [
+            {
+                "kind": "concept",
+                "title": "Thermal Justice",
+                "summary": "Unequal exposure to heat and cooling.",
+                "evidenceIds": ["item-1"],
+                "sourceIds": ["doc-1"],
+            }
+        ]
+        original_body = vault_connections.split_frontmatter((source_run / "literature_summary.md").read_bytes())["body"]
+        with patch.object(
+            vault_connections,
+            "invoke_upstream_validator",
+            return_value={"valid": True, "complete": True, "warnings": ["minor warning"]},
+        ):
+            result = vault_connections.command_import_run(self.import_args(source_run))
+        self.assertEqual(result["data"]["sourceRunType"], "literature")
+        proposals = result["data"]["proposals"]
+        self.assertEqual([proposal["id"] for proposal in proposals], ["i-001", "i-002", "w-001"])
+        self.assertEqual(proposals[0]["destination"], "00 Inbox/Climate Corpus - Literature Overview.md")
+        self.assertEqual(proposals[2]["destination"], "09 Wiki/9.01 Concepts/Thermal Justice.md")
+        imported = proposals[0]["content"]
+        self.assertEqual(vault_connections.split_frontmatter(imported.encode("utf-8"))["body"], original_body)
+        self.assertLess(imported.index("type:"), imported.index("status:"))
+        self.assertLess(imported.index("status:"), imported.index("domain:"))
+        self.assertLess(imported.index("domain:"), imported.index("capture_type:"))
+        self.assertIn("status: complete\n", imported)
+        self.assertIn("source_kind: generated\n", imported)
+        self.assertIn("capture_type: generated\n", imported)
+        self.assertTrue(any("minor warning" in warning for warning in result["warnings"]))
+        self.assertFalse((self.vault / "00 Inbox").exists())
+        self.assertFalse((self.vault / "09 Wiki").exists())
+        self.assertFalse((self.vault / ".vault-connections/cache").exists())
+
+    def test_import_apply_is_selective_dry_run_and_idempotent(self):
+        self.seed_wiki_templates()
+        source_run = self.make_literature_run()
+        StubHandler.entities = []
+        with patch.object(
+            vault_connections,
+            "invoke_upstream_validator",
+            return_value={"valid": True, "complete": True, "warnings": []},
+        ):
+            proposed = vault_connections.command_import_run(self.import_args(source_run))
+        run_directory = proposed["data"]["runDirectory"]
+        apply_args = SimpleNamespace(
+            vault=str(self.vault),
+            schema=None,
+            run=run_directory,
+            accept="i-001",
+            reject="i-002",
+            dry_run=True,
+        )
+        preview = vault_connections.command_apply(apply_args)
+        self.assertEqual(preview["data"]["results"]["notes_created"], 1)
+        destination = self.vault / "00 Inbox/Climate Corpus - Literature Overview.md"
+        self.assertFalse(destination.exists())
+        apply_args.dry_run = False
+        applied = vault_connections.command_apply(apply_args)
+        self.assertEqual(applied["data"]["results"]["notes_created"], 1)
+        self.assertTrue(destination.is_file())
+        again = vault_connections.command_apply(apply_args)
+        self.assertEqual(again["data"]["results"]["notes_created"], 0)
+        self.assertEqual(again["data"]["results"]["skipped"], 1)
+        self.assertFalse((self.vault / "00 Inbox/Climate Corpus - Key Terms.md").exists())
+
+    def test_import_apply_refuses_source_drift_before_writing(self):
+        self.seed_wiki_templates()
+        source_run = self.make_literature_run()
+        with patch.object(
+            vault_connections,
+            "invoke_upstream_validator",
+            return_value={"valid": True, "complete": True, "warnings": []},
+        ):
+            proposed = vault_connections.command_import_run(self.import_args(source_run))
+        (source_run / "key_terms.md").write_text("# Changed\n", encoding="utf-8")
+        apply_args = SimpleNamespace(
+            vault=str(self.vault),
+            schema=None,
+            run=proposed["data"]["runDirectory"],
+            accept="i-001,i-002",
+            reject=None,
+            dry_run=False,
+        )
+        with self.assertRaisesRegex(vault_connections.UserError, "source artifact changed"):
+            vault_connections.command_apply(apply_args)
+        self.assertFalse((self.vault / "00 Inbox").exists())
+
+    def test_import_apply_is_bound_to_originating_vault(self):
+        self.seed_wiki_templates()
+        source_run = self.make_literature_run()
+        with patch.object(
+            vault_connections,
+            "invoke_upstream_validator",
+            return_value={"valid": True, "complete": True, "warnings": []},
+        ):
+            proposed = vault_connections.command_import_run(self.import_args(source_run))
+        other_vault = Path(self.temporary.name) / "other-vault"
+        schema_path = other_vault / "99 Meta/99.02 Schemas/0.00 Vault Schema.md"
+        schema_path.parent.mkdir(parents=True)
+        schema_path.write_text(SCHEMA, encoding="utf-8")
+        template_root = other_vault / "99 Meta/99.03 Templates"
+        template_root.mkdir(parents=True)
+        source_template_root = self.vault / "99 Meta/99.03 Templates"
+        for name in vault_connections.WIKI_TEMPLATE_NAMES.values():
+            (template_root / name).write_bytes((source_template_root / name).read_bytes())
+        apply_args = SimpleNamespace(
+            vault=str(other_vault),
+            schema=None,
+            run=proposed["data"]["runDirectory"],
+            accept="i-001",
+            reject=None,
+            dry_run=False,
+        )
+        with self.assertRaisesRegex(vault_connections.UserError, "originating vault"):
+            vault_connections.command_apply(apply_args)
+        self.assertFalse((other_vault / "00 Inbox").exists())
+
+    def test_import_apply_refuses_a_tampered_proposal_manifest(self):
+        self.seed_wiki_templates()
+        source_run = self.make_literature_run()
+        with patch.object(
+            vault_connections,
+            "invoke_upstream_validator",
+            return_value={"valid": True, "complete": True, "warnings": []},
+        ):
+            proposed = vault_connections.command_import_run(self.import_args(source_run))
+        proposals_path = Path(proposed["data"]["runDirectory"]) / "proposals.jsonl"
+        proposals_path.write_text(
+            proposals_path.read_text(encoding="utf-8").replace("00 Inbox", "02 Craft", 1),
+            encoding="utf-8",
+        )
+        apply_args = SimpleNamespace(
+            vault=str(self.vault),
+            schema=None,
+            run=proposed["data"]["runDirectory"],
+            accept="i-001",
+            reject=None,
+            dry_run=False,
+        )
+        with self.assertRaisesRegex(vault_connections.UserError, "proposals changed"):
+            vault_connections.command_apply(apply_args)
+        self.assertFalse((self.vault / "00 Inbox").exists())
+        self.assertFalse((self.vault / "02 Craft").exists())
+
+    def test_import_apply_rolls_back_a_partially_created_batch(self):
+        self.seed_wiki_templates()
+        source_run = self.make_literature_run()
+        with patch.object(
+            vault_connections,
+            "invoke_upstream_validator",
+            return_value={"valid": True, "complete": True, "warnings": []},
+        ):
+            proposed = vault_connections.command_import_run(self.import_args(source_run))
+        apply_args = SimpleNamespace(
+            vault=str(self.vault),
+            schema=None,
+            run=proposed["data"]["runDirectory"],
+            accept="i-001,i-002",
+            reject=None,
+            dry_run=False,
+        )
+        original_create = vault_connections.atomic_create_bytes
+        calls = 0
+
+        def fail_second(path, data):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("simulated second create failure")
+            original_create(path, data)
+
+        with patch.object(vault_connections, "atomic_create_bytes", side_effect=fail_second):
+            with self.assertRaisesRegex(OSError, "simulated second create failure"):
+                vault_connections.command_apply(apply_args)
+        self.assertFalse((self.vault / "00 Inbox/Climate Corpus - Literature Overview.md").exists())
+        self.assertFalse((self.vault / "00 Inbox/Climate Corpus - Key Terms.md").exists())
+
+    def test_import_supports_an_explicit_extra_markdown_artifact(self):
+        self.seed_wiki_templates()
+        source_run = self.make_literature_run()
+        (source_run / "appendix.md").write_text("# Appendix\n\nAdditional synthesis.\n", encoding="utf-8")
+        with patch.object(
+            vault_connections,
+            "invoke_upstream_validator",
+            return_value={"valid": True, "complete": True, "warnings": []},
+        ):
+            proposed = vault_connections.command_import_run(
+                self.import_args(source_run, include_artifact=["appendix.md"])
+            )
+        inbox = [item for item in proposed["data"]["proposals"] if item["id"].startswith("i-")]
+        self.assertEqual(len(inbox), 3)
+        self.assertEqual(inbox[2]["sourceArtifact"], "appendix.md")
+        with self.assertRaisesRegex(vault_connections.UserError, "unsafe import artifact path"):
+            vault_connections.selected_import_artifacts(source_run, "literature", ["../escape.md"])
+
+    def test_import_requires_selected_templates_and_doctor_is_non_breaking(self):
+        source_run = self.make_literature_run()
+        with patch.object(
+            vault_connections,
+            "invoke_upstream_validator",
+            return_value={"valid": True, "complete": True, "warnings": []},
+        ):
+            with self.assertRaisesRegex(vault_connections.UserError, "Wiki Concept.md"):
+                vault_connections.command_import_run(self.import_args(source_run))
+        result, _ = self.run_command("doctor")
+        self.assertFalse(result["data"]["checks"]["wikiTemplates"]["ok"])
+        self.assertEqual(result["data"]["checks"]["wikiTemplates"]["requiredFor"], "import-run only")
+
+    def test_import_detects_all_supported_run_types(self):
+        root = Path(self.temporary.name)
+        literature = root / "normal"
+        literature.mkdir()
+        (literature / "run_config.json").touch()
+        (literature / "item_index.jsonl").touch()
+        meta = root / "meta"
+        meta.mkdir()
+        (meta / "meta_config.json").touch()
+        (meta / "meta_items.jsonl").touch()
+        deep = root / "deep"
+        deep.mkdir()
+        (deep / "research_run.json").touch()
+        (deep / "claim_register.jsonl").touch()
+        self.assertEqual(vault_connections.detect_source_run(literature), "literature")
+        self.assertEqual(vault_connections.detect_source_run(meta), "meta-literature")
+        self.assertEqual(vault_connections.detect_source_run(deep), "deep-research")
+
+    def test_meta_and_deep_imports_select_their_default_reports(self):
+        self.seed_wiki_templates()
+        root = Path(self.temporary.name)
+        meta = root / "meta-run"
+        meta.mkdir()
+        (meta / "meta_config.json").write_text(
+            json.dumps({"researchQuestion": "Heat Adaptation"}) + "\n",
+            encoding="utf-8",
+        )
+        (meta / "run_state.json").write_text('{"status":"complete"}\n', encoding="utf-8")
+        (meta / "meta_items.jsonl").write_text(
+            json.dumps(
+                {
+                    "itemId": "meta-1",
+                    "documentId": "doc-1",
+                    "itemType": "synthesis",
+                    "itemText": "Heat adaptation requires public infrastructure.",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (meta / "meta_artifacts.jsonl").touch()
+        (meta / "meta_synthesis.md").write_text("# Meta Synthesis\n", encoding="utf-8")
+        (meta / "concept_register.md").write_text("# Concept Register\n", encoding="utf-8")
+
+        deep = root / "deep-run"
+        deep.mkdir()
+        (deep / "research_run.json").write_text(
+            json.dumps({"question": "Heat Evidence"}) + "\n",
+            encoding="utf-8",
+        )
+        (deep / "run_state.json").write_text('{"status":"complete"}\n', encoding="utf-8")
+        (deep / "source_index.json").write_text("{}\n", encoding="utf-8")
+        (deep / "evidence_items.jsonl").write_text(
+            json.dumps({"evidenceId": "e-1", "sourceId": "source-1", "text": "Supported evidence."}) + "\n",
+            encoding="utf-8",
+        )
+        (deep / "claim_register.jsonl").write_text(
+            json.dumps(
+                {
+                    "claimId": "claim-1",
+                    "text": "Supported claim.",
+                    "sourceIds": ["source-1"],
+                    "evidenceIds": ["e-1"],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (deep / "deep_research_report.md").write_text("# Deep Research\n", encoding="utf-8")
+
+        with patch.object(
+            vault_connections,
+            "invoke_upstream_validator",
+            return_value={"valid": True, "complete": True, "warnings": []},
+        ):
+            meta_result = vault_connections.command_import_run(self.import_args(meta))
+            deep_result = vault_connections.command_import_run(self.import_args(deep))
+        self.assertEqual(meta_result["data"]["sourceRunType"], "meta-literature")
+        self.assertEqual(
+            [proposal["sourceArtifact"] for proposal in meta_result["data"]["proposals"] if proposal["id"].startswith("i-")],
+            ["meta_synthesis.md", "concept_register.md"],
+        )
+        self.assertEqual(deep_result["data"]["sourceRunType"], "deep-research")
+        self.assertEqual(
+            [proposal["sourceArtifact"] for proposal in deep_result["data"]["proposals"] if proposal["id"].startswith("i-")],
+            ["deep_research_report.md"],
+        )
+
+    def test_literature_key_term_table_is_added_to_supported_item_context(self):
+        source_run = self.make_literature_run()
+        records = vault_connections.import_source_records(source_run, "literature")
+        self.assertEqual(len(records), 1)
+        self.assertIn("Table context: Thermal justice", records[0]["text"])
+
+    def test_import_invokes_each_validator_in_read_only_mode(self):
+        root = Path(self.temporary.name)
+        for run_type in ("literature", "meta-literature", "deep-research"):
+            run_directory = root / run_type
+            run_directory.mkdir()
+            if run_type == "deep-research":
+                (run_directory / "run_state.json").write_text('{"status":"complete"}\n', encoding="utf-8")
+            completed = SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"valid": True, "complete": True, "warnings": []}),
+                stderr="",
+            )
+            with patch.object(vault_connections.subprocess, "run", return_value=completed) as runner:
+                result = vault_connections.invoke_upstream_validator(run_directory, run_type)
+            self.assertTrue(result["valid"])
+            self.assertIn("--read-only", runner.call_args.args[0])
+        invalid = SimpleNamespace(
+            returncode=1,
+            stdout=json.dumps({"valid": False, "errors": ["incomplete output"]}),
+            stderr="",
+        )
+        with patch.object(vault_connections.subprocess, "run", return_value=invalid):
+            with self.assertRaisesRegex(vault_connections.UserError, "incomplete output"):
+                vault_connections.invoke_upstream_validator(root / "literature", "literature")
+
+    def test_import_apply_refuses_template_drift_and_new_basename_collision(self):
+        self.seed_wiki_templates()
+        source_run = self.make_literature_run()
+        with patch.object(
+            vault_connections,
+            "invoke_upstream_validator",
+            return_value={"valid": True, "complete": True, "warnings": []},
+        ):
+            proposed = vault_connections.command_import_run(self.import_args(source_run))
+        concept_template = self.vault / "99 Meta/99.03 Templates/Wiki Concept.md"
+        concept_template.write_text(concept_template.read_text(encoding="utf-8") + "\nChanged.\n", encoding="utf-8")
+        self.write(
+            "02 Craft/Climate Corpus - Key Terms.md",
+            "---\ntype: note\nstatus: active\ndomain: craft\n---\n# Collision\n",
+        )
+        apply_args = SimpleNamespace(
+            vault=str(self.vault),
+            schema=None,
+            run=proposed["data"]["runDirectory"],
+            accept="i-001,i-002",
+            reject=None,
+            dry_run=False,
+        )
+        with self.assertRaisesRegex(vault_connections.UserError, "wiki template changed"):
+            vault_connections.command_apply(apply_args)
+        concept_template.write_text(concept_template.read_text(encoding="utf-8").replace("\nChanged.\n", ""), encoding="utf-8")
+        with self.assertRaisesRegex(vault_connections.UserError, "basename collides"):
+            vault_connections.command_apply(apply_args)
+        self.assertFalse((self.vault / "00 Inbox").exists())
+
+    def test_import_apply_refuses_schema_drift(self):
+        self.seed_wiki_templates()
+        source_run = self.make_literature_run()
+        with patch.object(
+            vault_connections,
+            "invoke_upstream_validator",
+            return_value={"valid": True, "complete": True, "warnings": []},
+        ):
+            proposed = vault_connections.command_import_run(self.import_args(source_run))
+        schema_path = self.vault / "99 Meta/99.02 Schemas/0.00 Vault Schema.md"
+        schema_path.write_text(schema_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        apply_args = SimpleNamespace(
+            vault=str(self.vault),
+            schema=None,
+            run=proposed["data"]["runDirectory"],
+            accept="i-001",
+            reject=None,
+            dry_run=False,
+        )
+        with self.assertRaisesRegex(vault_connections.UserError, "schema hash changed"):
+            vault_connections.command_apply(apply_args)
+        self.assertFalse((self.vault / "00 Inbox").exists())
+
+    def test_all_seven_wiki_kinds_use_schema_types_and_compiled_folders(self):
+        self.seed_wiki_templates()
+        schema = self.schema()
+        expected_types = {
+            "concept": "concept",
+            "practice": "concept",
+            "place": "place",
+            "event": "event",
+            "term": "concept",
+            "work": "work",
+            "figure": "person",
+        }
+        for kind, expected_type in expected_types.items():
+            destination = vault_connections.wiki_destination(schema, kind, f"Example {kind.title()}")
+            self.assertIn(vault_connections.WIKI_KIND_SUBDOMAIN[kind].title(), destination)
+            template = vault_connections.inspect_wiki_template(self.vault, schema, kind)
+            candidate = {
+                "kind": kind,
+                "title": f"Example {kind.title()}",
+                "summary": "Supported summary.",
+                "evidenceIds": ["item-1"],
+                "sourceIds": ["doc-1"],
+            }
+            content = vault_connections.render_wiki_entity(
+                schema,
+                template,
+                candidate,
+                [{"id": "item-1", "text": "Supported evidence.", "sourceIds": ["doc-1"]}],
+                "/tmp/source-run",
+                "fingerprint",
+            )
+            self.assertIn(f"type: {expected_type}\n", content)
+            self.assertIn(f"subdomain: {vault_connections.WIKI_KIND_SUBDOMAIN[kind]}\n", content)
+            self.assertNotIn("{{", content)
+
+    def test_entity_candidates_are_deduplicated_and_unsupported_ids_are_discarded(self):
+        records = [
+            {"id": "item-1", "text": "Supported.", "sourceIds": ["doc-1"]},
+            {"id": "item-2", "text": "Other evidence.", "sourceIds": ["doc-2"]},
+        ]
+        StubHandler.entities = [
+            {
+                "kind": "concept",
+                "title": "Thermal Justice",
+                "summary": "First summary.",
+                "evidenceIds": ["item-1"],
+                "sourceIds": ["doc-1"],
+            },
+            {
+                "kind": "term",
+                "title": "thermal justice",
+                "summary": "Second summary.",
+                "evidenceIds": ["item-1"],
+                "sourceIds": [],
+            },
+            {
+                "kind": "concept",
+                "title": "Unsupported",
+                "summary": "Invented.",
+                "evidenceIds": ["missing"],
+                "sourceIds": [],
+            },
+            {
+                "kind": "concept",
+                "title": "Wrong Namespace",
+                "summary": "A source ID was used as a record ID.",
+                "evidenceIds": ["doc-1"],
+                "sourceIds": [],
+            },
+            {
+                "kind": "concept",
+                "title": "Unrelated Source",
+                "summary": "The source exists but belongs to another item.",
+                "evidenceIds": ["item-1"],
+                "sourceIds": ["doc-2"],
+            },
+        ]
+        candidates, warnings = vault_connections.harvest_entity_candidates(
+            self.import_args(Path(self.temporary.name)),
+            records,
+            ("concept", "term"),
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["evidenceIds"], ["item-1"])
+        self.assertTrue(any("unsupported provenance" in warning for warning in warnings))
+        self.assertTrue(any("unrelated to cited records" in warning for warning in warnings))
+
+    def test_entity_harvest_batches_records_and_limit_bounds_each_request(self):
+        records = [
+            {"id": f"item-{index}", "text": "Supported evidence. " * 20, "sourceIds": [f"doc-{index}"]}
+            for index in range(205)
+        ]
+        seen_batch_sizes = []
+
+        def respond(_args, messages):
+            content = messages[-1]["content"]
+            payload = json.loads(content.split("RESEARCH ENTITY CANDIDATES\n", 1)[1])
+            seen_batch_sizes.append(len(payload["records"]))
+            record = payload["records"][0]
+            return {
+                "entities": [
+                    {
+                        "kind": "concept",
+                        "title": f"Concept {record['id']}",
+                        "summary": "Supported summary.",
+                        "evidenceIds": [record["id"]],
+                        "sourceIds": [record["sourceIds"][0]],
+                    }
+                ]
+            }
+
+        with patch.object(vault_connections, "request_with_retry", side_effect=respond):
+            candidates, warnings = vault_connections.harvest_entity_candidates(
+                self.import_args(Path(self.temporary.name)),
+                records,
+                ("concept",),
+                limit=1,
+            )
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(seen_batch_sizes, [10])
+
     # -- vector store ------------------------------------------------------ #
 
     def test_vectors_are_cached_and_reused_across_runs(self):
@@ -636,7 +1268,10 @@ class VaultConnectionsTest(unittest.TestCase):
         checks = result["data"]["checks"]
         self.assertTrue(checks["schema"]["ok"])
         self.assertTrue(checks["schema"]["wikiDomain"])
-        self.assertEqual(checks["schema"]["wikiSubdomains"], ["concepts", "events", "places", "practices", "terms", "works"])
+        self.assertEqual(
+            checks["schema"]["wikiSubdomains"],
+            ["concepts", "events", "figures", "places", "practices", "terms", "works"],
+        )
         self.assertTrue(checks["chat"]["ok"])
         self.assertTrue(checks["embeddings"]["ok"])
 

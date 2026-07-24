@@ -18,6 +18,19 @@ import forge_embeddings
 import forge_llm
 import forge_verify
 import run_state
+from vault_classification import (
+    DEFAULT_BASE_URL,
+    THINK_PREFILL,
+    build_messages,
+    compact_schema_for_prompt,
+    extract_json_content,
+    normalize_base_url,
+    normalize_metadata,
+    request_json,
+    request_json_with_retry,
+    system_prompt,
+    validate_classification,
+)
 from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
     COMPILED_SCHEMA_VERSION,
     DEFAULT_SCHEMA,
@@ -78,16 +91,12 @@ DEFAULT_BASE_URL = "http://llms:8004/v1/chat/completions"
 DEFAULT_MODEL = "chat"
 PROMPT_VERSION = "vault-organizer-v3"
 MAX_BODY_CHARS = 30000
-MAX_ADVISORY_FRONTMATTER_CHARS = 2000
 EMBED_MAX_CHARS = 2000
 MIN_NEAR_DUPE_CHARS = 100
 NEAR_DUPE_AUTO = 0.97
 NEAR_DUPE_REVIEW = 0.90
 CONTAINMENT_MIN = 0.90
 MAX_BLOCK_BUCKET = 50
-MAX_SUGGESTIONS = 8
-MAX_SUGGESTION_CHARS = 200
-MAX_TRANSIENT_ATTEMPTS = 3
 RUN_STATE_BATCH = 25
 # Classification runs on the non-thinking backend, where a note costs one short
 # completion instead of a few hundred hidden reasoning tokens. --think-prefill
@@ -533,8 +542,6 @@ def validate_classification(response, schema):
         "review_reason": review_reason,
         "suggestions": suggestions,
     }, warnings, errors
-
-
 def scan_vault(vault, schema_path, mode, limit):
     schema_data = schema_path.read_bytes()
     schema_split = split_frontmatter(schema_data)

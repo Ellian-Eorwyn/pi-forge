@@ -626,15 +626,15 @@ def load_run(run_directory):
     return run
 
 
-def load_results(run_directory, strict=True):
+def load_results(run_directory, strict=True, repair=True):
     path = run_directory / "extraction_results.jsonl"
     if not path.is_file():
         fail(f"extraction_results.jsonl is missing: {path}")
     try:
-        results, warnings = run_state.read_jsonl_recover_tail(path, repair=True)
+        results, warnings = run_state.read_jsonl_recover_tail(path, repair=repair)
     except ValueError as error:
         fail(str(error))
-    if warnings:
+    if warnings and repair:
         try:
             run_state.update_run_state(
                 run_directory,
@@ -2616,12 +2616,12 @@ def require_meta_run_directory(raw_path):
     return path
 
 
-def load_packet_memos(run_directory, strict=True):
+def load_packet_memos(run_directory, strict=True, repair=True):
     path = run_directory / "packet_memos.jsonl"
     if not path.is_file():
         fail(f"packet_memos.jsonl is missing: {path}")
     try:
-        memos, _ = run_state.read_jsonl_recover_tail(path, repair=True)
+        memos, _ = run_state.read_jsonl_recover_tail(path, repair=repair)
     except ValueError as error:
         fail(str(error))
     seen = set()
@@ -3129,7 +3129,7 @@ def command_meta_validate(args):
     config = load_meta_config(run_directory)
     items = load_meta_items(run_directory)
     artifacts = load_meta_artifacts(run_directory)
-    memos = load_packet_memos(run_directory, strict=False)
+    memos = load_packet_memos(run_directory, strict=False, repair=not args.read_only)
     errors = []
     warnings = []
     item_ids = {item["itemId"] for item in items}
@@ -3249,7 +3249,7 @@ def command_meta_validate(args):
     }
     if args.fix_hints:
         result["issues"] = [meta_validation_issue(error) for error in errors]
-    if not errors and not missing:
+    if not errors and not missing and not args.read_only:
         run_state.update_run_state(
             run_directory,
             lambda state: {**state, "status": "complete", "phase": "complete", "nextAction": None},
@@ -3347,7 +3347,7 @@ def _initialize_build_state(state, synthesis, deliverables):
 def command_validate(args):
     run_directory = require_run_directory(args.run_directory)
     run = load_run(run_directory)
-    results = load_results(run_directory, strict=False)
+    results = load_results(run_directory, strict=False, repair=not args.read_only)
     errors = []
     warnings = []
     order = document_order(run)
@@ -3407,7 +3407,7 @@ def command_validate(args):
     }
     if args.fix_hints:
         result["issues"] = [validation_issue(error) for error in errors]
-    if not errors and not missing:
+    if not errors and not missing and not args.read_only:
         run_state.update_run_state(
             run_directory,
             lambda state: {**state, "status": "complete", "phase": "complete", "nextAction": None},
@@ -3571,6 +3571,7 @@ def parser():
     validate.add_argument("run_directory")
     validate.add_argument("--fix-hints", action="store_true", help="Include machine-readable repair hints.")
     validate.add_argument("--json", action="store_true", help="Accepted for symmetry; output is always JSON.")
+    validate.add_argument("--read-only", action="store_true", help="Validate without updating run state.")
     validate.set_defaults(handler=command_validate)
 
     meta_init = subparsers.add_parser("meta-init", help="Initialize a context-bounded meta extraction run over prior literature runs.")
@@ -3630,6 +3631,7 @@ def parser():
     meta_validate.add_argument("run_directory")
     meta_validate.add_argument("--fix-hints", action="store_true", help="Include machine-readable repair hints.")
     meta_validate.add_argument("--json", action="store_true", help="Accepted for symmetry; output is always JSON.")
+    meta_validate.add_argument("--read-only", action="store_true", help="Validate without updating run state.")
     meta_validate.set_defaults(handler=command_meta_validate)
     return root
 
