@@ -24,9 +24,10 @@ Nothing is written without the user naming the proposal ids they approve.
    ```
 
    This verifies the schema note parses, reports whether the schema has a `wiki`
-   domain yet, and probes both endpoints. The default chat endpoint is the
-   non-thinking `llms:8004`; for a thinking backend add
-   `--base-url http://llms:8008/v1/chat/completions --think-prefill`.
+   domain yet, and probes both endpoints. Pair judgments are one call each, so
+   they run on the non-thinking service (`llms:8004`, model `chat`) — the
+   agent's configured `connectedServices.chat` unless overridden. Doctor warns
+   if that endpoint is actually reasoning.
 3. Build or refresh the index. Every command does this on its own, so run it
    explicitly only for the first pass on a large vault:
 

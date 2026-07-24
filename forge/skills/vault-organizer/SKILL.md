@@ -29,10 +29,13 @@ section.
    This checks the schema parses, the chat endpoint answers, and the
    embeddings endpoint answers. Set the embeddings model that is actually
    served (for example `--embeddings-model Qwen3-Embedding-4B` or
-   `FORGE_EMBEDDINGS_MODEL`); it is fingerprinted into runs and caches. The
-   default chat endpoint is the non-thinking `llms:8004`; to use a thinking
-   backend instead pass `--base-url http://llms:8008/v1/chat/completions
-   --think-prefill` so it skips reasoning tokens.
+   `FORGE_EMBEDDINGS_MODEL`); it is fingerprinted into runs and caches.
+
+   Classification is one call per note, so it runs on the non-thinking service
+   (`llms:8004`, model `chat`) — the agent's configured `connectedServices.chat`
+   unless overridden. Doctor reports whether that endpoint actually answers
+   without reasoning; if it warns that it is thinking, the endpoint is
+   misconfigured and every note will cost hundreds of wasted tokens.
 4. Run a dry run first (dry run is always the default):
 
    ```bash

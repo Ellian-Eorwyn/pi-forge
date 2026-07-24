@@ -3,28 +3,31 @@
  *
  * A single-session plan -> execute -> verify loop for local-model vault work.
  *
- * The pi-forge agent brain is one local model (forge-local, http://llms:8008).
- * That server "thinks" (spends hidden reasoning tokens) unless a closed empty
- * <think></think> block is prefilled as the assistant turn. This extension uses
- * that toggle to give each phase the right behaviour from the single running
- * model:
+ * The same weights are served twice: forge-local (http://llms:8008) reasons
+ * before answering, and forge-chat-local (http://llms:8004) does not. Each
+ * phase gets the behaviour it needs by switching the session model:
  *
- *   plan    - thinking ON,  read-only tools  -> interview + write a plan
- *   execute - thinking OFF, full vault tools -> apply the plan, one step, on approval
- *   verify  - thinking ON,  read-only tools  -> check the result against the plan
+ *   plan    - thinking model,     read-only tools  -> interview + write a plan
+ *   execute - non-thinking model, full vault tools -> apply the plan, one step, on approval
+ *   verify  - thinking model,     read-only tools  -> check the result against the plan
  *
- * Phase is persisted so it survives a restart. Nothing here selects a second
- * provider; a future two-GPU setup can instead point execute at a real
- * non-thinking server by editing the ROLE_ENDPOINTS note below.
+ * Execute is mechanical: run a vetted skill, show the diff, wait for approval.
+ * Reasoning about each of those turns costs hundreds of hidden tokens and buys
+ * nothing, which is why the phase moves off the thinking server entirely.
+ *
+ * Phase and the model to return to are persisted, so both survive a restart.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 type Phase = "off" | "plan" | "execute" | "verify";
 
-// Same prefill vault-organizer.py uses. On llama.cpp-style servers the model
-// continues from the closed think block and skips reasoning entirely.
-const THINK_PREFILL = "<think>\n\n</think>\n\n";
+interface ModelReference {
+	provider: string;
+	id: string;
+}
+
+const EXECUTE_MODEL: ModelReference = { provider: "forge-chat-local", id: "chat" };
 
 // Desired tools per phase; intersected with the tools that actually exist so an
 // environment without (say) a standalone "grep" tool still works.
@@ -67,9 +70,8 @@ Carry out the approved plan, ONE change at a time. You have full tools, scoped t
 For each change:
 - Do the safe version first: run the skill without --apply (a dry run), or show the exact edit you will make.
 - Show the user the result and WAIT for an explicit "yes" before applying (--apply) or writing files. Never apply without approval.
-- Prefer the vetted skills over free-form edits. Run vault-organizer with:
-    --base-url http://llms:8008/v1/chat/completions --think-prefill
-  so its bulk per-note calls stay fast (non-thinking) on the running server.
+- Prefer the vetted skills over free-form edits. Run them with their default
+  endpoints; bulk per-note calls already go to the non-thinking backend.
 - After editing the schema note, run "vault-organizer.py doctor --vault <vault>" and confirm it parses before continuing.
 - Never delete notes (the tools quarantine, recoverably). Keep every path inside the vault.
 
@@ -96,6 +98,53 @@ function phasePrompt(phase: Phase): string | undefined {
 
 export default function vaultWorkflowExtension(pi: ExtensionAPI): void {
 	let phase: Phase = "off";
+	// The model to restore when execute ends. Persisted alongside the phase so a
+	// session interrupted mid-execute does not strand the user on the
+	// non-thinking model.
+	let previousModel: ModelReference | undefined;
+
+	function currentModel(ctx: ExtensionContext): ModelReference | undefined {
+		const model = ctx.model as { provider?: string; id?: string } | undefined;
+		if (!model?.provider || !model.id) return undefined;
+		return { provider: model.provider, id: model.id };
+	}
+
+	function isExecuteModel(model: ModelReference | undefined): boolean {
+		return model?.provider === EXECUTE_MODEL.provider && model.id === EXECUTE_MODEL.id;
+	}
+
+	async function switchModel(target: ModelReference, ctx: ExtensionContext): Promise<boolean> {
+		try {
+			const model = ctx.modelRegistry?.find(target.provider, target.id);
+			if (!model) return false;
+			return (await pi.setModel(model)) !== false;
+		} catch {
+			return false;
+		}
+	}
+
+	async function useExecuteModel(ctx: ExtensionContext): Promise<void> {
+		const active = currentModel(ctx);
+		if (isExecuteModel(active)) return;
+		const restoreTo = active;
+		if (await switchModel(EXECUTE_MODEL, ctx)) {
+			previousModel = restoreTo;
+			return;
+		}
+		// An install whose models.json predates the non-thinking provider keeps
+		// working; it just pays for reasoning it does not need.
+		ctx.ui.notify(
+			`Vault workflow: ${EXECUTE_MODEL.provider}/${EXECUTE_MODEL.id} is not configured, so execute stays on the thinking model. Run pi-forge-update to register it.`,
+			"warning",
+		);
+	}
+
+	async function restoreModel(ctx: ExtensionContext): Promise<void> {
+		// Only undo our own switch. If the user picked a different model during
+		// execute, that choice wins.
+		if (previousModel && isExecuteModel(currentModel(ctx))) await switchModel(previousModel, ctx);
+		previousModel = undefined;
+	}
 
 	function allToolNames(): string[] {
 		try {
@@ -127,12 +176,14 @@ export default function vaultWorkflowExtension(pi: ExtensionAPI): void {
 	}
 
 	function persist(): void {
-		pi.appendEntry("vault-workflow", { phase });
+		pi.appendEntry("vault-workflow", { phase, previousModel });
 	}
 
-	function enter(target: Phase, ctx: ExtensionContext): void {
+	async function enter(target: Phase, ctx: ExtensionContext): Promise<void> {
 		phase = target;
 		pi.setActiveTools(toolsForPhase(target));
+		if (target === "execute") await useExecuteModel(ctx);
+		else await restoreModel(ctx);
 		persist();
 		updateStatus(ctx);
 		if (target === "off") {
@@ -162,23 +213,11 @@ export default function vaultWorkflowExtension(pi: ExtensionAPI): void {
 		handler: async (args, ctx) => {
 			const requested = (typeof args === "string" ? args : "").trim().toLowerCase();
 			if (requested === "off" || requested === "plan" || requested === "execute" || requested === "verify") {
-				enter(requested, ctx);
+				await enter(requested, ctx);
 				return;
 			}
 			ctx.ui.notify(`Vault workflow phase: ${phase}. Use /plan, /execute, /verify, or /workflow off.`, "info");
 		},
-	});
-
-	// Thinking toggle: in execute phase, prefill a closed think block so the
-	// single local server skips reasoning for fast mechanical turns.
-	pi.on("before_provider_request", (event, ctx) => {
-		if (phase !== "execute") return undefined;
-		if (ctx.model?.provider !== "forge-local") return undefined;
-		const payload = event.payload;
-		if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
-		const body = payload as { messages?: unknown };
-		if (!Array.isArray(body.messages)) return undefined;
-		return { ...body, messages: [...body.messages, { role: "assistant", content: THINK_PREFILL }] };
 	});
 
 	// Per-phase role and rules, injected fresh each turn.
@@ -219,15 +258,21 @@ export default function vaultWorkflowExtension(pi: ExtensionAPI): void {
 			const entries = ctx.sessionManager.getEntries();
 			const last = entries
 				.filter((entry: { type: string; customType?: string }) => entry.type === "custom" && entry.customType === "vault-workflow")
-				.pop() as { data?: { phase?: Phase } } | undefined;
+				.pop() as { data?: { phase?: Phase; previousModel?: ModelReference } } | undefined;
 			const restored = last?.data?.phase;
 			if (restored === "plan" || restored === "execute" || restored === "verify" || restored === "off") {
 				phase = restored;
 			}
+			previousModel = last?.data?.previousModel;
 		} catch {
 			// no session manager in a stub; leave phase = off
 		}
 		if (phase !== "off") pi.setActiveTools(toolsForPhase(phase));
+		// The session restores its own last model, which is right for a clean
+		// resume. Re-assert here for sessions written before execute switched
+		// models, and undo a switch that a crash left in place.
+		if (phase === "execute") await useExecuteModel(ctx);
+		else await restoreModel(ctx);
 		updateStatus(ctx);
 	});
 }

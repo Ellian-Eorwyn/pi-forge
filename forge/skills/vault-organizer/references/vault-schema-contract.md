@@ -110,17 +110,23 @@ user message carries only the title, current path, the previous frontmatter
 as untrusted advisory context (capped), and the body excerpt. Repair requests
 append to the user message so the cached prefix survives.
 
-The default chat endpoint (`http://llms:8004/v1/chat/completions`) is a
-non-thinking configuration, so no reasoning-suppression trick is needed and
-classification runs directly. Pointing at a thinking backend instead (for
-example `--base-url http://llms:8008/v1/chat/completions`) wastes thousands of
-hidden thinking tokens per note; add `--think-prefill` in that case to end
-each request with a closed empty `<think></think>` assistant turn that
-llama.cpp-style servers continue from, skipping reasoning (observed ~10x
-speedup). Either way the response parser strips a leading think block and code
-fences before JSON parsing, so a thinking backend used without the flag still
-produces valid output (just slowly). `--think-prefill` is part of the
-classification cache key and the run options fingerprint.
+Classification resolves its endpoint from `connectedServices.chat`, which is a
+non-thinking configuration (`http://llms:8004/v1/chat/completions`, model
+`chat`), so no reasoning-suppression trick is needed. Pointing at a thinking
+backend instead costs hundreds of hidden tokens per note: measured on the
+reference deployment, two inbox notes took 4.2s against :8004 and 56.9s against
+:8008, for the same destinations.
+
+That cost is invisible in the response — llama.cpp strips the think block
+server-side and returns no `reasoning_content` — so `doctor` detects it from the
+generated-token count instead and warns when the bulk endpoint is reasoning.
+
+`--think-prefill` remains for pointing this at a thinking backend by hand: it
+ends each request with a closed empty `<think></think>` assistant turn that
+llama.cpp-style servers continue from. It is part of the classification cache
+key and the run options fingerprint. The response parser strips a leading think
+block and code fences regardless, so a thinking backend used without the flag
+still produces valid output (just slowly).
 
 ## Model Output
 
