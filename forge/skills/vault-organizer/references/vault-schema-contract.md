@@ -56,19 +56,41 @@ following the repository run-state contract: `run_state.json` (options
 fingerprint, phase, per-note statuses), `run_events.jsonl` (fsynced phase
 journal), `scan.json` (input snapshot with content hashes), `dedupe.json`
 (duplicate plan), `classified.jsonl` (fsynced per-note classification
-journal), `plan.json`, `report.md`, `review-queue.jsonl`, and
-`apply-log.jsonl`.
+journal), `verified.jsonl` (fsynced per-note verdict journal), `plan.json`,
+`report.md`, `review-queue.jsonl`, and `apply-log.jsonl`.
 
-- `--run <dir>` resumes: journaled classifications are reused, apply
-  operations already logged `ok` are skipped, and input drift since the scan
-  is reported as warnings. Files changed after planning are refused at apply
-  by SHA-256 re-check.
+- `--run <dir>` resumes: journaled classifications and verdicts are reused,
+  apply operations already logged `ok` are skipped, and input drift since the
+  scan is reported as warnings. Files changed after planning are refused at
+  apply by SHA-256 re-check.
 - Resuming with different options (model, endpoints, thresholds, limit,
   schema hash) is refused via the options fingerprint; start a new run.
 - A vault-level lock (`.vault-organizer/.run.lock`) serializes runs; a stale
   lock from a dead process is reclaimed automatically.
 - The whole run is idempotent: re-running a completed run re-derives the same
   plan and applies nothing new.
+
+## Verification
+
+Classification runs on the non-thinking service, so every classification is
+then reviewed by the thinking service (`connectedServices.think`, overridable
+with `--think-url`/`--think-model`, skippable with `--no-verify`).
+
+- Review is batched at ~20 notes per call, so coverage is total while the
+  thinking cost stays proportional to the number of batches, not notes. The
+  reviewer sees each note's title, current path, proposed destination,
+  metadata, and a 1,000-character excerpt.
+- The reviewer must return exactly one verdict per note it was given, and a
+  flag must carry a reason. A malformed response gets one corrective retry.
+- A flagged note is re-classified individually on the thinking service, told
+  what the objection was. That result wins and is recorded with
+  `classification_source: model-think`. If it fails validation, the note
+  becomes `needs_review` for a human rather than shipping the filing the
+  reviewer objected to.
+- Verdicts are journaled per note, so a resumed run reviews nothing twice.
+- If the thinking service is unreachable the run continues and `report.md`
+  says **Not verified** with the reason. An absent reviewer never reads as
+  approval.
 
 ## De-duplication
 

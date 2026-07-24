@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import forge_embeddings
 import forge_llm
+import forge_verify
 import run_state
 from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
     COMPILED_SCHEMA_VERSION,
@@ -958,6 +959,147 @@ def classify_items(args, vault, schema, schema_hash, items, losers, run_dir):
     return records, warnings
 
 
+VERIFY_SYSTEM = (
+    "You are reviewing where notes were filed in one person's Obsidian vault.\n"
+    "A faster model without reasoning proposed a destination and frontmatter for each note.\n"
+    "Your job is to catch the ones that are actually wrong: a destination that does not match\n"
+    "what the note is about, or metadata that contradicts the note or the schema.\n"
+    "Judge only what the evidence shows. A defensible filing is 'ok' even if you would have\n"
+    "chosen differently; taste is not an error."
+)
+VERIFY_EXCERPT_CHARS = 1000
+
+
+def verifiable_records(records):
+    """Records a reviewer can judge: something was actually decided by the model."""
+    return [
+        (rel, record)
+        for rel, record in sorted(records.items())
+        if record.get("destination") and not record.get("needs_review") and record.get("status") != "failed"
+    ]
+
+
+def verify_payload(vault, rel, record):
+    body = ""
+    try:
+        frontmatter = split_frontmatter((vault / rel).read_bytes())
+        body = frontmatter["body"].strip()[:VERIFY_EXCERPT_CHARS]
+    except OSError:
+        pass
+    return {
+        "id": rel,
+        "title": note_title(vault / rel, body),
+        "currentPath": rel,
+        "proposedDestination": record["destination"],
+        "metadata": record.get("metadata", {}),
+        "excerpt": body,
+    }
+
+
+def verify_classifications(args, vault, schema, records, run_dir):
+    """Have the thinking model review every classification, and redo the ones it
+    flags with reasoning.
+
+    Bulk classification runs without reasoning because it is usually right and
+    reasoning about each note costs hundreds of hidden tokens. This is what
+    makes "usually" safe: full coverage for a handful of batched calls, with the
+    thinking budget spent on the notes that turn out to need it.
+    """
+    warnings = []
+    candidates = verifiable_records(records)
+    summary = {"verified": 0, "ok": 0, "flagged": 0, "escalated": 0, "needsReview": 0, "flaggedIds": []}
+    if not candidates:
+        return summary, warnings
+
+    think = forge_llm.resolve_think_or_chat(base_url=args.think_url, model=args.think_model)
+    if not think["enabled"]:
+        warnings.append("verification skipped: no thinking service is configured")
+        summary["skipped"] = "disabled"
+        return summary, warnings
+
+    items = [verify_payload(vault, rel, record) for rel, record in candidates]
+    by_path = dict(candidates)
+    journal = run_dir / "verified.jsonl"
+    log(args, f"verifying {len(items)} classifications on {think['url']}")
+    try:
+        verdicts = forge_verify.verify_packets(
+            think,
+            VERIFY_SYSTEM,
+            items,
+            journal_path=journal,
+            background=True,
+            timeout=args.request_timeout,
+            progress=progress,
+        )
+    except forge_verify.VerificationError as error:
+        # An unreachable reviewer must not look like approval.
+        warnings.append(f"verification skipped: {error}")
+        summary["skipped"] = str(error)
+        return summary, warnings
+
+    flagged = [
+        (next(item for item in items if item["id"] == rel), entry["reason"])
+        for rel, entry in verdicts.items()
+        if entry["verdict"] == forge_verify.VERDICT_FLAG and rel in by_path
+    ]
+
+    def redo(item, reason):
+        rel = item["id"]
+        path = vault / rel
+        data = path.read_bytes()
+        frontmatter = split_frontmatter(data)
+        body = frontmatter["body"]
+        excerpt, _excerpted = excerpt_body(body)
+        messages = build_messages(
+            schema,
+            note_title(path, body),
+            rel,
+            frontmatter["frontmatter_text"],
+            excerpt,
+            repair={"reviewer_objection": reason, "previous_metadata": by_path[rel].get("metadata", {})},
+            think_prefill=False,
+        )
+        response = request_json_with_retry(args, messages, service=think)
+        validated, _warnings, errors = validate_classification(response, schema)
+        if errors:
+            raise UserError("; ".join(errors))
+        return validated
+
+    escalations = forge_verify.escalate(flagged, redo, journal_path=journal, progress=progress)
+    for rel, outcome in escalations.items():
+        record = by_path[rel]
+        record["verify_reason"] = next(reason for item, reason in flagged if item["id"] == rel)
+        if outcome["ok"]:
+            validated = outcome["value"]
+            record["metadata"] = validated["metadata"]
+            record["classification_source"] = "model-think"
+            record["verified"] = "escalated"
+            if validated.get("needs_review"):
+                record["needs_review"] = True
+                record["review_reason"] = validated.get("review_reason")
+                record["status"] = "review"
+                record["destination"] = None
+            else:
+                destination_dir = compile_destination(schema, record["metadata"])
+                record["destination"] = (destination_dir / (vault / rel).name).as_posix()
+                record["move_required"] = record["destination"] != rel
+        else:
+            # Could not be redone, so a human decides rather than shipping a
+            # filing the reviewer already objected to.
+            record["verified"] = "needs-review"
+            record["needs_review"] = True
+            record["review_reason"] = f"verification flagged this and re-classification failed: {outcome['detail']}"
+            record["status"] = "review"
+            record["destination"] = None
+            warnings.append(f"{rel}: {record['review_reason']}")
+        run_state.append_jsonl_fsync(run_dir / "classified.jsonl", record)
+    for rel, entry in verdicts.items():
+        if entry["verdict"] == forge_verify.VERDICT_OK and rel in by_path:
+            by_path[rel]["verified"] = "ok"
+    summary = forge_verify.summarize(verdicts, escalations)
+    return summary, warnings
+
+
 def item_status_for(record):
     if record["status"] == "failed":
         return "failed"
@@ -1210,7 +1352,41 @@ def append_report_listing(report, entries, formatter, limit=50):
         report.append("- None")
 
 
-def write_plan(run_dir, records, counts, dedupe, base_references, mode, dry_run, vault, schema_hash, warnings):
+def verification_report(verification, records):
+    """The verification section of report.md.
+
+    Says plainly when nothing was verified: an unreachable reviewer must not
+    read as approval.
+    """
+    lines = ["## Verification", ""]
+    if verification is None:
+        lines.extend(["- Skipped (`--no-verify`). These classifications were not reviewed.", ""])
+        return lines
+    if verification.get("skipped"):
+        lines.extend([f"- **Not verified**: {verification['skipped']}", ""])
+        return lines
+    lines.extend([
+        f"- Reviewed by the thinking model: {verification['verified']}",
+        f"- Agreed: {verification['ok']}",
+        f"- Flagged: {verification['flagged']}",
+        f"- Re-done with reasoning: {verification['escalated']}",
+        f"- Left for you to decide: {verification['needsReview']}",
+        "",
+    ])
+    flagged = [record for record in records if record.get("verify_reason")]
+    if flagged:
+        lines.append("| Note | Objection | Outcome | Destination |")
+        lines.append("| --- | --- | --- | --- |")
+        for record in flagged:
+            outcome = "re-done with reasoning" if record.get("verified") == "escalated" else "needs your review"
+            destination = record.get("destination") or "—"
+            reason = str(record.get("verify_reason", "")).replace("|", "\\|")
+            lines.append(f"| `{record['source']}` | {reason} | {outcome} | `{destination}` |")
+        lines.append("")
+    return lines
+
+
+def write_plan(run_dir, records, counts, dedupe, base_references, mode, dry_run, vault, schema_hash, warnings, verification=None):
     plan_path = run_dir / "plan.json"
     report_path = run_dir / "report.md"
     data = {
@@ -1221,6 +1397,7 @@ def write_plan(run_dir, records, counts, dedupe, base_references, mode, dry_run,
         "run_directory": str(run_dir),
         "counts": counts,
         "dedupe": dedupe,
+        "verification": verification,
         "base_references": base_references,
         "records": plan_for_json(records),
         "warnings": warnings,
@@ -1252,9 +1429,9 @@ def write_plan(run_dir, records, counts, dedupe, base_references, mode, dry_run,
         f"- Duplicate pairs needing review: {counts['duplicate_review']}",
         f"- Failed: {counts['failed']}",
         "",
-        "## Destination Counts",
-        "",
     ]
+    report.extend(verification_report(verification, records))
+    report.extend(["## Destination Counts", ""])
     if destination_counts:
         for key in sorted(destination_counts):
             report.append(f"- {key}: {destination_counts[key]}")
@@ -1563,8 +1740,18 @@ def organize(args):
         warnings.extend(classify_warnings)
         run_state.update_run_state(
             run_dir,
-            lambda draft: draft.update({"phase": "route"}) or draft,
+            lambda draft: draft.update({"phase": "verify"}) or draft,
             event={"type": "phase", "phase": "classify", "records": len(class_records)},
+        )
+
+        verification = None
+        if args.verify:
+            verification, verify_warnings = verify_classifications(args, vault, schema, class_records, run_dir)
+            warnings.extend(verify_warnings)
+        run_state.update_run_state(
+            run_dir,
+            lambda draft: draft.update({"phase": "route"}) or draft,
+            event={"type": "phase", "phase": "verify", **(verification or {"skipped": "disabled by --no-verify"})},
         )
 
         applied_log, _ = run_state.read_jsonl_recover_tail(run_dir / "apply-log.jsonl", repair=True)
@@ -1586,7 +1773,7 @@ def organize(args):
         else:
             final_phase = "planned"
         plan_path, report_path = write_plan(
-            run_dir, records, counts, dedupe, base_references, args.mode, not args.apply, vault, schema_hash, warnings
+            run_dir, records, counts, dedupe, base_references, args.mode, not args.apply, vault, schema_hash, warnings, verification
         )
         run_state.update_run_state(
             run_dir,
@@ -1742,6 +1929,9 @@ def parse_args(argv):
     parser.add_argument("--near-dupe-auto", type=float, action=TrackingAction)
     parser.add_argument("--near-dupe-review", type=float, action=TrackingAction)
     parser.add_argument("--no-cache-prompt", action="store_true")
+    parser.add_argument("--no-verify", action="store_true", help="skip the thinking-model review of classifications")
+    parser.add_argument("--think-url", help="thinking service used for verification (default: connectedServices.think)")
+    parser.add_argument("--think-model")
     parser.add_argument("--think-prefill", action="store_true", help="prefill an empty think block (for thinking backends like :8008)")
     parser.add_argument("--force-reclassify", action="store_true")
     parser.add_argument("--verbose", action="store_true")
@@ -1777,6 +1967,7 @@ def parse_args(argv):
     if not 0 < args.near_dupe_review <= args.near_dupe_auto <= 1:
         raise UserError("--near-dupe-review must be within (0, --near-dupe-auto] and --near-dupe-auto at most 1")
     args.cache_prompt = not args.no_cache_prompt
+    args.verify = not args.no_verify
     return args
 
 

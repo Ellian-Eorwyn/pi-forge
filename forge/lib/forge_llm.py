@@ -250,13 +250,20 @@ def _write_background_lease(path, slot):
 
 def _acquire_background_lease(scheduling, env=None):
     """Claim the background slot, retrying if an interactive turn starts during
-    the claim. Returns the lease path."""
+    the claim. Returns the lease path, or None if leases cannot be written.
+
+    An unwritable agent directory costs cooperative scheduling, not the call:
+    the work still runs, it just cannot announce itself.
+    """
     directory = _lease_directory(env)
     while True:
         wait_for_interactive_idle(scheduling, env)
-        directory.mkdir(parents=True, exist_ok=True)
-        lease = directory / f"background-{os.getpid()}-{threading.get_ident()}.json"
-        _write_background_lease(lease, scheduling["backgroundSlot"])
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            lease = directory / f"background-{os.getpid()}-{threading.get_ident()}.json"
+            _write_background_lease(lease, scheduling["backgroundSlot"])
+        except OSError:
+            return None
         if not active_interactive_leases(env):
             return lease
         lease.unlink(missing_ok=True)
@@ -384,6 +391,8 @@ def call(
     finally:
         if lease is not None:
             lease.unlink(missing_ok=True)
+        elif use_slot:
+            use_slot = False  # no lease was held, so do not report this as scheduled
 
     usage = payload.get("usage") or {}
     details = usage.get("prompt_tokens_details") or {}

@@ -44,10 +44,18 @@ section.
 
    Use `--limit <n>` for a small trial before a whole-vault run. Progress is
    one stderr line per note with an ETA; stdout stays one JSON result.
+
+   Classifications are then reviewed by the thinking model in batches of ~20,
+   and anything it flags is re-classified individually with reasoning. That
+   review is what makes fast bulk classification safe, so leave it on;
+   `--no-verify` exists for when the thinking backend is down and the report
+   will then say plainly that nothing was reviewed.
 5. Read the structured JSON result and generated `report.md`. Report to the
    user: selected notes, duplicate groups (exact and near), duplicate pairs
-   held for review, proposed metadata updates and moves, notes routed to
-   `00 Inbox` for review, schema suggestions, and the run directory.
+   held for review, the Verification section (how many were reviewed, what was
+   flagged and why, what was re-done and what needs their decision), proposed
+   metadata updates and moves, notes routed to `00 Inbox` for review, schema
+   suggestions, and the run directory.
 6. Obtain explicit approval before any whole-vault `--apply`. For inbox mode,
    a direct instruction such as "process my inbox and apply it" is approval;
    otherwise present the dry run first.
