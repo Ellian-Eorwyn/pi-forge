@@ -1530,6 +1530,172 @@ test("Markdown to EPUB handles fallbacks and rejects invalid covers", () => {
 	});
 });
 
+function startLiteratureWorkerFixture(workspace, options = {}) {
+	const serverPath = join(workspace, "literature-worker-server.mjs");
+	const requestsPath = join(workspace, "literature-worker-requests.jsonl");
+	writeFileSync(
+		serverPath,
+		`import { appendFileSync } from "node:fs";
+import { createServer } from "node:http";
+const requestsPath = ${JSON.stringify(requestsPath)};
+const flagEverything = ${JSON.stringify(Boolean(options.flagEverything))};
+const fabricateQuote = ${JSON.stringify(Boolean(options.fabricateQuote))};
+let extractions = 0;
+const item = (text, quote) => ({
+  item_type: "finding", text, direct_quotes: quote, locator: null,
+  interpretation: "explicit", confidence: "high", notes: null,
+});
+const server = createServer((request, response) => {
+  let body = "";
+  request.setEncoding("utf8");
+  request.on("data", (chunk) => { body += chunk; });
+  request.on("end", () => {
+    const payload = JSON.parse(body);
+    appendFileSync(requestsPath, JSON.stringify(payload) + "\\n");
+    const last = payload.messages?.at(-1)?.content || "";
+    let parsed;
+    try { parsed = JSON.parse(last); } catch { parsed = undefined; }
+    let content;
+    if (parsed?.items) {
+      content = JSON.stringify({ verdicts: parsed.items.map((entry) => ({
+        id: entry.id,
+        verdict: flagEverything ? "flag" : "ok",
+        reason: flagEverything ? "the sample does not support these items" : "",
+      })) });
+    } else {
+      extractions += 1;
+      // First extraction can fabricate a quote; the corrective retry fixes it.
+      const bad = fabricateQuote && extractions === 1;
+      content = JSON.stringify([item("The study reports a 12 percent increase.",
+        bad ? "a sentence that is nowhere in the document" : "12 percent increase")]);
+    }
+    const data = JSON.stringify({
+      choices: [{ message: { content }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 10 },
+      timings: { predicted_n: 5 },
+    });
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(data);
+  });
+});
+server.listen(0, "127.0.0.1", () => process.stdout.write(String(server.address().port) + "\\n"));
+`,
+	);
+	const child = spawn(process.execPath, [serverPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+	return new Promise((resolveServer, rejectServer) => {
+		let stdout = "";
+		let stderr = "";
+		child.stdout.setEncoding("utf8");
+		child.stderr.setEncoding("utf8");
+		child.stderr.on("data", (chunk) => (stderr += chunk));
+		child.stdout.on("data", (chunk) => {
+			stdout += chunk;
+			const port = stdout.split(/\r?\n/).find((value) => value.trim());
+			if (!port) return;
+			resolveServer({
+				url: `http://127.0.0.1:${port.trim()}/v1/chat/completions`,
+				requestsPath,
+				close: () => new Promise((resolveClose) => { child.once("exit", resolveClose); child.kill(); }),
+			});
+		});
+		child.once("error", rejectServer);
+		child.once("exit", (code) => { if (!stdout.trim()) rejectServer(new Error(`literature worker fixture exited ${code}: ${stderr}`)); });
+	});
+}
+
+test("literature extraction processes documents on the bulk service and reviews them on the thinking one", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startLiteratureWorkerFixture(workspace);
+		try {
+			const source = join(workspace, "study.md");
+			writeFileSync(source, "# Study\n\nThe study reports a 12 percent increase.\n");
+			const runDirectory = join(workspace, "literature");
+			const cli = script("literature-extraction", "literature-extraction.py");
+			run(python, [cli, "init", source, "--output", runDirectory]);
+			await runAsyncWithEnvironment(
+				python,
+				[cli, "process", runDirectory, "--base-url", fixture.url, "--think-url", fixture.url],
+				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
+			);
+
+			const results = readFileSync(join(runDirectory, "extraction_results.jsonl"), "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+			assert.equal(results.length, 1);
+			assert.equal(results[0].status, "success");
+			assert.equal(results[0].items.length, 1);
+
+			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			// One extraction call plus one batched review call.
+			assert.equal(requests.length, 2);
+			assert.ok(requests[1].messages.at(-1).content.includes("\"items\""), "second call is the review");
+			assert.deepEqual(
+				JSON.parse(readFileSync(join(runDirectory, "verified.jsonl"), "utf8").trim()).verdict,
+				"ok",
+			);
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("literature extraction rejects a fabricated quote and retries", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startLiteratureWorkerFixture(workspace, { fabricateQuote: true });
+		try {
+			const source = join(workspace, "study.md");
+			writeFileSync(source, "# Study\n\nThe study reports a 12 percent increase.\n");
+			const runDirectory = join(workspace, "literature");
+			const cli = script("literature-extraction", "literature-extraction.py");
+			run(python, [cli, "init", source, "--output", runDirectory]);
+			await runAsyncWithEnvironment(
+				python,
+				[cli, "process", runDirectory, "--base-url", fixture.url, "--no-verify"],
+				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
+			);
+
+			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			assert.equal(requests.length, 2, "the fabricated quote costs one corrective retry");
+			assert.match(requests[1].messages.at(-1).content, /direct_quotes not found in the document/);
+			const results = JSON.parse(readFileSync(join(runDirectory, "extraction_results.jsonl"), "utf8").trim());
+			assert.equal(results.status, "success");
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("literature extraction re-extracts a flagged document and supersedes the original", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startLiteratureWorkerFixture(workspace, { flagEverything: true });
+		try {
+			const source = join(workspace, "study.md");
+			writeFileSync(source, "# Study\n\nThe study reports a 12 percent increase.\n");
+			const runDirectory = join(workspace, "literature");
+			const cli = script("literature-extraction", "literature-extraction.py");
+			run(python, [cli, "init", source, "--output", runDirectory]);
+			await runAsyncWithEnvironment(
+				python,
+				[cli, "process", runDirectory, "--base-url", fixture.url, "--think-url", fixture.url],
+				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
+			);
+
+			const results = readFileSync(join(runDirectory, "extraction_results.jsonl"), "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+			// The re-extraction replaces the original rather than adding a duplicate.
+			assert.equal(results.length, 1);
+			assert.equal(results[0].supersedes, true);
+			assert.match(results[0].note, /re-extracted with reasoning/);
+			run(python, [cli, "status", runDirectory]);
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
 test("literature extraction rejects scaffolds and accepts authored deliverables", () => {
 	withWorkspace((workspace) => {
 		const source = join(workspace, "study.md");
