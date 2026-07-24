@@ -4678,10 +4678,23 @@ test("profile configuration installs local service defaults without dropping use
 			},
 			chat: {
 				enabled: true,
+				baseUrl: "http://llms:8004/v1/chat/completions",
+				model: "chat",
+				scheduling: {
+					enabled: false,
+					interactiveSlot: 0,
+					backgroundSlot: 1,
+					idleGraceMs: 2000,
+					yieldMs: 1000,
+					backgroundOutputTokens: 4096,
+				},
+			},
+			think: {
+				enabled: true,
 				baseUrl: "http://llms:8008/v1/chat/completions",
 				model: "code",
 				scheduling: {
-					enabled: false,
+					enabled: true,
 					interactiveSlot: 0,
 					backgroundSlot: 1,
 					idleGraceMs: 2000,
@@ -4736,10 +4749,23 @@ test("profile configuration preserves connected service overrides", () => {
 			},
 			chat: {
 				enabled: true,
+				baseUrl: "http://llms:8004/v1/chat/completions",
+				model: "chat",
+				scheduling: {
+					enabled: false,
+					interactiveSlot: 0,
+					backgroundSlot: 1,
+					idleGraceMs: 2000,
+					yieldMs: 1000,
+					backgroundOutputTokens: 4096,
+				},
+			},
+			think: {
+				enabled: true,
 				baseUrl: "http://llms:8008/v1/chat/completions",
 				model: "code",
 				scheduling: {
-					enabled: false,
+					enabled: true,
 					interactiveSlot: 0,
 					backgroundSlot: 1,
 					idleGraceMs: 2000,

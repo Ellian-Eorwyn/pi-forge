@@ -2,7 +2,7 @@
 
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { seedConnectedServicesSettings } from "../lib/connected-services.mjs";
+import { LEGACY_CHAT_SERVICE, seedConnectedServicesSettings } from "../lib/connected-services.mjs";
 
 // Shared limits for the local code and chat variants. Kept here so every
 // install and `pi-forge-update` writes the same context and output budgets.
@@ -81,6 +81,7 @@ settings.contextBudget = {
 	useTaskModel: false,
 	verbatimRecentTokens: CONTEXT_BUDGET_VERBATIM_RECENT_TOKENS,
 };
+migrateLegacyChatService(settings);
 seedConnectedServicesSettings(settings);
 
 let models = {};
@@ -150,3 +151,21 @@ writeFileSync(modelsPath, `${JSON.stringify(models, undefined, "\t")}\n`, { mode
 writeFileSync(installedAgentsPath, profileInstructions, { mode: 0o600 });
 chmodSync(installedAgentsPath, 0o600);
 writeFileSync(profilePathMarker, `${profileDirectory}\n`, { mode: 0o600 });
+
+/**
+ * Bulk skills moved from the thinking backend to its non-thinking sibling.
+ * Seeding preserves whatever is already persisted, so an install configured
+ * before the split would keep pointing batch work at the thinking server
+ * forever. Drop the chat endpoint only when it is byte-equal to the old
+ * default — that value was written by an earlier install, not chosen — and
+ * leave any customization alone.
+ */
+function migrateLegacyChatService(target) {
+	const services = target.connectedServices;
+	if (!services || typeof services !== "object" || Array.isArray(services)) return;
+	const chat = services.chat;
+	if (!chat || typeof chat !== "object" || Array.isArray(chat)) return;
+	if (chat.baseUrl !== LEGACY_CHAT_SERVICE.baseUrl || chat.model !== LEGACY_CHAT_SERVICE.model) return;
+	delete chat.baseUrl;
+	delete chat.model;
+}
