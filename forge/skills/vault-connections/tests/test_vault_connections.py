@@ -128,12 +128,23 @@ def stub_vector(text):
     return topic + signature
 
 
+def review_items(message):
+    """The verification payload, when this request is a review rather than a
+    pair judgment."""
+    try:
+        parsed = json.loads(message)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return parsed.get("items") if isinstance(parsed, dict) else None
+
+
 class StubHandler(BaseHTTPRequestHandler):
     connect = True
     embeddings_ok = True
     canonical_titles = {}
     kinds = {}
     chat_requests = []
+    flags = {}
 
     def log_message(self, *args):
         pass
@@ -158,6 +169,18 @@ class StubHandler(BaseHTTPRequestHandler):
             return
         StubHandler.chat_requests.append(payload)
         message = payload["messages"][-1]["content"]
+        review = review_items(message)
+        if review is not None:
+            verdicts = [
+                {
+                    "id": item["id"],
+                    "verdict": "flag" if StubHandler.flags.get(item["id"]) else "ok",
+                    "reason": StubHandler.flags.get(item["id"], ""),
+                }
+                for item in review
+            ]
+            self._send(200, {"choices": [{"message": {"content": json.dumps({"verdicts": verdicts})}}]})
+            return
         if "LINK TARGET" in message:
             target = message.splitlines()[0].replace("LINK TARGET:", "").strip()
             title = StubHandler.canonical_titles.get(target.lower(), target)
@@ -191,6 +214,7 @@ class VaultConnectionsTest(unittest.TestCase):
         StubHandler.canonical_titles = {}
         StubHandler.kinds = {}
         StubHandler.chat_requests = []
+        StubHandler.flags = {}
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.vault = Path(self.temporary.name) / "vault"
@@ -209,8 +233,13 @@ class VaultConnectionsTest(unittest.TestCase):
         return path
 
     def run_command(self, *argv):
+        # Review talks to a second endpoint. Tests that are not about it opt
+        # out, so they neither reach a real server nor add stub traffic.
+        arguments = list(argv)
+        if not {"--no-verify", "--think-url"} & set(arguments):
+            arguments.append("--no-verify")
         process = subprocess.run(
-            [sys.executable, str(SCRIPT), *argv, "--vault", str(self.vault), "--base-url", f"{self.base}/v1/chat/completions"],
+            [sys.executable, str(SCRIPT), *arguments, "--vault", str(self.vault), "--base-url", f"{self.base}/v1/chat/completions"],
             capture_output=True,
             text=True,
             env={
@@ -354,6 +383,32 @@ class VaultConnectionsTest(unittest.TestCase):
         self.assertTrue(any("semantic ranking unavailable" in warning for warning in result["warnings"]))
 
     # -- propose / apply --------------------------------------------------- #
+
+    def test_review_marks_doubted_proposals_and_puts_them_first(self):
+        self.seed_pair()
+        StubHandler.flags = {"c-001": "the notes only share vocabulary"}
+        result, _ = self.run_command("propose", "--think-url", f"{self.base}/v1/chat/completions")
+        proposal = result["data"]["proposals"][0]
+        self.assertEqual(proposal["verified"], "flag")
+        self.assertIn("share vocabulary", proposal["verifyReason"])
+        self.assertEqual(result["data"]["counts"]["verification_flagged"], 1)
+        report = (Path(result["data"]["runDirectory"]) / "report.md").read_text(encoding="utf-8")
+        self.assertIn("## Needs attention", report)
+
+    def test_review_never_drops_a_proposal(self):
+        self.seed_pair()
+        StubHandler.flags = {"c-001": "not a real connection"}
+        result, _ = self.run_command("propose", "--think-url", f"{self.base}/v1/chat/completions")
+        # Flagged, but still proposed: the human decides, not the reviewer.
+        self.assertEqual(result["data"]["counts"]["proposed"], 1)
+        self.assertEqual(len(result["data"]["proposals"]), 1)
+
+    def test_an_unreachable_reviewer_leaves_proposals_unannotated(self):
+        self.seed_pair()
+        result, _ = self.run_command("propose", "--think-url", "http://127.0.0.1:9/v1/chat/completions")
+        self.assertEqual(result["data"]["counts"]["proposed"], 1)
+        self.assertNotIn("verified", result["data"]["proposals"][0])
+        self.assertTrue(any("review skipped" in warning for warning in result["warnings"]))
 
     def test_pair_judgments_use_the_non_thinking_model(self):
         self.seed_pair()

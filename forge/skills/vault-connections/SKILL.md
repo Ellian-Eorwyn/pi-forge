@@ -50,9 +50,16 @@ Nothing is written without the user naming the proposal ids they approve.
    python3 <skill-directory>/scripts/vault-connections.py propose --vault <vault> --limit 40
    ```
 
+   Proposals are then reviewed by the thinking model, which marks the ones it
+   doubts and sorts them first so they land in the first ten you show. This is
+   annotation only — nothing is ever dropped, and the human still decides every
+   proposal. `--no-verify` skips it; an unreachable reviewer leaves proposals
+   unannotated with a warning.
+
 6. **Review with the user, ten at a time.** This is the point of the skill — do
    not dump the whole list. For each proposal give both note titles, the
-   strength, and the one-line reason. Ask which ones to apply. Then:
+   strength, and the one-line reason. Mention when a proposal was flagged in
+   review and what the objection was. Ask which ones to apply. Then:
 
    ```bash
    python3 <skill-directory>/scripts/vault-connections.py apply --vault <vault> --run <run-dir> --accept c-001,c-004,c-007 --reject c-002,c-003

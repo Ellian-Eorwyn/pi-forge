@@ -30,6 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import forge_embeddings
 import forge_llm
+import forge_verify
 import run_state
 from vault_schema import (
     INBOX_DIR,
@@ -1038,6 +1039,14 @@ def write_report(run_dir, proposals, counts, histogram, warnings, vault, mode, e
         report.append(f"- {key.replace('_', ' ')}: {value}")
     links = [item for item in proposals if item["action"] == "link"]
     stubs = [item for item in proposals if item["action"] == "create_wiki_note"]
+    doubted = [item for item in proposals if item.get("verified") == "flag"]
+    if doubted:
+        report.extend(["", f"## Needs attention ({len(doubted)})", "",
+                       "The thinking model doubts these. Still yours to accept or reject — start here.", ""])
+        for item in doubted:
+            title = item.get("title") or f"{item.get('leftTitle')} ↔ {item.get('rightTitle')}"
+            report.append(f"- `{item['id']}` **{title}** — {item.get('verifyReason', '')}")
+            report.append(f"  - proposed because: {item.get('reason', '')}")
     for strength in STRENGTHS:
         group = [item for item in links if item.get("strength") == strength]
         if not group:
@@ -1232,6 +1241,7 @@ def command_propose(args):
         if index % JUDGE_BATCH_STATE == 0:
             run_state.update_run_state(run_dir, lambda state: state.update({"phase": "judging"}) or state)
 
+    verification = annotate_proposals(args, proposals, run_dir, warnings) if args.verify else None
     counts = {
         "notes_indexed": len(entries),
         "candidate_pairs": len(candidates),
@@ -1242,6 +1252,8 @@ def command_propose(args):
         "judgment_failed": failed,
         **{f"skipped_{key}": value for key, value in skipped.items()},
     }
+    if verification:
+        counts["verification_flagged"] = verification["flagged"]
     finish_run(run_dir, proposals, counts, histogram, warnings, vault, "connection proposals")
     return structured(
         "ok",
@@ -1249,6 +1261,67 @@ def command_propose(args):
         warnings=warnings,
         data={"runDirectory": str(run_dir), "counts": counts, "proposals": proposals},
     )
+
+
+ANNOTATE_SYSTEM = (
+    "You are reviewing proposed links between notes in one person's Obsidian vault.\n"
+    "A faster model without reasoning judged each pair worth linking and gave a reason.\n"
+    "Flag a proposal when the stated reason does not actually justify a link: the two notes\n"
+    "merely share vocabulary, the claimed relationship is not supported, or the link would\n"
+    "be noise. A genuine connection is 'ok' even if it is obvious or modest."
+)
+
+
+def annotate_proposals(args, proposals, run_dir, warnings):
+    """Sort proposals by whether the thinking model agrees they are real links.
+
+    This is annotation, never a gate: every proposal still reaches the human
+    review loop, flagged ones just arrive marked. The pair judgments themselves
+    are already human-approved before anything is written, so the value here is
+    ordering attention, not filtering.
+    """
+    if not proposals:
+        return None
+    think = forge_llm.resolve_think_or_chat(base_url=args.think_url, model=args.think_model)
+    if not think["enabled"]:
+        return None
+    items = [
+        {
+            "id": proposal["id"],
+            "left": proposal["leftTitle"],
+            "right": proposal["rightTitle"],
+            "strength": proposal["strength"],
+            "kind": proposal["kind"],
+            "reason": proposal["reason"],
+            "similarity": round(proposal["similarity"], 3),
+        }
+        for proposal in proposals
+    ]
+    progress(f"[{WORKFLOW}] reviewing {len(items)} proposals on {think['url']}")
+    try:
+        verdicts = forge_verify.verify_packets(
+            think,
+            ANNOTATE_SYSTEM,
+            items,
+            journal_path=run_dir / "verified.jsonl",
+            background=True,
+            timeout=args.request_timeout,
+            progress=progress,
+        )
+    except forge_verify.VerificationError as error:
+        warnings.append(f"proposal review skipped: {error}")
+        return None
+    for proposal in proposals:
+        verdict = verdicts.get(proposal["id"])
+        if not verdict:
+            continue
+        proposal["verified"] = verdict["verdict"]
+        if verdict["verdict"] == forge_verify.VERDICT_FLAG:
+            proposal["verifyReason"] = verdict["reason"]
+    # Flagged first: the human is reviewing ten at a time, so the ones a
+    # reasoning model doubts should be in the first ten.
+    proposals.sort(key=lambda proposal: (proposal.get("verified") != forge_verify.VERDICT_FLAG, proposal["id"]))
+    return forge_verify.summarize(verdicts)
 
 
 def command_wiki(args):
@@ -1676,6 +1749,9 @@ def parse_args(argv):
     parser.add_argument("--embeddings-url")
     parser.add_argument("--embeddings-model")
     parser.add_argument("--no-cache-prompt", action="store_true")
+    parser.add_argument("--no-verify", action="store_true", help="skip the thinking-model review of proposals")
+    parser.add_argument("--think-url", help="thinking service used for review (default: connectedServices.think)")
+    parser.add_argument("--think-model")
     parser.add_argument("--think-prefill", action="store_true", help="prefill an empty think block (for thinking backends like :8008)")
     args = parser.parse_args(argv)
 
@@ -1707,6 +1783,7 @@ def parse_args(argv):
     args.embeddings_url = forge_embeddings.endpoint_url(args.embeddings_url)
     args.embeddings_model = forge_embeddings.model_name(args.embeddings_model)
     args.cache_prompt = not args.no_cache_prompt
+    args.verify = not args.no_verify
     return args
 
 
