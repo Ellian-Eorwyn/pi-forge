@@ -920,8 +920,7 @@ async function commandHarvest(positionals, flags) {
 }
 
 async function filterLinksWithLlm(links, instruction) {
-	const baseChatUrl = process.env.FORGE_BASE_CHAT_URL || process.env.FORGE_CHAT_URL || "http://llms:8008/v1/chat/completions";
-	const baseModel = process.env.FORGE_BASE_MODEL || "llama-3.3-70b-versatile";
+	const { baseUrl: baseChatUrl, model: baseModel } = resolveConnectedServices().chat;
 	const prompt = `You are an expert web spider. I will provide a list of URLs and an instruction for what I'm looking for. Please return ONLY a JSON array of strings containing the URLs that are most likely to contain the requested information. Do not return any other text.
 Instruction: ${instruction}
 URLs:

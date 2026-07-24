@@ -312,10 +312,12 @@ class StubEmbeddingsServer:
 
 def run_script(*args, environment=None):
     # Point the agent directory at nothing by default so endpoint resolution
-    # cannot pick up the settings of whoever is running the tests.
-    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PI_FORGE_AGENT_DIR": "/nonexistent-agent-directory"}
-    if environment:
-        env.update(environment)
+    # cannot pick up the settings of whoever is running the tests. An explicit
+    # environment replaces the inherited one outright, so a test can prove what
+    # happens in the *absence* of a variable.
+    base = environment if environment is not None else os.environ
+    env = {**base, "PYTHONDONTWRITEBYTECODE": "1"}
+    env.setdefault("PI_FORGE_AGENT_DIR", "/nonexistent-agent-directory")
     return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True, env=env)
 
 
@@ -598,7 +600,14 @@ class VaultOrganizerV2Tests(unittest.TestCase):
                 json.dumps({"connectedServices": {"chat": {"baseUrl": server.url, "model": "configured"}}}),
                 encoding="utf-8",
             )
-            environment = dict(os.environ, PI_FORGE_AGENT_DIR=str(agent))
+            # Environment beats settings, so clear any inherited endpoint to
+            # exercise the settings layer itself.
+            environment = {
+                key: value
+                for key, value in os.environ.items()
+                if key not in {"FORGE_BASE_CHAT_URL", "FORGE_CHAT_URL", "FORGE_BASE_MODEL"}
+            }
+            environment["PI_FORGE_AGENT_DIR"] = str(agent)
             self.write_note("00 Inbox/Configured.md", "# Configured\n\nBody.\n")
             self.run_ok("inbox", "--vault", str(self.vault), "--no-embeddings", environment=environment)
             self.assertEqual(server.requests[0]["model"], "configured")

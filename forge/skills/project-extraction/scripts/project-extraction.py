@@ -463,8 +463,8 @@ def chat_configuration():
     scheduling = chat.get("scheduling") or {}
     return {
         "enabled": bool(chat.get("enabled", True)),
-        "url": os.environ.get("FORGE_BASE_CHAT_URL") or os.environ.get("FORGE_CHAT_URL") or chat.get("baseUrl") or "http://llms:8008/v1/chat/completions",
-        "model": os.environ.get("FORGE_BASE_MODEL") or chat.get("model") or "code",
+        "url": os.environ.get("FORGE_BASE_CHAT_URL") or os.environ.get("FORGE_CHAT_URL") or chat.get("baseUrl") or "http://llms:8004/v1/chat/completions",
+        "model": os.environ.get("FORGE_BASE_MODEL") or chat.get("model") or "chat",
         "scheduling": {
             "enabled": bool(scheduling.get("enabled", False)),
             "interactiveSlot": int(scheduling.get("interactiveSlot", 0)),
