@@ -4,7 +4,7 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { seedConnectedServicesSettings } from "../lib/connected-services.mjs";
 
-// Local model limits for the forge-local "code" model. Kept here so every
+// Shared limits for the local code and chat variants. Kept here so every
 // install and `pi-forge-update` writes the same context and output budgets.
 const CONTEXT_WINDOW = 262144;
 const MAX_OUTPUT_TOKENS = 32768;
@@ -100,29 +100,50 @@ if (models.providers !== undefined && (models.providers === null || Array.isArra
 models.providers = models.providers ?? {};
 delete models.providers["forge-task-local"];
 models.providers["forge-local"] = {
-		baseUrl: "http://llms:8008/v1",
-		api: "openai-completions",
-		apiKey: "local",
-		compat: {
-			supportsDeveloperRole: false,
-			supportsReasoningEffort: false,
-			maxTokensField: "max_tokens",
-			// The served Qwen model emits <think>...</think> in its content; parse
-			// it as reasoning so raw think tags do not leak into displayed output
-			// (and the vault-workflow execute-phase prefill stays invisible).
-			thinkingFormat: "qwen",
+	baseUrl: "http://llms:8008/v1",
+	api: "openai-completions",
+	apiKey: "local",
+	compat: {
+		supportsDeveloperRole: false,
+		supportsReasoningEffort: false,
+		maxTokensField: "max_tokens",
+		// The served Qwen model emits <think>...</think> in its content; parse
+		// it as reasoning so raw think tags do not leak into displayed output
+		// (and the vault-workflow execute-phase prefill stays invisible).
+		thinkingFormat: "qwen",
+	},
+	models: [
+		{
+			id: "code",
+			name: "Code (Local)",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: CONTEXT_WINDOW,
+			maxTokens: MAX_OUTPUT_TOKENS,
 		},
-		models: [
-			{
-				id: "code",
-				name: "Code (Local)",
-				reasoning: false,
-				input: ["text"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow: CONTEXT_WINDOW,
-				maxTokens: MAX_OUTPUT_TOKENS,
-			},
-		],
+	],
+};
+models.providers["forge-chat-local"] = {
+	baseUrl: "http://llms:8004/v1",
+	api: "openai-completions",
+	apiKey: "local",
+	compat: {
+		supportsDeveloperRole: false,
+		supportsReasoningEffort: false,
+		maxTokensField: "max_tokens",
+	},
+	models: [
+		{
+			id: "chat",
+			name: "Chat (Local, Non-Thinking)",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: CONTEXT_WINDOW,
+			maxTokens: MAX_OUTPUT_TOKENS,
+		},
+	],
 };
 writeFileSync(settingsPath, `${JSON.stringify(settings, undefined, "\t")}\n`, { mode: 0o600 });
 writeFileSync(modelsPath, `${JSON.stringify(models, undefined, "\t")}\n`, { mode: 0o600 });
