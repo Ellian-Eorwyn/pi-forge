@@ -14,14 +14,29 @@ export function addInteractiveSlot(payload: unknown, configuration: SchedulingCo
 	return { ...payload, id_slot: configuration.interactiveSlot, cache_prompt: true };
 }
 
+// The interactive session runs on the thinking server by default and moves to
+// the non-thinking one during the vault workflow's execute phase. Both share a
+// GPU with background batch work, so leases have to cover both providers: if
+// only one were watched, an execute-phase turn would stop announcing itself and
+// background workers would never yield to the user.
+const PROVIDER_SERVICES: Record<string, "think" | "chat"> = {
+	"forge-local": "think",
+	"forge-chat-local": "chat",
+};
+
 export default function inferenceSchedulingExtension(pi: ExtensionAPI) {
-	const chat = resolveConnectedServices().chat;
-	const scheduling = chat.scheduling;
-	if (!scheduling.enabled) return;
+	const services = resolveConnectedServices();
+	const schedulingFor = (provider: string | undefined) => {
+		const service = provider ? PROVIDER_SERVICES[provider] : undefined;
+		const scheduling = service ? services[service]?.scheduling : undefined;
+		return scheduling?.enabled ? scheduling : undefined;
+	};
+	if (!Object.keys(PROVIDER_SERVICES).some((provider) => schedulingFor(provider))) return;
 
 	const leaseDirectory = join(getForgeAgentDir(), "inference-leases");
 	const leasePath = join(leaseDirectory, `${process.pid}-${randomUUID()}.json`);
 	let providerActive = false;
+	let activeSlot = services.think.scheduling.interactiveSlot;
 
 	const refreshLease = () => {
 		if (!providerActive) return;
@@ -29,7 +44,7 @@ export default function inferenceSchedulingExtension(pi: ExtensionAPI) {
 		const temporary = `${leasePath}.tmp`;
 		writeFileSync(
 			temporary,
-			`${JSON.stringify({ pid: process.pid, kind: "interactive", slot: scheduling.interactiveSlot, updatedAtMs: Date.now() })}\n`,
+			`${JSON.stringify({ pid: process.pid, kind: "interactive", slot: activeSlot, updatedAtMs: Date.now() })}\n`,
 			{ encoding: "utf8", mode: 0o600 },
 		);
 		renameSync(temporary, leasePath);
@@ -63,11 +78,13 @@ export default function inferenceSchedulingExtension(pi: ExtensionAPI) {
 	};
 
 	pi.on("before_provider_request", (event, ctx) => {
-		if (ctx.model?.provider !== "forge-local") return undefined;
+		const active = schedulingFor(ctx.model?.provider);
+		if (!active) return undefined;
+		activeSlot = active.interactiveSlot;
 		providerActive = true;
 		refreshLease();
 		waitForBackgroundYield();
-		return addInteractiveSlot(event.payload, scheduling);
+		return addInteractiveSlot(event.payload, active);
 	});
 
 	pi.on("message_update", (event) => {

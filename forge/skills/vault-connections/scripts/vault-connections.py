@@ -23,14 +23,14 @@ import shutil
 import sys
 import tempfile
 import time
-import urllib.error
-import urllib.request
 from array import array
 from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import forge_embeddings
+import forge_llm
+import forge_verify
 import run_state
 from vault_schema import (
     INBOX_DIR,
@@ -56,7 +56,7 @@ from vault_schema import (
 WORKFLOW = "vault-connections"
 STATE_DIR = ".vault-connections"
 DEFAULT_BASE_URL = "http://llms:8004/v1/chat/completions"
-DEFAULT_MODEL = "code"
+DEFAULT_MODEL = "chat"
 PROMPT_VERSION = "vault-connections-v1"
 
 EMBED_BODY_CHARS = 2000
@@ -102,7 +102,7 @@ WIKI_KIND_SUBDOMAIN = {
 DIRECTORY_KINDS = ("person", "organization")
 
 THINK_PREFILL = "<think>\n\n</think>\n\n"
-THINK_BLOCK_RE = re.compile(r"^\s*<think>.*?</think>\s*", re.DOTALL)
+THINK_BLOCK_RE = forge_llm.THINK_BLOCK_RE
 WIKILINK_RE = re.compile(r"\[\[([^\]\r\n]+)\]\]")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 FRONTMATTER_KEY_RE = re.compile(r"^([a-z][a-z0-9_]*):(.*)$")
@@ -687,52 +687,38 @@ def normalize_base_url(value):
     return f"{text}/v1/chat/completions"
 
 
-def request_json(base_url, model, api_key, timeout, messages, cache_prompt=True):
-    payload = {"model": model, "messages": messages, "temperature": 0, "stream": False}
-    if cache_prompt:
-        payload["cache_prompt"] = True
-    request = urllib.request.Request(
-        base_url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            **({"Authorization": f"Bearer {api_key}"} if api_key else {}),
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as error:
-        raise UserError(f"HTTP {error.code} from {base_url}: {error.read().decode('utf-8', 'replace')[:400]}") from error
-    except (urllib.error.URLError, OSError) as error:
-        raise UserError(f"request to {base_url} failed: {error}") from error
-    parsed = json.loads(body)
-    choices = parsed.get("choices")
-    if not isinstance(choices, list) or not choices:
-        raise UserError("chat response contained no choices")
-    return choices[0].get("message", {}).get("content") or ""
-
-
 def extract_json_content(content):
-    text = THINK_BLOCK_RE.sub("", content).strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
+    text = forge_llm.extract_json_content(content)
     start, end = text.find("{"), text.rfind("}")
     if start == -1 or end <= start:
         raise UserError(f"model did not return a JSON object: {text[:200]}")
     return json.loads(text[start:end + 1])
 
 
-def request_with_retry(args, messages):
+def chat_service(args):
+    return {
+        "name": "chat",
+        "enabled": True,
+        "url": args.base_url,
+        "model": args.model,
+        "scheduling": forge_llm.DEFAULT_SERVICES["chat"]["scheduling"],
+    }
+
+
+def request_with_retry(args, messages, service=None):
     last = None
     for attempt in range(1, MAX_TRANSIENT_ATTEMPTS + 1):
         try:
-            content = request_json(args.base_url, args.model, args.api_key, args.request_timeout, messages, args.cache_prompt)
+            content, _record = forge_llm.call(
+                service or chat_service(args),
+                messages,
+                cache_prompt=args.cache_prompt,
+                timeout=args.request_timeout,
+                api_key=args.api_key,
+                task="judge",
+            )
             return extract_json_content(content)
-        except (UserError, json.JSONDecodeError) as error:
+        except (forge_llm.ChatError, UserError, json.JSONDecodeError) as error:
             last = error
             if attempt < MAX_TRANSIENT_ATTEMPTS and run_state.is_transient_failure(error):
                 time.sleep(min(2 ** attempt, 8))
@@ -1053,6 +1039,14 @@ def write_report(run_dir, proposals, counts, histogram, warnings, vault, mode, e
         report.append(f"- {key.replace('_', ' ')}: {value}")
     links = [item for item in proposals if item["action"] == "link"]
     stubs = [item for item in proposals if item["action"] == "create_wiki_note"]
+    doubted = [item for item in proposals if item.get("verified") == "flag"]
+    if doubted:
+        report.extend(["", f"## Needs attention ({len(doubted)})", "",
+                       "The thinking model doubts these. Still yours to accept or reject — start here.", ""])
+        for item in doubted:
+            title = item.get("title") or f"{item.get('leftTitle')} ↔ {item.get('rightTitle')}"
+            report.append(f"- `{item['id']}` **{title}** — {item.get('verifyReason', '')}")
+            report.append(f"  - proposed because: {item.get('reason', '')}")
     for strength in STRENGTHS:
         group = [item for item in links if item.get("strength") == strength]
         if not group:
@@ -1247,6 +1241,7 @@ def command_propose(args):
         if index % JUDGE_BATCH_STATE == 0:
             run_state.update_run_state(run_dir, lambda state: state.update({"phase": "judging"}) or state)
 
+    verification = annotate_proposals(args, proposals, run_dir, warnings) if args.verify else None
     counts = {
         "notes_indexed": len(entries),
         "candidate_pairs": len(candidates),
@@ -1257,6 +1252,8 @@ def command_propose(args):
         "judgment_failed": failed,
         **{f"skipped_{key}": value for key, value in skipped.items()},
     }
+    if verification:
+        counts["verification_flagged"] = verification["flagged"]
     finish_run(run_dir, proposals, counts, histogram, warnings, vault, "connection proposals")
     return structured(
         "ok",
@@ -1264,6 +1261,67 @@ def command_propose(args):
         warnings=warnings,
         data={"runDirectory": str(run_dir), "counts": counts, "proposals": proposals},
     )
+
+
+ANNOTATE_SYSTEM = (
+    "You are reviewing proposed links between notes in one person's Obsidian vault.\n"
+    "A faster model without reasoning judged each pair worth linking and gave a reason.\n"
+    "Flag a proposal when the stated reason does not actually justify a link: the two notes\n"
+    "merely share vocabulary, the claimed relationship is not supported, or the link would\n"
+    "be noise. A genuine connection is 'ok' even if it is obvious or modest."
+)
+
+
+def annotate_proposals(args, proposals, run_dir, warnings):
+    """Sort proposals by whether the thinking model agrees they are real links.
+
+    This is annotation, never a gate: every proposal still reaches the human
+    review loop, flagged ones just arrive marked. The pair judgments themselves
+    are already human-approved before anything is written, so the value here is
+    ordering attention, not filtering.
+    """
+    if not proposals:
+        return None
+    think = forge_llm.resolve_think_or_chat(base_url=args.think_url, model=args.think_model)
+    if not think["enabled"]:
+        return None
+    items = [
+        {
+            "id": proposal["id"],
+            "left": proposal["leftTitle"],
+            "right": proposal["rightTitle"],
+            "strength": proposal["strength"],
+            "kind": proposal["kind"],
+            "reason": proposal["reason"],
+            "similarity": round(proposal["similarity"], 3),
+        }
+        for proposal in proposals
+    ]
+    progress(f"[{WORKFLOW}] reviewing {len(items)} proposals on {think['url']}")
+    try:
+        verdicts = forge_verify.verify_packets(
+            think,
+            ANNOTATE_SYSTEM,
+            items,
+            journal_path=run_dir / "verified.jsonl",
+            background=True,
+            timeout=args.request_timeout,
+            progress=progress,
+        )
+    except forge_verify.VerificationError as error:
+        warnings.append(f"proposal review skipped: {error}")
+        return None
+    for proposal in proposals:
+        verdict = verdicts.get(proposal["id"])
+        if not verdict:
+            continue
+        proposal["verified"] = verdict["verdict"]
+        if verdict["verdict"] == forge_verify.VERDICT_FLAG:
+            proposal["verifyReason"] = verdict["reason"]
+    # Flagged first: the human is reviewing ten at a time, so the ones a
+    # reasoning model doubts should be in the first ten.
+    proposals.sort(key=lambda proposal: (proposal.get("verified") != forge_verify.VERDICT_FLAG, proposal["id"]))
+    return forge_verify.summarize(verdicts)
 
 
 def command_wiki(args):
@@ -1593,6 +1651,7 @@ def command_status(args):
 def command_doctor(args):
     vault = resolve_vault(args)
     checks = {"vault": {"ok": os.access(vault, os.W_OK), "path": str(vault)}}
+    warnings = []
     ok = checks["vault"]["ok"]
     try:
         schema_path, schema, schema_hash = load_schema(args, vault)
@@ -1610,26 +1669,23 @@ def command_doctor(args):
         checks["schema"] = {"ok": False, "detail": str(error)}
         ok = False
 
-    chat = {"ok": False, "url": args.base_url, "model": args.model}
-    try:
-        started = time.time()
-        request_json(
-            args.base_url,
-            args.model,
-            args.api_key,
-            min(args.request_timeout, 60),
-            with_prefill(args, [
-                {"role": "system", "content": 'Reply with exactly {"ok": true} as JSON.'},
-                {"role": "user", "content": "ping"},
-            ]),
-            cache_prompt=False,
-        )
-        chat["ok"] = True
-        chat["seconds"] = round(time.time() - started, 2)
-    except (UserError, json.JSONDecodeError) as error:
-        chat["detail"] = str(error)
+    # One call per candidate pair, so hidden reasoning is charged per pair.
+    chat_probe = forge_llm.service_doctor(
+        chat_service(args), expect_non_thinking=not args.think_prefill, timeout=min(args.request_timeout, 60)
+    )
+    chat = {
+        "ok": chat_probe["reachable"],
+        "url": chat_probe["url"],
+        "model": chat_probe["model"],
+        "detail": chat_probe.get("detail"),
+    }
+    for key in ("thinking", "hiddenTokens", "modelMismatch", "servedModels"):
+        if key in chat_probe:
+            chat[key] = chat_probe[key]
     checks["chat"] = chat
     ok = ok and chat["ok"]
+    if chat_probe.get("warning"):
+        warnings.append(chat_probe["warning"])
 
     probe = forge_embeddings.embeddings_doctor(url=args.embeddings_url, model=args.embeddings_model)
     checks["embeddings"] = {"ok": probe["reachable"], "url": probe["url"], "model": probe["model"], "detail": probe["detail"]}
@@ -1637,7 +1693,7 @@ def command_doctor(args):
 
     store = load_vectors(vault, args.embeddings_model)
     checks["vectorStore"] = {"ok": True, "cachedVectors": len(store["rows"]), "dimensions": store["dims"]}
-    return structured("ok" if ok else "error", data={"checks": checks})
+    return structured("ok" if ok else "error", warnings=warnings, data={"checks": checks})
 
 
 # --------------------------------------------------------------------------- #
@@ -1693,6 +1749,9 @@ def parse_args(argv):
     parser.add_argument("--embeddings-url")
     parser.add_argument("--embeddings-model")
     parser.add_argument("--no-cache-prompt", action="store_true")
+    parser.add_argument("--no-verify", action="store_true", help="skip the thinking-model review of proposals")
+    parser.add_argument("--think-url", help="thinking service used for review (default: connectedServices.think)")
+    parser.add_argument("--think-model")
     parser.add_argument("--think-prefill", action="store_true", help="prefill an empty think block (for thinking backends like :8008)")
     args = parser.parse_args(argv)
 
@@ -1711,14 +1770,20 @@ def parse_args(argv):
     if not 0 < args.min_similarity <= 1:
         raise UserError("--min-similarity must be within (0, 1]")
 
-    args.base_url = normalize_base_url(
-        args.base_url or os.environ.get("VAULT_CONNECTIONS_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or DEFAULT_BASE_URL
+    # Skill-specific settings win, then the agent's configured chat service, then
+    # the built-in non-thinking default.
+    resolved = forge_llm.resolve_service(
+        "chat",
+        base_url=args.base_url or os.environ.get("VAULT_CONNECTIONS_BASE_URL") or os.environ.get("OPENAI_BASE_URL"),
+        model=args.model or os.environ.get("VAULT_CONNECTIONS_MODEL") or os.environ.get("OPENAI_MODEL"),
     )
-    args.model = args.model or os.environ.get("VAULT_CONNECTIONS_MODEL") or os.environ.get("OPENAI_MODEL") or DEFAULT_MODEL
+    args.base_url = resolved["url"]
+    args.model = resolved["model"]
     args.api_key = args.api_key or os.environ.get("VAULT_CONNECTIONS_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
     args.embeddings_url = forge_embeddings.endpoint_url(args.embeddings_url)
     args.embeddings_model = forge_embeddings.model_name(args.embeddings_model)
     args.cache_prompt = not args.no_cache_prompt
+    args.verify = not args.no_verify
     return args
 
 

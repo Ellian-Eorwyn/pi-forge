@@ -6,10 +6,10 @@
 
 - Available skills: 18
 - Model-visible skills at launch: 18
-- Managed instructions (`AGENTS.md` with its `<project_context>` wrapper): 1412 tokens
+- Managed instructions (`AGENTS.md` with its `<project_context>` wrapper): 1415 tokens
 - Skills menu (metadata for all skills): 3135 tokens
-- **Total forge launch context (always processed): 4547 tokens**
-- **Maximum if every `SKILL.md` body is also loaded at once: 34651 tokens**
+- **Total forge launch context (always processed): 4549 tokens**
+- **Maximum if every `SKILL.md` body is also loaded at once: 35210 tokens**
 
 Of the skills menu above, the shared wrapper (instructions and XML envelope, independent of skill count) is ~92 tokens; the rest scales with the number of skills.
 
@@ -24,7 +24,7 @@ Still excluded, because they are owned by the Pi harness rather than this profil
 | [`coding`](forge/skills/coding/SKILL.md) | Inspect repos and ship small reviewable changes | 160 | 750 | 886 | Model-visible |
 | [`document-ingest`](forge/skills/document-ingest/SKILL.md) | Normalize documents with provenance | 131 | 3039 | 3143 | Model-visible |
 | [`file-conversion`](forge/skills/file-conversion/SKILL.md) | Convert files, including Markdown and EPUB | 213 | 1238 | 1425 | Model-visible |
-| [`literature-extraction`](forge/skills/literature-extraction/SKILL.md) | Extract structured evidence from research documents | 180 | 3072 | 3224 | Model-visible |
+| [`literature-extraction`](forge/skills/literature-extraction/SKILL.md) | Extract structured evidence from research documents | 180 | 3338 | 3491 | Model-visible |
 | [`organize-folder`](forge/skills/organize-folder/SKILL.md) | Sort a messy folder via a reviewable manifest | 167 | 1743 | 1883 | Model-visible |
 | [`personal-admin`](forge/skills/personal-admin/SKILL.md) | Summarize personal documents into action plans | 206 | 838 | 1019 | Model-visible |
 | [`project-extraction`](forge/skills/project-extraction/SKILL.md) | Search and refresh live project controls | 257 | 2290 | 2520 | Model-visible |
@@ -34,9 +34,9 @@ Still excluded, because they are owned by the Pi harness rather than this profil
 | [`spreadsheet-analysis`](forge/skills/spreadsheet-analysis/SKILL.md) | Analyze and enrich tabular datasets | 161 | 1767 | 1901 | Model-visible |
 | [`transcript-cleanup`](forge/skills/transcript-cleanup/SKILL.md) | Clean and structure raw transcripts | 144 | 1127 | 1244 | Model-visible |
 | [`transcription`](forge/skills/transcription/SKILL.md) | Transcribe audio or video, then correct and clean it | 185 | 1517 | 1676 | Model-visible |
-| [`vault-connections`](forge/skills/vault-connections/SKILL.md) | Search an Obsidian vault by meaning rather than filename, propose links between notes for the... | 155 | 1202 | 1330 | Model-visible |
+| [`vault-connections`](forge/skills/vault-connections/SKILL.md) | Search an Obsidian vault by meaning rather than filename, propose links between notes for the... | 155 | 1326 | 1455 | Model-visible |
 | [`vault-handoff`](forge/skills/vault-handoff/SKILL.md) | Send completed text artifacts to pi-vault review | 63 | 226 | 264 | Model-visible |
-| [`vault-organizer`](forge/skills/vault-organizer/SKILL.md) | Organize an Obsidian vault or vault inbox from a human-maintained schema note - classify Mark... | 181 | 1072 | 1227 | Model-visible |
+| [`vault-organizer`](forge/skills/vault-organizer/SKILL.md) | Organize an Obsidian vault or vault inbox from a human-maintained schema note - classify Mark... | 181 | 1237 | 1392 | Model-visible |
 | [`web-collection`](forge/skills/web-collection/SKILL.md) | Archive and organize web sources | 138 | 1971 | 2083 | Model-visible |
 | [`web-research`](forge/skills/web-research/SKILL.md) | Quick web search and page reading for information lookup. | 146 | 2882 | 3003 | Model-visible |
 

@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
+import { resolveConnectedServices } from "./connected-services.mjs";
 
 /**
  * Parses raw HTML, extracts the main article via Readability, converts it to Markdown via pandoc,
@@ -40,9 +41,10 @@ export async function htmlToCleanMarkdown(buffer, url) {
 	
 	if (!rawMarkdown.trim()) return null;
 
-	const baseChatUrl = process.env.FORGE_BASE_CHAT_URL || process.env.FORGE_CHAT_URL || "http://llms:8008/v1/chat/completions";
-	const baseModel = process.env.FORGE_BASE_MODEL || "llama-3.3-70b-versatile";
-	
+	// Boilerplate stripping is mechanical and runs once per fetched page, so it
+	// belongs on the bulk service like every other per-document call.
+	const { baseUrl: baseChatUrl, model: baseModel } = resolveConnectedServices().chat;
+
 	let instruction = "";
 	if (isReadabilityPass) {
 		instruction = `The following is an article extracted from the document/webpage ${url}. Please review it for formatting issues and clean it up if it's messy. Do not remove core content. If the extraction looks completely wrong (e.g., you only see a copyright footer or navigation links instead of the main article content), output exactly the string <EXTRACTION_FAILED> and nothing else. Do NOT wrap your response in markdown code blocks. Just output the clean markdown.`;

@@ -86,7 +86,12 @@ The current extension/tool surfaces outside skill-local scripts are:
 The installed forge profile defaults to local services unless overridden in
 `~/.pi-forge/agent/settings.json`:
 
-- Primary LLM: `http://llms:8008` with model `code`.
+- Interactive agent: `http://llms:8008` with model `code` (thinking).
+- Bulk per-file work (`connectedServices.chat`): `http://llms:8004` with model
+  `chat` — the same weights served without thinking. Skills that process many
+  files one at a time use this so they do not pay for reasoning per file.
+- Judgment and verification (`connectedServices.think`): `http://llms:8008` with
+  model `code`. Falls back to the chat service when not configured.
 - Embeddings: `http://llms:8005` with model `embed`.
 - SearXNG search: `connectedServices.searxng.baseUrl` defaults to `http://llms/searxng`.
 - Playwright rendered browsing: `connectedServices.playwright.wsEndpoint` defaults to `ws://llms/playwright`.

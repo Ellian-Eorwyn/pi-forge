@@ -56,19 +56,41 @@ following the repository run-state contract: `run_state.json` (options
 fingerprint, phase, per-note statuses), `run_events.jsonl` (fsynced phase
 journal), `scan.json` (input snapshot with content hashes), `dedupe.json`
 (duplicate plan), `classified.jsonl` (fsynced per-note classification
-journal), `plan.json`, `report.md`, `review-queue.jsonl`, and
-`apply-log.jsonl`.
+journal), `verified.jsonl` (fsynced per-note verdict journal), `plan.json`,
+`report.md`, `review-queue.jsonl`, and `apply-log.jsonl`.
 
-- `--run <dir>` resumes: journaled classifications are reused, apply
-  operations already logged `ok` are skipped, and input drift since the scan
-  is reported as warnings. Files changed after planning are refused at apply
-  by SHA-256 re-check.
+- `--run <dir>` resumes: journaled classifications and verdicts are reused,
+  apply operations already logged `ok` are skipped, and input drift since the
+  scan is reported as warnings. Files changed after planning are refused at
+  apply by SHA-256 re-check.
 - Resuming with different options (model, endpoints, thresholds, limit,
   schema hash) is refused via the options fingerprint; start a new run.
 - A vault-level lock (`.vault-organizer/.run.lock`) serializes runs; a stale
   lock from a dead process is reclaimed automatically.
 - The whole run is idempotent: re-running a completed run re-derives the same
   plan and applies nothing new.
+
+## Verification
+
+Classification runs on the non-thinking service, so every classification is
+then reviewed by the thinking service (`connectedServices.think`, overridable
+with `--think-url`/`--think-model`, skippable with `--no-verify`).
+
+- Review is batched at ~20 notes per call, so coverage is total while the
+  thinking cost stays proportional to the number of batches, not notes. The
+  reviewer sees each note's title, current path, proposed destination,
+  metadata, and a 1,000-character excerpt.
+- The reviewer must return exactly one verdict per note it was given, and a
+  flag must carry a reason. A malformed response gets one corrective retry.
+- A flagged note is re-classified individually on the thinking service, told
+  what the objection was. That result wins and is recorded with
+  `classification_source: model-think`. If it fails validation, the note
+  becomes `needs_review` for a human rather than shipping the filing the
+  reviewer objected to.
+- Verdicts are journaled per note, so a resumed run reviews nothing twice.
+- If the thinking service is unreachable the run continues and `report.md`
+  says **Not verified** with the reason. An absent reviewer never reads as
+  approval.
 
 ## De-duplication
 
@@ -110,17 +132,23 @@ user message carries only the title, current path, the previous frontmatter
 as untrusted advisory context (capped), and the body excerpt. Repair requests
 append to the user message so the cached prefix survives.
 
-The default chat endpoint (`http://llms:8004/v1/chat/completions`) is a
-non-thinking configuration, so no reasoning-suppression trick is needed and
-classification runs directly. Pointing at a thinking backend instead (for
-example `--base-url http://llms:8008/v1/chat/completions`) wastes thousands of
-hidden thinking tokens per note; add `--think-prefill` in that case to end
-each request with a closed empty `<think></think>` assistant turn that
-llama.cpp-style servers continue from, skipping reasoning (observed ~10x
-speedup). Either way the response parser strips a leading think block and code
-fences before JSON parsing, so a thinking backend used without the flag still
-produces valid output (just slowly). `--think-prefill` is part of the
-classification cache key and the run options fingerprint.
+Classification resolves its endpoint from `connectedServices.chat`, which is a
+non-thinking configuration (`http://llms:8004/v1/chat/completions`, model
+`chat`), so no reasoning-suppression trick is needed. Pointing at a thinking
+backend instead costs hundreds of hidden tokens per note: measured on the
+reference deployment, two inbox notes took 4.2s against :8004 and 56.9s against
+:8008, for the same destinations.
+
+That cost is invisible in the response — llama.cpp strips the think block
+server-side and returns no `reasoning_content` — so `doctor` detects it from the
+generated-token count instead and warns when the bulk endpoint is reasoning.
+
+`--think-prefill` remains for pointing this at a thinking backend by hand: it
+ends each request with a closed empty `<think></think>` assistant turn that
+llama.cpp-style servers continue from. It is part of the classification cache
+key and the run options fingerprint. The response parser strips a leading think
+block and code fences regardless, so a thinking backend used without the flag
+still produces valid output (just slowly).
 
 ## Model Output
 
