@@ -9,7 +9,7 @@
 - Managed instructions (`AGENTS.md` with its `<project_context>` wrapper): 1415 tokens
 - Skills menu (metadata for all skills): 3135 tokens
 - **Total forge launch context (always processed): 4549 tokens**
-- **Maximum if every `SKILL.md` body is also loaded at once: 34716 tokens**
+- **Maximum if every `SKILL.md` body is also loaded at once: 34837 tokens**
 
 Of the skills menu above, the shared wrapper (instructions and XML envelope, independent of skill count) is ~92 tokens; the rest scales with the number of skills.
 
@@ -36,7 +36,7 @@ Still excluded, because they are owned by the Pi harness rather than this profil
 | [`transcription`](forge/skills/transcription/SKILL.md) | Transcribe audio or video, then correct and clean it | 185 | 1517 | 1676 | Model-visible |
 | [`vault-connections`](forge/skills/vault-connections/SKILL.md) | Search an Obsidian vault by meaning rather than filename, propose links between notes for the... | 155 | 1220 | 1349 | Model-visible |
 | [`vault-handoff`](forge/skills/vault-handoff/SKILL.md) | Send completed text artifacts to pi-vault review | 63 | 226 | 264 | Model-visible |
-| [`vault-organizer`](forge/skills/vault-organizer/SKILL.md) | Organize an Obsidian vault or vault inbox from a human-maintained schema note - classify Mark... | 181 | 1116 | 1271 | Model-visible |
+| [`vault-organizer`](forge/skills/vault-organizer/SKILL.md) | Organize an Obsidian vault or vault inbox from a human-maintained schema note - classify Mark... | 181 | 1237 | 1392 | Model-visible |
 | [`web-collection`](forge/skills/web-collection/SKILL.md) | Archive and organize web sources | 138 | 1971 | 2083 | Model-visible |
 | [`web-research`](forge/skills/web-research/SKILL.md) | Quick web search and page reading for information lookup. | 146 | 2882 | 3003 | Model-visible |
 

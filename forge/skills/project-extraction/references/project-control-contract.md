@@ -172,6 +172,17 @@ across types. The workflow, not the model, allocates deterministic IDs after
 those decisions. Unresolved authority conflicts and ambiguous merges remain
 review items.
 
+Extraction and reconciliation run on different services. Extraction is bulk
+transcription of evidence, one call per packet, and uses
+`connectedServices.chat` (non-thinking). Reconciliation and the relationship
+pass weigh evidence across packets and decide what supersedes or conflicts
+with what, so they use `connectedServices.think`, falling back to the chat
+service when no thinking backend is configured. All extraction finishes before
+review begins, which keeps each server's prompt cache warm rather than
+swapping prefixes on every call. `inference_schedule.jsonl` records the
+service, endpoint, and model for every call, and `run_metrics.json` reports
+`modelCallsByService` so the bulk-to-judgment ratio is visible.
+
 ## Scope and Packet Dispositions
 
 Full-project extraction is the default. Focused extraction screens the complete

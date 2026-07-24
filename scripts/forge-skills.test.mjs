@@ -1917,6 +1917,7 @@ test("project extraction worker isolates its slot and completes cache-aware arti
 			const projectEnvironment = {
 				PI_FORGE_AGENT_DIR: agentDirectory,
 				FORGE_BASE_CHAT_URL: fixture.url,
+				FORGE_THINK_URL: fixture.url,
 				FORGE_EMBEDDINGS_URL: embeddings.url,
 			};
 			await runAsyncWithEnvironment(python, [cli, "process", runDirectory, "--worker"], projectEnvironment);
@@ -1970,6 +1971,7 @@ test("project extraction run completes 100-plus packets serially without schedul
 			await runAsyncWithEnvironment(python, [cli, "process", runDirectory], {
 				PI_FORGE_AGENT_DIR: agentDirectory,
 				FORGE_BASE_CHAT_URL: fixture.url,
+				FORGE_THINK_URL: fixture.url,
 				FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
 			});
 			assert.equal(JSON.parse(readFileSync(join(runDirectory, "run_state.json"), "utf8")).status, "complete");
@@ -1984,6 +1986,7 @@ test("project extraction run completes 100-plus packets serially without schedul
 			const resumed = jsonOutput(await runAsyncWithEnvironment(python, [cli, "run", sources, "--output", runDirectory, "--packet-chars", "1000"], {
 				PI_FORGE_AGENT_DIR: agentDirectory,
 				FORGE_BASE_CHAT_URL: fixture.url,
+				FORGE_THINK_URL: fixture.url,
 				FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
 			}));
 			assert.equal(resumed.complete, true);
@@ -2047,6 +2050,7 @@ test("project extraction splits truncated responses and retries malformed respon
 				await runAsyncWithEnvironment(python, [cli, "process", runDirectory], {
 					PI_FORGE_AGENT_DIR: agentDirectory,
 					FORGE_BASE_CHAT_URL: fixture.url,
+				FORGE_THINK_URL: fixture.url,
 					FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
 				});
 				assert.equal(JSON.parse(readFileSync(join(runDirectory, "run_state.json"), "utf8")).status, "complete");
@@ -2073,7 +2077,7 @@ test("project extraction model reconciliation merges duplicate evidence and pres
 			writeFileSync(join(sources, "work-plan.md"), "# Work Plan\n\nFinal report due 2026-08-01.\n");
 			const runDirectory = join(workspace, "run");
 			const cli = script("project-extraction", "project-extraction.py");
-			const environment = { PI_FORGE_AGENT_DIR: agentDirectory, FORGE_BASE_CHAT_URL: fixture.url, FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings" };
+			const environment = { PI_FORGE_AGENT_DIR: agentDirectory, FORGE_BASE_CHAT_URL: fixture.url, FORGE_THINK_URL: fixture.url, FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings" };
 			run(python, [cli, "init", sources, "--output", runDirectory]);
 			await runAsyncWithEnvironment(python, [cli, "process", runDirectory], environment);
 			let controls = readFileSync(join(runDirectory, "controls.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
@@ -2110,7 +2114,7 @@ test("project extraction worker refuses a server without its reserved slot", asy
 			const result = await runAsyncWithEnvironment(
 				python,
 				[cli, "process", runDirectory, "--background"],
-				{ PI_FORGE_AGENT_DIR: agentDirectory, FORGE_BASE_CHAT_URL: fixture.url, FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings" },
+				{ PI_FORGE_AGENT_DIR: agentDirectory, FORGE_BASE_CHAT_URL: fixture.url, FORGE_THINK_URL: fixture.url, FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings" },
 				1,
 			);
 			assert.match(result.stderr, /background slot 1 is unavailable/);
@@ -2143,6 +2147,7 @@ test("project extraction worker pauses after repeated cache misses", async () =>
 			await runAsyncWithEnvironment(python, [cli, "process", runDirectory, "--worker"], {
 				PI_FORGE_AGENT_DIR: agentDirectory,
 				FORGE_BASE_CHAT_URL: fixture.url,
+				FORGE_THINK_URL: fixture.url,
 				FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
 			});
 			assert.equal(JSON.parse(readFileSync(join(runDirectory, "worker_control.json"), "utf8")).desiredState, "paused");
@@ -2173,6 +2178,7 @@ test("project extraction worker preempts and requeues for an interactive lease",
 			const processing = runAsyncWithEnvironment(python, [cli, "process", runDirectory, "--worker"], {
 				PI_FORGE_AGENT_DIR: agentDirectory,
 				FORGE_BASE_CHAT_URL: fixture.url,
+				FORGE_THINK_URL: fixture.url,
 				FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
 			});
 			await new Promise((resolve, reject) => {
