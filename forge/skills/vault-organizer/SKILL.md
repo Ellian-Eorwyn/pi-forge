@@ -29,10 +29,13 @@ section.
    This checks the schema parses, the chat endpoint answers, and the
    embeddings endpoint answers. Set the embeddings model that is actually
    served (for example `--embeddings-model Qwen3-Embedding-4B` or
-   `FORGE_EMBEDDINGS_MODEL`); it is fingerprinted into runs and caches. The
-   default chat endpoint is the non-thinking `llms:8004`; to use a thinking
-   backend instead pass `--base-url http://llms:8008/v1/chat/completions
-   --think-prefill` so it skips reasoning tokens.
+   `FORGE_EMBEDDINGS_MODEL`); it is fingerprinted into runs and caches.
+
+   Classification is one call per note, so it runs on the non-thinking service
+   (`llms:8004`, model `chat`) — the agent's configured `connectedServices.chat`
+   unless overridden. Doctor reports whether that endpoint actually answers
+   without reasoning; if it warns that it is thinking, the endpoint is
+   misconfigured and every note will cost hundreds of wasted tokens.
 4. Run a dry run first (dry run is always the default):
 
    ```bash
@@ -41,10 +44,18 @@ section.
 
    Use `--limit <n>` for a small trial before a whole-vault run. Progress is
    one stderr line per note with an ETA; stdout stays one JSON result.
+
+   Classifications are then reviewed by the thinking model in batches of ~20,
+   and anything it flags is re-classified individually with reasoning. That
+   review is what makes fast bulk classification safe, so leave it on;
+   `--no-verify` exists for when the thinking backend is down and the report
+   will then say plainly that nothing was reviewed.
 5. Read the structured JSON result and generated `report.md`. Report to the
    user: selected notes, duplicate groups (exact and near), duplicate pairs
-   held for review, proposed metadata updates and moves, notes routed to
-   `00 Inbox` for review, schema suggestions, and the run directory.
+   held for review, the Verification section (how many were reviewed, what was
+   flagged and why, what was re-done and what needs their decision), proposed
+   metadata updates and moves, notes routed to `00 Inbox` for review, schema
+   suggestions, and the run directory.
 6. Obtain explicit approval before any whole-vault `--apply`. For inbox mode,
    a direct instruction such as "process my inbox and apply it" is approval;
    otherwise present the dry run first.

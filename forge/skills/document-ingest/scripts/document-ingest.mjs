@@ -32,12 +32,11 @@ import {
 	updateRunState,
 	withRunLock,
 } from "../../../lib/run-state.mjs";
+import { resolveConnectedServices } from "../../../lib/connected-services.mjs";
 
 const DEFAULT_CHUNK_CHARACTERS = 150_000;
 const DEFAULT_GLMOCR_URL = "http://llms:5002/glmocr/parse";
 const DEFAULT_GLMOCR_TIMEOUT_MS = 300_000;
-const DEFAULT_BASE_CHAT_URL = "http://llms:8008/v1/chat/completions";
-const DEFAULT_BASE_MODEL = "code";
 const LOW_TEXT_CHARACTERS = 40;
 const MINIMUM_ALPHANUMERIC_RATIO = 0.2;
 const MAXIMUM_PUNCTUATION_RATIO = 0.55;
@@ -897,8 +896,7 @@ function extractMedia(filePath, documentDirectory, tools) {
 }
 
 async function categorizeFolder(inputs) {
-	const baseChatUrl = process.env.FORGE_BASE_CHAT_URL || process.env.FORGE_CHAT_URL || DEFAULT_BASE_CHAT_URL;
-	const baseModel = process.env.FORGE_BASE_MODEL || DEFAULT_BASE_MODEL;
+	const { baseUrl: baseChatUrl, model: baseModel } = resolveConnectedServices().chat;
 	try {
 		const response = await fetch(baseChatUrl, {
 			method: "POST",

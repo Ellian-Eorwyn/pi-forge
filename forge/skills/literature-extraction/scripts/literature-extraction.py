@@ -15,6 +15,8 @@ from pathlib import Path
 # forge/skills/literature-extraction/scripts/literature-extraction.py.
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import forge_embeddings
+import forge_llm
+import forge_verify
 import run_state
 
 
@@ -326,6 +328,15 @@ def fail(message, exit_code=1):
     raise SystemExit(exit_code)
 
 
+def progress(message):
+    """Per-document progress on stderr; stdout stays one JSON result."""
+    print(message, file=sys.stderr, flush=True)
+
+
+class UserError(RuntimeError):
+    """A document could not be extracted; the run records it and continues."""
+
+
 def utc_now():
     from datetime import datetime, timezone
 
@@ -632,13 +643,22 @@ def load_results(run_directory, strict=True, repair=True):
             )
         except ValueError:
             pass
-    seen = set()
+    # One result per document. A later record may replace an earlier one only
+    # when it says so: review escalation re-extracts a document deliberately,
+    # while an unmarked duplicate is still a bug worth failing on.
+    position = {}
+    effective = []
     for result in results:
         document_id = result.get("documentId")
-        if strict and document_id in seen:
-            fail(f"duplicate result for document {document_id}")
-        seen.add(document_id)
-    return results
+        if document_id in position:
+            if result.get("supersedes"):
+                effective[position[document_id]] = result
+                continue
+            if strict:
+                fail(f"duplicate result for document {document_id}")
+        position[document_id] = len(effective)
+        effective.append(result)
+    return effective
 
 
 def document_order(run):
@@ -692,29 +712,44 @@ def command_next(args):
     )
 
 
-def normalize_items(raw, item_types):
+def validate_items(raw, item_types):
+    """Normalize extracted items, returning ``(items, errors)``.
+
+    Returns errors rather than exiting so the worker can feed them back to the
+    model as a correction; the CLI turns the first one into a failure.
+    """
     if not isinstance(raw, list):
-        fail("extraction file must contain a JSON array of item objects")
+        return [], ["extraction must be a JSON array of item objects"]
     items = []
+    errors = []
     item_type_set = set(item_types)
     for index, item in enumerate(raw, start=1):
         if not isinstance(item, dict):
-            fail(f"item {index} is not an object")
+            errors.append(f"item {index} is not an object")
+            continue
         item_type = item.get("item_type")
         if item_type not in item_type_set:
-            fail(f"item {index} has invalid item_type {item_type!r}; expected one of {', '.join(item_types)}")
+            errors.append(f"item {index} has invalid item_type {item_type!r}; expected one of {', '.join(item_types)}")
+            continue
         if blank(item.get("text")):
-            fail(f"item {index} requires a nonblank text value")
+            errors.append(f"item {index} requires a nonblank text value")
+            continue
         interpretation = item.get("interpretation")
         if interpretation not in INTERPRETATIONS:
-            fail(f"item {index} has invalid interpretation {interpretation!r}; expected explicit, inferred, or unclear")
+            errors.append(f"item {index} has invalid interpretation {interpretation!r}; expected explicit, inferred, or unclear")
+            continue
         confidence = item.get("confidence")
         if confidence not in CONFIDENCES:
-            fail(f"item {index} has invalid confidence {confidence!r}; expected high, medium, or low")
-        for optional in ("direct_quotes", "locator", "notes"):
-            value = item.get(optional)
-            if value is not None and not isinstance(value, str):
-                fail(f"item {index} field {optional} must be a string or null")
+            errors.append(f"item {index} has invalid confidence {confidence!r}; expected high, medium, or low")
+            continue
+        invalid_optional = [
+            optional
+            for optional in ("direct_quotes", "locator", "notes")
+            if item.get(optional) is not None and not isinstance(item.get(optional), str)
+        ]
+        if invalid_optional:
+            errors.append(f"item {index} field {invalid_optional[0]} must be a string or null")
+            continue
         items.append(
             {
                 "item_type": item_type,
@@ -726,7 +761,322 @@ def normalize_items(raw, item_types):
                 "notes": item.get("notes"),
             }
         )
+    return items, errors
+
+
+def normalize_items(raw, item_types):
+    items, errors = validate_items(raw, item_types)
+    if errors:
+        fail(errors[0])
     return items
+
+
+# --------------------------------------------------------------------------- #
+# Stateless extraction worker
+# --------------------------------------------------------------------------- #
+
+# One document per call, with no conversation carried between them: the whole
+# task is this contract plus this document. That keeps the prompt prefix
+# byte-stable across every call in a run, so the server reuses its cached
+# prefix instead of re-reading a growing conversation.
+EXTRACTION_SYSTEM = """You extract structured, source-backed evidence from one document.
+
+Return a JSON array of item objects and nothing else. Every item has exactly these fields:
+- "item_type": one of {item_types}
+- "text": the extracted statement as a faithful paraphrase (required, nonblank)
+- "direct_quotes": a short verbatim quote copied character-for-character from the document, or null
+- "locator": a page number, section, heading, or block reference, or null
+- "interpretation": "explicit" when the document states it directly, "inferred" when you
+  concluded it from the document, "unclear" when the document is ambiguous or silent
+- "confidence": "high", "medium", or "low"
+- "notes": optional clarification, or null
+
+Rules:
+- Never invent details the document does not support, and never present inference as fact.
+- A direct_quotes value must appear verbatim in the document. If you cannot copy it exactly, use null.
+- Extract what the document actually contains. An empty array is the right answer for a
+  document with nothing extractable.
+- Work through the item types in order and ask what the document offers for each one before
+  moving on. Do not stop at claims, findings, methods, and limitations: documents also carry
+  definitions, data sources, variables, populations, technologies, policies, cited works,
+  research gaps, and connections to other work.
+"""
+
+MAX_DOCUMENT_CHARACTERS = 48000
+QUOTE_MIN_MATCH_CHARACTERS = 12
+WHITESPACE_RE = re.compile(r"\s+")
+QUOTE_CHARACTERS = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"', "—": "-", "–": "-"})
+
+
+def extraction_system_prompt(item_types):
+    return EXTRACTION_SYSTEM.format(item_types=", ".join(item_types))
+
+
+def normalize_for_quote_match(text):
+    return WHITESPACE_RE.sub(" ", str(text or "").translate(QUOTE_CHARACTERS)).strip().casefold()
+
+
+def quote_violations(items, source_text):
+    """Quotes that do not actually appear in the document.
+
+    The cheapest and most important check on an extraction: a paraphrase can be
+    argued about, but a quotation either is in the source or is fabricated.
+    Matching is whitespace- and smart-quote-insensitive, and fragments are
+    checked individually because the contract allows several short quotes in one
+    field.
+    """
+    haystack = normalize_for_quote_match(source_text)
+    violations = []
+    for index, item in enumerate(items, start=1):
+        quotes = item.get("direct_quotes")
+        if not quotes:
+            continue
+        fragments = [part for part in re.split(r'["“”]|\.\.\.|…|\n|;\s', str(quotes)) if part.strip()]
+        for fragment in fragments or [str(quotes)]:
+            candidate = normalize_for_quote_match(fragment)
+            if len(candidate) < QUOTE_MIN_MATCH_CHARACTERS:
+                continue
+            if candidate not in haystack:
+                violations.append(f"item {index}: direct_quotes not found in the document: {fragment.strip()[:120]!r}")
+                break
+    return violations
+
+
+def document_chunks(text, budget=MAX_DOCUMENT_CHARACTERS):
+    """Split an oversized document on paragraph boundaries.
+
+    A document too large for one call is covered in pieces rather than
+    truncated, so nothing is silently dropped.
+    """
+    if len(text) <= budget:
+        return [text]
+    chunks = []
+    current = []
+    size = 0
+    for paragraph in text.split("\n\n"):
+        piece = paragraph + "\n\n"
+        if size + len(piece) > budget and current:
+            chunks.append("".join(current))
+            current, size = [], 0
+        current.append(piece)
+        size += len(piece)
+    if current:
+        chunks.append("".join(current))
+    return chunks
+
+
+def document_label(document):
+    """A human-facing name: the recorded title, else the file name."""
+    return document.get("title") or Path(document["sourcePath"]).stem
+
+
+def extraction_user_prompt(title, instructions, text):
+    sections = [f"DOCUMENT TITLE: {title}"]
+    if instructions:
+        sections.append(f"RESEARCH FOCUS: {instructions}")
+    sections.append(f"DOCUMENT:\n{text}")
+    return "\n\n".join(sections)
+
+
+def extract_document(service, run, document, text, args):
+    """Extract one document, with one corrective retry on validation failure."""
+    item_types = run.get("itemTypes", ITEM_TYPES)
+    system = extraction_system_prompt(item_types)
+    instructions = run.get("customInstructions", "")
+    items = []
+    for chunk in document_chunks(text):
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": extraction_user_prompt(document_label(document), instructions, chunk)},
+        ]
+        chunk_items, errors = attempt_extraction(service, messages, item_types, chunk, args)
+        if errors:
+            repair = [
+                *messages,
+                {"role": "user", "content": "That response was unusable: " + "; ".join(errors[:5]) + ". Return corrected JSON only."},
+            ]
+            chunk_items, errors = attempt_extraction(service, repair, item_types, chunk, args)
+            if errors:
+                raise UserError("; ".join(errors[:5]))
+        items.extend(chunk_items)
+    return items
+
+
+def attempt_extraction(service, messages, item_types, source_text, args):
+    try:
+        value, _record = forge_llm.call_json_with_retry(
+            service, messages, cache_prompt=args.cache_prompt, timeout=args.request_timeout, task="extract"
+        )
+    except forge_llm.ChatError as error:
+        return [], [str(error)]
+    if isinstance(value, dict):
+        value = value.get("items") if isinstance(value.get("items"), list) else None
+    if not isinstance(value, list):
+        return [], ["response was not a JSON array of items"]
+    items, errors = validate_items(value, item_types)
+    if errors:
+        return [], errors
+    return items, quote_violations(items, source_text)
+
+
+def record_extraction(run_directory, run, document_id, status, items, note, supersedes=False):
+    """Commit one document's disposition. Shared by the CLI and the worker so
+    both go through the same journal and state transition.
+
+    ``supersedes`` marks a deliberate replacement of an earlier result, which is
+    how review escalation records a re-extraction.
+    """
+    result = {
+        "documentId": document_id,
+        "status": status,
+        "items": items,
+        "note": note,
+        "recordedAt": utc_now(),
+    }
+    if supersedes:
+        result["supersedes"] = True
+    run_state.append_jsonl_fsync(run_directory / "extraction_results.jsonl", result)
+    results = load_results(run_directory)
+    by_id = {row["documentId"]: row for row in results}
+    ordered = [by_id[identifier] for identifier in document_order(run) if identifier in by_id]
+    write_results(run_directory, ordered)
+    write_documents_csv(run_directory, run["documents"], by_id)
+    remaining = len(run["documents"]) - len(ordered)
+    run_state.update_run_state(
+        run_directory,
+        lambda state: _record_extraction_state(state, document_id, status, remaining),
+        {"type": "item_completed", "itemId": document_id, "phase": "extract", "status": status},
+    )
+    return remaining
+
+
+VERIFY_SYSTEM = (
+    "You are reviewing evidence extracted from documents by a faster model without reasoning.\n"
+    "For each document you see the title and a sample of the items extracted from it.\n"
+    "Flag a document when its extraction is actually wrong: items that misstate what the\n"
+    "document says, inference presented as explicit fact, or items unsupported by the quotes\n"
+    "shown. Do not flag a document for being thin if the source genuinely offers little."
+)
+VERIFY_SAMPLE_ITEMS = 6
+
+
+def verification_payload(document_id, document, result):
+    items = result.get("items") or []
+    counts = Counter(item["item_type"] for item in items)
+    return {
+        "id": document_id,
+        "title": document_label(document),
+        "itemCount": len(items),
+        "itemTypes": dict(counts),
+        "sample": [
+            {
+                "item_type": item["item_type"],
+                "text": item["text"][:300],
+                "interpretation": item["interpretation"],
+                "quote": (item.get("direct_quotes") or "")[:200],
+            }
+            for item in items[:VERIFY_SAMPLE_ITEMS]
+        ],
+    }
+
+
+def command_process(args):
+    run_directory = require_run_directory(args.run_directory)
+    run = load_run(run_directory)
+    verify_hashes(run)
+    service = forge_llm.resolve_service("chat", base_url=args.base_url, model=args.model)
+    if not service["enabled"]:
+        fail("connectedServices.chat is disabled; configure the local chat endpoint before processing")
+
+    processed = 0
+    failures = 0
+    limit = args.limit if args.limit and args.limit > 0 else None
+    while True:
+        results = load_results(run_directory)
+        document_id = next_pending(run, results)
+        if document_id is None or (limit is not None and processed >= limit):
+            break
+        document = document_by_id(run, document_id)
+        position = len(results) + 1
+        total = len(run["documents"])
+        label = document_label(document)
+        progress(f"[{position}/{total}] {label}")
+        try:
+            text = Path(document["sourcePath"]).read_text(encoding="utf-8", errors="replace")
+            items = extract_document(service, run, document, text, args)
+            record_extraction(run_directory, run, document_id, "success", items, None)
+            progress(f"[{position}/{total}] {label}: {len(items)} items")
+        except (UserError, OSError) as error:
+            failures += 1
+            record_extraction(run_directory, run, document_id, "needs_review", None, f"extraction failed: {error}")
+            progress(f"[{position}/{total}] {label}: needs review ({error})")
+        processed += 1
+
+    verification = verify_extractions(args, run_directory, run) if args.verify else None
+    remaining = len(run["documents"]) - len(load_results(run_directory))
+    print(
+        json.dumps(
+            {
+                "processed": processed,
+                "needsReview": failures,
+                "remaining": remaining,
+                "verification": verification,
+                "nextAction": "process" if remaining else "build",
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+def verify_extractions(args, run_directory, run):
+    """Review every extraction on the thinking model, and redo what it flags."""
+    results = {row["documentId"]: row for row in load_results(run_directory)}
+    documents = {document["documentId"]: document for document in run["documents"]}
+    reviewable = [
+        (document_id, result)
+        for document_id, result in results.items()
+        if result["status"] == "success" and result.get("items") and document_id in documents
+    ]
+    if not reviewable:
+        return None
+    think = forge_llm.resolve_think_or_chat(base_url=args.think_url, model=args.think_model)
+    if not think["enabled"]:
+        return {"skipped": "no thinking service is configured"}
+    items = [verification_payload(document_id, documents[document_id], result) for document_id, result in reviewable]
+    progress(f"verifying {len(items)} extractions on {think['url']}")
+    try:
+        verdicts = forge_verify.verify_packets(
+            think,
+            VERIFY_SYSTEM,
+            items,
+            journal_path=run_directory / "verified.jsonl",
+            packet_size=args.verify_packet_size,
+            background=True,
+            timeout=args.request_timeout,
+            progress=progress,
+        )
+    except forge_verify.VerificationError as error:
+        return {"skipped": str(error)}
+
+    flagged = [
+        (item, verdicts[item["id"]]["reason"])
+        for item in items
+        if verdicts.get(item["id"], {}).get("verdict") == forge_verify.VERDICT_FLAG
+    ]
+
+    def redo(item, reason):
+        document = documents[item["id"]]
+        text = Path(document["sourcePath"]).read_text(encoding="utf-8", errors="replace")
+        run_with_note = {**run, "customInstructions": f"{run.get('customInstructions', '')}\n\nA reviewer rejected the previous extraction of this document: {reason}. Extract it again, carefully.".strip()}
+        return extract_document(think, run_with_note, document, text, args)
+
+    escalations = forge_verify.escalate(flagged, redo, journal_path=run_directory / "verified.jsonl", progress=progress)
+    for document_id, outcome in escalations.items():
+        if outcome["ok"]:
+            record_extraction(run_directory, run, document_id, "success", outcome["value"], "re-extracted with reasoning after review", supersedes=True)
+        else:
+            record_extraction(run_directory, run, document_id, "needs_review", None, f"review flagged this and re-extraction failed: {outcome['detail']}", supersedes=True)
+    return forge_verify.summarize(verdicts, escalations)
 
 
 def command_record(args):
@@ -759,25 +1109,7 @@ def command_record(args):
             fail(f"--status {args.status} requires --note")
         items = None
         note = args.note
-    result = {
-        "documentId": args.doc_id,
-        "status": args.status,
-        "items": items,
-        "note": note,
-        "recordedAt": utc_now(),
-    }
-    run_state.append_jsonl_fsync(run_directory / "extraction_results.jsonl", result)
-    effective = [*results, result]
-    by_id = {row["documentId"]: row for row in effective}
-    effective = [by_id[document_id] for document_id in document_order(run) if document_id in by_id]
-    write_results(run_directory, effective)
-    write_documents_csv(run_directory, run["documents"], by_id)
-    remaining = len(run["documents"]) - len(effective)
-    run_state.update_run_state(
-        run_directory,
-        lambda state: _record_extraction_state(state, args.doc_id, args.status, remaining),
-        {"type": "item_completed", "itemId": args.doc_id, "phase": "extract", "status": args.status},
-    )
+    remaining = record_extraction(run_directory, run, args.doc_id, args.status, items, note)
     item_count = len(items) if items is not None else 0
     print(json.dumps({"recorded": args.doc_id, "status": args.status, "items": item_count, "remaining": remaining}))
 
@@ -3174,6 +3506,22 @@ def parser():
     record.add_argument("--note")
     record.set_defaults(handler=command_record)
 
+    process = subparsers.add_parser(
+        "process",
+        help="Extract every pending document without leaving the script, then have the thinking model review the batch.",
+    )
+    process.add_argument("run_directory")
+    process.add_argument("--limit", type=int, help="stop after this many documents")
+    process.add_argument("--base-url", help="chat service (default: connectedServices.chat)")
+    process.add_argument("--model")
+    process.add_argument("--think-url", help="thinking service used for review (default: connectedServices.think)")
+    process.add_argument("--think-model")
+    process.add_argument("--no-verify", action="store_true", help="skip the thinking-model review of extractions")
+    process.add_argument("--verify-packet-size", type=int, default=15)
+    process.add_argument("--no-cache-prompt", action="store_true")
+    process.add_argument("--request-timeout", type=float, default=600)
+    process.set_defaults(handler=command_process)
+
     build = subparsers.add_parser("build", help="Assemble evidence and methods tables, cluster claims across documents, and scaffold Markdown deliverables.")
     build.add_argument("run_directory")
     build.add_argument(
@@ -3290,6 +3638,10 @@ def parser():
 
 def main():
     args = parser().parse_args()
+    if hasattr(args, "no_cache_prompt"):
+        args.cache_prompt = not args.no_cache_prompt
+    if hasattr(args, "no_verify"):
+        args.verify = not args.no_verify
     args.handler(args)
 
 

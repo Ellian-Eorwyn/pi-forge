@@ -111,6 +111,22 @@ rather than guessing. Transient endpoint failures retry up to three times.
 
 Every judgment, including rejections, is journaled to `judged.jsonl`.
 
+## Review
+
+Pair judgments run on the non-thinking service, so accepted proposals are then
+reviewed in batches by the thinking service (`connectedServices.think`,
+overridable with `--think-url`/`--think-model`, skippable with `--no-verify`).
+The reviewer sees each proposal's titles, strength, kind, stated reason, and
+similarity — not the note bodies, which the judgment already weighed.
+
+This layer annotates, it never gates. A flagged proposal gains
+`verified: "flag"` and a `verifyReason`, is listed under "Needs attention" in
+`report.md`, and is sorted ahead of the rest so it appears in the first ten the
+human sees. Nothing is dropped: the value is ordering attention, since every
+proposal already requires explicit human acceptance before anything is written.
+Verdicts are journaled to `verified.jsonl`. An unreachable reviewer leaves
+proposals unannotated with a warning.
+
 ## Frontmatter merge
 
 The only mutation to an existing note. It is textual, not a YAML round-trip:

@@ -23,11 +23,11 @@ Nothing is written without the user naming the proposal ids they approve.
    python3 <skill-directory>/scripts/vault-connections.py doctor --vault <vault>
    ```
 
-   This verifies the schema note parses, reports wiki-template readiness without
-   making missing templates a general doctor failure, and probes both endpoints.
-   The default chat endpoint is the
-   non-thinking `llms:8004`; for a thinking backend add
-   `--base-url http://llms:8008/v1/chat/completions --think-prefill`.
+   This verifies the schema note parses, reports whether the schema has a `wiki`
+   domain yet, and probes both endpoints. Pair judgments are one call each, so
+   they run on the non-thinking service (`llms:8004`, model `chat`) — the
+   agent's configured `connectedServices.chat` unless overridden. Doctor warns
+   if that endpoint is actually reasoning.
 3. Build or refresh the index. Every command does this on its own, so run it
    explicitly only for the first pass on a large vault:
 
@@ -64,9 +64,16 @@ Nothing is written without the user naming the proposal ids they approve.
    python3 <skill-directory>/scripts/vault-connections.py propose --vault <vault> --limit 40
    ```
 
-7. **Review with the user, ten at a time.** This is the point of the skill — do
+   Proposals are then reviewed by the thinking model, which marks the ones it
+   doubts and sorts them first so they land in the first ten you show. This is
+   annotation only — nothing is ever dropped, and the human still decides every
+   proposal. `--no-verify` skips it; an unreachable reviewer leaves proposals
+   unannotated with a warning.
+
+6. **Review with the user, ten at a time.** This is the point of the skill — do
    not dump the whole list. For each proposal give both note titles, the
-   strength, and the one-line reason. Ask which ones to apply. Then:
+   strength, and the one-line reason. Mention when a proposal was flagged in
+   review and what the objection was. Ask which ones to apply. Then:
 
    ```bash
    python3 <skill-directory>/scripts/vault-connections.py apply --vault <vault> --run <run-dir> --accept c-001,c-004,c-007 --reject c-002,c-003

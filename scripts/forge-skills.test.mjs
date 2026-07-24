@@ -1530,6 +1530,172 @@ test("Markdown to EPUB handles fallbacks and rejects invalid covers", () => {
 	});
 });
 
+function startLiteratureWorkerFixture(workspace, options = {}) {
+	const serverPath = join(workspace, "literature-worker-server.mjs");
+	const requestsPath = join(workspace, "literature-worker-requests.jsonl");
+	writeFileSync(
+		serverPath,
+		`import { appendFileSync } from "node:fs";
+import { createServer } from "node:http";
+const requestsPath = ${JSON.stringify(requestsPath)};
+const flagEverything = ${JSON.stringify(Boolean(options.flagEverything))};
+const fabricateQuote = ${JSON.stringify(Boolean(options.fabricateQuote))};
+let extractions = 0;
+const item = (text, quote) => ({
+  item_type: "finding", text, direct_quotes: quote, locator: null,
+  interpretation: "explicit", confidence: "high", notes: null,
+});
+const server = createServer((request, response) => {
+  let body = "";
+  request.setEncoding("utf8");
+  request.on("data", (chunk) => { body += chunk; });
+  request.on("end", () => {
+    const payload = JSON.parse(body);
+    appendFileSync(requestsPath, JSON.stringify(payload) + "\\n");
+    const last = payload.messages?.at(-1)?.content || "";
+    let parsed;
+    try { parsed = JSON.parse(last); } catch { parsed = undefined; }
+    let content;
+    if (parsed?.items) {
+      content = JSON.stringify({ verdicts: parsed.items.map((entry) => ({
+        id: entry.id,
+        verdict: flagEverything ? "flag" : "ok",
+        reason: flagEverything ? "the sample does not support these items" : "",
+      })) });
+    } else {
+      extractions += 1;
+      // First extraction can fabricate a quote; the corrective retry fixes it.
+      const bad = fabricateQuote && extractions === 1;
+      content = JSON.stringify([item("The study reports a 12 percent increase.",
+        bad ? "a sentence that is nowhere in the document" : "12 percent increase")]);
+    }
+    const data = JSON.stringify({
+      choices: [{ message: { content }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 10 },
+      timings: { predicted_n: 5 },
+    });
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(data);
+  });
+});
+server.listen(0, "127.0.0.1", () => process.stdout.write(String(server.address().port) + "\\n"));
+`,
+	);
+	const child = spawn(process.execPath, [serverPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+	return new Promise((resolveServer, rejectServer) => {
+		let stdout = "";
+		let stderr = "";
+		child.stdout.setEncoding("utf8");
+		child.stderr.setEncoding("utf8");
+		child.stderr.on("data", (chunk) => (stderr += chunk));
+		child.stdout.on("data", (chunk) => {
+			stdout += chunk;
+			const port = stdout.split(/\r?\n/).find((value) => value.trim());
+			if (!port) return;
+			resolveServer({
+				url: `http://127.0.0.1:${port.trim()}/v1/chat/completions`,
+				requestsPath,
+				close: () => new Promise((resolveClose) => { child.once("exit", resolveClose); child.kill(); }),
+			});
+		});
+		child.once("error", rejectServer);
+		child.once("exit", (code) => { if (!stdout.trim()) rejectServer(new Error(`literature worker fixture exited ${code}: ${stderr}`)); });
+	});
+}
+
+test("literature extraction processes documents on the bulk service and reviews them on the thinking one", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startLiteratureWorkerFixture(workspace);
+		try {
+			const source = join(workspace, "study.md");
+			writeFileSync(source, "# Study\n\nThe study reports a 12 percent increase.\n");
+			const runDirectory = join(workspace, "literature");
+			const cli = script("literature-extraction", "literature-extraction.py");
+			run(python, [cli, "init", source, "--output", runDirectory]);
+			await runAsyncWithEnvironment(
+				python,
+				[cli, "process", runDirectory, "--base-url", fixture.url, "--think-url", fixture.url],
+				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
+			);
+
+			const results = readFileSync(join(runDirectory, "extraction_results.jsonl"), "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+			assert.equal(results.length, 1);
+			assert.equal(results[0].status, "success");
+			assert.equal(results[0].items.length, 1);
+
+			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			// One extraction call plus one batched review call.
+			assert.equal(requests.length, 2);
+			assert.ok(requests[1].messages.at(-1).content.includes("\"items\""), "second call is the review");
+			assert.deepEqual(
+				JSON.parse(readFileSync(join(runDirectory, "verified.jsonl"), "utf8").trim()).verdict,
+				"ok",
+			);
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("literature extraction rejects a fabricated quote and retries", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startLiteratureWorkerFixture(workspace, { fabricateQuote: true });
+		try {
+			const source = join(workspace, "study.md");
+			writeFileSync(source, "# Study\n\nThe study reports a 12 percent increase.\n");
+			const runDirectory = join(workspace, "literature");
+			const cli = script("literature-extraction", "literature-extraction.py");
+			run(python, [cli, "init", source, "--output", runDirectory]);
+			await runAsyncWithEnvironment(
+				python,
+				[cli, "process", runDirectory, "--base-url", fixture.url, "--no-verify"],
+				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
+			);
+
+			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			assert.equal(requests.length, 2, "the fabricated quote costs one corrective retry");
+			assert.match(requests[1].messages.at(-1).content, /direct_quotes not found in the document/);
+			const results = JSON.parse(readFileSync(join(runDirectory, "extraction_results.jsonl"), "utf8").trim());
+			assert.equal(results.status, "success");
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("literature extraction re-extracts a flagged document and supersedes the original", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startLiteratureWorkerFixture(workspace, { flagEverything: true });
+		try {
+			const source = join(workspace, "study.md");
+			writeFileSync(source, "# Study\n\nThe study reports a 12 percent increase.\n");
+			const runDirectory = join(workspace, "literature");
+			const cli = script("literature-extraction", "literature-extraction.py");
+			run(python, [cli, "init", source, "--output", runDirectory]);
+			await runAsyncWithEnvironment(
+				python,
+				[cli, "process", runDirectory, "--base-url", fixture.url, "--think-url", fixture.url],
+				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
+			);
+
+			const results = readFileSync(join(runDirectory, "extraction_results.jsonl"), "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+			// The re-extraction replaces the original rather than adding a duplicate.
+			assert.equal(results.length, 1);
+			assert.equal(results[0].supersedes, true);
+			assert.match(results[0].note, /re-extracted with reasoning/);
+			run(python, [cli, "status", runDirectory]);
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
 test("literature extraction rejects scaffolds and accepts authored deliverables", () => {
 	withWorkspace((workspace) => {
 		const source = join(workspace, "study.md");
@@ -1917,6 +2083,7 @@ test("project extraction worker isolates its slot and completes cache-aware arti
 			const projectEnvironment = {
 				PI_FORGE_AGENT_DIR: agentDirectory,
 				FORGE_BASE_CHAT_URL: fixture.url,
+				FORGE_THINK_URL: fixture.url,
 				FORGE_EMBEDDINGS_URL: embeddings.url,
 			};
 			await runAsyncWithEnvironment(python, [cli, "process", runDirectory, "--worker"], projectEnvironment);
@@ -1970,6 +2137,7 @@ test("project extraction run completes 100-plus packets serially without schedul
 			await runAsyncWithEnvironment(python, [cli, "process", runDirectory], {
 				PI_FORGE_AGENT_DIR: agentDirectory,
 				FORGE_BASE_CHAT_URL: fixture.url,
+				FORGE_THINK_URL: fixture.url,
 				FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
 			});
 			assert.equal(JSON.parse(readFileSync(join(runDirectory, "run_state.json"), "utf8")).status, "complete");
@@ -1984,6 +2152,7 @@ test("project extraction run completes 100-plus packets serially without schedul
 			const resumed = jsonOutput(await runAsyncWithEnvironment(python, [cli, "run", sources, "--output", runDirectory, "--packet-chars", "1000"], {
 				PI_FORGE_AGENT_DIR: agentDirectory,
 				FORGE_BASE_CHAT_URL: fixture.url,
+				FORGE_THINK_URL: fixture.url,
 				FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
 			}));
 			assert.equal(resumed.complete, true);
@@ -2047,6 +2216,7 @@ test("project extraction splits truncated responses and retries malformed respon
 				await runAsyncWithEnvironment(python, [cli, "process", runDirectory], {
 					PI_FORGE_AGENT_DIR: agentDirectory,
 					FORGE_BASE_CHAT_URL: fixture.url,
+				FORGE_THINK_URL: fixture.url,
 					FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
 				});
 				assert.equal(JSON.parse(readFileSync(join(runDirectory, "run_state.json"), "utf8")).status, "complete");
@@ -2073,7 +2243,7 @@ test("project extraction model reconciliation merges duplicate evidence and pres
 			writeFileSync(join(sources, "work-plan.md"), "# Work Plan\n\nFinal report due 2026-08-01.\n");
 			const runDirectory = join(workspace, "run");
 			const cli = script("project-extraction", "project-extraction.py");
-			const environment = { PI_FORGE_AGENT_DIR: agentDirectory, FORGE_BASE_CHAT_URL: fixture.url, FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings" };
+			const environment = { PI_FORGE_AGENT_DIR: agentDirectory, FORGE_BASE_CHAT_URL: fixture.url, FORGE_THINK_URL: fixture.url, FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings" };
 			run(python, [cli, "init", sources, "--output", runDirectory]);
 			await runAsyncWithEnvironment(python, [cli, "process", runDirectory], environment);
 			let controls = readFileSync(join(runDirectory, "controls.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
@@ -2110,7 +2280,7 @@ test("project extraction worker refuses a server without its reserved slot", asy
 			const result = await runAsyncWithEnvironment(
 				python,
 				[cli, "process", runDirectory, "--background"],
-				{ PI_FORGE_AGENT_DIR: agentDirectory, FORGE_BASE_CHAT_URL: fixture.url, FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings" },
+				{ PI_FORGE_AGENT_DIR: agentDirectory, FORGE_BASE_CHAT_URL: fixture.url, FORGE_THINK_URL: fixture.url, FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings" },
 				1,
 			);
 			assert.match(result.stderr, /background slot 1 is unavailable/);
@@ -2143,6 +2313,7 @@ test("project extraction worker pauses after repeated cache misses", async () =>
 			await runAsyncWithEnvironment(python, [cli, "process", runDirectory, "--worker"], {
 				PI_FORGE_AGENT_DIR: agentDirectory,
 				FORGE_BASE_CHAT_URL: fixture.url,
+				FORGE_THINK_URL: fixture.url,
 				FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
 			});
 			assert.equal(JSON.parse(readFileSync(join(runDirectory, "worker_control.json"), "utf8")).desiredState, "paused");
@@ -2173,6 +2344,7 @@ test("project extraction worker preempts and requeues for an interactive lease",
 			const processing = runAsyncWithEnvironment(python, [cli, "process", runDirectory, "--worker"], {
 				PI_FORGE_AGENT_DIR: agentDirectory,
 				FORGE_BASE_CHAT_URL: fixture.url,
+				FORGE_THINK_URL: fixture.url,
 				FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
 			});
 			await new Promise((resolve, reject) => {
@@ -2752,6 +2924,10 @@ test("extracted organize-folder and spreadsheet tools expose structured executio
 			{ name: "beta", Amount: "20" },
 		]);
 	});
+});
+
+test("shared library Python tests pass", () => {
+	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_forge_llm.py")]);
 });
 
 test("vault-organizer Python tests pass", () => {
@@ -4678,10 +4854,23 @@ test("profile configuration installs local service defaults without dropping use
 			},
 			chat: {
 				enabled: true,
+				baseUrl: "http://llms:8004/v1/chat/completions",
+				model: "chat",
+				scheduling: {
+					enabled: false,
+					interactiveSlot: 0,
+					backgroundSlot: 1,
+					idleGraceMs: 2000,
+					yieldMs: 1000,
+					backgroundOutputTokens: 4096,
+				},
+			},
+			think: {
+				enabled: true,
 				baseUrl: "http://llms:8008/v1/chat/completions",
 				model: "code",
 				scheduling: {
-					enabled: false,
+					enabled: true,
 					interactiveSlot: 0,
 					backgroundSlot: 1,
 					idleGraceMs: 2000,
@@ -4736,10 +4925,23 @@ test("profile configuration preserves connected service overrides", () => {
 			},
 			chat: {
 				enabled: true,
+				baseUrl: "http://llms:8004/v1/chat/completions",
+				model: "chat",
+				scheduling: {
+					enabled: false,
+					interactiveSlot: 0,
+					backgroundSlot: 1,
+					idleGraceMs: 2000,
+					yieldMs: 1000,
+					backgroundOutputTokens: 4096,
+				},
+			},
+			think: {
+				enabled: true,
 				baseUrl: "http://llms:8008/v1/chat/completions",
 				model: "code",
 				scheduling: {
-					enabled: false,
+					enabled: true,
 					interactiveSlot: 0,
 					backgroundSlot: 1,
 					idleGraceMs: 2000,

@@ -453,20 +453,38 @@ def forge_agent_directory():
     return Path(explicit).expanduser() if explicit else Path.home() / ".pi-forge" / "agent"
 
 
-def chat_configuration():
+SERVICE_DEFAULTS = {
+    # Extraction is per-packet bulk work and runs without reasoning.
+    "chat": {"url": "http://llms:8004/v1/chat/completions", "model": "chat", "scheduling_enabled": False},
+    # Reconciliation and relationship review are judgment: they weigh evidence
+    # across packets and decide what supersedes or conflicts with what.
+    "think": {"url": "http://llms:8008/v1/chat/completions", "model": "code", "scheduling_enabled": True},
+}
+SERVICE_ENVIRONMENT = {
+    "chat": (("FORGE_BASE_CHAT_URL", "FORGE_CHAT_URL"), ("FORGE_BASE_MODEL",)),
+    "think": (("FORGE_THINK_URL",), ("FORGE_THINK_MODEL",)),
+}
+
+
+def service_configuration(name="chat"):
     settings_path = forge_agent_directory() / "settings.json"
     try:
         settings = json.loads(settings_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         settings = {}
-    chat = ((settings.get("connectedServices") or {}).get("chat") or {})
-    scheduling = chat.get("scheduling") or {}
+    service = ((settings.get("connectedServices") or {}).get(name) or {})
+    scheduling = service.get("scheduling") or {}
+    defaults = SERVICE_DEFAULTS[name]
+    url_keys, model_keys = SERVICE_ENVIRONMENT[name]
+    environment_url = next((os.environ[key] for key in url_keys if os.environ.get(key)), None)
+    environment_model = next((os.environ[key] for key in model_keys if os.environ.get(key)), None)
     return {
-        "enabled": bool(chat.get("enabled", True)),
-        "url": os.environ.get("FORGE_BASE_CHAT_URL") or os.environ.get("FORGE_CHAT_URL") or chat.get("baseUrl") or "http://llms:8008/v1/chat/completions",
-        "model": os.environ.get("FORGE_BASE_MODEL") or chat.get("model") or "code",
+        "name": name,
+        "enabled": bool(service.get("enabled", True)),
+        "url": environment_url or service.get("baseUrl") or defaults["url"],
+        "model": environment_model or service.get("model") or defaults["model"],
         "scheduling": {
-            "enabled": bool(scheduling.get("enabled", False)),
+            "enabled": bool(scheduling.get("enabled", defaults["scheduling_enabled"])),
             "interactiveSlot": int(scheduling.get("interactiveSlot", 0)),
             "backgroundSlot": int(scheduling.get("backgroundSlot", 1)),
             "idleGraceMs": int(scheduling.get("idleGraceMs", 2000)),
@@ -474,6 +492,21 @@ def chat_configuration():
             "backgroundOutputTokens": int(scheduling.get("backgroundOutputTokens", 4096)),
         },
     }
+
+
+def chat_configuration():
+    return service_configuration("chat")
+
+
+def think_configuration():
+    """The service used for review passes, falling back to the bulk service when
+    no thinking backend is configured."""
+    think = service_configuration("think")
+    if think["enabled"]:
+        return think
+    fallback = chat_configuration()
+    fallback["name"] = "think"
+    return fallback
 
 
 def active_interactive_leases():
@@ -633,6 +666,9 @@ def post_chat_json(
         "event": "model_call",
         "task": task,
         "sessionId": worker_session,
+        "service": chat.get("name", "chat"),
+        "endpoint": chat["url"],
+        "model": chat["model"],
         "mode": "background" if background else "foreground",
         "slot": scheduling["backgroundSlot"] if background else None,
         "promptCharacters": len(system_prompt) + len(user_prompt),
@@ -3570,6 +3606,12 @@ def write_run_metrics(run_directory):
         "modelCalls": sum(row.get("event") == "model_call" for row in schedule),
         "foregroundModelCalls": sum(row.get("event") == "model_call" and row.get("mode") == "foreground" for row in schedule),
         "backgroundModelCalls": sum(row.get("event") == "model_call" and row.get("mode") == "background" for row in schedule),
+        # Split by service so the bulk/judgment ratio is visible: extraction
+        # should dominate, and review should be a small fraction.
+        "modelCallsByService": {
+            service: sum(row.get("event") == "model_call" and (row.get("service") or "chat") == service for row in schedule)
+            for service in ("chat", "think")
+        },
         "preemptions": sum(row.get("event") == "preempted" for row in schedule),
         "promptTokens": prompt,
         "cachedTokens": cached,
@@ -3621,11 +3663,30 @@ def require_worker_runtime(run_directory, background=False):
             fail(f"background slot {chat['scheduling']['backgroundSlot']} is unavailable: {probe.get('detail')}. Configure llama.cpp with at least two slots; slot 0 is interactive and slot 1 is background.")
         config.setdefault("worker", {})["slotProbe"] = {**identity, "verifiedAt": utc_now()}
         write_json(run_directory / "run_config.json", config)
+    # The review passes run against the thinking service later in the same
+    # worker. Probe it now so a slot problem surfaces before the extraction
+    # work rather than after it.
+    think = think_configuration()
+    if think["url"] != chat["url"] and think["scheduling"]["enabled"]:
+        think_identity = {"url": think["url"], "model": think["model"], "slot": think["scheduling"]["backgroundSlot"]}
+        verified_think = config.get("worker", {}).get("thinkSlotProbe")
+        if not isinstance(verified_think, dict) or any(verified_think.get(key) != value for key, value in think_identity.items()):
+            probe = probe_background_slot(think)
+            if not probe.get("available"):
+                fail(f"the thinking service's background slot {think['scheduling']['backgroundSlot']} is unavailable: {probe.get('detail')}. Reconciliation runs there; give it at least two slots or disable connectedServices.think.scheduling.")
+            config.setdefault("worker", {})["thinkSlotProbe"] = {**think_identity, "verifiedAt": utc_now()}
+            write_json(run_directory / "run_config.json", config)
     return chat
 
 
 def run_worker(run_directory, background=False):
     chat = require_worker_runtime(run_directory, background)
+    # Extraction is bulk transcription of evidence and runs without reasoning.
+    # The review passes decide what supersedes or conflicts with what across
+    # packets, so they go to the thinking service. Running them after all the
+    # extraction, rather than interleaved, keeps each server's prefix cache
+    # warm.
+    think = think_configuration()
     with run_state.run_lock(run_directory):
         set_worker_control(run_directory, "running", os.getpid())
         process_extraction(run_directory, chat, background)
@@ -3633,9 +3694,9 @@ def run_worker(run_directory, background=False):
         if control["desiredState"] != "running":
             return
         command_reconcile(argparse.Namespace(run_directory=str(run_directory), draft=False))
-        if not automatic_review(run_directory, chat, background):
+        if not automatic_review(run_directory, think, background):
             return
-        automatic_relationship_review(run_directory, chat, background)
+        automatic_relationship_review(run_directory, think, background)
         command_build(argparse.Namespace(run_directory=str(run_directory), as_of=None, draft=False))
         command_validate(argparse.Namespace(run_directory=str(run_directory), fix_hints=True, json=True))
         write_run_metrics(run_directory)

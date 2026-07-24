@@ -91,8 +91,8 @@ tools and thinking behaviour, so follow the injected phase prompt:
   detailed numbered plan, and ask for approval. Make no changes.
 - **execute** — full vault tools, one change at a time. Dry-run first, show the
   result, and wait for an explicit "yes" before any `--apply` or file write.
-  Prefer the vetted skills; run `vault-organizer` with
-  `--base-url http://llms:8008/v1/chat/completions --think-prefill`. Run
+  Prefer the vetted skills and run them with their default endpoints — bulk
+  per-note calls already go to the non-thinking backend. Run
   `vault-organizer.py doctor` after editing the schema note. Never delete notes;
   keep every path inside the vault.
 - **verify** — read-only. Check the result against the plan (`doctor`, `status`,

@@ -80,18 +80,42 @@ surface.
    skipping hidden paths, symlinks, and finalized ingest workspace folders
    (`Ingest/`, `Originals/`, and `Generated/`). Use `--include-reserved` only
    when you explicitly need internal artifacts.
-3. Read [references/extraction-contract.md](references/extraction-contract.md).
-   Process **one document at a time**. Request the next pending document:
+3. Extract every document with the worker:
+
+   ```bash
+   python3 <skill-directory>/scripts/literature-extraction.py process <run-directory>
+   ```
+
+   This is the normal path. Each document is extracted by a single stateless
+   call to the non-thinking service — the extraction contract plus that one
+   document, with no conversation carried between documents — so a corpus does
+   not accumulate in your context and does not spend reasoning tokens per file.
+   Quotes are checked against the source before a result is recorded, and a
+   failure costs one corrective retry before the document is marked
+   `needs_review`.
+
+   The batch is then reviewed by the thinking model, and flagged documents are
+   re-extracted with reasoning. Use `--limit <n>` for a trial, `--no-verify` to
+   skip review, and `--think-url` to point review elsewhere. Progress is one
+   stderr line per document; stdout is one JSON result.
+
+   Read the result. Report how many documents were processed, how many need
+   review, and what verification flagged. Resume by running `process` again;
+   progress is derived from `extraction_results.jsonl`.
+
+4. Extract by hand only when you need to: a document the worker marked
+   `needs_review`, or a corpus where you want to read each source yourself.
+   Read [references/extraction-contract.md](references/extraction-contract.md),
+   then request one document at a time:
 
    ```bash
    python3 <skill-directory>/scripts/literature-extraction.py next <run-directory>
    ```
 
-   The `next` command will return the `itemTypes` and any `customInstructions` configured during initialization for the current document.
-
-4. Read that document's text, extract items with evidence quotes, locators, and
-   the `explicit`/`inferred`/`unclear` distinction, and write the JSON array to
-   a file under `<run-directory>/working/`. Record it with the returned id:
+   `next` returns the `itemTypes` and any `customInstructions` configured during
+   initialization. Read the document, extract items with evidence quotes,
+   locators, and the `explicit`/`inferred`/`unclear` distinction, write the JSON
+   array under `<run-directory>/working/`, and record it:
 
    ```bash
    python3 <skill-directory>/scripts/literature-extraction.py record <run-directory> \
@@ -101,8 +125,7 @@ surface.
    When a document cannot be processed, record an explicit disposition instead:
    `--status needs_review --note "<reason>"`, `--status skipped --note "<reason>"`,
    or `--status failed --note "<error>"`. Do not hide an unprocessable document
-   behind an empty success. Resume safely by calling `next` again; progress is
-   derived from `extraction_results.jsonl`.
+   behind an empty success.
 5. After every document has a disposition, assemble the tables and scaffold the
    deliverables:
 

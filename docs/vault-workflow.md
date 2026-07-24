@@ -8,20 +8,25 @@ detail, execute carefully, verify the result — within the constraint that one
 
 ## Why it exists
 
-The pi-forge agent brain is already the local model (`forge-local`,
+The pi-forge agent brain is the local model (`forge-local`,
 `http://llms:8008/v1`, model `code`). That server *thinks* — it spends hidden
 reasoning tokens — which is valuable for planning and verification but wasteful
-for mechanical execution. Because :8008 and its non-thinking sibling :8004 are
-the same weights and only one fits in VRAM, this extension gets both behaviours
-from the one running server: it suppresses thinking on demand with the same
-`<think></think>` assistant prefill that `vault-organizer` uses.
+for mechanical execution. Measured on this deployment it spends ~410 hidden
+tokens before answering, even to reply with one word.
+
+The same weights are also served without thinking as `forge-chat-local`
+(`http://llms:8004/v1`, model `chat`). Both run at once, so each phase simply
+uses the model that suits it: the extension calls `pi.setModel` on entering and
+leaving execute. Earlier versions suppressed thinking with a `<think></think>`
+assistant prefill against the single thinking server; that worked unreliably and
+is gone.
 
 ## Phases
 
 | Command | Phase | Thinking | Tools | Role |
 | --- | --- | --- | --- | --- |
 | `/plan` | plan | on | read-only (`read`, `bash`, `grep`, `find`, `ls`, `questionnaire`) | Interview, investigate, write a numbered plan, ask for approval. |
-| `/execute` | execute | off (prefill) | read-only **plus** `edit`, `write` | Apply the approved plan one change at a time, dry-run first, approve each change. |
+| `/execute` | execute | off (`forge-chat-local`) | read-only **plus** `edit`, `write` | Apply the approved plan one change at a time, dry-run first, approve each change. |
 | `/verify` | verify | on | read-only | Check the result against the plan and report. |
 | `/workflow off` | off | default | all tools | Leave the workflow; normal pi behaviour. |
 
@@ -35,21 +40,24 @@ Phase is persisted (`pi.appendEntry("vault-workflow", …)`) and restored on
   tools are simply absent, and a `tool_call` handler additionally blocks mutating
   bash (`rm`, `mv`, `--apply`, redirects, `git commit/push`, `sed -i`, …) so the
   model cannot change the vault while "thinking out loud".
-- **Thinking toggle** — a `before_provider_request` handler (mirroring
-  `forge/extensions/inference-scheduling.ts`) appends
-  `{role:"assistant", content:"<think>\n\n</think>\n\n"}` to the outgoing
-  `messages` **only** in the execute phase and **only** for the `forge-local`
-  provider. The model continues from the closed think block and skips reasoning
-  (~4–5x faster mechanical turns). Tool-calling is unaffected — the server still
-  returns a normal `tool_calls` array.
+- **Thinking toggle** — entering execute looks up `forge-chat-local/chat` in the
+  model registry and switches to it with `pi.setModel`; leaving execute restores
+  the model that was active before. The model actually in use is restored only
+  if it is still the non-thinking one, so a model the user picked by hand during
+  execute is never overwritten. Both the phase and the model to return to are
+  persisted, so a crash mid-execute cannot strand the session on the
+  non-thinking model. An install whose `models.json` predates the provider keeps
+  working: the switch is skipped with a warning.
 - **Per-phase prompt** — a `before_agent_start` handler injects the phase's role
-  and rules (the approve-each-change rule, the schema-edit → `doctor` discipline,
-  the `--think-prefill` flag for skill sub-calls) fresh each turn.
+  and rules (the approve-each-change rule, the schema-edit → `doctor`
+  discipline) fresh each turn.
 
 The `forge-local` model sets `compat.thinkingFormat: "qwen"` (in
 `configure-pi-forge.mjs`) so pi parses the model's `<think>…</think>` as
-reasoning instead of leaking raw tags into displayed content — this keeps both
-the execute-phase prefill and any real thinking clean in the transcript.
+reasoning instead of leaking raw tags into displayed content. In practice this
+deployment's llama.cpp strips the block server-side, which is why a thinking
+backend cannot be recognised from the response body — only from its token
+count.
 
 ## Guardrails
 
@@ -81,14 +89,15 @@ Run `pi-forge` in the vault directory, then:
 - Thinking is slow (~30–60s/turn for hard turns), so plan/verify chat is
   deliberately slower than execute. The phase→behaviour mapping lives in the
   extension and can be tuned.
-- **Two-GPU future:** if a non-thinking server (`:8004`) can run alongside
-  `:8008`, register it as a second provider and switch execute to it with
-  `pi.setModel` instead of the prefill — the phase structure is unchanged.
+- Both servers share one GPU. `forge/extensions/inference-scheduling.ts` writes
+  an interactive lease for whichever local provider the session is using, so
+  background batch work yields to the user in either phase.
 
 ## Tests
 
 `scripts/vault-workflow.test.ts` (run with `npm run test:vault-workflow` /
 `tsx --test`) drives the extension with a fake `ExtensionAPI` and asserts:
-phase→tool-set gating, execute-only prefill injection (forge-local only, without
-mutating the original payload), per-phase system prompts, mutating-bash blocking
-in read-only phases, and phase persistence/restore.
+phase→tool-set gating, the execute-phase model switch and its restore (including
+that a hand-picked model survives and that a missing provider degrades quietly),
+per-phase system prompts, mutating-bash blocking in read-only phases, and phase
+persistence/restore.

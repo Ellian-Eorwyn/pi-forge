@@ -203,7 +203,8 @@ class StubChatHandler(BaseHTTPRequestHandler):
             "needs_review": False,
             "review_reason": None,
         }
-        body = json.dumps({"choices": [{"message": {"content": json.dumps(response)}}]}).encode("utf-8")
+        content = response if isinstance(response, str) else json.dumps(response)
+        body = json.dumps({"choices": [{"message": {"content": content}}]}).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -212,6 +213,13 @@ class StubChatHandler(BaseHTTPRequestHandler):
 
     def log_message(self, *args):
         return
+
+
+class SecondStubChatHandler(StubChatHandler):
+    """A separate endpoint, so a test can watch the thinking service on its own."""
+
+    responses = []
+    requests = []
 
 
 class QuietServer(ThreadingHTTPServer):
@@ -310,9 +318,20 @@ class StubEmbeddingsServer:
         return StubEmbeddingsHandler.requests
 
 
-def run_script(*args):
-    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
-    return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True, env=env)
+def run_script(*args, environment=None):
+    # Point the agent directory at nothing by default so endpoint resolution
+    # cannot pick up the settings of whoever is running the tests. An explicit
+    # environment replaces the inherited one outright, so a test can prove what
+    # happens in the *absence* of a variable.
+    base = environment if environment is not None else os.environ
+    env = {**base, "PYTHONDONTWRITEBYTECODE": "1"}
+    env.setdefault("PI_FORGE_AGENT_DIR", "/nonexistent-agent-directory")
+    # Verification talks to a second endpoint. Tests that are not about it opt
+    # out, so they neither reach a real server nor consume stub responses.
+    arguments = list(args)
+    if arguments and arguments[0] in {"inbox", "vault"} and not {"--no-verify", "--think-url"} & set(arguments):
+        arguments.append("--no-verify")
+    return subprocess.run([sys.executable, str(SCRIPT), *arguments], capture_output=True, text=True, env=env)
 
 
 class VaultOrganizerTests(unittest.TestCase):
@@ -529,6 +548,43 @@ def ok_response(**overrides):
     return response
 
 
+class VerdictHandler(SecondStubChatHandler):
+    """The thinking endpoint.
+
+    Verification requests are answered from `flags` (a note path -> objection
+    map), so tests do not have to predict note ordering. Re-classification
+    requests are answered from `responses`.
+    """
+
+    flags = {}
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        self.__class__.requests.append(payload)
+        sent = json.loads(payload["messages"][-1]["content"])
+        if "items" in sent:
+            verdicts = [
+                {
+                    "id": item["id"],
+                    "verdict": "flag" if self.__class__.flags.get(item["id"]) else "ok",
+                    "reason": self.__class__.flags.get(item["id"], ""),
+                }
+                for item in sent["items"]
+            ]
+            content = json.dumps({"verdicts": verdicts})
+        else:
+            content = self.__class__.responses.pop(0) if self.__class__.responses else json.dumps(ok_response())
+            if not isinstance(content, str):
+                content = json.dumps(content)
+        body = json.dumps({"choices": [{"message": {"content": content}}]}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
 class VaultOrganizerV2Tests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -547,8 +603,8 @@ class VaultOrganizerV2Tests(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         return path
 
-    def run_ok(self, *args):
-        result = run_script(*args)
+    def run_ok(self, *args, environment=None):
+        result = run_script(*args, environment=environment)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         return json.loads(result.stdout)
 
@@ -578,6 +634,122 @@ class VaultOrganizerV2Tests(unittest.TestCase):
             prefill = server.requests[0]["messages"][-1]
             self.assertEqual(prefill["role"], "assistant")
             self.assertIn("<think>", prefill["content"])
+
+    def record_for(self, result, source):
+        plan = json.loads((Path(result["data"]["run_directory"]) / "plan.json").read_text(encoding="utf-8"))
+        return next(row for row in plan["records"] if row["source"] == source)
+
+    def verify_run(self, chat_responses, flags=None, escalations=None, *extra):
+        """Classification and verification against two separate stub endpoints."""
+        VerdictHandler.flags = flags or {}
+        with StubServer(chat_responses) as chat, StubServer(escalations or [], handler_cls=VerdictHandler) as think:
+            result = self.run_ok(
+                "inbox", "--vault", str(self.vault), "--base-url", chat.url,
+                "--think-url", think.url, "--no-embeddings", *extra,
+            )
+            return result, chat, think
+
+    def test_verification_reviews_every_classification_in_one_call(self):
+        for index in range(3):
+            self.write_note(f"00 Inbox/Note {index}.md", f"# Note {index}\n\nBody {index}.\n")
+        result, _chat, think = self.verify_run([ok_response(), ok_response(), ok_response()])
+        self.assertEqual(len(think.requests), 1, "three notes reviewed in one thinking call")
+        reviewed = json.loads(think.requests[0]["messages"][-1]["content"])["items"]
+        self.assertEqual(len(reviewed), 3)
+        self.assertIn("proposedDestination", reviewed[0])
+        run = Path(result["data"]["run_directory"])
+        self.assertIn("Reviewed by the thinking model: 3", (run / "report.md").read_text(encoding="utf-8"))
+
+    def test_a_flagged_note_is_redone_with_reasoning_and_the_new_answer_wins(self):
+        self.write_note("00 Inbox/Misfiled.md", "# Misfiled\n\nBody.\n")
+        corrected = ok_response(metadata={**ok_response()["metadata"], "subdomain": "software-development"})
+        result, _chat, think = self.verify_run(
+            [ok_response()],
+            flags={"00 Inbox/Misfiled.md": "filed under the wrong subdomain"},
+            escalations=[corrected],
+        )
+        record = self.record_for(result, "00 Inbox/Misfiled.md")
+        self.assertEqual(record["destination"], "04 Technology/4.02 Software Development/Misfiled.md")
+        self.assertEqual(record["classification_source"], "model-think")
+        # The escalation is asked to reconsider, and told what the objection was.
+        repair = json.loads(think.requests[-1]["messages"][-1]["content"])["repair"]
+        self.assertIn("wrong subdomain", repair["reviewer_objection"])
+        report = (Path(result["data"]["run_directory"]) / "report.md").read_text(encoding="utf-8")
+        self.assertIn("re-done with reasoning", report)
+
+    def test_a_flagged_note_that_cannot_be_redone_goes_to_a_human(self):
+        self.write_note("00 Inbox/Broken.md", "# Broken\n\nBody.\n")
+        unusable = ok_response(metadata={"type": "note", "domain": "not-a-real-domain"})
+        result, _chat, _think = self.verify_run(
+            [ok_response()],
+            flags={"00 Inbox/Broken.md": "wrong domain"},
+            escalations=[unusable, unusable],
+        )
+        record = self.record_for(result, "00 Inbox/Broken.md")
+        self.assertTrue(record["needs_review"])
+        self.assertIn("re-classification failed", record["review_reason"])
+
+    def test_an_unreachable_verifier_does_not_read_as_approval(self):
+        self.write_note("00 Inbox/Unverified.md", "# Unverified\n\nBody.\n")
+        with StubServer([ok_response()]) as chat:
+            result = self.run_ok(
+                "inbox",
+                "--vault",
+                str(self.vault),
+                "--base-url",
+                chat.url,
+                "--think-url",
+                "http://127.0.0.1:9/v1/chat/completions",
+                "--no-embeddings",
+            )
+        report = (Path(result["data"]["run_directory"]) / "report.md").read_text(encoding="utf-8")
+        self.assertIn("**Not verified**", report)
+
+    def test_verification_is_skippable_and_says_so(self):
+        self.write_note("00 Inbox/Skipped.md", "# Skipped\n\nBody.\n")
+        with StubServer([ok_response()]) as chat:
+            result = self.run_ok("inbox", "--vault", str(self.vault), "--base-url", chat.url, "--no-embeddings", "--no-verify")
+        report = (Path(result["data"]["run_directory"]) / "report.md").read_text(encoding="utf-8")
+        self.assertIn("were not reviewed", report)
+
+    def test_a_resumed_run_does_not_re_verify(self):
+        self.write_note("00 Inbox/Resumed.md", "# Resumed\n\nBody.\n")
+        VerdictHandler.flags = {}
+        # One pair of endpoints for both runs: resuming refuses a changed URL.
+        with StubServer([ok_response()]) as chat, StubServer([], handler_cls=VerdictHandler) as think:
+            arguments = ("--vault", str(self.vault), "--base-url", chat.url, "--think-url", think.url, "--no-embeddings")
+            result = self.run_ok("inbox", *arguments)
+            self.assertEqual(len(think.requests), 1)
+
+            self.run_ok("inbox", *arguments, "--run", result["data"]["run_directory"])
+            self.assertEqual(len(think.requests), 1, "verdicts were journaled, so nothing is reviewed twice")
+
+    def test_classification_requests_the_non_thinking_model_by_default(self):
+        self.write_note("00 Inbox/Default.md", "# Default\n\nBody.\n")
+        with StubServer([ok_response()]) as server:
+            self.run_ok("inbox", "--vault", str(self.vault), "--base-url", server.url, "--no-embeddings")
+            self.assertEqual(server.requests[0]["model"], "chat")
+            self.assertNotEqual(server.requests[0]["messages"][-1]["role"], "assistant")
+
+    def test_endpoint_falls_back_to_the_configured_chat_service(self):
+        with StubServer([ok_response()]) as server:
+            agent = self.root / "agent"
+            agent.mkdir(exist_ok=True)
+            (agent / "settings.json").write_text(
+                json.dumps({"connectedServices": {"chat": {"baseUrl": server.url, "model": "configured"}}}),
+                encoding="utf-8",
+            )
+            # Environment beats settings, so clear any inherited endpoint to
+            # exercise the settings layer itself.
+            environment = {
+                key: value
+                for key, value in os.environ.items()
+                if key not in {"FORGE_BASE_CHAT_URL", "FORGE_CHAT_URL", "FORGE_BASE_MODEL"}
+            }
+            environment["PI_FORGE_AGENT_DIR"] = str(agent)
+            self.write_note("00 Inbox/Configured.md", "# Configured\n\nBody.\n")
+            self.run_ok("inbox", "--vault", str(self.vault), "--no-embeddings", environment=environment)
+            self.assertEqual(server.requests[0]["model"], "configured")
 
     def test_extract_json_content_strips_think_and_fences(self):
         wrapped = "<think>\n\nreasoning here\n</think>\n\n{\"ok\": true}"

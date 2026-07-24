@@ -91,6 +91,37 @@ Meta runs use schema version 2. Existing completed first-pass literature runs
 remain valid inputs, but schema-version-1 meta directories must be reinitialized
 in a new output directory rather than resumed.
 
+## Extraction Execution
+
+`process` extracts every pending document without leaving the script. Each
+document is one stateless call to `connectedServices.chat` (non-thinking):
+system prompt is this contract, user prompt is the research focus plus that
+document. Nothing is carried between documents, so the prompt prefix is
+byte-stable across a whole corpus and the server reuses its cached prefix. A
+document larger than 48,000 characters is split on paragraph boundaries and
+covered in pieces rather than truncated.
+
+Before a result is recorded, every `direct_quotes` value is checked against the
+source (whitespace- and smart-quote-insensitive, per fragment). A quote that
+does not appear in the document, or items that fail the schema, cost one
+corrective retry that shows the model its own errors; a second failure records
+the document as `needs_review` rather than accepting unsupported evidence.
+
+Extraction is then reviewed in batches by `connectedServices.think`, which sees
+each document's title, item counts by type, and a sample of items with their
+quotes. A flagged document is re-extracted on the thinking service, told what
+the objection was, and the new result is journaled with `supersedes: true` so it
+replaces the original — an unmarked duplicate result remains an error.
+
+A non-thinking model does not spontaneously enumerate item types the way a
+reasoning model does, so the prompt makes it walk the list explicitly. Without
+that instruction it settles for claims, findings, methods, and limitations;
+with it, coverage matches or exceeds the thinking model's.
+
+Synthesis and the authored deliverables stay with the agent and its reasoning
+model. They are few calls, they need the whole corpus in view, and they are
+judgment rather than transcription.
+
 ## Extraction Schema
 
 Each document's extraction is a JSON array of item objects. Every item has

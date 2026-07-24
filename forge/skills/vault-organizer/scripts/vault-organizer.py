@@ -15,6 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import forge_embeddings
+import forge_llm
+import forge_verify
 import run_state
 from vault_classification import (
     DEFAULT_BASE_URL,
@@ -85,7 +87,8 @@ from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
 
 
 WORKFLOW = "vault-organizer"
-DEFAULT_MODEL = "code"
+DEFAULT_BASE_URL = "http://llms:8004/v1/chat/completions"
+DEFAULT_MODEL = "chat"
 PROMPT_VERSION = "vault-organizer-v3"
 MAX_BODY_CHARS = 30000
 EMBED_MAX_CHARS = 2000
@@ -95,11 +98,13 @@ NEAR_DUPE_REVIEW = 0.90
 CONTAINMENT_MIN = 0.90
 MAX_BLOCK_BUCKET = 50
 RUN_STATE_BATCH = 25
-# The default backend (:8004) is a non-thinking configuration. Pointing at a
-# thinking backend (e.g. :8008) instead needs --think-prefill: a closed empty
-# think block prefilled as the assistant turn so the server skips reasoning.
-# The response parser strips a stray leading think block regardless, so a
-# thinking backend used without the flag still parses (just slowly).
+# Classification runs on the non-thinking backend, where a note costs one short
+# completion instead of a few hundred hidden reasoning tokens. --think-prefill
+# remains for pointing this at a thinking backend by hand: it prefills a closed
+# empty think block so the server continues past reasoning. The response parser
+# strips a stray think block regardless.
+THINK_PREFILL = "<think>\n\n</think>\n\n"
+THINK_BLOCK_RE = forge_llm.THINK_BLOCK_RE
 QUARANTINE_SUBDIR = "duplicates"
 TEMP_NAME_RE = re.compile(
     r"^(untitled|document|extracted|extraction_report|chunk[-_ ]?\d+|new note|note)"
@@ -306,6 +311,237 @@ def refresh_vault_index(vault, schema_path):
     return entries, warnings
 
 
+SYSTEM_INSTRUCTIONS = (
+    "You classify Obsidian Markdown notes. Return exactly one JSON object. "
+    "Do not return YAML, paths, folder numbers, explanations, markdown, or filesystem instructions. "
+    "Choose values only from the approved schema below. Classify by the note's primary purpose. "
+    "The note's previous frontmatter is provided as untrusted advisory context only; never copy "
+    "unapproved keys or values from it. "
+    "Use needs_review true when required classification is genuinely ambiguous. "
+    "You may include an optional \"suggestions\" array of short strings, each proposing one schema "
+    "addition (a new subdomain, project, or value) only when the schema clearly lacks a needed value; "
+    "suggestions are reviewed by a human later and are never applied to this note."
+)
+
+
+def compact_schema_for_prompt(schema):
+    return {
+        "properties": schema["properties"],
+        "property_order": schema["property_order"],
+        "types": schema["types"],
+        "statuses": schema["statuses"],
+        "domains": schema["domains"],
+        "subdomains": schema["subdomains"],
+        "projects": schema["projects"],
+        "source_kinds": schema["source_kinds"],
+        "capture_types": schema["capture_types"],
+    }
+
+
+def system_prompt(schema):
+    shape = {
+        "metadata": {key: None for key in schema["property_order"]},
+        "needs_review": False,
+        "review_reason": None,
+        "suggestions": [],
+    }
+    sections = [
+        SYSTEM_INSTRUCTIONS,
+        "Schema:\n" + run_state.canonical_json(compact_schema_for_prompt(schema)),
+    ]
+    if schema.get("domain_rules"):
+        sections.append("Domain decision rules:\n" + "\n".join(f"- {rule}" for rule in schema["domain_rules"]))
+    if schema.get("project_rules"):
+        sections.append("Project assignment rules:\n" + "\n".join(f"- {rule}" for rule in schema["project_rules"]))
+    sections.append("Required response shape:\n" + run_state.canonical_json(shape))
+    return "\n\n".join(sections)
+
+
+def build_messages(schema, title, current_path, frontmatter_text, body_excerpt, repair=None, think_prefill=True):
+    payload = {
+        "title": title,
+        "current_relative_path": current_path,
+        "untrusted_existing_frontmatter": frontmatter_text[:MAX_ADVISORY_FRONTMATTER_CHARS],
+        "body": body_excerpt,
+    }
+    if repair:
+        payload["repair"] = repair
+    messages = [
+        {"role": "system", "content": system_prompt(schema)},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    if think_prefill:
+        messages.append({"role": "assistant", "content": THINK_PREFILL})
+    return messages
+
+
+def normalize_base_url(value):
+    return forge_llm.normalize_base_url(value, DEFAULT_BASE_URL)
+
+
+def extract_json_content(content):
+    return forge_llm.extract_json_content(content)
+
+
+def chat_service(args):
+    return {
+        "name": "chat",
+        "enabled": True,
+        "url": args.base_url,
+        "model": args.model,
+        "scheduling": forge_llm.DEFAULT_SERVICES["chat"]["scheduling"],
+    }
+
+
+def request_json_with_retry(args, messages, service=None):
+    try:
+        value, _record = forge_llm.call_json_with_retry(
+            service or chat_service(args),
+            messages,
+            attempts=MAX_TRANSIENT_ATTEMPTS,
+            response_format={"type": "json_object"},
+            cache_prompt=args.cache_prompt,
+            timeout=args.request_timeout,
+            api_key=args.api_key,
+            task="classify",
+        )
+    except forge_llm.ChatError as error:
+        raise UserError(str(error)) from error
+    return value
+
+
+def normalize_metadata(metadata, schema):
+    normalized = {}
+    warnings = []
+    for key in schema["property_order"]:
+        value = metadata.get(key)
+        if value is None or value == "" or value == []:
+            continue
+        if key == "project":
+            value = normalize_project_value(str(value))
+        if isinstance(value, str):
+            legacy = schema["legacy"].get(f"{key}:{value}")
+            if legacy:
+                for target_key, target_value in legacy.items():
+                    normalized[target_key] = target_value
+                warnings.append(f"normalized legacy {key}: {value}")
+                continue
+        normalized[key] = value
+    if normalized.get("project"):
+        project = schema["projects"].get(normalized["project"])
+        if project:
+            if normalized.get("domain") != project["domain"]:
+                warnings.append(f"project {normalized['project']} overrode domain {normalized.get('domain')} -> {project['domain']}")
+            normalized["domain"] = project["domain"]
+            if project.get("subdomain"):
+                if normalized.get("subdomain") != project["subdomain"]:
+                    warnings.append(f"project {normalized['project']} overrode subdomain {normalized.get('subdomain')} -> {project['subdomain']}")
+                normalized["subdomain"] = project["subdomain"]
+            else:
+                normalized.pop("subdomain", None)
+    return normalized, warnings
+
+
+def clean_suggestions(raw, warnings):
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        warnings.append("suggestions ignored: not a list")
+        return []
+    cleaned = []
+    for item in raw[:MAX_SUGGESTIONS]:
+        if not isinstance(item, str):
+            continue
+        text = "".join(character for character in item if ord(character) >= 32 or character == "\t").strip()
+        if text:
+            cleaned.append(text[:MAX_SUGGESTION_CHARS])
+    return cleaned
+
+
+def validate_classification(response, schema):
+    errors = []
+    warnings = []
+    if not isinstance(response, dict):
+        return None, [], ["response is not a JSON object"]
+    required = {"metadata", "needs_review", "review_reason"}
+    allowed = required | {"suggestions"}
+    actual = set(response)
+    if not required.issubset(actual) or not actual.issubset(allowed):
+        errors.append(f"top-level keys must be {sorted(required)} plus optional suggestions")
+    metadata = response.get("metadata")
+    if not isinstance(metadata, dict):
+        errors.append("metadata must be an object")
+        return None, warnings, errors
+    extra_keys = sorted(set(metadata) - set(schema["property_order"]))
+    if extra_keys:
+        errors.append(f"metadata contains unapproved keys: {', '.join(extra_keys)}")
+    normalized, normalize_warnings = normalize_metadata(metadata, schema)
+    warnings.extend(normalize_warnings)
+    for key in ("type", "status", "domain"):
+        if not normalized.get(key):
+            errors.append(f"missing required metadata: {key}")
+    for key, value in normalized.items():
+        prop = schema["properties"].get(key)
+        if not prop:
+            continue
+        if prop["shape"] == "list":
+            if not isinstance(value, list):
+                errors.append(f"{key} must be a list")
+                continue
+            seen = set()
+            clean = []
+            for item in value:
+                if not isinstance(item, str) or has_control_character(item):
+                    errors.append(f"{key} contains an invalid item")
+                    continue
+                if prop["value_mode"] == "wikilink" and not valid_wikilink(item):
+                    errors.append(f"{key} item must be a wikilink: {item}")
+                if item in seen:
+                    errors.append(f"{key} contains duplicate item: {item}")
+                seen.add(item)
+                clean.append(item)
+            normalized[key] = clean
+        else:
+            if not isinstance(value, str) or has_control_character(value):
+                errors.append(f"{key} must be a scalar string")
+                continue
+            if prop["value_mode"] in {"wikilink", "registered_wikilink"} and not valid_wikilink(value):
+                errors.append(f"{key} must be a wikilink: {value}")
+    if normalized.get("type") and normalized["type"] not in schema["types"]:
+        errors.append(f"invalid type: {normalized['type']}")
+    if normalized.get("status") and normalized["status"] not in schema["statuses"]:
+        errors.append(f"invalid status: {normalized['status']}")
+    if normalized.get("domain") and normalized["domain"] not in schema["domains"]:
+        errors.append(f"invalid domain: {normalized['domain']}")
+    if normalized.get("subdomain"):
+        domain = normalized.get("domain")
+        if not domain or normalized["subdomain"] not in schema["subdomains"].get(domain, {}):
+            errors.append(f"invalid subdomain for domain {domain}: {normalized['subdomain']}")
+    if normalized.get("project") and normalized["project"] not in schema["projects"]:
+        errors.append(f"invalid project: {normalized['project']}")
+    if normalized.get("source_kind"):
+        if normalized["source_kind"] not in schema["source_kinds"]:
+            errors.append(f"invalid source_kind: {normalized['source_kind']}")
+        if normalized.get("type") != "source":
+            errors.append("source_kind is forbidden unless type is source")
+    elif normalized.get("type") == "source":
+        errors.append("source_kind is required when type is source")
+    if normalized.get("capture_type") and normalized["capture_type"] not in schema["capture_types"]:
+        errors.append(f"invalid capture_type: {normalized['capture_type']}")
+    needs_review = response.get("needs_review")
+    if not isinstance(needs_review, bool):
+        errors.append("needs_review must be a boolean")
+        needs_review = True
+    review_reason = response.get("review_reason")
+    if review_reason is not None and not isinstance(review_reason, str):
+        errors.append("review_reason must be null or string")
+    suggestions = clean_suggestions(response.get("suggestions"), warnings)
+    return {
+        "metadata": normalized,
+        "needs_review": needs_review,
+        "review_reason": review_reason,
+        "suggestions": suggestions,
+    }, warnings, errors
 def scan_vault(vault, schema_path, mode, limit):
     schema_data = schema_path.read_bytes()
     schema_split = split_frontmatter(schema_data)
@@ -730,6 +966,147 @@ def classify_items(args, vault, schema, schema_hash, items, losers, run_dir):
     return records, warnings
 
 
+VERIFY_SYSTEM = (
+    "You are reviewing where notes were filed in one person's Obsidian vault.\n"
+    "A faster model without reasoning proposed a destination and frontmatter for each note.\n"
+    "Your job is to catch the ones that are actually wrong: a destination that does not match\n"
+    "what the note is about, or metadata that contradicts the note or the schema.\n"
+    "Judge only what the evidence shows. A defensible filing is 'ok' even if you would have\n"
+    "chosen differently; taste is not an error."
+)
+VERIFY_EXCERPT_CHARS = 1000
+
+
+def verifiable_records(records):
+    """Records a reviewer can judge: something was actually decided by the model."""
+    return [
+        (rel, record)
+        for rel, record in sorted(records.items())
+        if record.get("destination") and not record.get("needs_review") and record.get("status") != "failed"
+    ]
+
+
+def verify_payload(vault, rel, record):
+    body = ""
+    try:
+        frontmatter = split_frontmatter((vault / rel).read_bytes())
+        body = frontmatter["body"].strip()[:VERIFY_EXCERPT_CHARS]
+    except OSError:
+        pass
+    return {
+        "id": rel,
+        "title": note_title(vault / rel, body),
+        "currentPath": rel,
+        "proposedDestination": record["destination"],
+        "metadata": record.get("metadata", {}),
+        "excerpt": body,
+    }
+
+
+def verify_classifications(args, vault, schema, records, run_dir):
+    """Have the thinking model review every classification, and redo the ones it
+    flags with reasoning.
+
+    Bulk classification runs without reasoning because it is usually right and
+    reasoning about each note costs hundreds of hidden tokens. This is what
+    makes "usually" safe: full coverage for a handful of batched calls, with the
+    thinking budget spent on the notes that turn out to need it.
+    """
+    warnings = []
+    candidates = verifiable_records(records)
+    summary = {"verified": 0, "ok": 0, "flagged": 0, "escalated": 0, "needsReview": 0, "flaggedIds": []}
+    if not candidates:
+        return summary, warnings
+
+    think = forge_llm.resolve_think_or_chat(base_url=args.think_url, model=args.think_model)
+    if not think["enabled"]:
+        warnings.append("verification skipped: no thinking service is configured")
+        summary["skipped"] = "disabled"
+        return summary, warnings
+
+    items = [verify_payload(vault, rel, record) for rel, record in candidates]
+    by_path = dict(candidates)
+    journal = run_dir / "verified.jsonl"
+    log(args, f"verifying {len(items)} classifications on {think['url']}")
+    try:
+        verdicts = forge_verify.verify_packets(
+            think,
+            VERIFY_SYSTEM,
+            items,
+            journal_path=journal,
+            background=True,
+            timeout=args.request_timeout,
+            progress=progress,
+        )
+    except forge_verify.VerificationError as error:
+        # An unreachable reviewer must not look like approval.
+        warnings.append(f"verification skipped: {error}")
+        summary["skipped"] = str(error)
+        return summary, warnings
+
+    flagged = [
+        (next(item for item in items if item["id"] == rel), entry["reason"])
+        for rel, entry in verdicts.items()
+        if entry["verdict"] == forge_verify.VERDICT_FLAG and rel in by_path
+    ]
+
+    def redo(item, reason):
+        rel = item["id"]
+        path = vault / rel
+        data = path.read_bytes()
+        frontmatter = split_frontmatter(data)
+        body = frontmatter["body"]
+        excerpt, _excerpted = excerpt_body(body)
+        messages = build_messages(
+            schema,
+            note_title(path, body),
+            rel,
+            frontmatter["frontmatter_text"],
+            excerpt,
+            repair={"reviewer_objection": reason, "previous_metadata": by_path[rel].get("metadata", {})},
+            think_prefill=False,
+        )
+        response = request_json_with_retry(args, messages, service=think)
+        validated, _warnings, errors = validate_classification(response, schema)
+        if errors:
+            raise UserError("; ".join(errors))
+        return validated
+
+    escalations = forge_verify.escalate(flagged, redo, journal_path=journal, progress=progress)
+    for rel, outcome in escalations.items():
+        record = by_path[rel]
+        record["verify_reason"] = next(reason for item, reason in flagged if item["id"] == rel)
+        if outcome["ok"]:
+            validated = outcome["value"]
+            record["metadata"] = validated["metadata"]
+            record["classification_source"] = "model-think"
+            record["verified"] = "escalated"
+            if validated.get("needs_review"):
+                record["needs_review"] = True
+                record["review_reason"] = validated.get("review_reason")
+                record["status"] = "review"
+                record["destination"] = None
+            else:
+                destination_dir = compile_destination(schema, record["metadata"])
+                record["destination"] = (destination_dir / (vault / rel).name).as_posix()
+                record["move_required"] = record["destination"] != rel
+        else:
+            # Could not be redone, so a human decides rather than shipping a
+            # filing the reviewer already objected to.
+            record["verified"] = "needs-review"
+            record["needs_review"] = True
+            record["review_reason"] = f"verification flagged this and re-classification failed: {outcome['detail']}"
+            record["status"] = "review"
+            record["destination"] = None
+            warnings.append(f"{rel}: {record['review_reason']}")
+        run_state.append_jsonl_fsync(run_dir / "classified.jsonl", record)
+    for rel, entry in verdicts.items():
+        if entry["verdict"] == forge_verify.VERDICT_OK and rel in by_path:
+            by_path[rel]["verified"] = "ok"
+    summary = forge_verify.summarize(verdicts, escalations)
+    return summary, warnings
+
+
 def item_status_for(record):
     if record["status"] == "failed":
         return "failed"
@@ -982,7 +1359,41 @@ def append_report_listing(report, entries, formatter, limit=50):
         report.append("- None")
 
 
-def write_plan(run_dir, records, counts, dedupe, base_references, mode, dry_run, vault, schema_hash, warnings):
+def verification_report(verification, records):
+    """The verification section of report.md.
+
+    Says plainly when nothing was verified: an unreachable reviewer must not
+    read as approval.
+    """
+    lines = ["## Verification", ""]
+    if verification is None:
+        lines.extend(["- Skipped (`--no-verify`). These classifications were not reviewed.", ""])
+        return lines
+    if verification.get("skipped"):
+        lines.extend([f"- **Not verified**: {verification['skipped']}", ""])
+        return lines
+    lines.extend([
+        f"- Reviewed by the thinking model: {verification['verified']}",
+        f"- Agreed: {verification['ok']}",
+        f"- Flagged: {verification['flagged']}",
+        f"- Re-done with reasoning: {verification['escalated']}",
+        f"- Left for you to decide: {verification['needsReview']}",
+        "",
+    ])
+    flagged = [record for record in records if record.get("verify_reason")]
+    if flagged:
+        lines.append("| Note | Objection | Outcome | Destination |")
+        lines.append("| --- | --- | --- | --- |")
+        for record in flagged:
+            outcome = "re-done with reasoning" if record.get("verified") == "escalated" else "needs your review"
+            destination = record.get("destination") or "—"
+            reason = str(record.get("verify_reason", "")).replace("|", "\\|")
+            lines.append(f"| `{record['source']}` | {reason} | {outcome} | `{destination}` |")
+        lines.append("")
+    return lines
+
+
+def write_plan(run_dir, records, counts, dedupe, base_references, mode, dry_run, vault, schema_hash, warnings, verification=None):
     plan_path = run_dir / "plan.json"
     report_path = run_dir / "report.md"
     data = {
@@ -993,6 +1404,7 @@ def write_plan(run_dir, records, counts, dedupe, base_references, mode, dry_run,
         "run_directory": str(run_dir),
         "counts": counts,
         "dedupe": dedupe,
+        "verification": verification,
         "base_references": base_references,
         "records": plan_for_json(records),
         "warnings": warnings,
@@ -1024,9 +1436,9 @@ def write_plan(run_dir, records, counts, dedupe, base_references, mode, dry_run,
         f"- Duplicate pairs needing review: {counts['duplicate_review']}",
         f"- Failed: {counts['failed']}",
         "",
-        "## Destination Counts",
-        "",
     ]
+    report.extend(verification_report(verification, records))
+    report.extend(["## Destination Counts", ""])
     if destination_counts:
         for key in sorted(destination_counts):
             report.append(f"- {key}: {destination_counts[key]}")
@@ -1335,8 +1747,18 @@ def organize(args):
         warnings.extend(classify_warnings)
         run_state.update_run_state(
             run_dir,
-            lambda draft: draft.update({"phase": "route"}) or draft,
+            lambda draft: draft.update({"phase": "verify"}) or draft,
             event={"type": "phase", "phase": "classify", "records": len(class_records)},
+        )
+
+        verification = None
+        if args.verify:
+            verification, verify_warnings = verify_classifications(args, vault, schema, class_records, run_dir)
+            warnings.extend(verify_warnings)
+        run_state.update_run_state(
+            run_dir,
+            lambda draft: draft.update({"phase": "route"}) or draft,
+            event={"type": "phase", "phase": "verify", **(verification or {"skipped": "disabled by --no-verify"})},
         )
 
         applied_log, _ = run_state.read_jsonl_recover_tail(run_dir / "apply-log.jsonl", repair=True)
@@ -1358,7 +1780,7 @@ def organize(args):
         else:
             final_phase = "planned"
         plan_path, report_path = write_plan(
-            run_dir, records, counts, dedupe, base_references, args.mode, not args.apply, vault, schema_hash, warnings
+            run_dir, records, counts, dedupe, base_references, args.mode, not args.apply, vault, schema_hash, warnings, verification
         )
         run_state.update_run_state(
             run_dir,
@@ -1432,6 +1854,7 @@ def status(args):
 def doctor(args):
     vault = Path(args.vault).expanduser().resolve()
     checks = {}
+    warnings = []
     ok = True
     if vault.is_dir() and os.access(vault, os.W_OK):
         checks["vault"] = {"ok": True, "path": str(vault)}
@@ -1456,41 +1879,37 @@ def doctor(args):
             schema_check = {"ok": False, "detail": str(error)}
     checks["schema"] = schema_check
     ok = ok and schema_check["ok"]
-    chat_check = {"ok": False, "url": args.base_url, "model": args.model}
-    try:
-        started = time.time()
-        probe_messages = [
-            {"role": "system", "content": "Reply with exactly {\"ok\": true} as JSON."},
-            {"role": "user", "content": "ping"},
-        ]
-        if args.think_prefill:
-            probe_messages.append({"role": "assistant", "content": THINK_PREFILL})
-        request_json(
-            args.base_url,
-            args.model,
-            args.api_key,
-            min(args.request_timeout, 60),
-            probe_messages,
-            cache_prompt=False,
-        )
-        chat_check["ok"] = True
-        chat_check["seconds"] = round(time.time() - started, 2)
-    except (UserError, json.JSONDecodeError) as error:
-        chat_check["detail"] = str(error)
+    # Classification is one call per note, so a backend that reasons before
+    # answering costs hundreds of hidden tokens per note. Report that here
+    # rather than letting a whole-vault run discover it slowly.
+    chat_probe = forge_llm.service_doctor(
+        chat_service(args), expect_non_thinking=not args.think_prefill, timeout=min(args.request_timeout, 60)
+    )
+    chat_check = {
+        "ok": chat_probe["reachable"],
+        "url": chat_probe["url"],
+        "model": chat_probe["model"],
+        "detail": chat_probe.get("detail"),
+    }
+    for key in ("thinking", "hiddenTokens", "modelMismatch", "servedModels"):
+        if key in chat_probe:
+            chat_check[key] = chat_probe[key]
     checks["chat"] = chat_check
     ok = ok and chat_check["ok"]
+    if chat_probe.get("warning"):
+        warnings.append(chat_probe["warning"])
     if args.no_embeddings:
         checks["embeddings"] = {"ok": True, "skipped": True}
     else:
-        probe = forge_embeddings.embeddings_doctor(url=args.embeddings_url, model=args.embeddings_model)
+        embeddings_probe = forge_embeddings.embeddings_doctor(url=args.embeddings_url, model=args.embeddings_model)
         checks["embeddings"] = {
-            "ok": probe["reachable"],
-            "url": probe["url"],
-            "model": probe["model"],
-            "detail": probe["detail"],
+            "ok": embeddings_probe["reachable"],
+            "url": embeddings_probe["url"],
+            "model": embeddings_probe["model"],
+            "detail": embeddings_probe["detail"],
         }
-        ok = ok and probe["reachable"]
-    return structured("ok" if ok else "error", data={"checks": checks})
+        ok = ok and embeddings_probe["reachable"]
+    return structured("ok" if ok else "error", warnings=warnings, data={"checks": checks})
 
 
 class TrackingAction(argparse.Action):
@@ -1517,6 +1936,9 @@ def parse_args(argv):
     parser.add_argument("--near-dupe-auto", type=float, action=TrackingAction)
     parser.add_argument("--near-dupe-review", type=float, action=TrackingAction)
     parser.add_argument("--no-cache-prompt", action="store_true")
+    parser.add_argument("--no-verify", action="store_true", help="skip the thinking-model review of classifications")
+    parser.add_argument("--think-url", help="thinking service used for verification (default: connectedServices.think)")
+    parser.add_argument("--think-model")
     parser.add_argument("--think-prefill", action="store_true", help="prefill an empty think block (for thinking backends like :8008)")
     parser.add_argument("--force-reclassify", action="store_true")
     parser.add_argument("--verbose", action="store_true")
@@ -1532,13 +1954,15 @@ def parse_args(argv):
         return args
     if not args.vault:
         raise UserError(f"{args.mode} requires --vault")
-    args.base_url = normalize_base_url(
-        args.base_url
-        or os.environ.get("VAULT_ORGANIZER_BASE_URL")
-        or os.environ.get("OPENAI_BASE_URL")
-        or DEFAULT_BASE_URL
+    # Skill-specific settings win, then the agent's configured chat service, then
+    # the built-in non-thinking default.
+    resolved = forge_llm.resolve_service(
+        "chat",
+        base_url=args.base_url or os.environ.get("VAULT_ORGANIZER_BASE_URL") or os.environ.get("OPENAI_BASE_URL"),
+        model=args.model or os.environ.get("VAULT_ORGANIZER_MODEL") or os.environ.get("OPENAI_MODEL"),
     )
-    args.model = args.model or os.environ.get("VAULT_ORGANIZER_MODEL") or os.environ.get("OPENAI_MODEL") or DEFAULT_MODEL
+    args.base_url = resolved["url"]
+    args.model = resolved["model"]
     args.api_key = args.api_key or os.environ.get("VAULT_ORGANIZER_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
     args.schema = args.schema or os.environ.get("VAULT_ORGANIZER_SCHEMA") or None
     args.embeddings_url = forge_embeddings.endpoint_url(args.embeddings_url)
@@ -1550,6 +1974,7 @@ def parse_args(argv):
     if not 0 < args.near_dupe_review <= args.near_dupe_auto <= 1:
         raise UserError("--near-dupe-review must be within (0, --near-dupe-auto] and --near-dupe-auto at most 1")
     args.cache_prompt = not args.no_cache_prompt
+    args.verify = not args.no_verify
     return args
 
 
