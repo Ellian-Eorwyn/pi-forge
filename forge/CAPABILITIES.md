@@ -26,8 +26,9 @@ reconciles it.
 - `spreadsheet-analysis`: Analyze, clean, validate, and enrich tabular datasets.
 - `transcript-cleanup`: Clean raw transcripts into readable, structured documents.
 - `transcription`: Transcribe audio/video with per-chunk checkpoints, then correct and clean the transcript.
+- `vault-capture`: Turn a typed or spoken braindump into schema-valid notes in `00 Inbox`, marked `capture_type: generated` and keeping the braindump verbatim; for transcription exports use `vault-transcripts` instead, and run `vault-organizer` afterwards to file the result.
 - `vault-handoff`: Prepare completed artifacts for pi-vault or Obsidian review.
-- `vault-connections`: Search an Obsidian vault by meaning, propose note links for per-id approval, validate completed literature/meta-literature/deep-research runs, propose schema-classified reports for `00 Inbox`, and create evidence-backed concept/practice/place/event/term/work/figure notes from vault-owned templates.
+- `vault-connections`: Search an Obsidian vault by meaning, propose note links for per-id approval, validate completed literature/meta-literature/deep-research runs, propose schema-classified reports for `00 Inbox`, turn a deep-research run into per-subtopic notes with quotes and provenance (`--notes`), and create evidence-backed concept/practice/place/event/term/work/figure notes from vault-owned templates.
 - `vault-organizer`: Classify, de-duplicate, and organize Obsidian notes from a human-maintained vault schema note, with restart-safe resumable runs and a recoverable duplicate quarantine.
 - `vault-transcripts`: Rename, clean, and summarize raw voice-note and meeting transcripts in an Obsidian vault inbox, keeping the original transcription verbatim; run before `vault-organizer` inbox processing.
 - `web-collection`: Archive, organize, and preserve web sources with per-URL checkpoints.

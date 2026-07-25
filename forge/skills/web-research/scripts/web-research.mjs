@@ -7,7 +7,8 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import { JSDOM, VirtualConsole } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import { resolveConnectedServices } from "../../../lib/connected-services.mjs";
-import { callTextWithRetry, resolveService, serviceDoctor } from "../../../lib/forge-llm.mjs";
+import { callTextWithRetry, resolveService, resolveThinkService, serviceDoctor } from "../../../lib/forge-llm.mjs";
+import { verifyPackets } from "../../../lib/forge-verify.mjs";
 import {
 	DEFAULT_MAX_ATTEMPTS,
 	assertCompatibleRun,
@@ -52,6 +53,9 @@ const DEFAULT_DEEP_MAX_CLAIM_EVIDENCE_ITEMS = 48;
 const DEFAULT_EMBEDDING_BATCH_SIZE = 16;
 const DEFAULT_EVIDENCE_BATCH_SOURCES = 3;
 const DEFAULT_EVIDENCE_BATCH_CHARS = 24_000;
+// Enough archived source around a quote for a reviewer to judge whether the
+// extraction follows from it, without turning one packet into a whole page.
+const VERIFY_EXCERPT_CHARS = 1_500;
 const DEEP_SCHEMA_VERSION = 1;
 const ACADEMIC_SCHEMA_VERSION = 1;
 const DEEP_MANIFEST_COLUMNS = [
@@ -2131,6 +2135,11 @@ function deepDefaults(flags) {
 		evidenceBatchSources: flags.evidenceBatchSources ?? DEFAULT_EVIDENCE_BATCH_SOURCES,
 		evidenceBatchChars: flags.evidenceBatchChars ?? DEFAULT_EVIDENCE_BATCH_CHARS,
 		playwrightConcurrency: flags.playwrightConcurrency ?? 1,
+		noVerify: Boolean(flags.noVerify),
+		thinkUrl: flags.thinkUrl ?? null,
+		thinkModel: flags.thinkModel ?? null,
+		chatUrl: flags.chatUrl ?? null,
+		chatModel: flags.chatModel ?? null,
 	};
 }
 
@@ -2183,7 +2192,25 @@ function searchParamsForQuery(query, flags, defaults) {
 	};
 }
 
-async function callLocalJsonModel(runDirectory, task, prompt, fallback, runtime = null) {
+const RESEARCH_SYSTEM =
+	"You are a source-grounded research assistant. Return only valid JSON. Do not invent sources, quotes, or citations.";
+
+// A non-thinking model answers what it is asked and silently skips the rest, so
+// each per-item task names the categories that get missed rather than trusting
+// the schema to imply them (docs/service-split-handoff.md §2.1). These live in
+// the system prompt so the enumeration is part of the cached prefix instead of
+// being re-sent with every batch.
+const EVIDENCE_SYSTEM = `${RESEARCH_SYSTEM}
+
+Work through what each source offers before you answer. Check separately for: definitions and terminology; quantitative results, statistics, and measurements; dates and events; named people and organizations; mechanisms and causes; methods and how something was done; disagreements between sources; and limitations, caveats, and uncertainty. Do not stop at the headline claim.
+
+An empty category is a legitimate answer. A category you did not look at is not.`;
+
+const CLAIM_SYSTEM = `${RESEARCH_SYSTEM}
+
+Disagreement between sources, thin support, and counter-evidence are findings, not noise. Record them as claims with their limits stated, or as gaps. A register that lists only what the sources agree on has lost the part a reader most needs.`;
+
+async function callLocalJsonModel(runDirectory, task, prompt, fallback, runtime = null, systemPrompt = RESEARCH_SYSTEM) {
 	const startedAt = nowIso();
 	const callId = `${task}-${sha256(`${startedAt}\n${prompt}`).slice(0, 12)}`;
 	const chat = runtime?.chat ?? chatService();
@@ -2192,11 +2219,7 @@ async function callLocalJsonModel(runDirectory, task, prompt, fallback, runtime 
 	const request = {
 		model,
 		messages: [
-			{
-				role: "system",
-				content:
-					"You are a source-grounded research assistant. Return only valid JSON. Do not invent sources, quotes, or citations.",
-			},
+			{ role: "system", content: systemPrompt },
 			{ role: "user", content: prompt },
 		],
 		temperature: 0.1,
@@ -2777,6 +2800,7 @@ function writeDeepArtifacts(runDirectory, state) {
 			embeddingEvents: state.embeddingLog.length,
 		},
 		budgetEvents: state.budgetEvents,
+		verification: state.verification ?? { skipped: "verification did not run", evidence: null, claims: null },
 	});
 	writeJsonl(join(runDirectory, "query_log.jsonl"), state.queryLog);
 	writeJson(join(runDirectory, "source_index.json"), {
@@ -2844,6 +2868,32 @@ function buildSourcesMarkdown(state) {
 	return `${lines.join("\n")}\n`;
 }
 
+function deepVerificationSection(state) {
+	const verification = state.verification;
+	if (!verification || verification.skipped) {
+		return [
+			"## Verification",
+			"",
+			`Nothing was reviewed: ${verification?.skipped ?? "verification did not run"}.`,
+			"The evidence and claims below carry no thinking-model review. That is not the same as approval.",
+			"",
+		];
+	}
+	const lines = ["## Verification", ""];
+	for (const [label, summary] of [
+		["Evidence", verification.evidence],
+		["Claims", verification.claims],
+	]) {
+		if (!summary) continue;
+		lines.push(`- ${label} reviewed: ${summary.verified}, accepted ${summary.ok}, flagged ${summary.flagged}`);
+		if (summary.flagged) lines.push(`  - Flagged: ${summary.flaggedIds.map((id) => `\`${id}\``).join(", ")}`);
+	}
+	lines.push("");
+	lines.push("Flagged items are kept, not deleted, and are marked where they appear above.");
+	lines.push("");
+	return lines;
+}
+
 function buildDeepReport(state) {
 	const sourceById = new Map(state.sources.map((source) => [source.sourceId, source]));
 	const evidenceById = new Map(state.evidenceItems.map((item) => [item.evidenceId, item]));
@@ -2859,6 +2909,9 @@ function buildDeepReport(state) {
 		lines.push(`- Sources: ${claim.sourceIds.map((id) => `\`${id}\``).join(", ")}`);
 		lines.push(`- Evidence: ${claim.evidenceIds.map((id) => `\`${id}\``).join(", ")}`);
 		if (claim.notes) lines.push(`- Notes: ${claim.notes}`);
+		if (claim.verification?.verdict === "flag") {
+			lines.push(`- **Flagged in review**: ${claim.verification.reason}`);
+		}
 		for (const evidenceId of claim.evidenceIds) {
 			const evidence = evidenceById.get(evidenceId);
 			const source = evidence ? sourceById.get(evidence.sourceId) : null;
@@ -2868,6 +2921,7 @@ function buildDeepReport(state) {
 		}
 		lines.push("");
 	}
+	lines.push(...deepVerificationSection(state));
 	lines.push("## Gaps and Limits", "");
 	if (state.gaps.length === 0) lines.push("- No model-identified gaps were recorded.");
 	for (const gap of state.gaps) {
@@ -2885,6 +2939,46 @@ function buildDeepReport(state) {
 		lines.push(`- \`${source.sourceId}\` ${source.title || "Untitled"} - ${source.finalUrl || source.sourceUrl}`);
 	}
 	return `${lines.join("\n")}\n`;
+}
+
+/**
+ * A run that claims to have been verified has to be able to show its work.
+ *
+ * A run that was not verified is valid — the thinking service may have been
+ * down — but it is a warning, never silence, because an unreviewed report reads
+ * exactly like a reviewed one.
+ */
+function validateDeepVerification(runDirectory, evidenceItems, claims, errors, warnings) {
+	const runPath = join(runDirectory, "research_run.json");
+	if (!existsSync(runPath)) return;
+	let verification = null;
+	try {
+		verification = JSON.parse(readFileSync(runPath, "utf8")).verification ?? null;
+	} catch {
+		return; // an unparseable research_run.json is already an error above
+	}
+	if (!verification || verification.skipped) {
+		warnings.push(`evidence and claims were not verified: ${verification?.skipped ?? "verification did not run"}`);
+		return;
+	}
+	for (const [name, records, idKey] of [
+		["verify_evidence.jsonl", evidenceItems, "evidenceId"],
+		["verify_claims.jsonl", claims, "claimId"],
+	]) {
+		// Nothing to review means nothing to journal, and a run that found no
+		// evidence has its own gap entry saying so.
+		if (records.length === 0) continue;
+		const journalPath = join(runDirectory, name);
+		if (!existsSync(journalPath)) {
+			errors.push(`${name} is missing but research_run.json says verification ran`);
+			continue;
+		}
+		const covered = new Set(readJsonl(journalPath).map((row) => row.id));
+		const missing = records.map((record) => record[idKey]).filter((id) => id && !covered.has(id));
+		if (missing.length > 0) {
+			errors.push(`${name} does not cover ${missing.length} reviewed item(s): ${missing.slice(0, 5).join(", ")}`);
+		}
+	}
 }
 
 function validateDeepRun(runDirectory, options = {}) {
@@ -2984,6 +3078,7 @@ function validateDeepRun(runDirectory, options = {}) {
 		const headers = rows.shift() ?? [];
 		if (headers.join(",") !== DEEP_MANIFEST_COLUMNS.join(",")) errors.push("web_manifest.csv columns do not match the required contract");
 	}
+	validateDeepVerification(runDirectory, evidenceItems, claims, errors, warnings);
 	const result = { valid: errors.length === 0, errors, warnings };
 	if (options.writeReport !== false) writeJson(join(runDirectory, "validation_report.json"), result);
 	if (options.emit !== false) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
@@ -3047,7 +3142,19 @@ async function commandDoctor(options) {
 		chatProbe = await serviceDoctor(resolveService("chat", { chatUrl: options.chatUrl, chatModel: options.chatModel }), { expectNonThinking: true, timeoutMs: 15_000 });
 		if (chatProbe.warning) remediation.push(chatProbe.warning);
 	}
-	const report = { tools, capabilities, searxng, chat, chatProbe, embeddings, remediation };
+	// Deep runs review their own evidence and claims on the thinking service.
+	// An unreachable reviewer does not stop a run, but it does mean the report
+	// will say nothing was verified, which is worth knowing beforehand.
+	const think = resolveThinkService({ thinkUrl: options.thinkUrl, thinkModel: options.thinkModel });
+	let thinkProbe = null;
+	if (think.enabled) {
+		thinkProbe = await serviceDoctor(think, { timeoutMs: 15_000 });
+		if (!thinkProbe.reachable) remediation.push("thinking service unreachable; deep runs would report that nothing was verified");
+		if (think.fallback) remediation.push("no thinking service is configured; deep verification would run on the bulk service");
+	} else {
+		remediation.push("no thinking service is configured; deep runs would not be verified");
+	}
+	const report = { tools, capabilities, searxng, chat, chatProbe, think, thinkProbe, embeddings, remediation };
 	if (options.json) {
 		process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 		return;
@@ -3391,11 +3498,135 @@ async function extractEvidenceBatches(runDirectory, sources, state, options, run
 			evidenceBatchPrompt(batch, state.question, options.evidenceBatchChars),
 			{ evidence: [] },
 			runtime,
+			EVIDENCE_SYSTEM,
 		);
 		state.modelCalls.push(record);
 		state.evidenceItems.push(...sanitizeBatchedEvidence(value, batch, state.evidenceItems.length + 1));
 		for (const source of batch) source.evidenceExtracted = true;
 	}
+}
+
+const EVIDENCE_VERIFY_SYSTEM = `You are checking extracted research evidence against the source text it came from, before it is written into a report.
+
+Each item shows an extracted statement, the quote it claims to rest on, and an excerpt of the archived source around that quote. Flag an item only when:
+
+- the source excerpt does not support the statement
+- the statement is more certain than the source is, or drops a caveat the source attached
+- it is marked "explicit" but the source only implies it
+- it attributes something to the wrong party, or to the source's own summary of someone else's position
+
+Faithful extraction is ok even if you would have selected differently, worded it differently, or taken more. Do not flag an item for being brief, for omitting context you would have included, or for being low confidence when it says so. If the excerpt is too short to judge, that is not a flag.`;
+
+const CLAIM_VERIFY_SYSTEM = `You are checking a research claim against the evidence cited for it, before it is written into a report.
+
+Each item shows a claim and the full text and quotes of every evidence item it cites. Flag a claim only when:
+
+- the cited evidence does not support it
+- it generalizes past what the evidence covers, in scope, population, or time
+- it states as settled something the cited evidence disagrees about, without saying so
+- its confidence is plainly higher than the evidence warrants
+
+A claim that is narrow, hedged, or unexciting is doing its job. Do not flag a claim because you would have phrased it differently or because you know more about the subject than the evidence does.`;
+
+function evidenceVerifyItems(state, sourcesById) {
+	const items = [];
+	for (const item of state.evidenceItems) {
+		const source = sourcesById.get(item.sourceId);
+		items.push({
+			id: item.evidenceId,
+			statement: item.text,
+			directQuote: item.directQuote,
+			interpretation: item.interpretation,
+			confidence: item.confidence,
+			sourceUrl: source?.finalUrl ?? null,
+			// The verifier must see the source, not a paraphrase of it: a reviewer
+			// given only the extraction has nothing to check it against and
+			// rubber-stamps (docs/service-split-handoff.md §7.4).
+			sourceExcerpt: sourceExcerptFor(source, item),
+		});
+	}
+	return items;
+}
+
+function sourceExcerptFor(source, item) {
+	const text = source?.text ?? "";
+	if (!text) return null;
+	const anchor = item.directQuote ?? item.text.slice(0, 80);
+	const index = anchor ? text.toLowerCase().indexOf(normalizeWhitespace(anchor).toLowerCase().slice(0, 60)) : -1;
+	if (index === -1) return text.slice(0, VERIFY_EXCERPT_CHARS);
+	const start = Math.max(0, index - Math.floor(VERIFY_EXCERPT_CHARS / 3));
+	return text.slice(start, start + VERIFY_EXCERPT_CHARS);
+}
+
+function claimVerifyItems(state) {
+	const evidenceById = new Map(state.evidenceItems.map((item) => [item.evidenceId, item]));
+	return state.claims.map((claim) => ({
+		id: claim.claimId,
+		claim: claim.text,
+		confidence: claim.confidence,
+		notes: claim.notes,
+		citedEvidence: claim.evidenceIds
+			.map((evidenceId) => evidenceById.get(evidenceId))
+			.filter(Boolean)
+			.map((item) => ({ id: item.evidenceId, text: item.text, quote: item.directQuote, confidence: item.confidence })),
+	}));
+}
+
+async function verifyDeepRun(runDirectory, state, sources, options) {
+	if (options.noVerify) {
+		return { skipped: "verification was disabled with --no-verify", evidence: null, claims: null };
+	}
+	const think = resolveThinkService({ thinkUrl: options.thinkUrl, thinkModel: options.thinkModel });
+	if (!think.enabled) {
+		return { skipped: "no thinking service is configured", evidence: null, claims: null };
+	}
+	const sourcesById = new Map(sources.map((source) => [source.sourceId, source]));
+	const evidenceItems = evidenceVerifyItems(state, sourcesById);
+	const claimItems = claimVerifyItems(state);
+	const progress = (message) => process.stderr.write(`${message}\n`);
+	try {
+		const evidenceVerdicts = await verifyPackets(think, EVIDENCE_VERIFY_SYSTEM, evidenceItems, {
+			journalPath: join(runDirectory, "verify_evidence.jsonl"),
+			timeoutMs: 600_000,
+			progress,
+		});
+		const claimVerdicts = await verifyPackets(think, CLAIM_VERIFY_SYSTEM, claimItems, {
+			journalPath: join(runDirectory, "verify_claims.jsonl"),
+			timeoutMs: 600_000,
+			progress,
+		});
+		// Nothing is dropped. A flagged item keeps its record and carries the
+		// reviewer's objection into the report, so a reader can see what was
+		// doubted instead of silently not seeing it at all.
+		annotateVerdicts(state.evidenceItems, "evidenceId", evidenceVerdicts);
+		annotateVerdicts(state.claims, "claimId", claimVerdicts);
+		return {
+			skipped: null,
+			evidence: summarizeVerdicts(evidenceVerdicts),
+			claims: summarizeVerdicts(claimVerdicts),
+		};
+	} catch (error) {
+		// An unreachable reviewer must never read as approval.
+		return { skipped: error instanceof Error ? error.message : String(error), evidence: null, claims: null };
+	}
+}
+
+function annotateVerdicts(records, idKey, verdicts) {
+	for (const record of records) {
+		const verdict = verdicts[record[idKey]];
+		if (verdict) record.verification = { verdict: verdict.verdict, reason: verdict.reason || null };
+	}
+}
+
+function summarizeVerdicts(verdicts) {
+	const entries = Object.entries(verdicts);
+	const flagged = entries.filter(([, verdict]) => verdict.verdict === "flag");
+	return {
+		verified: entries.length,
+		ok: entries.length - flagged.length,
+		flagged: flagged.length,
+		flaggedIds: flagged.map(([id]) => id),
+	};
 }
 
 async function commandDeep(positionals, flags) {
@@ -3606,16 +3837,23 @@ async function commandDeep(positionals, flags) {
 
 	let claimValue = { claims: [], gaps: [] };
 	if (canCallDeepModel(state, options, "register-claims")) {
-		const claimResult = await callLocalJsonModel(runDirectory, "register-claims", claimPrompt(question, state.evidenceItems, options.maxClaimEvidenceItems), {
-			claims: [],
-			gaps: [],
-		}, runtime);
+		const claimResult = await callLocalJsonModel(
+			runDirectory,
+			"register-claims",
+			claimPrompt(question, state.evidenceItems, options.maxClaimEvidenceItems),
+			{ claims: [], gaps: [] },
+			runtime,
+			CLAIM_SYSTEM,
+		);
 		claimValue = claimResult.value;
 		state.modelCalls.push(claimResult.record);
 	}
 	const { claims, gaps } = sanitizeClaims(claimValue, state.evidenceItems);
 	state.claims = claims;
 	state.gaps = appendBudgetGaps(state, gaps);
+	// Every bulk call is finished by here, so review never interleaves with
+	// extraction and both prefix caches stay warm.
+	state.verification = await verifyDeepRun(runDirectory, state, state.sources ?? [], options);
 	acquisitionContext.metrics.embeddingEvents = state.embeddingLog.length;
 	acquisitionContext.metrics.embeddingCacheHits = state.embeddingLog.filter((event) => event.status === "hit").length;
 	acquisitionContext.metrics.embeddingCacheMisses = state.embeddingLog.filter((event) => event.status === "miss").length;
@@ -3947,6 +4185,9 @@ const FLAG_SPECS = {
 	"--no-render": { key: "noRender", value: false },
 	"--no-browser": { key: "noBrowser", value: false },
 	"--no-embeddings": { key: "noEmbeddings", value: false },
+	"--no-verify": { key: "noVerify", value: false },
+	"--think-url": { key: "thinkUrl", value: true },
+	"--think-model": { key: "thinkModel", value: true },
 	"--force-refresh": { key: "forceRefresh", value: false },
 	"--json": { key: "json", value: false },
 	"--item": { key: "item", value: true },

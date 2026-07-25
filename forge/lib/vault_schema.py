@@ -51,6 +51,8 @@ REQUIRED_SECTIONS = [
     "Folder routing",
 ]
 COMPILED_SCHEMA_VERSION = 2
+FRONTMATTER_KEY_RE = re.compile(r"^([a-z][a-z0-9_]*):(.*)$")
+LIST_ITEM_RE = re.compile(r"^(\s*)-\s+(.*)$")
 
 
 class UserError(Exception):
@@ -656,6 +658,75 @@ def split_frontmatter(data):
                 }
         return {"malformed": True, "body": text, "frontmatter_text": "", "had_frontmatter": True, "had_bom": had_bom}
     return {"malformed": False, "body": text, "frontmatter_text": "", "had_frontmatter": False, "had_bom": had_bom}
+
+
+def parse_frontmatter(text):
+    """Parse the inner lines of a YAML frontmatter block into {key: str | list}.
+
+    Read-only and advisory: it feeds property lookup and already-linked
+    filtering. Writes go through ``serialize_frontmatter`` or an additive text
+    merge, so a parse miss can degrade a proposal but can never corrupt a note.
+    """
+    values = {}
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        match = FRONTMATTER_KEY_RE.match(lines[index])
+        if not match:
+            index += 1
+            continue
+        key, inline = match.group(1), match.group(2).strip()
+        if inline.startswith("[") and inline.endswith("]"):
+            body = inline[1:-1].strip()
+            values[key] = [strip_yaml_scalar(part) for part in split_flow_items(body)] if body else []
+            index += 1
+            continue
+        if inline:
+            values[key] = strip_yaml_scalar(inline)
+            index += 1
+            continue
+        items = []
+        index += 1
+        while index < len(lines):
+            item = LIST_ITEM_RE.match(lines[index])
+            if not item:
+                break
+            items.append(strip_yaml_scalar(item.group(2).strip()))
+            index += 1
+        values[key] = items
+    return values
+
+
+def split_flow_items(body):
+    items = []
+    current = ""
+    quote = ""
+    for character in body:
+        if quote:
+            current += character
+            if character == quote:
+                quote = ""
+            continue
+        if character in "\"'":
+            quote = character
+            current += character
+            continue
+        if character == ",":
+            items.append(current)
+            current = ""
+            continue
+        current += character
+    if current.strip():
+        items.append(current)
+    return [item for item in (part.strip() for part in items) if item]
+
+
+def strip_yaml_scalar(value):
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        inner = text[1:-1]
+        return inner.replace('\\"', '"').replace("\\\\", "\\") if text[0] == '"' else inner
+    return text
 
 
 def note_title(path, body):

@@ -57,6 +57,33 @@ Nothing is written without the user naming the proposal ids they approve.
    override the derived filename prefix, and `--limit` to cap wiki candidates.
    The command invokes the source workflow's validator in read-only mode and
    fails closed on an incomplete run or a missing selected-kind template.
+
+   For a **deep-research** run, add `--notes` when the user wants the research
+   as notes rather than as one report:
+
+   ```bash
+   python3 <skill-directory>/scripts/vault-connections.py import-run <run-directory> --vault <vault> --notes
+   ```
+
+   This groups the run's claims into one note per subtopic, writes each an
+   opening paragraph, and renders the rest deterministically: a `## Findings`
+   list of the claims with the quotes behind them, a `## Sources` list of URLs,
+   and a `## Provenance` block naming the source run, its fingerprint, and the
+   claim ids. Every note is a proposal like any other, forced to
+   `capture_type: generated`, and capped by `--notes-limit` (6 by default).
+
+   Three things are worth relaying to the user:
+   - No claim is dropped. Anything the grouping missed lands in a final "Further
+     Findings" note.
+   - A claim the source run's own reviewer flagged is left out of the note body
+     and listed under `## Provenance` as excluded.
+   - The notes are reviewed on the thinking model. A flagged note is still
+     proposed, with the objection in a callout at the top — it is the user's
+     decision, not the reviewer's.
+
+   `--notes` needs no templates, so it works in a vault that has not written its
+   wiki templates yet; the wiki half is skipped with a warning naming the exact
+   paths it wanted.
 6. Propose connections. Start with `--limit` on a first run so the user sees the
    shape of the output before committing to a long batch:
 

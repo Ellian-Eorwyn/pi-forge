@@ -58,6 +58,7 @@ from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
     pad2,
     parse_assignment,
     parse_bullet_registry,
+    parse_frontmatter,
     parse_legacy_output,
     parse_schema_note,
     path_is_inside,
@@ -615,6 +616,44 @@ def plan_dedupe(args, vault, items, index_entries, warnings, schema_label="<sche
     return result, losers
 
 
+def carry_forward_provenance(validated, frontmatter_text, schema, warnings):
+    """Restore machine-provenance properties the classifier does not own.
+
+    Filing replaces a note's frontmatter wholesale from a model response, so a
+    ``capture_type: generated`` or ``processed_by`` mark written by another
+    skill would quietly disappear the first time the note was organized. How a
+    note was made is not a classification judgment, and a note does not stop
+    being machine-made because a later pass read it as prose. Both keys are
+    taken from the note's previous frontmatter, and the classifier's own value
+    for ``processed_by`` is discarded: scripts are its only writers.
+    """
+    metadata = validated.get("metadata")
+    if not isinstance(metadata, dict):
+        return validated
+    metadata.pop("processed_by", None)
+    previous = parse_frontmatter(frontmatter_text or "")
+
+    if previous.get("capture_type") == "generated" and metadata.get("capture_type") != "generated":
+        if "generated" in schema["capture_types"]:
+            replaced = metadata.get("capture_type")
+            metadata["capture_type"] = "generated"
+            if replaced:
+                warnings.append(f"kept capture_type: generated (classified as {replaced})")
+        else:
+            warnings.append("previous capture_type: generated dropped: schema no longer defines it")
+
+    processed_by = previous.get("processed_by")
+    if isinstance(processed_by, str):
+        processed_by = [processed_by]
+    if processed_by and schema["properties"].get("processed_by", {}).get("shape") == "list":
+        clean = [item for item in processed_by if isinstance(item, str) and item and not has_control_character(item)]
+        if clean:
+            metadata["processed_by"] = clean
+    elif processed_by:
+        warnings.append("previous processed_by dropped: schema does not define it as a list property")
+    return validated
+
+
 def classify_note(args, schema, title, relative_source, frontmatter_text, body, schema_hash, cache, cache_path):
     body_hash = sha256_text(normalize_body_for_hash(body))
     frontmatter_hash = sha256_text(frontmatter_text or "")
@@ -623,6 +662,7 @@ def classify_note(args, schema, title, relative_source, frontmatter_text, body, 
         cached = cache[key]
         validated, warnings, errors = validate_classification(cached["response"], schema)
         if not errors:
+            carry_forward_provenance(validated, frontmatter_text, schema, warnings)
             return validated, warnings, "cache", key
     excerpt, excerpted = excerpt_body(body)
     response = request_json_with_retry(
@@ -647,6 +687,7 @@ def classify_note(args, schema, title, relative_source, frontmatter_text, body, 
         }, warnings, "model", key
     cache[key] = {"response": response, "stored_at": time.time()}
     save_cache(cache_path, cache)
+    carry_forward_provenance(validated, frontmatter_text, schema, warnings)
     validated["excerpted"] = excerpted
     return validated, warnings, "model", key
 
@@ -867,6 +908,7 @@ def verify_classifications(args, vault, schema, records, run_dir):
         validated, _warnings, errors = validate_classification(response, schema)
         if errors:
             raise UserError("; ".join(errors))
+        carry_forward_provenance(validated, frontmatter["frontmatter_text"], schema, by_path[rel].setdefault("warnings", []))
         return validated
 
     escalations = forge_verify.escalate(flagged, redo, journal_path=journal, progress=progress)

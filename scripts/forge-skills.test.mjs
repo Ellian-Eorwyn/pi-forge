@@ -324,7 +324,7 @@ async function withAsyncWorkspace(callback) {
 	}
 }
 
-function startDeepResearchFixture() {
+function startDeepResearchFixture({ flagVerdicts = new Map() } = {}) {
 	const requests = [];
 	const server = createServer((request, response) => {
 		const url = new URL(request.url, "http://127.0.0.1");
@@ -392,8 +392,21 @@ function startDeepResearchFixture() {
 				const payload = body ? JSON.parse(body) : {};
 				requests.push(payload);
 				const prompt = payload.messages?.at(-1)?.content ?? "";
+				const system = payload.messages?.[0]?.content ?? "";
 				let content = "{}";
-				if (prompt.includes("Plan follow-up web searches")) {
+				if (system.includes('"verdicts"')) {
+					// The deep run's own reviewer, pointed here so verification is
+					// exercised without reaching a real thinking endpoint. Ids named
+					// in flagVerdicts come back flagged.
+					const items = JSON.parse(prompt).items ?? [];
+					content = JSON.stringify({
+						verdicts: items.map((item) => ({
+							id: item.id,
+							verdict: flagVerdicts.has(item.id) ? "flag" : "ok",
+							reason: flagVerdicts.get(item.id) ?? "",
+						})),
+					});
+				} else if (prompt.includes("Plan follow-up web searches")) {
 					content = JSON.stringify({ queries: ["follow-up provenance validation"], rationale: "Need validation source." });
 				} else if (prompt.includes("Extract source-backed evidence")) {
 					const sourceId = prompt.match(/source_id: (src-[a-f0-9]+)/)?.[1] ?? "src-unknown";
@@ -3373,6 +3386,10 @@ test("vault-transcripts Python tests pass", () => {
 	run(python, [join(skillsRoot, "vault-transcripts", "tests", "test_vault_transcripts.py")]);
 });
 
+test("vault-capture Python tests pass", () => {
+	run(python, [join(skillsRoot, "vault-capture", "tests", "test_vault_capture.py")]);
+});
+
 function startChunkWorkerFixture(workspace, options = {}) {
 	const serverPath = join(workspace, "chunk-worker-server.mjs");
 	const requestsPath = join(workspace, "chunk-worker-requests.jsonl");
@@ -3790,6 +3807,9 @@ test("web-research deep creates validated provenance-backed artifacts", async ()
 					],
 					{
 						FORGE_BASE_CHAT_URL: fixture.chat,
+						// Verification runs against the same stub, so deep runs review
+						// themselves without reaching a real thinking endpoint.
+						FORGE_THINK_URL: fixture.chat,
 						FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1",
 					},
 				),
@@ -3833,6 +3853,118 @@ test("web-research deep creates validated provenance-backed artifacts", async ()
 	});
 });
 
+test("web-research deep reviews its own evidence and claims on the thinking service", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startDeepResearchFixture({
+			flagVerdicts: new Map([["ev-0001", "the excerpt does not support this statement"]]),
+		});
+		try {
+			const queries = join(workspace, "verify-queries.txt");
+			writeFileSync(queries, "seed alpha\nseed beta\n");
+			const deepRun = join(workspace, "deep-verified");
+			const result = jsonOutput(
+				await runAsyncWithEnvironment(
+					"node",
+					[
+						script("web-research", "web-research.mjs"),
+						"deep",
+						"--question",
+						"How should deep web research preserve provenance?",
+						"--query-file",
+						queries,
+						"--output",
+						deepRun,
+						"--searxng",
+						fixture.searxng,
+						"--max-iterations",
+						"2",
+						"--limit",
+						"3",
+						"--read-count",
+						"3",
+						"--no-render",
+					],
+					{ FORGE_BASE_CHAT_URL: fixture.chat, FORGE_THINK_URL: fixture.chat, FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1" },
+				),
+			);
+			assert.equal(result.valid, true, JSON.stringify(result.validationErrors));
+
+			const run = JSON.parse(readFileSync(join(deepRun, "research_run.json"), "utf8"));
+			assert.equal(run.verification.skipped, null, JSON.stringify(run.verification));
+			assert.ok(run.verification.evidence.verified > 0, "every evidence item is reviewed");
+			assert.ok(run.verification.claims.verified > 0, "every claim is reviewed");
+
+			// Every reviewed id is journaled, which is what validate checks.
+			const readLines = (path) =>
+				readFileSync(path, "utf8")
+					.trim()
+					.split(/\r?\n/)
+					.filter(Boolean)
+					.map((line) => JSON.parse(line));
+			const journaled = new Set(readLines(join(deepRun, "verify_evidence.jsonl")).map((row) => row.id));
+			for (const item of readLines(join(deepRun, "evidence_items.jsonl"))) {
+				assert.ok(journaled.has(item.evidenceId), `${item.evidenceId} was not journaled`);
+			}
+
+			// A flagged item is kept and surfaced, never quietly dropped.
+			assert.deepEqual(run.verification.evidence.flaggedIds, ["ev-0001"]);
+			const flagged = readLines(join(deepRun, "evidence_items.jsonl")).find((row) => row.evidenceId === "ev-0001");
+			assert.equal(flagged.verification.verdict, "flag");
+			assert.match(readFileSync(join(deepRun, "deep_research_report.md"), "utf8"), /## Verification/);
+
+			// The reviewer must see archived source text, not just the extraction.
+			const verifyRequest = fixture.requests.find((payload) => (payload.messages?.[0]?.content ?? "").includes('"verdicts"'));
+			const reviewed = JSON.parse(verifyRequest.messages.at(-1).content).items;
+			assert.ok(reviewed[0].sourceExcerpt, "the reviewer is given the source excerpt");
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("web-research deep reports an unreachable reviewer instead of implying approval", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startDeepResearchFixture();
+		try {
+			const deepRun = join(workspace, "deep-unverified");
+			await runAsyncWithEnvironment(
+				"node",
+				[
+					script("web-research", "web-research.mjs"),
+					"deep",
+					"--question",
+					"How should deep web research preserve provenance?",
+					"--query",
+					"seed alpha",
+					"--output",
+					deepRun,
+					"--searxng",
+					fixture.searxng,
+					"--max-iterations",
+					"1",
+					"--limit",
+					"2",
+					"--read-count",
+					"2",
+					"--no-render",
+					"--no-verify",
+				],
+				{ FORGE_BASE_CHAT_URL: fixture.chat, FORGE_THINK_URL: fixture.chat },
+			);
+			const run = JSON.parse(readFileSync(join(deepRun, "research_run.json"), "utf8"));
+			assert.match(run.verification.skipped, /--no-verify/);
+			const report = readFileSync(join(deepRun, "deep_research_report.md"), "utf8");
+			assert.match(report, /not the same as approval/);
+			// Still a valid run: not verifying is allowed, hiding it is not.
+			const validation = JSON.parse(readFileSync(join(deepRun, "validation_report.json"), "utf8"));
+			assert.equal(validation.valid, true);
+			assert.ok(validation.warnings.some((warning) => /were not verified/.test(warning)));
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
 test("web-research deep applies whole-run budgets and records budget gaps", async () => {
 	await withAsyncWorkspace(async (workspace) => {
 		const fixture = await startDeepResearchFixture();
@@ -3861,6 +3993,9 @@ test("web-research deep applies whole-run budgets and records budget gaps", asyn
 					],
 					{
 						FORGE_BASE_CHAT_URL: fixture.chat,
+						// Verification runs against the same stub, so deep runs review
+						// themselves without reaching a real thinking endpoint.
+						FORGE_THINK_URL: fixture.chat,
 						FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1",
 					},
 				),
@@ -3918,6 +4053,9 @@ test("web-research deep batches local model work and records local-first schedul
 					],
 					{
 						FORGE_BASE_CHAT_URL: fixture.chat,
+						// Verification runs against the same stub, so deep runs review
+						// themselves without reaching a real thinking endpoint.
+						FORGE_THINK_URL: fixture.chat,
 						FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1",
 					},
 				),
@@ -3968,6 +4106,9 @@ test("web-research deep batches local model work and records local-first schedul
 					],
 					{
 						FORGE_BASE_CHAT_URL: fixture.chat,
+						// Verification runs against the same stub, so deep runs review
+						// themselves without reaching a real thinking endpoint.
+						FORGE_THINK_URL: fixture.chat,
 						FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1",
 					},
 				),
@@ -4012,6 +4153,9 @@ test("web-research deep repairs invalid direct quote candidates and skips checkp
 					],
 					{
 						FORGE_BASE_CHAT_URL: fixture.chat,
+						// Verification runs against the same stub, so deep runs review
+						// themselves without reaching a real thinking endpoint.
+						FORGE_THINK_URL: fixture.chat,
 						FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1",
 					},
 				),
@@ -4313,6 +4457,9 @@ test("web-research deep records unsafe result URLs as failed sources", async () 
 					],
 					{
 						FORGE_BASE_CHAT_URL: fixture.chat,
+						// Verification runs against the same stub, so deep runs review
+						// themselves without reaching a real thinking endpoint.
+						FORGE_THINK_URL: fixture.chat,
 					},
 				),
 			);

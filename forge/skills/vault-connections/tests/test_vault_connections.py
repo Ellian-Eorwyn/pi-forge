@@ -157,6 +157,8 @@ class StubHandler(BaseHTTPRequestHandler):
     classification_type = "note"
     chat_requests = []
     flags = {}
+    grouping = None
+    note_summary = None
 
     def log_message(self, *args):
         pass
@@ -198,6 +200,20 @@ class StubHandler(BaseHTTPRequestHandler):
         message = messages[-1]["content"]
         if "RESEARCH ENTITY CANDIDATES" in joined:
             self._send(200, {"choices": [{"message": {"content": json.dumps({"entities": StubHandler.entities})}}]})
+            return
+        if "You group the claims from one research run" in joined:
+            grouping = StubHandler.grouping
+            if grouping is None:
+                claim_ids = [claim["claimId"] for claim in json.loads(message).get("claims", [])]
+                grouping = {"notes": [{"title": "Heat And Health", "claimIds": claim_ids}]}
+            self._send(200, {"choices": [{"message": {"content": json.dumps(grouping)}}]})
+            return
+        if "You write the opening paragraph of a research note" in joined:
+            title = json.loads(message).get("title", "")
+            self._send(
+                200,
+                {"choices": [{"message": {"content": json.dumps({"summary": StubHandler.note_summary or f"What {title} establishes."})}}]},
+            )
             return
         if "You classify Obsidian Markdown notes" in joined:
             classification = {
@@ -299,6 +315,11 @@ class VaultConnectionsTest(unittest.TestCase):
             "prefer": "cross-domain",
             "max_candidates": 400,
             "min_mentions": 2,
+            "notes": False,
+            "notes_limit": vault_connections.DEFAULT_SUBTOPIC_NOTES,
+            "verify": False,
+            "think_url": None,
+            "think_model": None,
         }
         values.update(overrides)
         return SimpleNamespace(**values)
@@ -1012,6 +1033,182 @@ class VaultConnectionsTest(unittest.TestCase):
             [proposal["sourceArtifact"] for proposal in deep_result["data"]["proposals"] if proposal["id"].startswith("i-")],
             ["deep_research_report.md"],
         )
+
+    def make_deep_run(self, claims=None, evidence=None, sources=None):
+        root = Path(self.temporary.name) / f"deep-notes-{len(list(Path(self.temporary.name).iterdir()))}"
+        root.mkdir()
+        (root / "research_run.json").write_text(json.dumps({"question": "Urban heat"}) + "\n", encoding="utf-8")
+        (root / "run_state.json").write_text('{"status":"complete"}\n', encoding="utf-8")
+        (root / "source_index.json").write_text(
+            json.dumps(
+                {
+                    "sources": sources
+                    or [{"sourceId": "src-1", "finalUrl": "https://example.org/heat", "title": "Heat Study"}]
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (root / "evidence_items.jsonl").write_text(
+            "".join(
+                json.dumps(row) + "\n"
+                for row in (
+                    evidence
+                    or [
+                        {
+                            "evidenceId": "ev-1",
+                            "sourceId": "src-1",
+                            "text": "Shade lowers surface temperature.",
+                            "directQuote": "Shade lowered surface temperature by nine degrees.",
+                        }
+                    ]
+                )
+            ),
+            encoding="utf-8",
+        )
+        (root / "claim_register.jsonl").write_text(
+            "".join(
+                json.dumps(row) + "\n"
+                for row in (
+                    claims
+                    or [
+                        {
+                            "claimId": "cl-1",
+                            "text": "Tree canopy reduces surface temperature.",
+                            "sourceIds": ["src-1"],
+                            "evidenceIds": ["ev-1"],
+                            "confidence": "high",
+                        }
+                    ]
+                )
+            ),
+            encoding="utf-8",
+        )
+        (root / "deep_research_report.md").write_text("# Deep Research\n", encoding="utf-8")
+        return root
+
+    def import_notes(self, run, **overrides):
+        with patch.object(
+            vault_connections,
+            "invoke_upstream_validator",
+            return_value={"valid": True, "complete": True, "warnings": []},
+        ):
+            return vault_connections.command_import_run(self.import_args(run, notes=True, **overrides))
+
+    def test_a_deep_run_becomes_subtopic_notes_with_quotes_and_provenance(self):
+        result = self.import_notes(self.make_deep_run())
+        notes = [proposal for proposal in result["data"]["proposals"] if proposal["id"].startswith("n-")]
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(result["data"]["counts"]["subtopic_notes_proposed"], 1)
+        content = notes[0]["content"]
+        self.assertIn("## Findings", content)
+        self.assertIn("Tree canopy reduces surface temperature.", content)
+        self.assertIn('"Shade lowered surface temperature by nine degrees."', content)
+        self.assertIn("https://example.org/heat", content)
+        self.assertIn("## Provenance", content)
+        self.assertIn("`cl-1`", content)
+        # Forced, not model-chosen: a research note is machine-made.
+        self.assertIn("capture_type: generated", content)
+        self.assertIn("status: complete", content)
+
+    def test_subtopic_notes_are_proposed_not_written(self):
+        run = self.make_deep_run()
+        before = sorted(path.name for path in (self.vault / "00 Inbox").glob("*.md"))
+        self.import_notes(run)
+        self.assertEqual(sorted(path.name for path in (self.vault / "00 Inbox").glob("*.md")), before)
+
+    def test_no_claim_is_dropped_when_the_grouping_misses_one(self):
+        claims = [
+            {"claimId": "cl-1", "text": "Canopy cools streets.", "sourceIds": ["src-1"], "evidenceIds": ["ev-1"]},
+            {"claimId": "cl-2", "text": "Cool roofs cut peak load.", "sourceIds": ["src-1"], "evidenceIds": ["ev-1"]},
+        ]
+        StubHandler.grouping = {"notes": [{"title": "Canopy Cooling", "claimIds": ["cl-1"]}]}
+        try:
+            result = self.import_notes(self.make_deep_run(claims=claims))
+        finally:
+            StubHandler.grouping = None
+        notes = [proposal for proposal in result["data"]["proposals"] if proposal["id"].startswith("n-")]
+        self.assertEqual([note["claimIds"] for note in notes], [["cl-1"], ["cl-2"]])
+        self.assertIn("Further Findings", notes[1]["title"])
+
+    def test_a_claim_flagged_upstream_is_excluded_and_said_so(self):
+        claims = [
+            {"claimId": "cl-1", "text": "Canopy cools streets.", "sourceIds": ["src-1"], "evidenceIds": ["ev-1"]},
+            {
+                "claimId": "cl-2",
+                "text": "Canopy eliminates heat deaths.",
+                "sourceIds": ["src-1"],
+                "evidenceIds": ["ev-1"],
+                "verification": {"verdict": "flag", "reason": "not supported by the excerpt"},
+            },
+        ]
+        result = self.import_notes(self.make_deep_run(claims=claims))
+        notes = [proposal for proposal in result["data"]["proposals"] if proposal["id"].startswith("n-")]
+        self.assertNotIn("cl-2", notes[0]["claimIds"])
+        self.assertIn("Claims excluded as flagged in review", notes[0]["content"])
+        self.assertTrue(any("flagged in the source run" in warning for warning in result["warnings"]))
+
+    def test_a_quote_flagged_upstream_never_reaches_a_note(self):
+        # A claim can pass review on its wording while the extraction beneath it
+        # was rejected. The quote must not ride into the vault on that.
+        evidence = [
+            {"evidenceId": "ev-1", "sourceId": "src-1", "text": "Canopy cools.", "directQuote": "Canopy cooled the street."},
+            {
+                "evidenceId": "ev-2",
+                "sourceId": "src-1",
+                "text": "Canopy cut deaths by a quarter.",
+                "directQuote": "Canopy cut heat deaths by twenty-five percent.",
+                "verification": {"verdict": "flag", "reason": "the excerpt does not contain this figure"},
+            },
+        ]
+        claims = [
+            {"claimId": "cl-1", "text": "Canopy cools streets.", "sourceIds": ["src-1"], "evidenceIds": ["ev-1", "ev-2"]},
+        ]
+        result = self.import_notes(self.make_deep_run(claims=claims, evidence=evidence))
+        notes = [proposal for proposal in result["data"]["proposals"] if proposal["id"].startswith("n-")]
+        content = notes[0]["content"]
+        self.assertIn("Canopy cooled the street.", content)
+        self.assertNotIn("twenty-five percent", content)
+        self.assertIn("Quotes excluded as flagged in review", content)
+        self.assertIn("`ev-2`", content)
+
+    def test_a_claim_whose_evidence_was_all_flagged_is_dropped(self):
+        evidence = [
+            {
+                "evidenceId": "ev-1",
+                "sourceId": "src-1",
+                "text": "Unsupported.",
+                "directQuote": "An invented figure.",
+                "verification": {"verdict": "flag", "reason": "not in the excerpt"},
+            },
+            {"evidenceId": "ev-2", "sourceId": "src-1", "text": "Solid.", "directQuote": "A real quote."},
+        ]
+        claims = [
+            {"claimId": "cl-1", "text": "Rests only on rejected evidence.", "sourceIds": ["src-1"], "evidenceIds": ["ev-1"]},
+            {"claimId": "cl-2", "text": "Rests on kept evidence.", "sourceIds": ["src-1"], "evidenceIds": ["ev-2"]},
+        ]
+        result = self.import_notes(self.make_deep_run(claims=claims, evidence=evidence))
+        notes = [proposal for proposal in result["data"]["proposals"] if proposal["id"].startswith("n-")]
+        covered = {claim_id for note in notes for claim_id in note["claimIds"]}
+        self.assertEqual(covered, {"cl-2"})
+        self.assertIn("cl-1", notes[0]["content"], "the dropped claim is still named under Provenance")
+        self.assertTrue(any("every piece of evidence" in warning for warning in result["warnings"]))
+
+    def test_notes_are_refused_for_a_non_deep_run(self):
+        with self.assertRaisesRegex(vault_connections.UserError, "deep-research run"):
+            self.import_notes(self.make_literature_run())
+
+    def test_a_flagged_note_is_marked_rather_than_dropped(self):
+        StubHandler.flags = {"Heat And Health": "the summary overstates the evidence"}
+        try:
+            result = self.import_notes(self.make_deep_run(), verify=True, think_url=f"{self.base}/v1/chat/completions")
+        finally:
+            StubHandler.flags = {}
+        notes = [proposal for proposal in result["data"]["proposals"] if proposal["id"].startswith("n-")]
+        self.assertEqual(len(notes), 1, "a flagged note is still proposed")
+        self.assertIn("overstates", notes[0]["needsReview"])
+        self.assertIn("Flagged in review", notes[0]["content"])
+        self.assertEqual(result["data"]["verification"]["flagged"], 1)
 
     def test_literature_key_term_table_is_added_to_supported_item_context(self):
         source_run = self.make_literature_run()

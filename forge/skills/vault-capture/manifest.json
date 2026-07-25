@@ -1,0 +1,28 @@
+{
+	"name": "vault-capture",
+	"type": "pi-forge-skill",
+	"version": "0.1.0",
+	"description": "Turn a typed or spoken braindump into schema-valid notes in an Obsidian vault inbox, marked as model-written and keeping the braindump verbatim.",
+	"skill_file": "SKILL.md",
+	"scripts_dir": "scripts",
+	"references_dir": "references",
+	"restart_safe": true,
+	"tools": [
+		{
+			"name": "vault_capture",
+			"description": "Split a braindump into its distinct notes, draft each one as prose in the vault owner's own voice, write schema-valid frontmatter with a forced 'capture_type: generated', and create the notes in '00 Inbox' while keeping the braindump verbatim under a '# Braindump' heading; also proposes approval-gated edits to the vault's voice-and-style note from style feedback. Creates new files only and is inspectable with status/doctor.",
+			"command": "python3 scripts/vault-capture.py",
+			"destructive": true
+		}
+	],
+	"safety": {
+		"destructive_by_default": false,
+		"requires_review_for_filesystem_changes": false,
+		"preserve_provenance_when_applicable": true,
+		"never_deletes_notes": true,
+		"never_modifies_existing_notes": true,
+		"creates_new_inbox_notes_only": true,
+		"preserves_braindump_verbatim": true,
+		"marks_generated_notes": true
+	}
+}

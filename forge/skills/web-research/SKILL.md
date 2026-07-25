@@ -240,6 +240,29 @@ Use `web-research` when you need:
 - Structured findings with source attribution
 - Inline content (not raw file downloads)
 
+## Verification
+
+Evidence extraction and claim registration run on the non-thinking `chat`
+service, one call per batch. A `deep` run then reviews all of it on `think`
+after every bulk call is finished, in batched packets:
+
+- Each evidence item is reviewed against an excerpt of the **archived source
+  text** around its quote, not against a paraphrase. A reviewer with nothing to
+  check against approves everything.
+- Each claim is reviewed against the full text and quotes of the evidence it
+  cites.
+- Nothing is deleted. A flagged item keeps its record, carries the reviewer's
+  objection in `evidence_items.jsonl` or `claim_register.jsonl`, and is marked
+  where it appears in `deep_research_report.md`.
+- Counts land in `research_run.json` under `verification`, and every reviewed id
+  is journaled to `verify_evidence.jsonl` / `verify_claims.jsonl`. `validate`
+  fails when a run claims verification it cannot show.
+
+`--no-verify` skips the review, and both the report and `validate` then say
+plainly that nothing was reviewed. An unreachable thinking service does the same
+thing: it is reported, never treated as approval. Tell the user when a run was
+not verified — an unreviewed report reads exactly like a reviewed one.
+
 ## Safety and Failure Handling
 
 - Only `http` and `https` URLs are fetched. Loopback and cloud-metadata hosts

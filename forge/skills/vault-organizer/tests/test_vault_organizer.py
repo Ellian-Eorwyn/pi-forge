@@ -50,6 +50,7 @@ capture_type: manual
 | `related` | no | list of quoted wikilinks | Related links. |
 | `source_kind` | conditional | controlled scalar | Source kind. |
 | `capture_type` | no | controlled scalar | Capture type. |
+| `processed_by` | no | list | Automated workflows that transformed this note. |
 
 ### Property constraints
 
@@ -136,6 +137,7 @@ type: note
 
 - `manual` — Typed.
 - `chat` — Chat.
+- `generated` — Made by a script, agent, or model.
 
 ## Non-routing topic hubs
 
@@ -679,6 +681,45 @@ class VaultOrganizerV2Tests(unittest.TestCase):
     def record_for(self, result, source):
         plan = json.loads((Path(result["data"]["run_directory"]) / "plan.json").read_text(encoding="utf-8"))
         return next(row for row in plan["records"] if row["source"] == source)
+
+    def classify_one(self, note_text, response, relative="00 Inbox/Marked.md"):
+        self.write_note(relative, note_text)
+        with StubServer([response]) as server:
+            result = self.run_ok("inbox", "--vault", str(self.vault), "--base-url", server.url, "--no-embeddings")
+        return self.record_for(result, relative)
+
+    def test_machine_provenance_survives_filing(self):
+        # Filing rewrites frontmatter from the model's answer. A note that was
+        # generated, or cleaned by another skill, must not be able to lose that
+        # fact just because a classifier read it as ordinary prose.
+        record = self.classify_one(
+            '---\ntype: note\nstatus: raw\ncapture_type: generated\nprocessed_by:\n  - "vault-transcripts"\n---\n'
+            "# Marked\n\nBody.\n",
+            ok_response(),
+        )
+        self.assertEqual(record["metadata"]["capture_type"], "generated")
+        self.assertEqual(record["metadata"]["processed_by"], ["vault-transcripts"])
+        self.assertIn("kept capture_type: generated (classified as manual)", record["warnings"])
+
+    def test_the_classifier_does_not_get_to_write_processed_by(self):
+        record = self.classify_one(
+            "# Plain\n\nA note nobody has processed.\n",
+            ok_response(metadata=dict(ok_response()["metadata"], processed_by=["vault-organizer"])),
+            relative="00 Inbox/Plain.md",
+        )
+        self.assertNotIn("processed_by", record["metadata"])
+
+    def test_provenance_is_dropped_loudly_when_the_schema_lacks_the_property(self):
+        (self.vault / "99 System" / "0.00 Vault Schema.md").write_text(
+            SCHEMA.replace("| `processed_by` | no | list | Automated workflows that transformed this note. |\n", ""),
+            encoding="utf-8",
+        )
+        record = self.classify_one(
+            '---\ntype: note\nstatus: raw\nprocessed_by:\n  - "vault-transcripts"\n---\n# Marked\n\nBody.\n',
+            ok_response(),
+        )
+        self.assertNotIn("processed_by", record["metadata"])
+        self.assertIn("previous processed_by dropped: schema does not define it as a list property", record["warnings"])
 
     def verify_run(self, chat_responses, flags=None, escalations=None, *extra):
         """Classification and verification against two separate stub endpoints."""

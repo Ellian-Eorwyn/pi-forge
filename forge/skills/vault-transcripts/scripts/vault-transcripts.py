@@ -1536,6 +1536,14 @@ def frontmatter_metadata(schema, recording_type):
         "status": "raw",
         "capture_type": TYPE_TO_CAPTURE[recording_type],
     }
+    # capture_type stays the recording's own channel: this note did enter the
+    # vault as voice or as a meeting, and that stays true however much cleanup
+    # ran. What the pipeline did to it is a separate fact, and a separate
+    # property, so a reader can tell a hand-typed note from a model-cleaned one
+    # without losing how either arrived. Vaults whose schema note predates the
+    # property simply do not carry it.
+    if schema["properties"].get("processed_by", {}).get("shape") == "list":
+        metadata["processed_by"] = [WORKFLOW]
     metadata = {key: value for key, value in metadata.items() if key in schema["properties"]}
     if metadata.get("type") not in schema["types"]:
         raise UserError(f"schema does not define note type {metadata.get('type')!r}")

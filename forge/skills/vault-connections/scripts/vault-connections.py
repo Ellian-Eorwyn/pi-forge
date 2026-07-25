@@ -40,7 +40,9 @@ from vault_classification import (
     validate_classification,
 )
 from vault_schema import (
+    FRONTMATTER_KEY_RE,
     INBOX_DIR,
+    LIST_ITEM_RE,
     RESERVED_WINDOWS_NAMES,
     UserError,
     compile_destination,
@@ -48,6 +50,7 @@ from vault_schema import (
     link_basename,
     normalize_body_for_hash,
     note_title,
+    parse_frontmatter,
     parse_schema_note,
     path_is_inside,
     project_name,
@@ -59,7 +62,9 @@ from vault_schema import (
     sha256_bytes,
     sha256_file,
     sha256_text,
+    split_flow_items,
     split_frontmatter,
+    strip_yaml_scalar,
     valid_wikilink,
     validate_filename_title,
     wikilink_target,
@@ -92,6 +97,9 @@ CROSS_DOMAIN_BONUS = 0.06
 CROSS_SUBDOMAIN_BONUS = 0.02
 SAME_FOLDER_PENALTY = 0.04
 DEFAULT_MIN_MENTIONS = 2
+# One research run is a handful of subjects, not a whole shelf. Past this the
+# notes stop being about one thing each.
+DEFAULT_SUBTOPIC_NOTES = 6
 DEFAULT_SEARCH_LIMIT = 10
 SEARCH_RRF_K = 60
 MIN_BODY_CHARS = 80
@@ -152,8 +160,6 @@ THINK_PREFILL = "<think>\n\n</think>\n\n"
 THINK_BLOCK_RE = forge_llm.THINK_BLOCK_RE
 WIKILINK_RE = re.compile(r"\[\[([^\]\r\n]+)\]\]")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
-FRONTMATTER_KEY_RE = re.compile(r"^([a-z][a-z0-9_]*):(.*)$")
-LIST_ITEM_RE = re.compile(r"^(\s*)-\s+(.*)$")
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
@@ -259,76 +265,12 @@ def unique_run_directory(vault):
 
 
 # --------------------------------------------------------------------------- #
-# Minimal frontmatter reader
+# Wikilink and frontmatter helpers
 #
-# Read-only and advisory: it feeds already-linked filtering and property lookup.
-# Writes never go through it — merge_related edits the frontmatter text directly,
-# so a parse miss can degrade a proposal but can never corrupt a note.
+# The frontmatter reader itself lives in vault_schema, so every vault skill
+# reads a note's properties the same way; merge_related still edits the
+# frontmatter text directly rather than round-tripping through it.
 # --------------------------------------------------------------------------- #
-
-
-def parse_frontmatter(text):
-    """Parse the inner lines of a YAML frontmatter block into {key: str | list}."""
-    values = {}
-    lines = text.splitlines()
-    index = 0
-    while index < len(lines):
-        match = FRONTMATTER_KEY_RE.match(lines[index])
-        if not match:
-            index += 1
-            continue
-        key, inline = match.group(1), match.group(2).strip()
-        if inline.startswith("[") and inline.endswith("]"):
-            body = inline[1:-1].strip()
-            values[key] = [strip_yaml_scalar(part) for part in split_flow_items(body)] if body else []
-            index += 1
-            continue
-        if inline:
-            values[key] = strip_yaml_scalar(inline)
-            index += 1
-            continue
-        items = []
-        index += 1
-        while index < len(lines):
-            item = LIST_ITEM_RE.match(lines[index])
-            if not item:
-                break
-            items.append(strip_yaml_scalar(item.group(2).strip()))
-            index += 1
-        values[key] = items
-    return values
-
-
-def split_flow_items(body):
-    items = []
-    current = ""
-    quote = ""
-    for character in body:
-        if quote:
-            current += character
-            if character == quote:
-                quote = ""
-            continue
-        if character in "\"'":
-            quote = character
-            current += character
-            continue
-        if character == ",":
-            items.append(current)
-            current = ""
-            continue
-        current += character
-    if current.strip():
-        items.append(current)
-    return [item for item in (part.strip() for part in items) if item]
-
-
-def strip_yaml_scalar(value):
-    text = value.strip()
-    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
-        inner = text[1:-1]
-        return inner.replace('\\"', '"').replace("\\\\", "\\") if text[0] == '"' else inner
-    return text
 
 
 def link_targets_in(text):
@@ -1334,6 +1276,11 @@ def import_source_records(run_directory, run_type):
                         "sourceIds": row.get("sourceIds") or [],
                         "evidenceIds": row.get("evidenceIds") or [],
                         "source": "",
+                        "confidence": row.get("confidence") or "",
+                        # The source run's own reviewer already judged this. Its
+                        # verdict travels with the record so a note can leave a
+                        # doubted claim out and say that it did.
+                        "verification": row.get("verification") or None,
                     }
                 )
         for row in evidence:
@@ -1346,6 +1293,8 @@ def import_source_records(run_directory, run_type):
                         "quote": row.get("directQuote") or "",
                         "sourceIds": [value for value in [row.get("sourceId")] if value],
                         "source": "",
+                        "confidence": row.get("confidence") or "",
+                        "verification": row.get("verification") or None,
                     }
                 )
     return records
@@ -1539,7 +1488,10 @@ def classify_import_artifact(args, schema, relative_name, path):
     split = split_frontmatter(path.read_bytes())
     if split["malformed"]:
         raise UserError(f"artifact has malformed frontmatter: {relative_name}")
-    title = note_title(path, split["body"])
+    return classify_import_body(args, schema, relative_name, note_title(path, split["body"]), split)
+
+
+def classify_import_body(args, schema, relative_name, title, split):
     messages = classification_messages(
         schema,
         title,
@@ -1592,6 +1544,360 @@ def prepare_import_classification(response):
     return prepared
 
 
+# --------------------------------------------------------------------------- #
+# Subtopic notes from a deep-research run
+#
+# A completed deep run already produces one long report. That is the right shape
+# for reading once and the wrong shape for a vault, where a note is found by
+# being about one thing. These build one note per subtopic instead, each carrying
+# the claims it covers, the quotes behind them, and where they came from.
+# --------------------------------------------------------------------------- #
+
+TOPIC_NOTES_SYSTEM = (
+    "You group the claims from one research run into the notes they should become in a personal knowledge vault. "
+    "A note is about one thing, and is found later by someone looking for that thing. "
+    "Work through the claims and group the ones that answer the same question, describe the same mechanism, or "
+    "cover the same entity. Check separately for: definitions and background; findings and results; disagreement "
+    "between sources; methods; limitations; and practical implications. A group is a note. "
+    "Every claim belongs to exactly one note, and no note repeats what another covers. Never create a note that "
+    "summarizes the run as a whole: the run's own report already does that. "
+    "Return exactly one JSON object: "
+    '{"notes": [{"title": "What the note is about", "claimIds": ["cl-0001"]}]}. '
+    "Titles name the subject in plain words, under 60 characters, with no characters that would break a filename."
+)
+
+NOTE_SUMMARY_SYSTEM = (
+    "You write the opening paragraph of a research note for a personal knowledge vault. "
+    "You are given the note's title and the claims it covers, each with the quotes behind it. "
+    "Write one paragraph saying what this note establishes and how confident the evidence is. "
+    "Use only what the claims say. Never add a fact, number, date, or name that is not in them, and never cite a "
+    "source that is not listed. Where the claims disagree or the support is thin, say so plainly. "
+    'Return exactly one JSON object: {"summary": "the paragraph"}.'
+)
+
+VERIFY_NOTES_SYSTEM = (
+    "You are reviewing research notes before they are proposed for someone's Obsidian vault. "
+    "Each item shows a note's title, its opening summary, and every claim it covers with the quotes behind them. "
+    "Flag a note only when: the summary states something the claims do not support; it presents contested findings "
+    "as settled; its title does not describe what the note actually covers; or the claims grouped together are not "
+    "about the same thing. "
+    "Do not flag a note because you would have grouped the claims differently, written the summary differently, or "
+    "included more. A narrow, hedged note is doing its job."
+)
+
+
+def deep_run_sources(run_directory):
+    """Source id -> {url, title}, so a note can say where a quote came from."""
+    path = run_directory / "source_index.json"
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    sources = {}
+    for source in payload.get("sources") or []:
+        source_id = source.get("sourceId")
+        if source_id:
+            sources[source_id] = {
+                "url": source.get("finalUrl") or source.get("sourceUrl") or "",
+                "title": source.get("title") or "",
+            }
+    return sources
+
+
+def deep_run_claims(records):
+    claims = {record["id"]: record for record in records if record.get("kind") == "claim"}
+    evidence = {record["id"]: record for record in records if record.get("kind") == "evidence"}
+    return claims, evidence
+
+
+def flagged_ids(records):
+    """Records the source run's own reviewer rejected."""
+    return {
+        record["id"]
+        for record in records
+        if (record.get("verification") or {}).get("verdict") == "flag"
+    }
+
+
+def claim_detail(claim, evidence, sources, flagged=frozenset()):
+    """One claim with the quotes and URLs behind it, for a prompt or a note.
+
+    Evidence the source run's reviewer rejected is dropped here rather than
+    carried into a note. A flag on an evidence item is a finding about the claim
+    that cites it: the claim itself may have passed review only because the
+    reviewer was judging its wording, not the extraction underneath it.
+    """
+    quotes = []
+    dropped = []
+    for evidence_id in claim.get("evidenceIds") or []:
+        item = evidence.get(evidence_id)
+        if not item:
+            continue
+        if evidence_id in flagged:
+            dropped.append(evidence_id)
+            continue
+        quote = (item.get("quote") or "").strip()
+        source_id = (item.get("sourceIds") or [None])[0]
+        quotes.append(
+            {
+                "evidenceId": evidence_id,
+                "quote": quote or (item.get("text") or "").strip(),
+                "exact": bool(quote),
+                "url": sources.get(source_id, {}).get("url", ""),
+                "sourceId": source_id or "",
+            }
+        )
+    return {
+        "claimId": claim["id"],
+        "text": claim.get("text") or "",
+        "quotes": quotes,
+        "droppedEvidenceIds": dropped,
+    }
+
+
+def validate_topic_notes(value, claims, limit):
+    """The model groups; this decides what is representable.
+
+    Unassigned claims are not dropped — they become one final note — because a
+    claim the run bothered to register is a claim the vault should be able to
+    find.
+    """
+    if not isinstance(value, dict) or not isinstance(value.get("notes"), list):
+        raise UserError("subtopic grouping response has no notes list")
+    seen_claims = set()
+    notes = []
+    for position, entry in enumerate(value["notes"], start=1):
+        if not isinstance(entry, dict):
+            raise UserError(f"note {position} is not an object")
+        title = entry.get("title")
+        if not isinstance(title, str) or not safe_title(title).strip():
+            raise UserError(f"note {position} has no usable title")
+        title = safe_title(title)[:60].strip()
+        claim_ids = [value for value in (entry.get("claimIds") or []) if isinstance(value, str)]
+        claim_ids = [claim_id for claim_id in claim_ids if claim_id in claims]
+        if not claim_ids:
+            continue
+        duplicated = [claim_id for claim_id in claim_ids if claim_id in seen_claims]
+        if duplicated:
+            raise UserError(f"note {position} reuses claims already covered: {', '.join(duplicated[:3])}")
+        seen_claims.update(claim_ids)
+        notes.append({"title": title, "claimIds": claim_ids})
+    if limit:
+        notes = notes[:limit]
+        seen_claims = {claim_id for note in notes for claim_id in note["claimIds"]}
+    leftover = [claim_id for claim_id in claims if claim_id not in seen_claims]
+    if leftover:
+        notes.append({"title": "Further Findings", "claimIds": leftover, "fallback": True})
+    if not notes:
+        raise UserError("subtopic grouping produced no notes")
+    titles = [note["title"].casefold() for note in notes]
+    if len(set(titles)) != len(titles):
+        raise UserError("subtopic grouping returned two notes with the same title")
+    return notes
+
+
+def render_subtopic_note(note, summary, claims, evidence, sources, run_directory, fingerprint, flagged=frozenset()):
+    """Deterministic body. The model writes the summary; code writes everything
+    that has to be exact."""
+    lines = [summary.strip(), "", "## Findings", ""]
+    used_sources = []
+    dropped_quotes = []
+    for claim_id in note["claimIds"]:
+        detail = claim_detail(claims[claim_id], evidence, sources, flagged)
+        dropped_quotes.extend(detail["droppedEvidenceIds"])
+        confidence = claims[claim_id].get("confidence") or ""
+        lines.append(f"- {detail['text']}" + (f" (confidence: {confidence})" if confidence else ""))
+        for quote in detail["quotes"]:
+            if not quote["quote"]:
+                continue
+            citation = f" — {quote['url']}" if quote["url"] else ""
+            lines.append(f'  - "{quote["quote"]}"{citation}')
+            if quote["url"] and quote["url"] not in used_sources:
+                used_sources.append(quote["url"])
+    if used_sources:
+        lines.extend(["", "## Sources", ""])
+        lines.extend(f"- {url}" for url in used_sources)
+    lines.extend(
+        [
+            "",
+            "## Provenance",
+            "",
+            f"- Source run: `{run_directory}`",
+            f"- Source fingerprint: `{fingerprint}`",
+            f"- Claims: {', '.join(f'`{claim_id}`' for claim_id in note['claimIds'])}",
+        ]
+    )
+    excluded = [claim_id for claim_id in note.get("excludedClaimIds") or []]
+    if excluded:
+        lines.append(f"- Claims excluded as flagged in review: {', '.join(f'`{claim_id}`' for claim_id in excluded)}")
+    if dropped_quotes:
+        lines.append(f"- Quotes excluded as flagged in review: {', '.join(f'`{item}`' for item in dropped_quotes)}")
+    return "\n".join(lines) + "\n"
+
+
+def check_subtopic_note(note, summary, claims, evidence):
+    """Deterministic gate, run before the thinking model sees anything."""
+    problems = []
+    if not summary.strip():
+        problems.append("the summary is empty")
+    if "\n\n" in summary.strip():
+        problems.append("the summary is more than one paragraph")
+    for claim_id in note["claimIds"]:
+        if claim_id not in claims:
+            problems.append(f"cites a claim that is not in the run: {claim_id}")
+    for claim_id in note["claimIds"]:
+        for evidence_id in claims.get(claim_id, {}).get("evidenceIds") or []:
+            if evidence_id not in evidence:
+                problems.append(f"{claim_id} cites evidence that is not in the run: {evidence_id}")
+    try:
+        validate_filename_title(note["title"], "note title")
+    except UserError as error:
+        problems.append(str(error))
+    return problems
+
+
+def harvest_subtopic_notes(args, run_directory, records, fingerprint, limit=None):
+    """Group a deep run's claims into notes and write each one's summary."""
+    claims, evidence = deep_run_claims(records)
+    if not claims:
+        return [], ["no claims were available to build subtopic notes from"]
+    warnings = []
+    # Anything the upstream reviewer rejected is left out of a note body and
+    # said so under Provenance, rather than quietly carried into the vault.
+    # A claim goes too when every piece of evidence under it was rejected:
+    # the claim's own verdict judged its wording, not the extraction beneath it.
+    flagged_claims = flagged_ids(claims.values())
+    flagged_evidence = flagged_ids(evidence.values())
+    unsupported = {
+        claim_id
+        for claim_id, claim in claims.items()
+        if (claim.get("evidenceIds") or []) and set(claim["evidenceIds"]) <= flagged_evidence
+    }
+    excluded = {claim_id: claims[claim_id] for claim_id in flagged_claims | unsupported}
+    usable = {claim_id: claim for claim_id, claim in claims.items() if claim_id not in excluded}
+    if flagged_claims:
+        warnings.append(f"{len(flagged_claims)} claim(s) flagged in the source run were left out of the notes")
+    if unsupported - flagged_claims:
+        warnings.append(
+            f"{len(unsupported - flagged_claims)} claim(s) were left out because every piece of evidence "
+            "under them was flagged in the source run"
+        )
+    if flagged_evidence:
+        warnings.append(f"{len(flagged_evidence)} quote(s) flagged in the source run were left out of the notes")
+    if not usable:
+        return [], warnings + ["every claim in the source run was flagged in review"]
+    sources = deep_run_sources(run_directory)
+    grouping = classification_request(
+        args,
+        [
+            {"role": "system", "content": TOPIC_NOTES_SYSTEM},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "maxNotes": limit or DEFAULT_SUBTOPIC_NOTES,
+                        "claims": [
+                            {"claimId": claim_id, "text": claim.get("text") or "", "confidence": claim.get("confidence")}
+                            for claim_id, claim in usable.items()
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ],
+    )
+    notes = validate_topic_notes(grouping, usable, limit or DEFAULT_SUBTOPIC_NOTES)
+    built = []
+    for note in notes:
+        details = [claim_detail(usable[claim_id], evidence, sources, flagged_evidence) for claim_id in note["claimIds"]]
+        summary_value = classification_request(
+            args,
+            [
+                {"role": "system", "content": NOTE_SUMMARY_SYSTEM},
+                {"role": "user", "content": json.dumps({"title": note["title"], "claims": details}, ensure_ascii=False)},
+            ],
+        )
+        summary = summary_value.get("summary") if isinstance(summary_value, dict) else None
+        summary = summary.strip() if isinstance(summary, str) else ""
+        problems = check_subtopic_note(note, summary, usable, evidence)
+        if problems:
+            warnings.append(f"{note['title']}: held back, {'; '.join(problems)}")
+            continue
+        note = dict(note, excludedClaimIds=sorted(excluded))
+        built.append(
+            {
+                "title": note["title"],
+                "summary": summary,
+                "claimIds": note["claimIds"],
+                "fallback": bool(note.get("fallback")),
+                "body": render_subtopic_note(
+                    note, summary, usable, evidence, sources, run_directory, fingerprint, flagged_evidence
+                ),
+                "verifyItem": {"title": note["title"], "summary": summary, "claims": details},
+            }
+        )
+    return built, warnings
+
+
+def verify_subtopic_notes(args, notes, run_dir):
+    """Review the notes on the thinking model, annotating rather than dropping."""
+    if not notes or not args.verify:
+        return {"skipped": "verification disabled" if notes else None}, []
+    think = forge_llm.resolve_think_or_chat(base_url=args.think_url, model=args.think_model)
+    if not think["enabled"]:
+        return {"skipped": "no thinking service is configured"}, ["subtopic notes were not verified"]
+    items = [{"id": note["title"], **note["verifyItem"]} for note in notes]
+    try:
+        verdicts = forge_verify.verify_packets(
+            think,
+            VERIFY_NOTES_SYSTEM,
+            items,
+            journal_path=run_dir / "verified-notes.jsonl",
+            background=True,
+            timeout=args.request_timeout,
+        )
+    except forge_verify.VerificationError as error:
+        # An unreachable reviewer must never read as approval.
+        return {"skipped": str(error)}, [f"subtopic notes were not verified: {error}"]
+    warnings = []
+    for note in notes:
+        verdict = verdicts.get(note["title"])
+        if verdict and verdict["verdict"] == forge_verify.VERDICT_FLAG:
+            note["needsReview"] = verdict["reason"]
+            warnings.append(f"{note['title']}: flagged in review, {verdict['reason']}")
+    return forge_verify.summarize(verdicts), warnings
+
+
+def subtopic_report_line(proposal):
+    line = f"- `{proposal['id']}` **{proposal['title']}** → `{proposal['destination']}`"
+    line += f"\n  - {len(proposal['claimIds'])} claim(s): {', '.join(proposal['claimIds'][:6])}"
+    if proposal.get("needsReview"):
+        line += f"\n  - **flagged in review**: {proposal['needsReview']}"
+    return line
+
+
+def verification_report_rows(verification):
+    """A section saying what the reviewer did, including when it did nothing."""
+    if verification is None:
+        return []
+    if verification.get("skipped"):
+        return [
+            (
+                "Verification",
+                [f"Nothing was reviewed: {verification['skipped']}. That is not the same as approval."],
+                lambda row: f"- {row}",
+            )
+        ]
+    rows = [
+        f"Reviewed by the thinking model: {verification.get('verified', 0)}",
+        f"Accepted: {verification.get('ok', 0)}",
+        f"Flagged for your attention: {verification.get('flagged', 0)}",
+    ]
+    return [("Verification", rows, lambda row: f"- {row}")]
+
+
 def command_import_run(args):
     vault = resolve_vault(args, initialize_state=False)
     schema_path, schema, schema_hash = load_schema(args, vault, use_cache=False)
@@ -1609,7 +1915,18 @@ def command_import_run(args):
         raise UserError(f"unknown --wiki-kinds: {', '.join(unknown_kinds)}")
     if not kinds:
         raise UserError("--wiki-kinds must select at least one kind")
-    templates = require_wiki_templates(vault, schema, kinds)
+    # Wiki entity notes are rendered from vault-owned templates, and a vault
+    # that has not written them yet cannot have them invented. That is a hard
+    # failure for the wiki half — but subtopic notes use no templates at all, so
+    # a --notes run degrades to the half it can actually do rather than
+    # refusing work the vault is ready for.
+    try:
+        templates = require_wiki_templates(vault, schema, kinds)
+    except UserError as error:
+        if not args.notes:
+            raise
+        templates = None
+        warnings.append(f"wiki notes skipped: {error}")
     artifacts = selected_import_artifacts(run_directory, run_type, args.include_artifact)
     source_files = source_support_files(run_directory, run_type, artifacts)
     source_fingerprint = run_state.configuration_fingerprint(
@@ -1655,8 +1972,61 @@ def command_import_run(args):
         inbox_proposals.append(proposal)
 
     records = import_source_records(run_directory, run_type)
-    candidates, candidate_warnings = harvest_entity_candidates(args, records, kinds, limit=args.limit)
-    warnings.extend(candidate_warnings)
+    run_dir = unique_run_directory(vault)
+    note_proposals = []
+    verification = None
+    if args.notes:
+        if run_type != "deep-research":
+            raise UserError(f"--notes builds subtopic notes from a deep-research run; this is a {run_type} run")
+        built, note_warnings = harvest_subtopic_notes(args, run_directory, records, source_fingerprint, args.notes_limit)
+        warnings.extend(note_warnings)
+        verification, verify_warnings = verify_subtopic_notes(args, built, run_dir)
+        warnings.extend(verify_warnings)
+        for note in built:
+            filename = f"{prefix} - {note['title']}.md"
+            validate_filename_title(Path(filename).stem, f"destination for {note['title']}")
+            destination = (Path(INBOX_DIR) / filename).as_posix()
+            collision = basenames.get(Path(filename).stem.casefold())
+            if collision or Path(filename).stem.casefold() in planned:
+                blocked.append(
+                    {
+                        "action": "blocked",
+                        "title": Path(filename).stem,
+                        "reason": f"case-insensitive basename collision with `{collision or destination}`",
+                    }
+                )
+                continue
+            body = note["body"]
+            if note.get("needsReview"):
+                body = f"> [!warning] Flagged in review\n> {note['needsReview']}\n\n{body}"
+            content, classification_warnings = classify_import_body(
+                args,
+                schema,
+                Path(filename).stem,
+                note["title"],
+                {"malformed": False, "frontmatter_text": "", "body": body, "had_frontmatter": False},
+            )
+            warnings.extend(f"{note['title']}: {warning}" for warning in classification_warnings)
+            proposal = {
+                "id": f"n-{len(note_proposals) + 1:03d}",
+                "action": "create_inbox_note",
+                "title": Path(filename).stem,
+                "destination": destination,
+                "claimIds": note["claimIds"],
+                "needsReview": note.get("needsReview"),
+                "sourceRunFingerprint": source_fingerprint,
+                "content": content,
+            }
+            if decision_key(proposal) in decided:
+                warnings.append(f"previously decided import proposal suppressed: {destination}")
+                continue
+            planned.add(Path(filename).stem.casefold())
+            note_proposals.append(proposal)
+
+    candidates = []
+    if templates is not None:
+        candidates, candidate_warnings = harvest_entity_candidates(args, records, kinds, limit=args.limit)
+        warnings.extend(candidate_warnings)
     wiki_proposals = []
     for candidate in candidates:
         key = candidate["title"].casefold()
@@ -1698,8 +2068,7 @@ def command_import_run(args):
         planned.add(key)
         wiki_proposals.append(proposal)
 
-    proposals = inbox_proposals + wiki_proposals
-    run_dir = unique_run_directory(vault)
+    proposals = inbox_proposals + note_proposals + wiki_proposals
     input_config = {
         "vault": str(vault),
         "schemaPath": str(schema_path),
@@ -1710,7 +2079,7 @@ def command_import_run(args):
         "sourceFiles": source_files,
         "templateFiles": [
             {"kind": kind, "path": templates[kind]["path"], "sha256": templates[kind]["sha256"]}
-            for kind in kinds
+            for kind in (kinds if templates is not None else ())
         ],
     }
     run_state.initialize_run_state(
@@ -1719,11 +2088,15 @@ def command_import_run(args):
     )
     counts = {
         "inbox_notes_proposed": len(inbox_proposals),
+        "subtopic_notes_proposed": len(note_proposals),
         "wiki_notes_proposed": len(wiki_proposals),
         "blocked_by_collision": len(blocked),
         "validator_warnings": len(validation.get("warnings") or []),
     }
-    finish_run(run_dir, proposals + blocked, counts, None, warnings, vault, f"{run_type} import")
+    extra = None
+    if args.notes:
+        extra = [("Subtopic notes", note_proposals, subtopic_report_line), *verification_report_rows(verification)]
+    finish_run(run_dir, proposals + blocked, counts, None, warnings, vault, f"{run_type} import", extra)
     return structured(
         "ok",
         artifacts=[str(run_dir / "report.md"), str(run_dir / "proposals.jsonl")],
@@ -1733,6 +2106,7 @@ def command_import_run(args):
             "sourceRunType": run_type,
             "sourceRunFingerprint": source_fingerprint,
             "counts": counts,
+            "verification": verification,
             "proposals": proposals,
             "blocked": blocked,
         },
@@ -2660,6 +3034,17 @@ def parse_args(argv):
         help="additional run-relative Markdown artifact for import-run; may be repeated",
     )
     parser.add_argument("--title-prefix", help="filename prefix for imported inbox notes")
+    parser.add_argument(
+        "--notes",
+        action="store_true",
+        help="import-run: also propose one note per subtopic from a deep-research run's claims",
+    )
+    parser.add_argument(
+        "--notes-limit",
+        type=int,
+        default=DEFAULT_SUBTOPIC_NOTES,
+        help=f"cap subtopic notes per import-run (default {DEFAULT_SUBTOPIC_NOTES})",
+    )
     parser.add_argument("--base-url")
     parser.add_argument("--model")
     parser.add_argument("--api-key")

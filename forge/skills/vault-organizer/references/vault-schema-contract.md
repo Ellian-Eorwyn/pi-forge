@@ -185,6 +185,22 @@ review queue. Transient endpoint failures retry up to three times.
 Suggestions are aggregated into the report's Schema Suggestions section for
 the human maintainer and are never applied to the schema or to any note.
 
+## Machine Provenance
+
+Two properties record what a machine did to a note, and neither is the
+classifier's to decide. `capture_type: generated` means a skill created the
+note. `processed_by` lists the workflows that substantially transformed a note
+the user wrote — `vault-transcripts` sets it on every transcript it cleans.
+
+Filing replaces frontmatter wholesale from the model's response, so both are
+carried forward deterministically from the note's previous frontmatter before
+routing: a `generated` capture type is restored (with a warning naming what the
+classifier proposed instead), and `processed_by` is taken from the file and any
+model-supplied value discarded. A note does not stop being machine-made because
+a later pass read it as prose. Vaults whose schema note does not define
+`processed_by` as a list property simply never carry the key, and the report
+warns when an existing value has to be dropped for that reason.
+
 ## Review Routing
 
 Notes that cannot be confidently classified (model review, validation

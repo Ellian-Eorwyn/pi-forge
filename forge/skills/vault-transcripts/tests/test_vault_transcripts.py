@@ -43,6 +43,7 @@ capture_type: manual
 | `subdomain` | no | controlled scalar | Nested area. |
 | `source_kind` | conditional | controlled scalar | Source kind. |
 | `capture_type` | no | controlled scalar | Capture type. |
+| `processed_by` | no | list | Automated workflows that transformed this note. |
 
 ### Property constraints
 
@@ -622,11 +623,31 @@ class NoteBuildingTests(unittest.TestCase):
 
     def test_frontmatter_is_only_approved_keys(self):
         metadata = vt.frontmatter_metadata(self.schema, "therapy")
-        self.assertEqual(metadata, {"type": "meeting", "status": "raw", "capture_type": "meeting"})
+        self.assertEqual(
+            metadata,
+            {"type": "meeting", "status": "raw", "capture_type": "meeting", "processed_by": ["vault-transcripts"]},
+        )
         self.assertEqual(vt.frontmatter_metadata(self.schema, "memo")["capture_type"], "voice")
         self.assertEqual(vt.frontmatter_metadata(self.schema, "journal")["type"], "journal")
         for recording_type in vt.RECORDING_TYPES:
             self.assertEqual(set(vt.frontmatter_metadata(self.schema, recording_type)) - set(self.schema["properties"]), set())
+
+    def test_capture_type_records_the_channel_and_processed_by_records_the_pipeline(self):
+        # A cleaned recording is model-transformed but still arrived as voice.
+        # Losing either fact would make a transcript unfindable as a recording
+        # or indistinguishable from something typed by hand.
+        for recording_type in vt.RECORDING_TYPES:
+            metadata = vt.frontmatter_metadata(self.schema, recording_type)
+            self.assertIn(metadata["capture_type"], {"voice", "meeting"})
+            self.assertEqual(metadata["processed_by"], ["vault-transcripts"])
+
+    def test_vault_without_the_property_gets_no_processed_by(self):
+        import vault_schema
+
+        older = vault_schema.parse_schema_note(
+            SCHEMA.replace("| `processed_by` | no | list | Automated workflows that transformed this note. |\n", "")
+        )
+        self.assertNotIn("processed_by", vt.frontmatter_metadata(older, "memo"))
 
     def test_missing_vocabulary_fails_closed(self):
         import vault_schema
@@ -642,7 +663,7 @@ class NoteBuildingTests(unittest.TestCase):
         note, head = vt.build_note(
             self.schema, vt.frontmatter_metadata(self.schema, "memo"), "A short summary paragraph.", "callout", parsed["preamble"], cleaned, body
         )
-        self.assertTrue(note.startswith("---\ntype: note\nstatus: raw\ncapture_type: voice\n---\n"))
+        self.assertTrue(note.startswith('---\ntype: note\nstatus: raw\ncapture_type: voice\nprocessed_by:\n  - "vault-transcripts"\n---\n'))
         self.assertIn("> [!summary]\n> A short summary paragraph.", head)
         self.assertIn("1. buy gasket", head)
         self.assertEqual([line for line in note.splitlines() if line.startswith("# ")], ["# Transcript"])
@@ -763,7 +784,7 @@ class PipelineTests(unittest.TestCase):
             result = self.result_of(self.process(server.url, "--apply"))
         self.assertEqual(self.inbox(), ["2026-07-24 - Memo - Espresso Machine Repairs.md"])
         note = (self.vault / "00 Inbox" / "2026-07-24 - Memo - Espresso Machine Repairs.md").read_text(encoding="utf-8")
-        self.assertTrue(note.startswith("---\ntype: note\nstatus: raw\ncapture_type: voice\n---\n"))
+        self.assertTrue(note.startswith('---\ntype: note\nstatus: raw\ncapture_type: voice\nprocessed_by:\n  - "vault-transcripts"\n---\n'))
         self.assertIn("> [!summary]", note)
         self.assertEqual(note.split("\n# Transcript\n\n", 1)[1], body)
         self.assertEqual([line for line in note.splitlines() if line.startswith("# ")], ["# Transcript"])

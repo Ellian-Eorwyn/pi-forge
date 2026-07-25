@@ -1,0 +1,1975 @@
+#!/usr/bin/env python3
+"""Turn a braindump into schema-valid notes in an Obsidian vault inbox.
+
+The input is thinking, not a document: a paragraph typed into chat, a page of
+half-formed plans, a dictated ramble that already came back from transcription.
+One dump usually holds more than one note — an idea, a couple of errands, a
+question to look into later — and left as a single blob none of them are
+findable.
+
+This pipeline splits a dump into its distinct notes, drafts each one as prose,
+names it, gives it schema-valid frontmatter, and writes it to ``00 Inbox``. The
+braindump itself is preserved verbatim under a ``# Braindump`` heading in the
+primary note, because the drafts are a convenience and the user's own words are
+the record.
+
+It is the counterpart to ``vault-transcripts``, not a replacement: that skill
+preserves a recording and cleans it, this one synthesizes notes out of raw
+thinking. Both hand off to ``vault-organizer``, which decides where a note
+belongs.
+
+Every note this skill writes carries ``capture_type: generated``. The words are
+the user's; the note is the machine's, and the vault says so.
+
+Splitting and drafting are one call per unit on the non-thinking ``chat``
+service; the whole batch is then reviewed on ``think`` in a handful of packets.
+Deterministic checks run before either, because a byte-exact invariant beats a
+model's opinion and costs nothing.
+"""
+
+import argparse
+import datetime
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
+import forge_llm
+import forge_verify
+import run_state
+import vault_voice
+from vault_schema import (
+    INBOX_DIR,
+    UserError,
+    compiled_schema_for,
+    parse_frontmatter,
+    resolve_schema_path,
+    safe_title,
+    serialize_frontmatter,
+    sha256_bytes,
+    sha256_text,
+    split_frontmatter,
+    validate_filename_title,
+)
+
+WORKFLOW = "vault-capture"
+PROMPT_VERSION = "vault-capture-v1"
+STATE_DIR = ".vault-capture"
+
+# What a braindump can turn into. The kind reaches the note's `type`, so each
+# one maps to a schema type and falls back when a vault does not define it.
+CAPTURE_KINDS = ("idea", "task", "journal", "question", "reference", "draft", "plan")
+KIND_TO_NOTE_TYPE = {
+    "idea": "note",
+    "task": "task",
+    "journal": "journal",
+    "question": "note",
+    "reference": "note",
+    "draft": "draft",
+    "plan": "note",
+}
+FALLBACK_NOTE_TYPE = "note"
+
+FILENAME_PATTERNS = ("topic", "date-topic")
+DEFAULT_MAX_NOTES = 8
+MAX_TITLE_CHARS = 60
+# One dump is one prompt. Past this the split stops being a split and the input
+# is really a document, which document-ingest handles better.
+MAX_BRAINDUMP_CHARS = 40000
+DRAFT_INPUT_CHARS = 24000
+VERIFY_SOURCE_CHARS = 6000
+MIN_BRAINDUMP_WORDS = 15
+
+# Synthesis compresses, so a low retention floor is normal and only a collapse
+# is interesting. This warns rather than holds: a short dump legitimately
+# becomes a shorter note.
+COVERAGE_WARN_RATIO = 0.4
+COVERAGE_MIN_SOURCE_WORDS = 120
+
+# Style examples: enough to show a register, not enough to crowd out the
+# braindump the draft is actually working from.
+EXEMPLAR_COUNT = 3
+EXEMPLAR_CHARS = 1200
+EXEMPLAR_TOTAL_CHARS = 4000
+EXEMPLAR_MIN_CHARS = 200
+EXEMPLAR_SEARCH_LIMIT = 12
+EXEMPLAR_SEARCH_TIMEOUT = 120
+PREFS_RUN_CONTEXT_CHARS = 6000
+
+BRAINDUMP_HEADING = "# Braindump"
+WORD_RE = re.compile(r"[a-z][a-z-]{2,}")
+URL_RE = re.compile(r"https?://[^\s<>\"'\])]+", re.IGNORECASE)
+NUMBER_RE = re.compile(r"\d+(?:[.,:/]\d+)*")
+PROPER_NOUN_RE = re.compile(r"\b([A-Z][a-zA-Z]*(?:['’][a-zA-Z]+)?)\b")
+TIMESTAMP_LINE_RE = re.compile(r"^\*\d{1,2}(?::\d{2}){1,2}\*$")
+SPEAKER_LINE_RE = re.compile(r"^\*\*(.+)\*\*$")
+SENTENCE_START_RE = re.compile(r"(?:^|[.!?:;]\s+|[\n\r]\s*|[-*]\s+|[\"“(\[]\s*)$")
+
+# Words that open a sentence in English and would otherwise read as names.
+COMMON_CAPITALS = {
+    "i", "a", "an", "the", "it", "its", "this", "that", "these", "those", "there", "then",
+    "and", "but", "or", "so", "if", "when", "while", "because", "after", "before", "since",
+    "we", "our", "you", "your", "they", "their", "he", "she", "his", "her", "him", "them",
+    "my", "me", "mine", "us", "who", "what", "why", "how", "where", "which", "not", "no",
+    "yes", "ok", "okay", "maybe", "also", "still", "just", "one", "two", "three", "some",
+    "any", "all", "each", "every", "both", "for", "from", "with", "without", "about",
+    "into", "onto", "over", "under", "again", "next", "last", "first", "second", "third",
+    "today", "tomorrow", "yesterday", "monday", "tuesday", "wednesday", "thursday",
+    "friday", "saturday", "sunday", "january", "february", "march", "april", "may",
+    "june", "july", "august", "september", "october", "november", "december",
+    "note", "notes", "task", "tasks", "idea", "ideas", "question", "questions", "summary",
+    "background", "context", "details", "plan", "plans", "reference", "draft", "open",
+    "todo", "to", "do", "of", "in", "on", "at", "by", "as", "is", "are", "was", "were",
+    "have", "has", "had", "will", "would", "could", "should", "can", "may", "might",
+    "need", "needs", "want", "wants", "think", "thinking", "thought", "thoughts",
+}
+# Spelled-out numbers, so "three weeks" in a dump covers "3 weeks" in a draft.
+NUMBER_WORDS = {
+    "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+    "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10", "eleven": "11",
+    "twelve": "12", "thirteen": "13", "fourteen": "14", "fifteen": "15",
+    "sixteen": "16", "seventeen": "17", "eighteen": "18", "nineteen": "19",
+    "twenty": "20", "thirty": "30", "forty": "40", "fifty": "50", "sixty": "60",
+    "seventy": "70", "eighty": "80", "ninety": "90", "hundred": "100",
+    "thousand": "1000", "million": "1000000",
+}
+
+
+# --------------------------------------------------------------------------- #
+# Output plumbing
+# --------------------------------------------------------------------------- #
+
+
+def structured(status, artifacts=None, warnings=None, errors=None, data=None):
+    return {
+        "status": status,
+        "artifacts": artifacts or [],
+        "warnings": warnings or [],
+        "errors": errors or [],
+        "data": data,
+    }
+
+
+def error_entry(code, message):
+    return {"code": code, "message": message}
+
+
+def print_json(value):
+    print(json.dumps(value, ensure_ascii=False, indent=2))
+
+
+def log(args, message):
+    if getattr(args, "verbose", False):
+        print(message, file=sys.stderr, flush=True)
+
+
+def progress(message):
+    print(message, file=sys.stderr, flush=True)
+
+
+def utc_timestamp():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def unique_run_directory(vault):
+    base = vault / STATE_DIR / "runs"
+    base.mkdir(parents=True, exist_ok=True)
+    stamp = utc_timestamp()
+    candidate = base / f"{stamp}-capture"
+    suffix = 2
+    while candidate.exists():
+        candidate = base / f"{stamp}-capture-{suffix}"
+        suffix += 1
+    candidate.mkdir(parents=True)
+    return candidate
+
+
+# --------------------------------------------------------------------------- #
+# Input
+# --------------------------------------------------------------------------- #
+
+
+def looks_like_transcript_export(text):
+    """A raw transcription dump, which vault-transcripts owns.
+
+    Cheap and shape-only: the exports this vault sees are runs of ``*04:12*``
+    timestamp lines and ``**Speaker 1**`` labels. Capture would throw that
+    structure away and synthesize over it, losing the recording, so it is held
+    for the skill that preserves it instead.
+    """
+    lines = [line.strip() for line in text.splitlines()]
+    timestamps = sum(1 for line in lines if TIMESTAMP_LINE_RE.match(line))
+    speakers = sum(1 for line in lines if SPEAKER_LINE_RE.match(line))
+    return timestamps >= 3 and speakers >= 2
+
+
+def read_braindump(path):
+    data = path.read_bytes()
+    split = split_frontmatter(data)
+    return split["body"] if split["had_frontmatter"] and not split["malformed"] else data.decode("utf-8")
+
+
+def scan_inputs(paths, stdin_text, force):
+    """Snapshot every braindump before any model sees one."""
+    items = []
+    seen = set()
+    for index, raw in enumerate(paths):
+        path = Path(raw).expanduser().resolve()
+        if not path.is_file():
+            raise UserError(f"input file does not exist: {path}")
+        if path in seen:
+            continue
+        seen.add(path)
+        text = read_braindump(path)
+        items.append(build_input_item(f"in-{index + 1:03d}", str(path), path.name, text, force))
+    if stdin_text is not None:
+        items.append(build_input_item(f"in-{len(items) + 1:03d}", "<stdin>", "stdin", stdin_text, force))
+    if not items:
+        raise UserError("no input given: pass one or more files, or --stdin")
+    return items
+
+
+def build_input_item(identifier, source, label, text, force):
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    stripped = text.strip()
+    held = None
+    if not stripped:
+        held = "the braindump is empty"
+    elif len(stripped.split()) < MIN_BRAINDUMP_WORDS:
+        held = f"the braindump is under {MIN_BRAINDUMP_WORDS} words; write it into the vault by hand"
+    elif len(stripped) > MAX_BRAINDUMP_CHARS:
+        held = f"the braindump is {len(stripped)} characters, over the {MAX_BRAINDUMP_CHARS} limit; use document-ingest"
+    elif looks_like_transcript_export(stripped) and not force:
+        held = "this looks like a raw transcription export; run vault-transcripts, or pass --force to synthesize from it"
+    return {
+        "id": identifier,
+        "source": source,
+        "label": label,
+        "text": text,
+        "sha256": sha256_text(text),
+        "words": len(stripped.split()),
+        "characters": len(stripped),
+        "held": held,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Split
+# --------------------------------------------------------------------------- #
+
+# The enumeration is the point. A non-thinking model asked "how many notes is
+# this" answers "one" almost every time; asked to check for each kind of thing a
+# braindump contains, it finds the errand buried in the third paragraph.
+SPLIT_SYSTEM = """You read one person's braindump and decide how many notes it should become.
+
+A braindump is unedited thinking: talking through a problem, listing what needs doing, working out a plan, remembering something worth keeping. It is not a document and it has no structure you can trust.
+
+Work through what this dump contains before you answer. Check for each of these separately:
+
+- working ideas, arguments, or things being figured out
+- tasks, errands, and commitments, including ones mentioned in passing
+- reflection on how the person is doing, feeling, or deciding
+- questions to look into later
+- facts worth keeping: names, numbers, links, recommendations, references
+- drafts of something to be written or sent
+- plans with steps, dates, or dependencies
+
+One dump is often one note. It is just as often three, because a person thinking out loud does not stay on one subject. Split when the parts would be looked for separately later; keep together what only makes sense read as one thing. Never split a single line of thinking across two notes.
+
+Every part of the dump belongs to exactly one note. Notes must not overlap: never add a note that summarizes the dump, collects "everything else", or repeats what another note already covers. If a part fits two notes, choose one.
+
+Return exactly one JSON object:
+
+{"notes": [{"kind": "idea|task|journal|question|reference|draft|plan", "title": "What the note is about", "gist": "One or two sentences on what this note covers.", "covers": ["short phrase from the dump", "another"]}], "needs_review": false, "review_reason": null}
+
+Titles name the subject, not the medium: "Espresso Machine Gasket Replacement", never "Braindump about the espresso machine". Keep them under 60 characters, plain text, no punctuation that would break a filename.
+
+"covers" lists the parts of the dump this note is responsible for, in the person's own words, short. Between them the notes must cover everything of substance in the dump.
+
+Set needs_review true only when the dump is too fragmentary to divide honestly."""
+
+
+def split_payload(item, max_notes):
+    return {
+        "braindump": item["text"][:DRAFT_INPUT_CHARS],
+        "maxNotes": max_notes,
+        "sourceName": item["label"],
+    }
+
+
+def validate_split(value, max_notes):
+    """The model proposes; this decides. Returns (notes, needs_review, reason)."""
+    if not isinstance(value, dict):
+        raise UserError("split response is not a JSON object")
+    if not isinstance(value.get("notes"), list) or not value["notes"]:
+        raise UserError("split response has no notes")
+    if len(value["notes"]) > max_notes:
+        raise UserError(f"split returned {len(value['notes'])} notes, over --max-notes {max_notes}")
+    notes = []
+    for position, entry in enumerate(value["notes"], start=1):
+        if not isinstance(entry, dict):
+            raise UserError(f"note {position} is not an object")
+        kind = entry.get("kind")
+        if kind not in CAPTURE_KINDS:
+            raise UserError(f"note {position} has unknown kind {kind!r}")
+        title = entry.get("title")
+        if not isinstance(title, str) or not title.strip():
+            raise UserError(f"note {position} has no title")
+        title = safe_title(title)[:MAX_TITLE_CHARS].strip()
+        if not title:
+            raise UserError(f"note {position} title is empty once made filename-safe")
+        gist = entry.get("gist")
+        if not isinstance(gist, str) or not gist.strip():
+            raise UserError(f"note {position} has no gist")
+        covers = entry.get("covers")
+        covers = [text for text in covers if isinstance(text, str) and text.strip()] if isinstance(covers, list) else []
+        notes.append({"kind": kind, "title": title, "gist": gist.strip(), "covers": covers[:12]})
+    seen = set()
+    for note in notes:
+        key = note["title"].casefold()
+        if key in seen:
+            raise UserError(f"split returned two notes titled {note['title']!r}")
+        seen.add(key)
+    needs_review = value.get("needs_review")
+    if not isinstance(needs_review, bool):
+        needs_review = False
+    reason = value.get("review_reason")
+    return notes, needs_review, reason if isinstance(reason, str) else None
+
+
+def call_json(args, service, system, payload, task, background=False, extra=None):
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    if extra:
+        messages.append({"role": "user", "content": json.dumps(extra, ensure_ascii=False)})
+    value, _record = forge_llm.call_json_with_retry(
+        service,
+        messages,
+        temperature=0,
+        cache_prompt=args.cache_prompt,
+        response_format={"type": "json_object"},
+        background=background,
+        timeout=args.request_timeout,
+        api_key=args.api_key,
+        task=task,
+    )
+    return value
+
+
+def split_items(args, service, items, run_dir):
+    """One call per braindump. Journaled, so a resumed run re-splits nothing."""
+    journal = run_dir / "split.jsonl"
+    done, warnings = run_state.read_jsonl_recover_tail(journal, repair=True)
+    by_id = {row["id"]: row for row in done if "id" in row}
+    results = []
+    pending = [item for item in items if not item["held"] and item["id"] not in by_id]
+    for position, item in enumerate(pending, start=1):
+        started = time.time()
+        record = {"at": run_state.utc_now(), "id": item["id"], "source": item["source"]}
+        try:
+            value = call_json(args, service, SPLIT_SYSTEM, split_payload(item, args.max_notes), "split-braindump")
+            notes, needs_review, reason = validate_split(value, args.max_notes)
+            record.update({"status": "ok", "notes": notes, "needs_review": needs_review, "review_reason": reason})
+        except (UserError, forge_llm.ChatError) as error:
+            record.update({"status": "error", "detail": str(error)})
+        record["seconds"] = round(time.time() - started, 3)
+        run_state.append_jsonl_fsync(journal, record)
+        by_id[item["id"]] = record
+        progress(f"[split {position}/{len(pending)}] {item['label']}: {len(record.get('notes') or [])} note(s)")
+    for item in items:
+        if item["held"]:
+            continue
+        record = by_id.get(item["id"])
+        if record is None:
+            continue
+        if record["status"] != "ok":
+            item["held"] = f"could not be divided into notes: {record['detail']}"
+            warnings.append(f"{item['label']}: {record['detail']}")
+            continue
+        if record.get("needs_review"):
+            item["held"] = record.get("review_reason") or "the model asked for review of how this dump divides"
+            continue
+        results.append((item, record["notes"]))
+    return results, warnings
+
+
+# --------------------------------------------------------------------------- #
+# Exemplars
+# --------------------------------------------------------------------------- #
+
+
+def connections_script():
+    return Path(__file__).resolve().parents[2] / "vault-connections" / "scripts" / "vault-connections.py"
+
+
+def search_vault(vault, query, limit=EXEMPLAR_SEARCH_LIMIT, timeout=EXEMPLAR_SEARCH_TIMEOUT):
+    """Ask vault-connections for notes about this topic.
+
+    Shelling out rather than importing keeps one implementation of the vector
+    store. Search is a nice-to-have here, so every failure degrades to no
+    exemplars rather than failing the run.
+    """
+    script = connections_script()
+    if not script.is_file():
+        return [], "vault-connections is not installed alongside this skill"
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(script), "search", query, "--vault", str(vault), "--search-limit", str(limit)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return [], f"vault search failed: {error}"
+    if completed.returncode != 0:
+        return [], "vault search failed; drafting without style examples"
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return [], "vault search returned unreadable output"
+    hits = (payload.get("data") or {}).get("hits") or []
+    return [row.get("path") for row in hits if isinstance(row, dict) and row.get("path")], None
+
+
+def exemplar_excerpt(text, limit=EXEMPLAR_CHARS):
+    """The head of a note's body, cut at a paragraph boundary.
+
+    Stops before a preserved-source heading: what follows those is raw
+    transcription or an unedited braindump, which is the opposite of the
+    considered writing this is looking for.
+    """
+    for marker in (BRAINDUMP_HEADING, "# Transcript"):
+        index = text.find(f"\n{marker}")
+        if index != -1:
+            text = text[:index]
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    cut = text.rfind("\n\n", 0, limit)
+    return text[: cut if cut > limit // 2 else limit].strip()
+
+
+def collect_exemplars(vault, query, wanted=EXEMPLAR_COUNT, note_type=None):
+    """Notes by this person that read the way a new note should.
+
+    Anything the pipeline wrote is excluded. A model shown its own output learns
+    its own habits, and the point of an exemplar is to sound like the person
+    whose vault this is.
+    """
+    paths, warning = search_vault(vault, query)
+    if warning:
+        return [], warning
+    chosen = []
+    fallback = []
+    for relative in paths:
+        if len(chosen) >= wanted:
+            break
+        path = vault / relative
+        if not path.is_file() or relative.startswith(f"{INBOX_DIR}/"):
+            continue
+        try:
+            split = split_frontmatter(path.read_bytes())
+        except (OSError, UnicodeDecodeError):
+            continue
+        values = {} if split["malformed"] else parse_frontmatter(split["frontmatter_text"])
+        if values.get("capture_type") == "generated" or values.get("processed_by"):
+            continue
+        excerpt = exemplar_excerpt(split["body"])
+        if len(excerpt) < EXEMPLAR_MIN_CHARS:
+            continue
+        entry = {"note": Path(relative).stem, "excerpt": excerpt}
+        if note_type and values.get("type") == note_type:
+            chosen.append(entry)
+        else:
+            fallback.append(entry)
+    for entry in fallback:
+        if len(chosen) >= wanted:
+            break
+        chosen.append(entry)
+    budget = EXEMPLAR_TOTAL_CHARS
+    kept = []
+    for entry in chosen:
+        if budget - len(entry["excerpt"]) < 0:
+            break
+        budget -= len(entry["excerpt"])
+        kept.append(entry)
+    return kept, None
+
+
+# --------------------------------------------------------------------------- #
+# Draft
+# --------------------------------------------------------------------------- #
+
+# Part A of references/capture-note-format.md, verbatim. If you change one,
+# change both.
+DRAFT_FIDELITY = """- Every idea, task, question, decision, and factual detail in the braindump appears in exactly one note.
+- Never add a fact, name, date, number, link, or commitment the braindump does not contain.
+- Preserve uncertainty. "I think", "maybe", and "I'm not sure" are content, not noise.
+- The ideas are the person's; the wording is yours. Write what they meant, in clean prose."""
+
+DRAFT_SYSTEM = """You write one note for a person's Obsidian vault, from a braindump they wrote or spoke.
+
+The braindump is unedited thinking. Your job is to turn the part of it assigned to you into a note that is worth finding again in a year: the substance kept, the false starts and repetition gone.
+
+You see the whole braindump, but you are writing **one** note out of several. `thisNote` is your assignment and `otherNotes` lists what the rest cover. Write your part only. Material that belongs to another note is not yours to include — leaving it out is correct, not a loss — and a note that ends up restating the whole dump is the one thing this must never produce. When your assignment is the only note, it covers everything.
+
+Fidelity rules, which outrank everything below:
+
+{fidelity}
+
+How to write it:
+
+- Open with what this is about, in a sentence or two. No preamble, no "this note covers".
+- Then the substance, as prose paragraphs. Use `##` headings only when the note really moves between several parts. Use bullets for things that are genuinely a list — tasks, options, steps — not as a default shape.
+- Never write a `#` level-one heading. The note's title is its filename.
+- Do not add a title line, a summary callout, frontmatter, or a closing summary.
+- Keep the person's own terms for things. If they call it "the gasket thing", it is the gasket thing.
+- Say what is unresolved as unresolved. Do not tidy an open question into a conclusion.
+
+When `thisNote.styleForThisKind` is present it is the vault owner's own rule for this kind of note, and it wins over the general guidance above. When `styleExamples` are present they are notes this person wrote themselves: match their register, sentence length, and vocabulary. Do not copy their subject matter.
+
+Return exactly one JSON object:
+
+{{"title": "What the note is about", "body": "The note's Markdown body."}}
+
+The title names the subject and stays under 60 characters. Refine the working title if the braindump justifies it; keep it if it is already right."""
+
+
+def draft_system_prompt(voice_segment=""):
+    """Byte-stable within a run: the fidelity contract, then the vault's voice."""
+    system = DRAFT_SYSTEM.format(fidelity=DRAFT_FIDELITY)
+    return f"{system}\n\n{voice_segment}" if voice_segment else system
+
+
+def draft_payload(item, note, exemplars=None, siblings=None, type_style=None):
+    payload = {
+        "braindump": item["text"][:DRAFT_INPUT_CHARS],
+        "thisNote": {
+            "kind": note["kind"],
+            "workingTitle": note["title"],
+            "gist": note["gist"],
+            "covers": note["covers"],
+        },
+        # Knowing what the other notes are responsible for is what stops a draft
+        # quietly absorbing the whole dump. Per-note variation belongs here, in
+        # the user message, so the system prompt stays byte-stable.
+        "otherNotes": siblings or [],
+    }
+    if type_style:
+        payload["thisNote"]["styleForThisKind"] = type_style
+    if exemplars:
+        payload["styleExamples"] = exemplars
+    return payload
+
+
+def validate_draft(value):
+    if not isinstance(value, dict):
+        raise UserError("draft response is not a JSON object")
+    title = value.get("title")
+    body = value.get("body")
+    if not isinstance(title, str) or not title.strip():
+        raise UserError("draft has no title")
+    if not isinstance(body, str) or not body.strip():
+        raise UserError("draft has no body")
+    title = safe_title(title)[:MAX_TITLE_CHARS].strip()
+    if not title:
+        raise UserError("draft title is empty once made filename-safe")
+    return title, body.strip()
+
+
+def draft_items(args, service, system, planned, run_dir):
+    """One call per planned note, all on the bulk service before any review."""
+    journal = run_dir / "drafted.jsonl"
+    done, warnings = run_state.read_jsonl_recover_tail(journal, repair=True)
+    by_id = {row["id"]: row for row in done if "id" in row}
+    pending = [entry for entry in planned if entry["id"] not in by_id]
+    for position, entry in enumerate(pending, start=1):
+        started = time.time()
+        record = {"at": run_state.utc_now(), "id": entry["id"], "source": entry["item"]["source"]}
+        try:
+            value = call_json(
+                args,
+                service,
+                system,
+                draft_payload(
+                    entry["item"],
+                    entry["note"],
+                    entry.get("exemplars"),
+                    entry.get("siblings"),
+                    entry.get("type_style"),
+                ),
+                "draft-note",
+            )
+            title, body = validate_draft(value)
+            record.update({"status": "ok", "title": title, "body": body})
+        except (UserError, forge_llm.ChatError) as error:
+            record.update({"status": "error", "detail": str(error)})
+        record["seconds"] = round(time.time() - started, 3)
+        run_state.append_jsonl_fsync(journal, record)
+        by_id[entry["id"]] = record
+        progress(f"[draft {position}/{len(pending)}] {entry['note']['title']}")
+    for entry in planned:
+        record = by_id[entry["id"]]
+        if record["status"] == "ok":
+            entry["title"] = record["title"]
+            entry["body"] = record["body"]
+        else:
+            entry["held"] = f"could not be drafted: {record['detail']}"
+            warnings.append(f"{entry['note']['title']}: {record['detail']}")
+    return warnings
+
+
+# --------------------------------------------------------------------------- #
+# Deterministic checks
+# --------------------------------------------------------------------------- #
+
+
+def content_words(text):
+    return WORD_RE.findall(str(text).casefold().replace("'", "").replace("’", ""))
+
+
+def normalized_source(text):
+    """The source as one comparable blob, with spelled-out numbers as digits."""
+    lowered = str(text).casefold().replace("'", "").replace("’", "")
+    for word, digits in NUMBER_WORDS.items():
+        lowered = lowered.replace(word, f"{word} {digits}")
+    return lowered
+
+
+def capitalized_tokens(text):
+    """Capitalized tokens, split by how much their position proves.
+
+    Mid-sentence capitalization is nearly always a name. At the start of a
+    sentence it is ambiguous — an ordinary word gets a capital there too — so
+    the two are kept apart rather than pretending one rule fits both.
+    """
+    confident = []
+    ambiguous = []
+    for match in PROPER_NOUN_RE.finditer(str(text)):
+        token = match.group(1)
+        if token.casefold() in COMMON_CAPITALS or len(token) < 3:
+            continue
+        preceding = str(text)[max(0, match.start() - 24):match.start()]
+        opener = bool(SENTENCE_START_RE.search(preceding)) and not token.isupper()
+        (ambiguous if opener else confident).append(token)
+    return confident, ambiguous
+
+
+def invented_specifics(source, body):
+    """Specifics in the draft with no root in the braindump.
+
+    Rewording is the job, so most of a draft cannot be checked against its
+    source. Names, links, and figures can: they were either in the braindump or
+    the model made them up, and that is worth catching exactly.
+
+    Returns ``{"names", "uncertain_names", "links", "numbers"}``. Only ``names``
+    and ``links`` are strong enough to hold a note back; the rest are handed to
+    the reviewer, which reads the braindump anyway.
+    """
+    source_lower = normalized_source(source)
+    source_words = set(content_words(source))
+    prose = strip_structure(body)
+
+    def rooted(token):
+        folded = token.casefold().replace("'", "").replace("’", "")
+        if folded in source_lower or folded in source_words:
+            return True
+        # A word the draft derived from one that was spoken ("order" ->
+        # "ordering") shares a stem; a fabricated name shares nothing.
+        return len(folded) >= 4 and any(folded[:length] in source_words for length in range(4, len(folded) + 1))
+
+    confident, ambiguous = capitalized_tokens(prose)
+    names, uncertain = [], []
+    for token, bucket in [(token, names) for token in confident] + [(token, uncertain) for token in ambiguous]:
+        if not rooted(token) and token not in bucket:
+            bucket.append(token)
+    return {
+        "names": names,
+        "uncertain_names": [token for token in uncertain if token not in names],
+        "links": [url for url in URL_RE.findall(body) if url.rstrip(".,;:").casefold() not in source_lower],
+        "numbers": [number for number in NUMBER_RE.findall(prose) if number not in source_lower],
+    }
+
+
+def strip_structure(markdown):
+    """Prose only. Headings and list markers are structure the writer authors."""
+    lines = []
+    for line in str(markdown).splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        stripped = re.sub(r"^[-*+]\s+", "", stripped)
+        stripped = re.sub(r"^\d+[.)]\s+", "", stripped)
+        stripped = re.sub(r"^>\s*", "", stripped)
+        lines.append(stripped)
+    return "\n".join(lines)
+
+
+def coverage_ratio(source, bodies):
+    """How much of the braindump's distinctive vocabulary survived into notes."""
+    source_words = [word for word in content_words(source) if len(word) >= 5]
+    if not source_words:
+        return 1.0
+    kept = set()
+    written = set()
+    for body in bodies:
+        written.update(content_words(body))
+    for word in source_words:
+        if word in written or any(word[:length] in written for length in range(4, len(word))):
+            kept.add(word)
+    return len(kept) / len(set(source_words))
+
+
+def check_draft(entry):
+    """Everything that can fail one drafted note. Returns (problems, notices)."""
+    problems = []
+    notices = []
+    body = entry["body"]
+    headings = [line.strip() for line in body.splitlines() if re.match(r"^#\s", line.strip())]
+    if headings:
+        problems.append(f"the draft wrote a level-one heading: {headings[0]!r}")
+    if body.lstrip().startswith("---"):
+        problems.append("the draft wrote its own frontmatter")
+    if BRAINDUMP_HEADING.casefold() in body.casefold():
+        problems.append("the draft wrote its own braindump section")
+    found = invented_specifics(entry["item"]["text"], body)
+    if found["names"]:
+        problems.append(f"these names are not in the braindump: {', '.join(found['names'][:6])}")
+    if found["links"]:
+        problems.append(f"these links are not in the braindump: {', '.join(found['links'][:3])}")
+    # Rewording legitimately turns "a couple" into "2" and opens a sentence with
+    # a word the braindump never used, so these go to the reviewer rather than
+    # throwing away a note that is probably fine.
+    if found["numbers"]:
+        notices.append(f"numbers not found in the braindump: {', '.join(found['numbers'][:6])}")
+    if found["uncertain_names"]:
+        notices.append(f"words not found in the braindump: {', '.join(found['uncertain_names'][:6])}")
+    return problems, notices
+
+
+# --------------------------------------------------------------------------- #
+# Assemble
+# --------------------------------------------------------------------------- #
+
+
+def note_type_for(kind, schema):
+    proposed = KIND_TO_NOTE_TYPE.get(kind, FALLBACK_NOTE_TYPE)
+    if proposed in schema["types"]:
+        return proposed
+    if FALLBACK_NOTE_TYPE in schema["types"]:
+        return FALLBACK_NOTE_TYPE
+    raise UserError(f"schema does not define note type {proposed!r} or {FALLBACK_NOTE_TYPE!r}")
+
+
+def frontmatter_metadata(schema, kind, related=None):
+    """Minimal and forced.
+
+    `vault-organizer` replaces this block when it files the note and reads it as
+    an advisory hint, so it is accurate rather than complete: domain, subdomain,
+    project, and people are its judgment, not this skill's. `capture_type` is
+    not a hint. This note was written by a model, and no run of this skill can
+    produce one that says otherwise.
+    """
+    metadata = {"type": note_type_for(kind, schema), "status": "raw", "capture_type": "generated"}
+    if related and schema["properties"].get("related", {}).get("shape") == "list":
+        metadata["related"] = related
+    metadata = {key: value for key, value in metadata.items() if key in schema["properties"]}
+    if metadata.get("status") != "raw" or "raw" not in schema["statuses"]:
+        raise UserError("schema does not define status 'raw'")
+    if metadata.get("capture_type") != "generated" or "generated" not in schema["capture_types"]:
+        raise UserError("schema does not define capture type 'generated'; capture cannot mark what it writes")
+    return metadata
+
+
+def existing_inbox_names(vault):
+    inbox = vault / INBOX_DIR
+    if not inbox.is_dir():
+        return set()
+    return {path.name.casefold() for path in inbox.rglob("*.md")}
+
+
+def assign_filename(title, pattern, date, taken_casefold):
+    stem = f"{date} - {title}" if pattern == "date-topic" else title
+    stem = safe_title(stem)
+    candidate = f"{stem}.md"
+    suffix = 2
+    while candidate.casefold() in taken_casefold:
+        candidate = f"{stem} ({suffix}).md"
+        suffix += 1
+    taken_casefold.add(candidate.casefold())
+    return candidate
+
+
+def build_note_text(schema, metadata, body, braindump=None):
+    """The generated body, then the braindump verbatim when this is the primary."""
+    text = serialize_frontmatter(metadata, schema) + "\n" + body.strip() + "\n"
+    if braindump is not None:
+        text += f"\n{BRAINDUMP_HEADING}\n\n{braindump}"
+        if not text.endswith("\n"):
+            text += "\n"
+    return text
+
+
+def primary_of(entries):
+    """The note that carries the braindump: the first surviving draft.
+
+    Something has to hold the original, and the split lists notes in the order
+    the dump raises them, so the first one is where the person started. Picking
+    the longest instead would quietly reward a draft that absorbed more of the
+    dump than it was assigned.
+    """
+    return next((entry for entry in entries if not entry.get("held")), None)
+
+
+def already_created(run_dir):
+    """Notes this run has already written, by id.
+
+    A note keeps the name it was given the first time. Without this a rerun
+    would see its own output sitting in the inbox, treat it as a collision, and
+    write a second copy under a numbered name.
+    """
+    rows, _warnings = run_state.read_jsonl_recover_tail(run_dir / "created.jsonl", repair=True)
+    return {row["id"]: row for row in rows if row.get("status") == "ok" and row.get("id")}
+
+
+def assemble_one(args, schema, item, entries, taken, date, warnings, prior=None):
+    """Name, gate, and lay out the notes from one braindump."""
+    prior = prior or {}
+    for entry in entries:
+        problems, notices = ([], []) if entry.get("held") else check_draft(entry)
+        if problems:
+            entry["held"] = "; ".join(problems)
+        entry["notices"] = notices
+    primary = primary_of(entries)
+    if primary is not None and item["words"] >= COVERAGE_MIN_SOURCE_WORDS:
+        ratio = coverage_ratio(item["text"], [entry["body"] for entry in entries if not entry.get("held")])
+        if ratio < COVERAGE_WARN_RATIO:
+            message = f"{item['label']}: notes kept {ratio:.0%} of the braindump's distinctive words"
+            warnings.append(message)
+            for entry in entries:
+                entry["notices"].append(message)
+
+    records = []
+    for entry in entries:
+        record = {
+            "id": entry["id"],
+            "source": item["source"],
+            "source_id": item["id"],
+            "kind": entry["note"]["kind"],
+            "title": entry.get("title") or entry["note"]["title"],
+            "gist": entry["note"]["gist"],
+            "notices": entry["notices"],
+            "is_primary": primary is not None and entry["id"] == primary["id"],
+            "status": "review" if entry.get("held") else "ok",
+            "held_reason": entry.get("held"),
+            "destination": None,
+            "verified": "not-verified",
+        }
+        if record["status"] == "ok":
+            written = prior.get(record["id"])
+            if written:
+                record["destination"] = written["destination"]
+            else:
+                filename = assign_filename(
+                    validate_filename_title(record["title"], "note title"), args.filename_pattern, date, taken
+                )
+                record["destination"] = f"{INBOX_DIR}/{filename}"
+        records.append((record, entry))
+
+    # Siblings link back to the note holding the original, which is only
+    # nameable once every note in the group has a filename.
+    back_link = None
+    for record, _entry in records:
+        if record["is_primary"] and record["destination"]:
+            back_link = f"[[{Path(record['destination']).stem}]]"
+    for record, entry in records:
+        if record["status"] != "ok":
+            continue
+        related = [back_link] if back_link and not record["is_primary"] else []
+        record["metadata"] = frontmatter_metadata(schema, record["kind"], related)
+        record["text"] = build_note_text(
+            schema, record["metadata"], entry["body"], item["text"] if record["is_primary"] else None
+        )
+        if record["is_primary"] and not record["text"].endswith(item["text"].rstrip("\n") + "\n"):
+            record["status"] = "review"
+            record["held_reason"] = "the braindump is not preserved verbatim in the primary note"
+            record["destination"] = None
+    return [record for record, _entry in records]
+
+
+def assemble(args, vault, schema, results, run_dir):
+    """Name, gate, and lay out every drafted note. Nothing is written here."""
+    warnings = []
+    prior = already_created(run_dir)
+    taken = existing_inbox_names(vault) - {Path(row["destination"]).name.casefold() for row in prior.values()}
+    date = datetime.date.today().isoformat()
+    records = []
+    for item, entries in results:
+        records.extend(assemble_one(args, schema, item, entries, taken, date, warnings, prior))
+    run_state.atomic_write_json(
+        run_dir / "assembled.json",
+        {"records": [{key: value for key, value in row.items() if key != "text"} for row in records]},
+    )
+    return records, warnings
+
+
+# --------------------------------------------------------------------------- #
+# Verify
+# --------------------------------------------------------------------------- #
+
+VERIFY_NOTES_SYSTEM = """You are reviewing notes a model wrote from one person's braindump, before they are saved to that person's Obsidian vault.
+
+You see the braindump and one note drafted from it. Flag the note only when one of these is true:
+
+- it states a fact, name, date, number, or commitment the braindump does not contain
+- it drops something substantial the braindump said and no other note covers
+- it turns something the person left open into a settled conclusion
+- its title names the medium ("Braindump", "Notes", "Voice memo") instead of the subject, or says nothing about what the note is about
+- its kind is plainly wrong: a list of errands filed as reflection, a journal entry filed as a task
+
+A note is a synthesis, not a transcript. Rewording, reordering, compressing, and dropping repetition are the job. Do not flag a note because you would have written it differently, chosen a different title, or kept more detail. `notices` lists deterministic checks that could not confirm something; treat them as places to look, not as findings."""
+
+VERIFY_COVERAGE_SYSTEM = """You are checking whether a set of notes together covers one person's braindump, before they are saved to their Obsidian vault.
+
+You see the braindump and every note drafted from it, with titles and bodies. Flag only when:
+
+- something of substance in the braindump appears in none of the notes
+- two notes cover the same material, so the split was wrong
+- material that belongs together was split across notes and neither reads correctly alone
+
+Do not flag compression, dropped repetition, or a different division you would have preferred. One note for one dump is a correct answer when the dump is about one thing."""
+
+
+def verify_payload(record, item):
+    return {
+        "id": record["id"],
+        "braindump": item["text"][:VERIFY_SOURCE_CHARS],
+        "note": {
+            "title": record["title"],
+            "kind": record["kind"],
+            "body": record.get("text", "").split(f"\n{BRAINDUMP_HEADING}\n", 1)[0],
+        },
+        "notices": record.get("notices", []),
+    }
+
+
+def coverage_payload(item, records):
+    return {
+        "id": item["id"],
+        "braindump": item["text"][:VERIFY_SOURCE_CHARS],
+        "notes": [
+            {
+                "title": record["title"],
+                "kind": record["kind"],
+                "body": record.get("text", "").split(f"\n{BRAINDUMP_HEADING}\n", 1)[0],
+            }
+            for record in records
+        ],
+    }
+
+
+def verify_records(args, schema, system, items_by_id, records, run_dir):
+    """Review the batch on the thinking model, and redo what it flags.
+
+    Bulk work runs without reasoning because it is usually right. This is what
+    makes "usually" safe: full coverage for a handful of batched calls, with the
+    reasoning budget spent on the items that turn out to need it.
+    """
+    warnings = []
+    summary = {"verified": 0, "ok": 0, "flagged": 0, "escalated": 0, "needsReview": 0, "flaggedIds": []}
+    candidates = [record for record in records if record["status"] == "ok"]
+    if not candidates:
+        return summary, warnings
+    think = forge_llm.resolve_think_or_chat(base_url=args.think_url, model=args.think_model)
+    if not think["enabled"]:
+        warnings.append("verification skipped: no thinking service is configured")
+        summary["skipped"] = "disabled"
+        return summary, warnings
+
+    by_id = {record["id"]: record for record in candidates}
+    note_items = [verify_payload(record, items_by_id[record["source_id"]]) for record in candidates]
+    grouped = {}
+    for record in candidates:
+        grouped.setdefault(record["source_id"], []).append(record)
+    coverage_items = [coverage_payload(items_by_id[source_id], rows) for source_id, rows in grouped.items()]
+
+    log(args, f"verifying {len(note_items)} notes and {len(coverage_items)} braindumps on {think['url']}")
+    try:
+        verdicts = forge_verify.verify_packets(
+            think,
+            VERIFY_NOTES_SYSTEM,
+            note_items,
+            journal_path=run_dir / "verified.jsonl",
+            background=True,
+            timeout=args.request_timeout,
+            progress=progress,
+        )
+        coverage_verdicts = forge_verify.verify_packets(
+            think,
+            VERIFY_COVERAGE_SYSTEM,
+            coverage_items,
+            journal_path=run_dir / "verified-coverage.jsonl",
+            background=True,
+            timeout=args.request_timeout,
+            progress=progress,
+        )
+    except forge_verify.VerificationError as error:
+        # An unreachable reviewer must not read as approval.
+        warnings.append(f"verification skipped: {error}")
+        summary["skipped"] = str(error)
+        return summary, warnings
+
+    flagged = [
+        (next(entry for entry in note_items if entry["id"] == identifier), verdict["reason"])
+        for identifier, verdict in verdicts.items()
+        if verdict["verdict"] == forge_verify.VERDICT_FLAG and identifier in by_id
+    ]
+
+    def redo(payload, reason):
+        record = by_id[payload["id"]]
+        item = items_by_id[record["source_id"]]
+        value = call_json(
+            args,
+            think,
+            system,
+            draft_payload(
+                item,
+                {"kind": record["kind"], "title": record["title"], "gist": record["gist"], "covers": []},
+                type_style=record.get("type_style"),
+            ),
+            "redraft-note",
+            background=True,
+            extra={"reviewerObjection": reason, "previousTitle": record["title"]},
+        )
+        title, body = validate_draft(value)
+        return {"title": title, "body": body}
+
+    escalations = forge_verify.escalate(flagged, redo, journal_path=run_dir / "escalated.jsonl", progress=progress)
+    for identifier, outcome in escalations.items():
+        if outcome.get("resumed"):
+            continue  # committed when it was first escalated
+        record = by_id[identifier]
+        record["verify_reason"] = next(reason for entry, reason in flagged if entry["id"] == identifier)
+        if outcome["ok"]:
+            item = items_by_id[record["source_id"]]
+            entry = outcome["value"]
+            rechecked, notices = check_draft({"item": item, "body": entry["body"]})
+            record["notices"] = notices
+            if rechecked:
+                record["status"] = "review"
+                record["held_reason"] = "; ".join(rechecked)
+                record["destination"] = None
+                record["verified"] = "needs-review"
+                warnings.append(f"{record['title']}: re-drafted note still fails a check: {record['held_reason']}")
+                continue
+            record["title"] = entry["title"]
+            record["text"] = build_note_text(
+                schema, record["metadata"], entry["body"], item["text"] if record["is_primary"] else None
+            )
+            record["verified"] = "escalated"
+        else:
+            record["status"] = "review"
+            record["held_reason"] = f"verification flagged this and re-drafting failed: {outcome['detail']}"
+            record["destination"] = None
+            record["verified"] = "needs-review"
+            warnings.append(f"{record['title']}: {record['held_reason']}")
+    for identifier, verdict in verdicts.items():
+        if verdict["verdict"] == forge_verify.VERDICT_OK and identifier in by_id:
+            by_id[identifier]["verified"] = "ok"
+    for source_id, verdict in coverage_verdicts.items():
+        if verdict["verdict"] != forge_verify.VERDICT_FLAG:
+            continue
+        label = items_by_id[source_id]["label"] if source_id in items_by_id else source_id
+        warnings.append(f"{label}: the reviewer flagged how this braindump was divided: {verdict['reason']}")
+        for record in grouped.get(source_id, []):
+            record.setdefault("notices", []).append(f"split flagged: {verdict['reason']}")
+    summary = forge_verify.summarize(verdicts, escalations)
+    summary["coverageFlagged"] = [
+        identifier for identifier, verdict in coverage_verdicts.items() if verdict["verdict"] == forge_verify.VERDICT_FLAG
+    ]
+    return summary, warnings
+
+
+# --------------------------------------------------------------------------- #
+# Write
+# --------------------------------------------------------------------------- #
+
+
+def write_notes(vault, records, run_dir):
+    """Create the notes. New files only: nothing here can touch existing ones.
+
+    A note already written by this run is recognized by its hash and skipped, so
+    a resumed run is a no-op rather than a second copy.
+    """
+    journal = run_dir / "created.jsonl"
+    _done, warnings = run_state.read_jsonl_recover_tail(journal, repair=True)
+    prior = already_created(run_dir)
+    created = 0
+    for record in records:
+        if record["status"] != "ok" or not record.get("destination"):
+            continue
+        destination = vault / record["destination"]
+        payload = record["text"].encode("utf-8")
+        digest = sha256_bytes(payload)
+        previous = prior.get(record["id"])
+        if previous:
+            # Already written by this run. Accept it only when what is on disk
+            # is what was written; anything else is the user's edit, and this
+            # skill does not touch notes it did not just create.
+            if destination.is_file() and sha256_bytes(destination.read_bytes()) == previous.get("sha256"):
+                record["status"] = "created"
+                continue
+            record["status"] = "review"
+            record["held_reason"] = (
+                f"{record['destination']} was written by this run and has since changed or been moved; "
+                "it was left alone"
+            )
+            warnings.append(f"{record['title']}: {record['held_reason']}")
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(destination, "xb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except FileExistsError:
+            record["status"] = "review"
+            record["held_reason"] = f"a note already exists at {record['destination']}"
+            warnings.append(f"{record['title']}: {record['held_reason']}")
+            run_state.append_jsonl_fsync(
+                journal, {"at": run_state.utc_now(), "id": record["id"], "destination": record["destination"], "status": "collision"}
+            )
+            continue
+        record["status"] = "created"
+        created += 1
+        run_state.append_jsonl_fsync(
+            journal,
+            {
+                "at": run_state.utc_now(),
+                "id": record["id"],
+                "destination": record["destination"],
+                "sha256": digest,
+                "source": record["source"],
+                "status": "ok",
+            },
+        )
+    return created, warnings
+
+
+# --------------------------------------------------------------------------- #
+# Report
+# --------------------------------------------------------------------------- #
+
+
+def verification_report(verification):
+    if not verification:
+        return ["## Verification", "", "Verification did not run.", ""]
+    if verification.get("skipped"):
+        return [
+            "## Verification",
+            "",
+            f"Nothing was reviewed: {verification['skipped']}.",
+            "These notes carry no thinking-model review. That is not the same as approval.",
+            "",
+        ]
+    lines = [
+        "## Verification",
+        "",
+        f"- Reviewed by the thinking model: {verification.get('verified', 0)}",
+        f"- Accepted: {verification.get('ok', 0)}",
+        f"- Flagged: {verification.get('flagged', 0)}",
+        f"- Re-drafted with reasoning: {verification.get('escalated', 0)}",
+        f"- Left for you: {verification.get('needsReview', 0)}",
+    ]
+    if verification.get("coverageFlagged"):
+        lines.append(f"- Braindumps whose split was flagged: {len(verification['coverageFlagged'])}")
+    lines.append("")
+    return lines
+
+
+def write_report(run_dir, items, records, counts, dry_run, vault, options, warnings, verification):
+    lines = [
+        "# Vault capture",
+        "",
+        f"- Vault: `{vault}`",
+        f"- Run: `{run_dir}`",
+        f"- Dry run: `{str(dry_run).lower()}`",
+        f"- Braindumps: {counts['braindumps']}",
+        f"- Notes written: {counts['created']}",
+        f"- Held for you: {counts['review']}",
+        f"- Voice note: {options.get('voice_note') or 'none'}",
+        "",
+        "## Notes",
+        "",
+    ]
+    if not records:
+        lines.append("No notes were drafted.")
+        lines.append("")
+    for record in records:
+        marker = {"created": "written", "ok": "ready", "review": "held"}.get(record["status"], record["status"])
+        destination = record.get("destination") or "—"
+        lines.append(f"### {record['title']} ({record['kind']}, {marker})")
+        lines.append("")
+        lines.append(f"- Destination: `{destination}`")
+        lines.append(f"- From: `{record['source']}`")
+        if record["is_primary"]:
+            lines.append("- Carries the braindump verbatim")
+        lines.append(f"- Verification: {record.get('verified', 'not-verified')}")
+        if record.get("held_reason"):
+            lines.append(f"- Held: {record['held_reason']}")
+        for notice in record.get("notices", []):
+            lines.append(f"- Notice: {notice}")
+        lines.append("")
+        lines.append(f"> {record['gist']}")
+        lines.append("")
+    held_inputs = [item for item in items if item["held"]]
+    if held_inputs:
+        lines.extend(["## Braindumps not processed", ""])
+        for item in held_inputs:
+            lines.append(f"- `{item['label']}` — {item['held']}")
+        lines.append("")
+    lines.extend(verification_report(verification))
+    if warnings:
+        lines.extend(["## Warnings", ""])
+        lines.extend(f"- {warning}" for warning in warnings)
+        lines.append("")
+    lines.extend(["## Options", "", "```json", json.dumps(options, indent=2, ensure_ascii=False), "```", ""])
+    path = run_dir / "report.md"
+    run_state.atomic_write_text(path, "\n".join(lines))
+    return path
+
+
+# --------------------------------------------------------------------------- #
+# Preferences
+# --------------------------------------------------------------------------- #
+
+PREFS_EDIT_SYSTEM = """You turn one piece of feedback about writing style into proposed edits to a person's voice-and-style note.
+
+That note is what tells the note-writing pipeline how this person's notes should read. You are proposing changes to it, not applying them: a human reads every proposal and accepts or rejects each one.
+
+The note has exactly five sections, and every edit belongs to one of them:
+
+- "global" — how they write, in general: person, tense, tone, hedging.
+- "per_type" — one rule for one kind of note. Needs a `type` as well as the text.
+- "vocabulary" — a word they use or avoid, written as "term — how they use it".
+- "formatting" — headings, bullets, punctuation. Mechanical rules only.
+- "never" — things a note must never do. Use this only for real prohibitions.
+
+Return exactly one JSON object:
+
+{"edits": [{"section": "global|per_type|vocabulary|formatting|never", "operation": "add|amend|remove", "type": "note type, only for per_type", "text": "The rule, written as an instruction.", "replaces": "the existing bullet this amends or removes, exactly", "reason": "why this feedback implies this rule"}], "needs_review": false, "review_reason": null}
+
+Rules for what you propose:
+
+- Write a rule the pipeline can follow. "Be less formal" is not actionable; "Keep contractions" is.
+- One rule per edit. Do not combine two pieces of guidance into one bullet.
+- Propose only what the feedback supports. Inventing rules the person did not ask for is how a style note becomes something they no longer recognize.
+- `amend` and `remove` must quote the existing bullet exactly in `replaces`.
+- An empty `edits` list is a legitimate answer when the feedback is about one note rather than about how notes should read in general. Say why in `review_reason`."""
+
+SECTION_KEYS = {
+    "global": "global",
+    "per_type": "per_type",
+    "vocabulary": "vocabulary",
+    "formatting": "formatting",
+    "never": "never",
+}
+
+
+def validate_edits(value, voice):
+    """The model proposes; this decides what is even representable."""
+    if not isinstance(value, dict) or not isinstance(value.get("edits"), list):
+        raise UserError("preferences response has no edits list")
+    edits = []
+    for position, entry in enumerate(value["edits"], start=1):
+        if not isinstance(entry, dict):
+            raise UserError(f"edit {position} is not an object")
+        section = entry.get("section")
+        if section not in SECTION_KEYS:
+            raise UserError(f"edit {position} names an unknown section {section!r}")
+        operation = entry.get("operation")
+        if operation not in ("add", "amend", "remove"):
+            raise UserError(f"edit {position} has an unknown operation {operation!r}")
+        text = entry.get("text")
+        if operation != "remove" and (not isinstance(text, str) or not text.strip()):
+            raise UserError(f"edit {position} has no text")
+        replaces = entry.get("replaces")
+        if operation in ("amend", "remove"):
+            if not isinstance(replaces, str) or not replaces.strip():
+                raise UserError(f"edit {position} is an {operation} without naming what it replaces")
+            existing = (
+                list(voice.get("per_type", {}).values()) if section == "per_type" else voice.get(section, [])
+            )
+            if replaces.strip() not in [str(item).strip() for item in existing]:
+                raise UserError(f"edit {position} names a bullet that is not in the {section} section: {replaces!r}")
+        note_type = entry.get("type")
+        if section == "per_type" and operation != "remove" and (not isinstance(note_type, str) or not note_type.strip()):
+            raise UserError(f"edit {position} is a per-type rule without a type")
+        edits.append(
+            {
+                "id": f"p-{position:03d}",
+                "section": section,
+                "operation": operation,
+                "text": (text or "").strip(),
+                "replaces": (replaces or "").strip(),
+                "type": (note_type or "").strip(),
+                "reason": entry.get("reason") if isinstance(entry.get("reason"), str) else "",
+            }
+        )
+    return edits
+
+
+def apply_edits(voice, edits):
+    """Apply accepted edits to a parsed voice note, in order."""
+    updated = {
+        "global": list(voice.get("global", [])),
+        "per_type": dict(voice.get("per_type", {})),
+        "vocabulary": list(voice.get("vocabulary", [])),
+        "formatting": list(voice.get("formatting", [])),
+        "never": list(voice.get("never", [])),
+    }
+    for edit in edits:
+        section = edit["section"]
+        if section == "per_type":
+            if edit["operation"] == "remove":
+                for note_type, style in list(updated["per_type"].items()):
+                    if style.strip() == edit["replaces"]:
+                        del updated["per_type"][note_type]
+            else:
+                updated["per_type"][edit["type"]] = edit["text"]
+            continue
+        bullets = updated[section]
+        if edit["operation"] == "add":
+            if edit["text"] not in bullets:
+                bullets.append(edit["text"])
+        elif edit["operation"] == "amend":
+            for index, bullet in enumerate(bullets):
+                if bullet.strip() == edit["replaces"]:
+                    bullets[index] = edit["text"]
+        else:
+            updated[section] = [bullet for bullet in bullets if bullet.strip() != edit["replaces"]]
+    return updated
+
+
+def describe_edit(edit):
+    where = f"{edit['section']}/{edit['type']}" if edit["section"] == "per_type" and edit["type"] else edit["section"]
+    if edit["operation"] == "remove":
+        return f"remove from {where}: {edit['replaces']}"
+    if edit["operation"] == "amend":
+        return f"amend {where}: {edit['replaces']} -> {edit['text']}"
+    return f"add to {where}: {edit['text']}"
+
+
+def preferences(args):
+    """Propose voice-note edits from feedback, or apply the ones named.
+
+    This edits a note the user wrote, so it follows the rule every skill that
+    touches existing notes follows: propose, show the diff, and change nothing
+    without being told which proposals to take.
+    """
+    vault = Path(args.vault).expanduser().resolve()
+    if not vault.is_dir():
+        raise UserError(f"vault root does not exist: {vault}")
+    voice_path = vault_voice.resolve_voice_path(vault, args.voice)
+    if voice_path is None:
+        raise UserError(
+            f"this vault has no voice note. Create {vault / vault_voice.DEFAULT_VOICE} with at least one of the "
+            "sections '## Global voice', '## Per-type style', '## Vocabulary', '## Formatting', '## Never do', "
+            "then run this again. This skill does not create it: it is your note, and it should say what you meant."
+        )
+    current_text = voice_path.read_text(encoding="utf-8")
+    voice = vault_voice.parse_voice_note(current_text)
+    current_hash = sha256_text(current_text)
+
+    if args.accept or args.reject:
+        return apply_preferences(args, vault, voice_path, voice, current_hash)
+
+    if not args.feedback:
+        raise UserError("preferences requires --feedback \"<what you want changed>\", or --accept/--reject with --run")
+    payload = {"feedback": args.feedback, "currentVoiceNote": voice}
+    if args.from_run:
+        report = Path(args.from_run).expanduser().resolve() / "report.md"
+        if report.is_file():
+            payload["recentRun"] = report.read_text(encoding="utf-8")[:PREFS_RUN_CONTEXT_CHARS]
+    value = call_json(args, chat_service(args), PREFS_EDIT_SYSTEM, payload, "propose-preferences")
+    edits = validate_edits(value, voice)
+    # Prove the result is still a readable voice note before offering it. A
+    # proposal that would break the note is a bug, not a decision to hand over.
+    proposed = apply_edits(voice, edits)
+    rendered = vault_voice.render_voice_note(proposed)
+    try:
+        vault_voice.parse_voice_note(rendered)
+    except UserError as error:
+        raise UserError(f"the proposed voice note would not parse, so nothing was proposed: {error}") from error
+
+    run_dir = unique_run_directory(vault)
+    run_state.initialize_run_state(
+        run_dir,
+        run_state.create_run_state(
+            WORKFLOW,
+            "preferences",
+            {"vault": str(vault), "voice_note": str(voice_path), "voice_hash": current_hash},
+            {"feedback": args.feedback, "prompt_version": PROMPT_VERSION},
+            phase="proposed",
+        ),
+    )
+    run_state.atomic_write_json(
+        run_dir / "proposals.json",
+        {"voice_note": str(voice_path), "voice_hash": current_hash, "edits": edits},
+    )
+    lines = [
+        "# Voice and style proposals",
+        "",
+        f"- Voice note: `{voice_path}`",
+        f"- Feedback: {args.feedback}",
+        "",
+        "## Proposed edits",
+        "",
+    ]
+    if not edits:
+        lines.append("Nothing to change: this feedback is about one note rather than about how notes should read.")
+        lines.append("")
+    for edit in edits:
+        lines.append(f"### {edit['id']}")
+        lines.append("")
+        lines.append(f"- {describe_edit(edit)}")
+        if edit["reason"]:
+            lines.append(f"- Why: {edit['reason']}")
+        lines.append("")
+    lines.extend(["## The note as it would read", "", "```markdown", rendered.strip(), "```", ""])
+    report_path = run_dir / "report.md"
+    run_state.atomic_write_text(report_path, "\n".join(lines))
+    return structured(
+        "ok",
+        artifacts=[str(report_path)],
+        warnings=[] if edits else ["no edits were proposed"],
+        data={
+            "run_directory": str(run_dir),
+            "voice_note": str(voice_path),
+            "edits": edits,
+            "next_action": f"accept with: preferences --vault {vault} --run {run_dir} --accept <ids>",
+        },
+    )
+
+
+def apply_preferences(args, vault, voice_path, voice, current_hash):
+    if not args.run:
+        raise UserError("--accept and --reject need --run <run-directory>")
+    run_dir = Path(args.run).expanduser().resolve()
+    proposals = json.loads((run_dir / "proposals.json").read_text(encoding="utf-8"))
+    if proposals["voice_hash"] != current_hash:
+        raise UserError(
+            "the voice note changed since these edits were proposed; nothing was applied. "
+            "Run preferences again to propose against the note as it reads now."
+        )
+    accepted_ids = [value.strip() for value in (args.accept or "").split(",") if value.strip()]
+    rejected_ids = [value.strip() for value in (args.reject or "").split(",") if value.strip()]
+    known = {edit["id"] for edit in proposals["edits"]}
+    unknown = sorted((set(accepted_ids) | set(rejected_ids)) - known)
+    if unknown:
+        raise UserError(f"unknown proposal ids: {', '.join(unknown)}")
+    accepted = [edit for edit in proposals["edits"] if edit["id"] in accepted_ids]
+    if not accepted:
+        run_state.append_jsonl_fsync(
+            run_dir / "decisions.jsonl",
+            {"at": run_state.utc_now(), "accepted": [], "rejected": rejected_ids},
+        )
+        return structured(
+            "ok",
+            warnings=["nothing was accepted, so the voice note is unchanged"],
+            data={"voice_note": str(voice_path), "accepted": [], "rejected": rejected_ids},
+        )
+    updated = apply_edits(voice, accepted)
+    rendered = vault_voice.render_voice_note(updated)
+    vault_voice.parse_voice_note(rendered)  # raises rather than writing an unreadable note
+    backup = run_dir / "backup" / voice_path.name
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    backup.write_text(voice_path.read_text(encoding="utf-8"), encoding="utf-8")
+    run_state.atomic_write_text(voice_path, rendered)
+    run_state.append_jsonl_fsync(
+        run_dir / "decisions.jsonl",
+        {
+            "at": run_state.utc_now(),
+            "accepted": accepted_ids,
+            "rejected": rejected_ids,
+            "previous_hash": current_hash,
+            "new_hash": sha256_text(rendered),
+            "backup": str(backup),
+        },
+    )
+    return structured(
+        "ok",
+        artifacts=[str(voice_path)],
+        data={
+            "voice_note": str(voice_path),
+            "accepted": accepted_ids,
+            "rejected": rejected_ids,
+            "backup": str(backup),
+            "applied": [describe_edit(edit) for edit in accepted],
+        },
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Run
+# --------------------------------------------------------------------------- #
+
+
+def chat_service(args):
+    return {
+        "name": "chat",
+        "enabled": True,
+        "url": args.base_url,
+        "model": args.model,
+        "scheduling": forge_llm.DEFAULT_SERVICES["chat"]["scheduling"],
+    }
+
+
+def resolved_options(args):
+    return {
+        "model": args.model,
+        "base_url": args.base_url,
+        "filename_pattern": args.filename_pattern,
+        "max_notes": args.max_notes,
+        "prompt_version": PROMPT_VERSION,
+        "cache_prompt": args.cache_prompt,
+        "schema": args.schema,
+        "voice": args.voice,
+        "exemplars": args.exemplars,
+    }
+
+
+RESUMABLE_OPTION_FLAGS = {
+    "model": "--model",
+    "base_url": "--base-url",
+    "filename_pattern": "--filename-pattern",
+    "max_notes": "--max-notes",
+    "schema": "--schema",
+    "voice": "--voice",
+}
+
+
+def adopt_stored_options(args, state):
+    """Resuming keeps the original run's options: changing how notes are named
+    or divided halfway through produces a batch that disagrees with itself."""
+    stored = state.get("options", {})
+    for key, flag in RESUMABLE_OPTION_FLAGS.items():
+        if getattr(args, f"{key}_provided", False) and getattr(args, key) != stored.get(key):
+            raise UserError(
+                f"{flag} differs from the original run ({getattr(args, key)!r} vs {stored.get(key)!r}); "
+                "start a new run instead of --run"
+            )
+        if key in stored:
+            setattr(args, key, stored[key])
+    args.cache_prompt = stored.get("cache_prompt", args.cache_prompt)
+
+
+def phase(run_dir, name, event=None):
+    run_state.update_run_state(run_dir, lambda draft: draft.update({"phase": name}) or draft, event=event)
+
+
+def capture(args):
+    vault = Path(args.vault).expanduser().resolve()
+    if not vault.is_dir():
+        raise UserError(f"vault root does not exist: {vault}")
+    stdin_text = sys.stdin.read() if args.stdin else None
+    resuming = bool(args.run)
+    state = None
+    if resuming:
+        run_dir = Path(args.run).expanduser().resolve()
+        state = run_state.load_run_state(run_dir, workflow=WORKFLOW)
+        adopt_stored_options(args, state)
+    schema_path = resolve_schema_path(vault, args.schema)
+    schema, schema_hash = compiled_schema_for(vault, schema_path, cache_dir=vault / STATE_DIR / "cache")
+    voice_path = vault_voice.resolve_voice_path(vault, args.voice)
+    voice, voice_hash = vault_voice.compiled_voice_for(vault, voice_path, cache_dir=vault / STATE_DIR / "cache")
+    warnings = []
+
+    with run_state.run_lock(vault / STATE_DIR):
+        if resuming:
+            items = json.loads((run_dir / "scan.json").read_text(encoding="utf-8"))["items"]
+        else:
+            items = scan_inputs(args.inputs, stdin_text, args.force)
+        configuration = {
+            "workflow": WORKFLOW,
+            "command": "capture",
+            "input": {
+                "vault": str(vault),
+                "schema_hash": schema_hash,
+                # A changed voice note means a resumed run would draft its
+                # remaining notes to different rules than the ones it started
+                # with, so it is part of what makes a run compatible.
+                "voice_hash": vault_voice.voice_fingerprint(voice_hash),
+                "sources": [{"source": item["source"], "sha256": item["sha256"]} for item in items],
+            },
+            "options": resolved_options(args),
+        }
+        if resuming:
+            try:
+                run_state.assert_compatible_run(state, configuration)
+            except ValueError as error:
+                raise UserError(str(error)) from error
+        else:
+            run_dir = unique_run_directory(vault)
+            run_state.initialize_run_state(
+                run_dir,
+                run_state.create_run_state(
+                    WORKFLOW, "capture", configuration["input"], configuration["options"], phase="scan"
+                ),
+            )
+            run_state.atomic_write_json(run_dir / "scan.json", {"items": items})
+
+        items_by_id = {item["id"]: item for item in items}
+        for item in items:
+            if item["held"]:
+                warnings.append(f"{item['label']}: {item['held']}")
+
+        service = chat_service(args)
+        phase(run_dir, "split")
+        results, split_warnings = split_items(args, service, items, run_dir)
+        warnings.extend(split_warnings)
+
+        planned = []
+        for item, notes in results:
+            for position, note in enumerate(notes, start=1):
+                planned.append(
+                    {
+                        "id": f"{item['id']}-{position:02d}",
+                        "item": item,
+                        "note": note,
+                        "siblings": [
+                            {"title": other["title"], "gist": other["gist"]}
+                            for index, other in enumerate(notes)
+                            if index != position - 1
+                        ],
+                    }
+                )
+        phase(run_dir, "draft", event={"type": "phase", "phase": "draft", "counts": {"notes": len(planned)}})
+        seen_warnings = set()
+        for entry in planned:
+            note_type = note_type_for(entry["note"]["kind"], schema)
+            entry["type_style"] = (voice or {}).get("per_type", {}).get(note_type)
+            if not args.exemplars:
+                continue
+            exemplars, warning = collect_exemplars(vault, entry["note"]["gist"], note_type=note_type)
+            entry["exemplars"] = exemplars
+            if warning and warning not in seen_warnings:
+                seen_warnings.add(warning)
+                warnings.append(warning)
+        if args.exemplars and planned:
+            # Journal which of the user's own notes each draft was shown, so
+            # they can see what the pipeline read on their behalf.
+            run_state.atomic_write_json(
+                run_dir / "exemplars.json",
+                {entry["id"]: [row["note"] for row in entry.get("exemplars") or []] for entry in planned},
+            )
+        # One voice segment per run, not per note: the per-type row would change
+        # the system prompt between calls and throw away the prefix cache. Type
+        # guidance rides in the user message with everything else that varies.
+        system = draft_system_prompt(vault_voice.prompt_segment(voice))
+        warnings.extend(draft_items(args, service, system, planned, run_dir))
+
+        grouped = {}
+        for entry in planned:
+            grouped.setdefault(entry["item"]["id"], []).append(entry)
+        phase(run_dir, "assemble")
+        records, assemble_warnings = assemble(
+            args, vault, schema, [(items_by_id[key], entries) for key, entries in grouped.items()], run_dir
+        )
+        warnings.extend(assemble_warnings)
+
+        verification = None
+        if args.verify:
+            phase(run_dir, "verify")
+            verification, verify_warnings = verify_records(args, schema, system, items_by_id, records, run_dir)
+            warnings.extend(verify_warnings)
+        else:
+            warnings.append("verification was skipped with --no-verify; nothing was reviewed")
+
+        created = 0
+        if not args.dry_run:
+            phase(run_dir, "write")
+            created, write_warnings = write_notes(vault, records, run_dir)
+            warnings.extend(write_warnings)
+
+        counts = {
+            "braindumps": len(items),
+            "braindumps_held": sum(1 for item in items if item["held"]),
+            "notes": len(records),
+            "created": created,
+            "ready": sum(1 for record in records if record["status"] == "ok"),
+            "review": sum(1 for record in records if record["status"] == "review"),
+        }
+        report_path = write_report(
+            run_dir,
+            items,
+            records,
+            counts,
+            args.dry_run,
+            vault,
+            {**resolved_options(args), "voice_note": str(voice_path) if voice_path else None},
+            warnings,
+            verification,
+        )
+        run_state.atomic_write_json(
+            run_dir / "plan.json",
+            {"records": [{key: value for key, value in row.items() if key != "text"} for row in records]},
+        )
+        final_phase = "complete" if not args.dry_run else "planned"
+        run_state.update_run_state(
+            run_dir,
+            lambda draft: draft.update(
+                {
+                    "phase": final_phase,
+                    "status": "complete" if final_phase == "complete" else "running",
+                    "nextAction": None
+                    if final_phase == "complete"
+                    else f"review {report_path.name}, then rerun without --dry-run using --run {run_dir}",
+                }
+            )
+            or draft,
+            event={"type": "phase", "phase": final_phase, "counts": counts},
+        )
+    return structured(
+        "ok",
+        artifacts=[str(report_path), str(run_dir / "plan.json")],
+        warnings=warnings,
+        data={
+            "dry_run": args.dry_run,
+            "vault": str(vault),
+            "run_directory": str(run_dir),
+            "options": resolved_options(args),
+            "counts": counts,
+            "verification": verification,
+            "notes": [
+                {
+                    "title": record["title"],
+                    "kind": record["kind"],
+                    "destination": record.get("destination"),
+                    "status": record["status"],
+                    "held_reason": record.get("held_reason"),
+                }
+                for record in records
+            ],
+        },
+    )
+
+
+def status(args):
+    run_dir = Path(args.run).expanduser().resolve()
+    state = run_state.load_run_state(run_dir, workflow=WORKFLOW)
+    split, _ = run_state.read_jsonl_recover_tail(run_dir / "split.jsonl", repair=False)
+    drafted, _ = run_state.read_jsonl_recover_tail(run_dir / "drafted.jsonl", repair=False)
+    created, _ = run_state.read_jsonl_recover_tail(run_dir / "created.jsonl", repair=False)
+    return structured(
+        "ok",
+        data={
+            "run_directory": str(run_dir),
+            "phase": state.get("phase"),
+            "status": state.get("status"),
+            "braindumps_split": len(split),
+            "notes_drafted": sum(1 for row in drafted if row.get("status") == "ok"),
+            "notes_created": sum(1 for row in created if row.get("status") == "ok"),
+            "next_action": state.get("nextAction"),
+        },
+    )
+
+
+def doctor(args):
+    vault = Path(args.vault).expanduser().resolve()
+    checks = {}
+    warnings = []
+    ok = True
+    if vault.is_dir() and os.access(vault, os.W_OK):
+        checks["vault"] = {"ok": True, "path": str(vault)}
+    else:
+        checks["vault"] = {"ok": False, "path": str(vault), "detail": "vault root missing or not writable"}
+        ok = False
+    inbox = vault / INBOX_DIR
+    checks["inbox"] = {"ok": inbox.is_dir() and os.access(inbox, os.W_OK), "path": str(inbox)}
+    ok = ok and checks["inbox"]["ok"]
+    schema_check = {"ok": False}
+    if checks["vault"]["ok"]:
+        try:
+            schema_path = resolve_schema_path(vault, args.schema)
+            schema, schema_hash = compiled_schema_for(vault, schema_path, cache_dir=vault / STATE_DIR / "cache")
+            for kind in CAPTURE_KINDS:
+                frontmatter_metadata(schema, kind)
+            schema_check = {"ok": True, "path": str(schema_path), "schema_hash": schema_hash}
+        except UserError as error:
+            schema_check = {"ok": False, "detail": str(error)}
+    checks["schema"] = schema_check
+    ok = ok and schema_check["ok"]
+    # A vault with no voice note is healthy: notes are drafted the way this
+    # skill would have drafted them anyway. Only a note that cannot be read is
+    # a problem, because that is a rule the user wrote and nothing is applying.
+    voice_check = {"ok": True, "configured": False}
+    if checks["vault"]["ok"]:
+        try:
+            voice_path = vault_voice.resolve_voice_path(vault, args.voice)
+            if voice_path is None:
+                voice_check["detail"] = f"no voice note; the default path is {vault_voice.DEFAULT_VOICE}"
+            else:
+                voice, _voice_hash = vault_voice.compiled_voice_for(
+                    vault, voice_path, cache_dir=vault / STATE_DIR / "cache"
+                )
+                segment = vault_voice.prompt_segment(voice)
+                voice_check = {
+                    "ok": True,
+                    "configured": True,
+                    "path": str(voice_path),
+                    "prompt_characters": len(segment),
+                    "types_with_style": sorted(voice.get("per_type", {})),
+                }
+        except UserError as error:
+            voice_check = {"ok": False, "configured": True, "detail": str(error)}
+            warnings.append(f"voice note could not be read: {error}")
+    checks["voice"] = voice_check
+    ok = ok and voice_check["ok"]
+    checks["exemplars"] = {
+        "ok": True,
+        "enabled": args.exemplars,
+        "search_available": connections_script().is_file(),
+    }
+    if args.exemplars and not checks["exemplars"]["search_available"]:
+        warnings.append("vault-connections is not installed alongside this skill; drafts get no style examples")
+    # Splitting and drafting are one call each per unit, so a backend that
+    # reasons first costs hundreds of hidden tokens on every one of them.
+    chat_probe = forge_llm.service_doctor(
+        chat_service(args), expect_non_thinking=True, timeout=min(args.request_timeout, 60)
+    )
+    checks["chat"] = {
+        "ok": chat_probe["reachable"],
+        "url": chat_probe["url"],
+        "model": chat_probe["model"],
+        "detail": chat_probe.get("detail"),
+    }
+    for key in ("thinking", "hiddenTokens", "modelMismatch", "servedModels"):
+        if key in chat_probe:
+            checks["chat"][key] = chat_probe[key]
+    ok = ok and chat_probe["reachable"]
+    if chat_probe.get("warning"):
+        warnings.append(chat_probe["warning"])
+    think = forge_llm.resolve_think_or_chat(base_url=args.think_url, model=args.think_model)
+    think_probe = forge_llm.service_doctor(think, timeout=min(args.request_timeout, 60))
+    checks["think"] = {
+        "ok": think_probe["reachable"],
+        "url": think_probe["url"],
+        "model": think_probe["model"],
+        "detail": think_probe.get("detail"),
+    }
+    if think.get("fallback"):
+        checks["think"]["fallback"] = think["fallback"]
+        warnings.append("no thinking service is configured; verification would run on the bulk service")
+    if not think_probe["reachable"]:
+        warnings.append("thinking service is unreachable; runs would report that nothing was verified")
+    return structured("ok" if ok else "error", warnings=warnings, data={"checks": checks})
+
+
+class TrackingAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        setattr(namespace, f"{self.dest}_provided", True)
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(description="Turn a braindump into schema-valid notes in an Obsidian vault inbox.")
+    parser.add_argument("mode", choices=["capture", "preferences", "status", "doctor"])
+    parser.add_argument("inputs", nargs="*", help="braindump files to capture")
+    parser.add_argument("--feedback", help="what you want changed about how notes read (preferences)")
+    parser.add_argument("--from-run", help="a capture run this feedback is about (preferences)")
+    parser.add_argument("--accept", help="comma-separated proposal ids to apply (preferences)")
+    parser.add_argument("--reject", help="comma-separated proposal ids to record as rejected (preferences)")
+    parser.add_argument("--vault")
+    parser.add_argument("--schema", action=TrackingAction)
+    parser.add_argument("--voice", action=TrackingAction, help="voice-and-style note (default: the vault's, when it has one)")
+    parser.add_argument(
+        "--no-exemplars",
+        action="store_true",
+        help="draft without showing the model the user's own notes as style examples",
+    )
+    parser.add_argument("--stdin", action="store_true", help="read one braindump from standard input")
+    parser.add_argument("--run", help="existing run directory to resume")
+    parser.add_argument("--dry-run", action="store_true", help="plan and verify without writing notes")
+    parser.add_argument("--force", action="store_true", help="synthesize from input that looks like a transcript export")
+    parser.add_argument("--max-notes", type=int, action=TrackingAction, help=f"notes per braindump (default {DEFAULT_MAX_NOTES})")
+    parser.add_argument("--filename-pattern", choices=FILENAME_PATTERNS, action=TrackingAction)
+    parser.add_argument("--base-url", action=TrackingAction)
+    parser.add_argument("--model", action=TrackingAction)
+    parser.add_argument("--api-key")
+    parser.add_argument("--request-timeout", type=float, default=600)
+    parser.add_argument("--no-cache-prompt", action="store_true")
+    parser.add_argument("--no-verify", action="store_true", help="skip the thinking-model review")
+    parser.add_argument("--think-url", help="thinking service used for verification (default: connectedServices.think)")
+    parser.add_argument("--think-model")
+    parser.add_argument("--verbose", action="store_true")
+    args = parser.parse_args(argv)
+    for key in RESUMABLE_OPTION_FLAGS:
+        if not hasattr(args, f"{key}_provided"):
+            setattr(args, f"{key}_provided", False)
+    args.filename_pattern = args.filename_pattern or FILENAME_PATTERNS[0]
+    if args.max_notes is None:
+        args.max_notes = DEFAULT_MAX_NOTES
+    if args.max_notes < 1:
+        raise UserError("--max-notes must be at least 1")
+    if args.mode == "status":
+        if not args.run:
+            raise UserError("status requires --run <run-directory>")
+        return args
+    if not args.vault:
+        raise UserError(f"{args.mode} requires --vault")
+    if args.mode == "capture" and not args.inputs and not args.stdin and not args.run:
+        raise UserError("capture requires one or more input files, or --stdin")
+    if args.mode == "preferences" and not (args.feedback or args.accept or args.reject):
+        raise UserError('preferences requires --feedback "<what you want changed>", or --accept/--reject with --run')
+    resolved = forge_llm.resolve_service("chat", base_url=args.base_url, model=args.model)
+    args.base_url = resolved["url"]
+    args.model = resolved["model"]
+    args.api_key = args.api_key or os.environ.get("VAULT_CAPTURE_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
+    args.schema = args.schema or os.environ.get("VAULT_CAPTURE_SCHEMA") or None
+    args.cache_prompt = not args.no_cache_prompt
+    args.verify = not args.no_verify
+    args.exemplars = not args.no_exemplars
+    args.voice = args.voice or os.environ.get("VAULT_CAPTURE_VOICE") or None
+    return args
+
+
+def run(argv):
+    args = parse_args(argv)
+    if args.mode == "status":
+        return status(args)
+    if args.mode == "doctor":
+        return doctor(args)
+    if args.mode == "preferences":
+        return preferences(args)
+    return capture(args)
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        result = run(argv)
+    except UserError as error:
+        print_json(structured("error", errors=[error_entry("user_error", str(error))]))
+        return 2
+    except ValueError as error:
+        print_json(structured("error", errors=[error_entry("run_state_error", str(error))]))
+        return 2
+    except forge_llm.ChatError as error:
+        print_json(structured("error", errors=[error_entry("chat_error", str(error))]))
+        return 2
+    except KeyboardInterrupt:
+        print_json(structured("error", errors=[error_entry("interrupted", "interrupted")]))
+        return 130
+    print_json(result)
+    return 0 if result["status"] == "ok" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

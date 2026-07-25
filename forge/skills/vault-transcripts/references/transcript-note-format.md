@@ -14,6 +14,8 @@ both.
 type: meeting
 status: raw
 capture_type: meeting
+processed_by:
+  - "vault-transcripts"
 ---
 
 > [!summary]
@@ -35,11 +37,20 @@ Rules the script enforces, not suggestions:
 - Everything after `# Transcript` is the source body unchanged, including its
   handwritten preamble and any trailing text. The cleanup is a convenience; the
   transcription is the record.
-- Frontmatter carries only `type`, `status: raw`, and `capture_type`, all
-  validated against the vault's schema note. `vault-organizer` replaces this
-  block when it files the note and reads these three as advisory hints, so they
-  are accurate rather than complete. Domain, subdomain, project, and people are
-  the organizer's judgment, not this skill's.
+- Frontmatter carries only `type`, `status: raw`, `capture_type`, and
+  `processed_by`, all validated against the vault's schema note.
+  `vault-organizer` replaces this block when it files the note and reads the
+  first three as advisory hints, so they are accurate rather than complete.
+  Domain, subdomain, project, and people are the organizer's judgment, not this
+  skill's.
+- `capture_type` stays the recording's own channel — `voice` or `meeting`. It
+  records how the note entered the vault, which cleanup does not change, and
+  which is what makes a cleaned transcript findable as a recording. What the
+  pipeline *did* is `processed_by: ["vault-transcripts"]`: the cleaned body is
+  substantially model-transformed, and a reader deserves to know that without
+  losing how the note arrived. The organizer carries both forward when it
+  refiles the note. A vault whose schema note has no `processed_by` property
+  simply does not get the key.
 - A note under `--tiny-words` (120 by default) gets no summary. The descriptive
   filename already carries the gist of a two-sentence reminder.
 - Generated titles pass through `safe_title` in `forge/lib/vault_schema.py`, the
