@@ -3369,6 +3369,10 @@ test("vault-connections Python tests pass", () => {
 	run(python, [join(skillsRoot, "vault-connections", "tests", "test_vault_connections.py")]);
 });
 
+test("vault-transcripts Python tests pass", () => {
+	run(python, [join(skillsRoot, "vault-transcripts", "tests", "test_vault_transcripts.py")]);
+});
+
 function startChunkWorkerFixture(workspace, options = {}) {
 	const serverPath = join(workspace, "chunk-worker-server.mjs");
 	const requestsPath = join(workspace, "chunk-worker-requests.jsonl");

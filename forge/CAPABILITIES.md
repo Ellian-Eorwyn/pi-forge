@@ -29,5 +29,6 @@ reconciles it.
 - `vault-handoff`: Prepare completed artifacts for pi-vault or Obsidian review.
 - `vault-connections`: Search an Obsidian vault by meaning, propose note links for per-id approval, validate completed literature/meta-literature/deep-research runs, propose schema-classified reports for `00 Inbox`, and create evidence-backed concept/practice/place/event/term/work/figure notes from vault-owned templates.
 - `vault-organizer`: Classify, de-duplicate, and organize Obsidian notes from a human-maintained vault schema note, with restart-safe resumable runs and a recoverable duplicate quarantine.
+- `vault-transcripts`: Rename, clean, and summarize raw voice-note and meeting transcripts in an Obsidian vault inbox, keeping the original transcription verbatim; run before `vault-organizer` inbox processing.
 - `web-collection`: Archive, organize, and preserve web sources with per-URL checkpoints.
 - `web-research`: Perform resumable quick, deep, or academic web research with URL/provider/iteration checkpoints, direct-first acquisition, local-first scheduling, embedding-ranked source triage, browser fallback/discovery, provenance, evidence, claims, and validation.

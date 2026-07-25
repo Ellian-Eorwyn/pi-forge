@@ -72,6 +72,11 @@ context is present, use `vault-connections` search rather than grep for question
 about vault content, and `vault-organizer` for filing and de-duplication. `/vault`
 re-scans and reports. Outside a vault the extension does nothing.
 
+Raw voice-note and meeting transcripts in `00 Inbox` go through
+`vault-transcripts` **before** `vault-organizer` inbox processing: that skill
+names, cleans, and summarizes a recording and writes advisory frontmatter, and
+the organizer then classifies and files the result.
+
 Route requests such as "send this literature run to my vault", "publish this
 deep research to Obsidian", or "turn these extraction outputs into concept
 notes" to `vault-connections import-run`. It validates the source run without

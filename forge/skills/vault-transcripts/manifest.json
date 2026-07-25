@@ -1,0 +1,27 @@
+{
+	"name": "vault-transcripts",
+	"type": "pi-forge-skill",
+	"version": "0.1.0",
+	"description": "Rename, clean, and summarize voice-note and meeting transcripts in an Obsidian vault inbox while preserving the original transcription verbatim.",
+	"skill_file": "SKILL.md",
+	"scripts_dir": "scripts",
+	"references_dir": "references",
+	"restart_safe": true,
+	"tools": [
+		{
+			"name": "vault_transcripts",
+			"description": "Process raw transcripts in an Obsidian vault inbox: derive a dated descriptive filename, write schema-valid frontmatter, add a one-paragraph summary and a type-aware cleaned transcript, and keep the original transcription under a '# Transcript' heading; runs are dry-run by default and inspectable with status/doctor.",
+			"command": "python3 scripts/vault-transcripts.py",
+			"destructive": true
+		}
+	],
+	"safety": {
+		"destructive_by_default": false,
+		"requires_review_for_filesystem_changes": true,
+		"preserve_provenance_when_applicable": true,
+		"never_deletes_notes": true,
+		"preserves_raw_transcript_verbatim": true,
+		"backs_up_every_rewritten_note": true,
+		"recoverable_duplicate_quarantine": true
+	}
+}
