@@ -20,7 +20,11 @@ Configuration:
 - ``FORGE_EMBEDDINGS_URL`` overrides the endpoint
   (default ``http://llms:8005/v1/embeddings``).
 - ``FORGE_EMBEDDINGS_MODEL`` overrides the served model name
-  (default ``Qwen3-Embedding-0.6B``).
+  (default ``embed``, matching ``connectedServices.embeddings.model``).
+
+The server answers with whatever is loaded regardless of the name it is sent, so
+this name is not a request — but it keys the vault embedding caches, so changing
+it invalidates them and forces one full re-embed.
 """
 
 import json
@@ -30,7 +34,7 @@ import urllib.error
 import urllib.request
 
 DEFAULT_EMBEDDINGS_URL = "http://llms:8005/v1/embeddings"
-DEFAULT_EMBEDDINGS_MODEL = "Qwen3-Embedding-0.6B"
+DEFAULT_EMBEDDINGS_MODEL = "embed"
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_BATCH_SIZE = 64
 

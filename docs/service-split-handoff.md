@@ -1,11 +1,17 @@
 # Finishing the thinking/non-thinking split
 
-This is a handoff for whoever continues the work started on `feat/vault-connections`
-(commits `2f9e976e`…`a186cbf4`). The routing and verification layers are built and
-proven; three batch skills still route every per-file operation through the agent's
-own thinking context. This document says what to do, what to copy, and — most
-importantly — what had to change about *prompting* to keep quality when work moved
-off the thinking model.
+**Status: the conversions in §3 are done.** They landed in `b41c1884`…`f6f1a37e`,
+along with a JavaScript client the plan did not originally scope. §7 records what
+each one measured, what turned out to be wrong in the guidance below, and what is
+deliberately left unconverted. Read §7 before §3, which is kept as written so the
+before-and-after stays legible.
+
+This was a handoff for whoever continued the work started on
+`feat/vault-connections` (commits `2f9e976e`…`a186cbf4`). The routing and
+verification layers were built and proven; three batch skills still routed every
+per-file operation through the agent's own thinking context. This document says
+what to do, what to copy, and — most importantly — what had to change about
+*prompting* to keep quality when work moved off the thinking model.
 
 Read this before the code. The mechanical part is easy and the prompting part is
 where the quality actually lives.
@@ -168,7 +174,7 @@ prompt rule (see the per-skill notes below).
 
 ---
 
-## 3. Remaining work
+## 3. Remaining work — all done; see §7
 
 Order matters: each is a smaller step from the one before it.
 
@@ -229,10 +235,8 @@ the sort of dependency that disappears silently when a task goes stateless.
 
 ### 3.4 Optional cleanups
 
-- `forge_embeddings.py` still defaults its model name to `Qwen3-Embedding-0.6B`
-  while `connectedServices.embeddings` says `embed`. The server ignores the name,
-  so this is cosmetic — but the name keys embedding caches and run fingerprints,
-  so changing it forces a re-embed. Align it deliberately or leave it alone.
+- ~~`forge_embeddings.py` still defaults its model name to
+  `Qwen3-Embedding-0.6B`~~ — done; see §7.7.
 - `project-extraction`'s `post_chat_json` predates `forge_llm` and duplicates it.
   It is the most battle-tested client in the repo (threaded, preemptible,
   lease-aware); only consolidate if you are prepared to port preemption carefully.
@@ -305,3 +309,115 @@ python3 forge/skills/vault-organizer/scripts/vault-organizer.py doctor --vault <
 misconfigured and every file is costing a few hundred wasted tokens — that warning
 is the single most useful signal in this whole system, because nothing else in the
 response body reveals it.
+
+`web-research doctor --json` now runs the same probe and reports it as
+`chatProbe`, so a JavaScript install can be checked without a vault.
+
+---
+
+## 7. What actually happened
+
+Everything in §3 is done. What follows is what the work measured and where the
+guidance above turned out to be wrong.
+
+### 7.1 Corrections to this document
+
+- **§3.4 overstated the `project-extraction` risk.** Consolidating
+  `post_chat_json` did not require porting preemption, because
+  `forge_llm._post_preemptible` already *was* that port — same worker thread,
+  same 1s lease refresh, same connection close, same `InterruptedError`. The only
+  real delta was journaling, and `forge_llm.call` already returned the row
+  `inference_schedule.jsonl` wants. One capability was genuinely missing:
+  `allow_preemption=False`, which the slot probe needs so a diagnostic is not
+  abandoned by the first interactive turn. `forge_llm.call` takes that flag now.
+- **§3.4 also mis-describes `project-extraction` as unverified.** Reconciliation
+  and relationship review already ran on `think`. The real gap was that nothing
+  reviewed the *extraction*: quote exactness is enforced when a packet is
+  recorded, so what went unchecked was the judgment a verbatim quote cannot
+  settle — who owes an obligation, and whether something merely discussed was
+  recorded as committed. That review exists now.
+- **§3.3 had an unstated prerequisite.** `document-ingest` is `.mjs`, and there
+  was no JavaScript equivalent of `forge_llm.py`. `forge-llm.mjs` and
+  `forge-verify.mjs` exist for that reason, and `web-collection` and
+  `web-research` moved onto them too.
+- **§3.2's `NEAR_DUPE_AUTO = 0.97` does not transfer.** That threshold asks "is
+  this the same text twice"; reusing an answer across rows asks "do these rows
+  deserve the same answer", which paraphrases satisfy much lower. Three genuine
+  duplicate groups in a support-ticket sheet sat between 0.945 and 0.964, so 0.97
+  reused nothing at all. 0.85–0.92 found exactly those groups with no false
+  merge; 0.80 began merging distinct problems. The default is 0.92.
+
+### 7.2 What the A/B gates measured
+
+| Skill | Bulk on `chat` | Baseline on `think` | Coverage |
+| --- | --- | --- | --- |
+| `personal-admin` | 44.7s, 40 facts | 3m49s, 44 facts | 8 of 8 fact types on both |
+| `spreadsheet-analysis` | 2.7s, 5 model calls | 49.8s, 10 calls | identical values on every row |
+| `document-ingest` | 3 chunks, 49s | — | one consistent outline |
+
+§2.1 held everywhere it was tested. The enumeration clause naming the fact types
+that get skipped is what kept `personal-admin` at full breadth; without checking
+coverage rather than counts, nothing would have shown the difference.
+
+### 7.3 Where §2.1 does *not* apply
+
+Naming a **formatting** dimension backfires. Row enrichment's one inconsistency
+against the thinking baseline was a stray trailing period, and adding a prompt
+clause asking for consistent punctuation took that from one cell in ten to six:
+it made the model attend to punctuation without giving it a rule.
+
+Category coverage and format consistency are different problems. Naming what gets
+skipped fixes coverage. Format belongs to §2.5 — a deterministic pass, which can
+also see every row at once, where a stateless call never can.
+
+### 7.4 Two defects the conversions exposed
+
+- **A verifier with no evidence rubber-stamps.** `personal-admin`'s first review
+  pass approved a seeded extraction that tripled a balance, invented a five-day
+  deadline, and reversed who owed a referral code. The payload carried
+  paraphrased facts and no document. `literature-extraction` gets away with this
+  because `direct_quotes` carries evidence inline; a skill whose items are
+  paraphrases must send the source. Check this when adding any new review.
+- **Escalation had no resume guard.** A flag verdict lives in the journal
+  forever, so every resumed run bought a fresh reasoning-model call for every
+  item ever flagged — 85s per resume that should cost nothing.
+  `forge_verify.escalate` now returns recorded outcomes marked `resumed`, and
+  callers must skip re-committing them. `forge-verify.mjs` does the same.
+
+Related: a rejected *reused* answer is a rejected grouping, not a wording
+complaint. Propagating a replacement value repeats the mistake in every row that
+copied it; the group is broken up and each row re-answered instead.
+
+### 7.5 Chunks are not independent
+
+The question §3.3 left open has an answer: **yes, chunk N depends on chunk N−1**,
+and the dependency is heading depth. A four-section report cleaned statelessly
+came back with sections three and four demoted a level — chunk 1 set the depth
+and every later chunk re-derived its own. Carrying the headings used so far fixes
+it completely, and is far cheaper than the previous chunk's text.
+
+Paragraphs were never at risk: the splitter breaks on blank lines, so no
+sentence, list, or table is cut mid-structure.
+
+### 7.6 Deliberately not converted
+
+`coding`, `file-conversion`, `organize-folder`, `report-output`, `site-builder`,
+`skill-builder`, `transcription`, `vault-handoff`. These are either deterministic
+tooling with no model call, or single-judgment agent authoring where §3.1's rule
+applies — deliverables stay agent-authored.
+
+The one open candidate is **`transcript-cleanup`'s faithful-cleanup track**. A
+long faithful cleanup *is* per-segment bulk work done in the agent's context, and
+it has a strong deterministic invariant available (substantive-token retention
+against the source, the same shape as quote exactness). It is left alone because
+it changes a user-visible quality track rather than an internal pipeline, so the
+§4 gate matters more there than anywhere else.
+
+### 7.7 Loose ends
+
+- `forge_embeddings` now defaults its model name to `embed`, matching
+  `connectedServices.embeddings`. The server ignores the name, but it keys the
+  vault embedding caches: **an existing cache is invalidated and re-embeds once.**
+- `web-collection`'s LLM link filter is reachable only through an interactive
+  readline prompt, so its guard against following URLs the page never linked to
+  has no automated test. Making `spider` scriptable would fix both.

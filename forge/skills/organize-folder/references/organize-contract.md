@@ -133,7 +133,7 @@ from an existing run with `profile <run-directory>`.
 extensions it can read as UTF-8, plus PDFs when `pdftotext` is installed) and
 embeds it through the shared forge embeddings endpoint
 (`FORGE_EMBEDDINGS_URL`, default `http://llms:8005/v1/embeddings`, model
-`FORGE_EMBEDDINGS_MODEL`, default `Qwen3-Embedding-0.6B`). It uses the vectors
+`FORGE_EMBEDDINGS_MODEL`, default `embed`). It uses the vectors
 for two advisory signals:
 
 - **Content clusters** (`content_cluster`): files grouped by similarity at or
