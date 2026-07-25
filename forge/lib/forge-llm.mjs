@@ -356,13 +356,11 @@ export async function callJson(service, messages, options = {}) {
 	}
 }
 
-/** `callJson` retrying transient transport failures with backoff. */
-export async function callJsonWithRetry(service, messages, options = {}) {
-	const { attempts = MAX_TRANSIENT_ATTEMPTS, ...rest } = options;
+async function withRetry(attempts, operation) {
 	let lastError;
 	for (let attempt = 1; attempt <= attempts; attempt += 1) {
 		try {
-			return await callJson(service, messages, rest);
+			return await operation();
 		} catch (error) {
 			if (error instanceof PreemptedError) throw error;
 			lastError = error;
@@ -374,6 +372,23 @@ export async function callJsonWithRetry(service, messages, options = {}) {
 		}
 	}
 	throw lastError;
+}
+
+/** `callJson` retrying transient transport failures with backoff. */
+export async function callJsonWithRetry(service, messages, options = {}) {
+	const { attempts = MAX_TRANSIENT_ATTEMPTS, ...rest } = options;
+	return withRetry(attempts, () => callJson(service, messages, rest));
+}
+
+/**
+ * `call` with retries, returning the content with any stray think block and code
+ * fence removed. For the callers whose answer is a word or a sentence rather
+ * than a document — they still need the retry and the stripping.
+ */
+export async function callTextWithRetry(service, messages, options = {}) {
+	const { attempts = MAX_TRANSIENT_ATTEMPTS, ...rest } = options;
+	const { content, record } = await withRetry(attempts, () => call(service, messages, rest));
+	return { text: extractJsonContent(content), record };
 }
 
 /** List the model ids a service actually serves, via `GET /v1/models`. */

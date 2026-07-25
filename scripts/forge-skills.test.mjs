@@ -3369,6 +3369,149 @@ test("vault-connections Python tests pass", () => {
 	run(python, [join(skillsRoot, "vault-connections", "tests", "test_vault_connections.py")]);
 });
 
+function startChunkWorkerFixture(workspace, options = {}) {
+	const serverPath = join(workspace, "chunk-worker-server.mjs");
+	const requestsPath = join(workspace, "chunk-worker-requests.jsonl");
+	writeFileSync(
+		serverPath,
+		`import { appendFileSync } from "node:fs";
+import { createServer } from "node:http";
+const requestsPath = ${JSON.stringify(requestsPath)};
+const fabricate = ${JSON.stringify(Boolean(options.fabricate))};
+let cleanups = 0;
+const server = createServer((request, response) => {
+  let body = "";
+  request.setEncoding("utf8");
+  request.on("data", (chunk) => { body += chunk; });
+  request.on("end", () => {
+    const payload = JSON.parse(body);
+    appendFileSync(requestsPath, JSON.stringify(payload) + "\\n");
+    const last = payload.messages?.at(-1)?.content || "";
+    let parsed;
+    try { parsed = JSON.parse(last); } catch { parsed = undefined; }
+    let content;
+    if (parsed?.items) {
+      content = JSON.stringify({ verdicts: parsed.items.map((entry) => ({ id: entry.id, verdict: "ok", reason: "" })) });
+    } else {
+      cleanups += 1;
+      // Echo the chunk back as its own cleanup, optionally smuggling in a word
+      // that was never in the source.
+      const source = parsed?.chunk ?? "";
+      const suffix = fabricate && cleanups === 1 ? "\\n\\nThe committee subsequently ratified the appendix.\\n" : "";
+      content = JSON.stringify({ markdown: source + suffix });
+    }
+    const data = JSON.stringify({
+      choices: [{ message: { content }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 10 },
+      timings: { predicted_n: 5 },
+    });
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(data);
+  });
+});
+server.listen(0, "127.0.0.1", () => process.stdout.write(String(server.address().port) + "\\n"));
+`,
+	);
+	const child = spawn(process.execPath, [serverPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+	return new Promise((resolveServer, rejectServer) => {
+		let stdout = "";
+		let stderr = "";
+		child.stdout.setEncoding("utf8");
+		child.stderr.setEncoding("utf8");
+		child.stderr.on("data", (chunk) => (stderr += chunk));
+		child.stdout.on("data", (chunk) => {
+			stdout += chunk;
+			const port = stdout.split(/\r?\n/).find((value) => value.trim());
+			if (!port) return;
+			resolveServer({
+				url: `http://127.0.0.1:${port.trim()}/v1/chat/completions`,
+				requestsPath,
+				close: () => new Promise((resolveClose) => { child.once("exit", resolveClose); child.kill(); }),
+			});
+		});
+		child.once("error", rejectServer);
+		child.once("exit", (code) => { if (!stdout.trim()) rejectServer(new Error(`chunk worker fixture exited ${code}: ${stderr}`)); });
+	});
+}
+
+// Four sections with subsections, split small enough to span several chunks.
+const CHUNKED_DOCUMENT = [
+	"# ANNUAL ASSESSMENT",
+	"## 1 INTRODUCTION",
+	"This assessment covers the period and consolidates the available records into one reference.",
+	"### 1.1 Scope",
+	"The assessment covers the area above the confluence and excludes the lower tributaries entirely.",
+	"## 2 CONDITIONS",
+	"The second consecutive period of below median measurement across the monitored network of stations.",
+	"### 2.1 Precipitation",
+	"Total precipitation reached seventy eight percent of the thirty year median for the whole region.",
+	"## 3 FINDINGS",
+	"The area remains in a multi year deficit and carryover is insufficient to buffer another dry period.",
+	"### 3.1 Recommendations",
+	"Continue the existing framework and expand the monitoring network where estimates carry wide error bars.",
+].join("\n\n");
+
+test("document ingest cleans chunks on the bulk service, carrying the outline forward", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startChunkWorkerFixture(workspace);
+		try {
+			const document = join(workspace, "report.md");
+			writeFileSync(document, `${CHUNKED_DOCUMENT}\n`);
+			const ingestRun = join(workspace, "ingest");
+			run("node", [script("document-ingest", "document-ingest.mjs"), "prepare", document, "--output", ingestRun, "--chunk-chars", "400"]);
+			const output = await runAsyncWithEnvironment(
+				"node",
+				[script("document-ingest", "document-ingest.mjs"), "process-chunks", ingestRun, "--base-url", fixture.url, "--think-url", fixture.url],
+				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
+			);
+			const report = JSON.parse(output.stdout.trim());
+			assert.ok(report.chunksCleaned > 1, "the document spans several chunks");
+			assert.equal(report.chunksLeftForReview, 0);
+			assert.equal(report.verification.ok, report.chunksCleaned);
+
+			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			const cleanups = requests.filter((entry) => !(entry.messages.at(-1).content || "").includes('"items"'));
+			// Chunk N's heading depth depends on the outline chunk N-1 established.
+			// Without this every chunk after the first drifts a level.
+			assert.equal(JSON.parse(cleanups[0].messages.at(-1).content).headingsSoFar, undefined);
+			assert.ok(JSON.parse(cleanups[1].messages.at(-1).content).headingsSoFar.length > 0, "later chunks carry the outline so far");
+			// The system prompt is what the server caches; it must not vary.
+			assert.equal(new Set(cleanups.map((entry) => entry.messages[0].content)).size, 1);
+
+			// The agent picks up where the worker stopped: chunks are recorded, so
+			// next-review moves on to the final document packet.
+			const packet = jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "next-review", ingestRun]));
+			assert.equal(packet.unit.kind, "document");
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("document ingest rejects a chunk cleanup that invents words", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startChunkWorkerFixture(workspace, { fabricate: true });
+		try {
+			const document = join(workspace, "report.md");
+			writeFileSync(document, `${CHUNKED_DOCUMENT}\n`);
+			const ingestRun = join(workspace, "ingest");
+			run("node", [script("document-ingest", "document-ingest.mjs"), "prepare", document, "--output", ingestRun, "--chunk-chars", "400"]);
+			await runAsyncWithEnvironment(
+				"node",
+				[script("document-ingest", "document-ingest.mjs"), "process-chunks", ingestRun, "--no-verify", "--base-url", fixture.url],
+				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
+			);
+			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			// Structure is the model's to fix; wording is not. A word either was in
+			// the chunk or was invented.
+			assert.match(requests[1].messages.at(-1).content, /these words are not in the chunk/);
+			assert.match(requests[1].messages.at(-1).content, /ratified|committee|subsequently|appendix/);
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
 test("document ingest, coding, and web collection expose review and safety boundaries", () => {
 	withWorkspace((workspace) => {
 		const document = join(workspace, "document.md");

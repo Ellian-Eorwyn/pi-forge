@@ -53,6 +53,7 @@ instead of reviewing it as a second evidence source.
 - `refresh <run-directory>`: explicitly reconcile added, changed, and removed sources while preserving revision history.
 - `retry <run-directory> --item <id>|--all-failed`: explicitly requeue permanent failures.
 - `next-review <run-directory>`: one structured review packet with allowed enum values, paths, metadata, and exact recording commands.
+- `process-chunks <run-directory>`: clean every pending chunk of every multi-chunk document script-side on the non-thinking service, then review the batch on the thinking one.
 - `record-review-unit <run-directory> --doc-id <id> --kind chunk|vision-page --index <n> --reviewed-file <markdown>`: atomically commit one granular review unit.
 - `record-review <run-directory> --review-file <review.json>`: atomically update `metadata.json`, `manifest.csv`, and `extraction_report.md` after model review.
 - `record-transcript <run-directory> --doc-id <id> --transcript <cleaned.md>`: atomically install a cleaned transcript as the final document text and repair transcript chunk validation state.
@@ -108,8 +109,27 @@ folder ingestion, review, finalization, and literature handoff.
 
    Each packet is one vision page, large chunk, or final document metadata
    review. Commit page/chunk packets with `record-review-unit`; if context ends
-   before recording, `next-review` returns the same unit. For each final
-   document packet with `complete == false`, follow its `suggestedPipeline`:
+   before recording, `next-review` returns the same unit.
+
+   For documents split into several chunks, clean them with the worker first
+   rather than one packet at a time:
+
+   ```bash
+   node <skill-directory>/scripts/document-ingest.mjs process-chunks <new-directory>
+   ```
+
+   Each chunk is one stateless call to the non-thinking service, so a long
+   document does not accumulate in your context. Chunks are not independent —
+   a chunk's heading depths only make sense against the outline the earlier
+   chunks established — so each call carries the headings used so far. Cleanups
+   are checked for inventing words before being recorded, and a failure costs
+   one corrective retry before the chunk is left for you. The batch is then
+   reviewed on the thinking model. Vision pages stay with you; that path is
+   multimodal. So does the final document packet, which is one judgment per
+   document rather than bulk work.
+
+   For each final document packet with `complete == false`, follow its
+   `suggestedPipeline`:
 
    **For `basic-markdown`, `personal-admin`, `literature`, or `project-extraction`**:
    - Review and clean up the `document.md` structure in the file's output directory. 

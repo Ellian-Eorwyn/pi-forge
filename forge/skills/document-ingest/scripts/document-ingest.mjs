@@ -32,7 +32,8 @@ import {
 	updateRunState,
 	withRunLock,
 } from "../../../lib/run-state.mjs";
-import { resolveConnectedServices } from "../../../lib/connected-services.mjs";
+import { callJsonWithRetry, callTextWithRetry, resolveService, resolveThinkService } from "../../../lib/forge-llm.mjs";
+import { escalate, summarize, verifyPackets, VERDICT_FLAG } from "../../../lib/forge-verify.mjs";
 
 const DEFAULT_CHUNK_CHARACTERS = 150_000;
 const DEFAULT_GLMOCR_URL = "http://llms:5002/glmocr/parse";
@@ -896,38 +897,27 @@ function extractMedia(filePath, documentDirectory, tools) {
 }
 
 async function categorizeFolder(inputs) {
-	const { baseUrl: baseChatUrl, model: baseModel } = resolveConnectedServices().chat;
+	const service = resolveService("chat", {});
+	if (!service.enabled) return "general";
 	try {
-		const response = await fetch(baseChatUrl, {
-			method: "POST",
-			headers: { "Content-Type": "application/json", "Authorization": "Bearer local" },
-			body: JSON.stringify({
-				model: baseModel,
-				messages: [
-					{
-						role: "system",
-						content: "You are a folder categorization assistant. Analyze the list of file paths. Reply with exactly one word: 'personal-admin', 'literature', 'project', or 'general'. Use project for grants, awards, proposals, scopes of work, contracts, work plans, reports, presentations, meetings, interviews, deliverables, deadlines, or project controls."
-					},
-					{
-						role: "user",
-						content: inputs.join("\\n")
-					}
-				],
-				temperature: 0
-			})
-		});
-		if (response.ok) {
-			const body = await response.json();
-			let text = body.choices[0].message.content.trim().toLowerCase();
-			if (text.includes("</think>")) {
-				text = text.split("</think>").pop().trim();
-			}
-			if (text.includes("personal-admin") || text.includes("admin")) return "personal-admin";
-			if (text.includes("literature") || text.includes("academic")) return "literature";
-			if (text.includes("project") || text.includes("grant") || text.includes("scope of work")) return "project";
-		}
-	} catch (e) {
-		// Ignore error and return general
+		const { text } = await callTextWithRetry(
+			service,
+			[
+				{
+					role: "system",
+					content:
+						"You are a folder categorization assistant. Analyze the list of file paths. Reply with exactly one word: 'personal-admin', 'literature', 'project', or 'general'. Use project for grants, awards, proposals, scopes of work, contracts, work plans, reports, presentations, meetings, interviews, deliverables, deadlines, or project controls.",
+				},
+				{ role: "user", content: inputs.join("\n") },
+			],
+			{ task: "categorize-folder", timeoutMs: 120_000 },
+		);
+		const answer = text.trim().toLowerCase();
+		if (answer.includes("personal-admin") || answer.includes("admin")) return "personal-admin";
+		if (answer.includes("literature") || answer.includes("academic")) return "literature";
+		if (answer.includes("project") || answer.includes("grant") || answer.includes("scope of work")) return "project";
+	} catch {
+		// Categorization is advisory; an unreachable endpoint is not a failure.
 	}
 	return "general";
 }
@@ -1969,8 +1959,7 @@ function reviewPacket(runDirectory, row) {
 		}
 	}
 	if (unit.kind === "document" && chunks.length > 1) {
-		const reviewedDirectory = join(documentDirectory, "working", "reviewed-chunks");
-		const chunk = chunks.find((candidate) => !existsSync(join(reviewedDirectory, `chunk-${String(candidate.index).padStart(4, "0")}.md`)));
+		const chunk = chunks.find((candidate) => !existsSync(reviewedChunkPath(documentDirectory, candidate.index)));
 		if (chunk) {
 			unit = {
 				kind: "chunk",
@@ -2072,7 +2061,7 @@ function commandRecordReviewUnit(args) {
 	if (kind === "chunk") {
 		const chunks = metadata.extraction?.chunks ?? [];
 		if (index > chunks.length) fail(`chunk index is out of range: ${index}`);
-		destination = join(documentDirectory, "working", "reviewed-chunks", `chunk-${String(index).padStart(4, "0")}.md`);
+		destination = reviewedChunkPath(documentDirectory, index);
 	} else {
 		if (!(metadata.extraction?.vision?.candidatePages ?? []).includes(index)) fail(`page is not a vision candidate: ${index}`);
 		destination = join(documentDirectory, "working", "vision-pages", `page-${String(index).padStart(4, "0")}.md`);
@@ -2087,6 +2076,222 @@ function commandRecordReviewUnit(args) {
 	}
 	appendRunEvent(runDirectory, { type: "review_unit_completed", documentId, kind, index, output: relative(runDirectory, destination) });
 	process.stdout.write(`${JSON.stringify({ recorded: true, documentId, kind, index, output: destination, nextCommand: `document-ingest.mjs next-review ${runDirectory}` }, null, 2)}\n`);
+}
+
+// --------------------------------------------------------------------------- //
+// Stateless chunk-cleanup worker
+// --------------------------------------------------------------------------- //
+
+function reviewedChunkPath(documentDirectory, index) {
+	return join(documentDirectory, "working", "reviewed-chunks", `chunk-${String(index).padStart(4, "0")}.md`);
+}
+
+// One chunk per call. The contract lives here so the prefix stays byte-stable
+// across every call in a run; the chunk and the outline so far travel in the
+// user message.
+const CHUNK_CLEANUP_SYSTEM = `You clean up the Markdown structure of one chunk of an extracted document.
+
+Improve headings, paragraphs, lists, and tables that the source supports.
+
+Rules:
+- Do not add, remove, or reword content. Every word in your output must come from
+  the chunk. Structure is yours to fix; wording is not.
+- Leave text that is garbled or uncertain visible rather than repairing it by guessing.
+- "headingsSoFar" lists the headings already used earlier in this same document.
+  Match their depth: a section at the same level as an earlier one gets the same
+  number of #. You are cleaning one chunk of a larger document, not a document.
+- Do not restate the document title if it already appears in headingsSoFar.
+
+Return exactly one JSON object and nothing else: {"markdown": "<the cleaned chunk>"}`;
+
+// Enough outline to place a heading without inflating the user message.
+const HEADING_BRIEF_LIMIT = 12;
+const WORD_PATTERN = /[a-z][a-z'-]{2,}/g;
+
+function headingsOf(markdown) {
+	return markdown.match(/^#{1,6} .*$/gm) ?? [];
+}
+
+/**
+ * Words in the cleaned chunk that were not in the source.
+ *
+ * Structural cleanup has an exact invariant available, which is worth more than
+ * any prompt rule: a word either appeared in the chunk or was invented. Dropped
+ * words are not checked here — removing a page-number artifact or a repeated
+ * running header is legitimate cleanup — but added ones are fabrication.
+ */
+function addedWords(source, cleaned) {
+	const counts = new Map();
+	for (const word of source.toLowerCase().match(WORD_PATTERN) ?? []) counts.set(word, (counts.get(word) ?? 0) + 1);
+	const added = [];
+	for (const word of cleaned.toLowerCase().match(WORD_PATTERN) ?? []) {
+		const remaining = counts.get(word) ?? 0;
+		if (remaining <= 0) added.push(word);
+		else counts.set(word, remaining - 1);
+	}
+	return [...new Set(added)];
+}
+
+async function attemptChunkCleanup(service, messages, source, timeoutMs) {
+	let value;
+	try {
+		({ value } = await callJsonWithRetry(service, messages, { timeoutMs, task: "clean-chunk" }));
+	} catch (error) {
+		return { errors: [error.message] };
+	}
+	const markdown = value?.markdown;
+	if (typeof markdown !== "string" || !markdown.trim()) return { errors: ["response had no nonblank markdown string"] };
+	const invented = addedWords(source, markdown);
+	if (invented.length) return { errors: [`these words are not in the chunk: ${invented.slice(0, 8).join(", ")}`] };
+	return { markdown };
+}
+
+async function cleanChunk(service, source, headingsSoFar, timeoutMs) {
+	const payload = headingsSoFar.length ? { chunk: source, headingsSoFar } : { chunk: source };
+	const messages = [
+		{ role: "system", content: CHUNK_CLEANUP_SYSTEM },
+		{ role: "user", content: JSON.stringify(payload) },
+	];
+	let outcome = await attemptChunkCleanup(service, messages, source, timeoutMs);
+	if (outcome.errors) {
+		const repair = [...messages, { role: "user", content: `That response was unusable: ${outcome.errors[0]}. Return corrected JSON only.` }];
+		outcome = await attemptChunkCleanup(service, repair, source, timeoutMs);
+		if (outcome.errors) throw new Error(outcome.errors[0]);
+	}
+	return outcome.markdown;
+}
+
+const CHUNK_VERIFY_SYSTEM = `You are reviewing Markdown structure cleanup done by a faster model without reasoning.
+For each chunk you get the headings it produced and the headings used earlier in the same document.
+Flag a chunk when its structure is actually wrong: a heading at the wrong depth for its place in the
+document's outline, a section heading demoted below a sibling, or a heading invented for text that is
+not a heading. A defensible outline is 'ok' even if you would have nested it differently; taste is
+not an error. Do not flag a chunk for having few headings if the text genuinely has little structure.`;
+
+async function verifyCleanedChunks(runDirectory, think, units, options) {
+	if (!units.length) return null;
+	if (!think.enabled) return { skipped: "no thinking service is configured" };
+	const items = units.map((unit) => ({
+		id: unit.id,
+		documentId: unit.documentId,
+		chunk: unit.index,
+		headingsBefore: unit.headingsSoFar,
+		headingsProduced: headingsOf(unit.markdown),
+	}));
+	let verdicts;
+	try {
+		verdicts = await verifyPackets(think, CHUNK_VERIFY_SYSTEM, items, {
+			journalPath: join(runDirectory, "verified-chunks.jsonl"),
+			packetSize: options.verifyPacketSize,
+			background: true,
+			timeoutMs: options.timeoutMs,
+			progress: options.progress,
+		});
+	} catch (error) {
+		return { skipped: error.message };
+	}
+	const byId = new Map(units.map((unit) => [unit.id, unit]));
+	const flagged = items
+		.filter((item) => verdicts[item.id]?.verdict === VERDICT_FLAG)
+		.map((item) => [item, verdicts[item.id].reason]);
+	const escalations = await escalate(
+		flagged,
+		async (item, reason) => {
+			const unit = byId.get(item.id);
+			const payload = { chunk: unit.source, headingsSoFar: unit.headingsSoFar, reviewerObjection: reason };
+			const messages = [
+				{ role: "system", content: CHUNK_CLEANUP_SYSTEM },
+				{ role: "user", content: JSON.stringify(payload) },
+			];
+			const outcome = await attemptChunkCleanup(think, messages, unit.source, options.timeoutMs);
+			if (outcome.errors) throw new Error(outcome.errors[0]);
+			return outcome.markdown;
+		},
+		{ journalPath: join(runDirectory, "verified-chunks.jsonl"), progress: options.progress },
+	);
+	for (const [identifier, outcome] of Object.entries(escalations)) {
+		if (outcome.resumed) continue; // committed when it was first escalated
+		const unit = byId.get(identifier);
+		if (outcome.ok) atomicWriteFile(unit.destination, ensureFinalNewline(outcome.value));
+	}
+	return summarize(verdicts, escalations);
+}
+
+async function commandProcessChunks(args) {
+	if (args.length < 1) fail("process-chunks requires a run directory");
+	const runDirectory = resolve(args[0]);
+	let verify = true;
+	let verifyPacketSize = 15;
+	let timeoutMs = 600_000;
+	const resolveOptions = {};
+	for (let position = 1; position < args.length; position += 1) {
+		if (args[position] === "--base-url") resolveOptions.chatUrl = args[++position] ?? fail("--base-url requires a url");
+		else if (args[position] === "--model") resolveOptions.chatModel = args[++position] ?? fail("--model requires a name");
+		else if (args[position] === "--think-url") resolveOptions.thinkUrl = args[++position] ?? fail("--think-url requires a url");
+		else if (args[position] === "--think-model") resolveOptions.thinkModel = args[++position] ?? fail("--think-model requires a name");
+		else if (args[position] === "--no-verify") verify = false;
+		else if (args[position] === "--verify-packet-size") verifyPacketSize = Number.parseInt(args[++position] ?? "", 10);
+		else if (args[position] === "--request-timeout") timeoutMs = Number.parseFloat(args[++position] ?? "") * 1000;
+		else fail(`unknown process-chunks option: ${args[position]}`);
+	}
+	requireRunDirectory(runDirectory);
+	const service = resolveService("chat", resolveOptions);
+	if (!service.enabled) fail("connectedServices.chat is disabled; configure the local chat endpoint before processing");
+	const progress = (message) => process.stderr.write(`${message}\n`);
+
+	const rows = readManifestRows(runDirectory).filter((row) => row.status === "needs_review");
+	const cleaned = [];
+	let failures = 0;
+	for (const row of rows) {
+		const documentDirectory = documentDirectoryForRow(runDirectory, row);
+		const metadata = loadDocumentMetadata(documentDirectory);
+		const chunks = metadata.extraction?.chunks ?? [];
+		// One chunk is the whole document; that review stays with the agent.
+		if (chunks.length <= 1) continue;
+		// Headings accumulate across the document, not across the run. Chunk N's
+		// heading depth depends on the outline chunk N-1 established, and without
+		// this every chunk after the first drifts a level — measured on a four
+		// section report, sections three and four came back demoted.
+		let headingsSoFar = [];
+		for (const [position, chunk] of chunks.entries()) {
+			const index = position + 1;
+			const destination = reviewedChunkPath(documentDirectory, index);
+			const source = readFileSync(join(documentDirectory, chunk.path), "utf8");
+			if (existsSync(destination)) {
+				headingsSoFar = headingsSoFar.concat(headingsOf(readFileSync(destination, "utf8"))).slice(-HEADING_BRIEF_LIMIT);
+				continue;
+			}
+			progress(`[${row.document_id}] chunk ${index}/${chunks.length}`);
+			let markdown;
+			try {
+				markdown = await cleanChunk(service, source, headingsSoFar, timeoutMs);
+			} catch (error) {
+				failures += 1;
+				progress(`[${row.document_id}] chunk ${index}/${chunks.length}: left for review (${error.message})`);
+				continue;
+			}
+			atomicWriteFile(destination, ensureFinalNewline(markdown));
+			appendRunEvent(runDirectory, { type: "review_unit_completed", documentId: row.document_id, kind: "chunk", index, output: relative(runDirectory, destination) });
+			cleaned.push({ id: `${row.document_id}#${index}`, documentId: row.document_id, index, source, markdown, headingsSoFar, destination });
+			headingsSoFar = headingsSoFar.concat(headingsOf(markdown)).slice(-HEADING_BRIEF_LIMIT);
+		}
+	}
+
+	const think = resolveThinkService(resolveOptions);
+	const verification = verify ? await verifyCleanedChunks(runDirectory, think, cleaned, { verifyPacketSize, timeoutMs, progress }) : null;
+	process.stdout.write(
+		`${JSON.stringify(
+			{
+				runDirectory,
+				chunksCleaned: cleaned.length,
+				chunksLeftForReview: failures,
+				verification,
+				nextAction: "next-review",
+			},
+			null,
+			2,
+		)}\n`,
+	);
 }
 
 function parseJsonFile(filePath, label) {
@@ -2658,6 +2863,7 @@ function usage() {
   document-ingest.mjs refresh <run-directory>
   document-ingest.mjs retry <run-directory> (--item <id> | --all-failed)
   document-ingest.mjs next-review <run-directory>
+  document-ingest.mjs process-chunks <run-directory> [--base-url URL] [--model NAME] [--think-url URL] [--think-model NAME] [--no-verify] [--verify-packet-size N] [--request-timeout SECONDS]
   document-ingest.mjs record-review-unit <run-directory> --doc-id <document-id> --kind chunk|vision-page --index N --reviewed-file <markdown>
   document-ingest.mjs record-review <run-directory> --review-file <review.json>
   document-ingest.mjs record-transcript <run-directory> --doc-id <document-id> --transcript <cleaned.md> [--title TEXT] [--author TEXT] [--filename NAME.md]
@@ -2681,6 +2887,7 @@ else if (command === "status") commandStatus(args);
 else if (command === "refresh") commandRefresh(args);
 else if (command === "retry") commandRetry(args);
 else if (command === "next-review") commandNextReview(args);
+else if (command === "process-chunks") await commandProcessChunks(args);
 else if (command === "record-review-unit") commandRecordReviewUnit(args);
 else if (command === "record-review") commandRecordReview(args);
 else if (command === "record-transcript") commandRecordTranscript(args);
