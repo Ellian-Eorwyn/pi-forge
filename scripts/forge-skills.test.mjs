@@ -2717,6 +2717,214 @@ test("personal admin and report output enforce authored deliverables", () => {
 	});
 });
 
+function startAdminWorkerFixture(workspace, options = {}) {
+	const serverPath = join(workspace, "admin-worker-server.mjs");
+	const requestsPath = join(workspace, "admin-worker-requests.jsonl");
+	writeFileSync(
+		serverPath,
+		`import { appendFileSync } from "node:fs";
+import { createServer } from "node:http";
+const requestsPath = ${JSON.stringify(requestsPath)};
+const flagEverything = ${JSON.stringify(Boolean(options.flagEverything))};
+const fabricateValue = ${JSON.stringify(Boolean(options.fabricateValue))};
+const badDueDate = ${JSON.stringify(Boolean(options.badDueDate))};
+let extractions = 0;
+const fact = (overrides) => ({
+  fact_type: "reference_number", text: "Policy number for the renewal.",
+  value: "NM-4471-2298", due_date: null, locator: null, confidence: "high",
+  notes: null, ...overrides,
+});
+const server = createServer((request, response) => {
+  let body = "";
+  request.setEncoding("utf8");
+  request.on("data", (chunk) => { body += chunk; });
+  request.on("end", () => {
+    const payload = JSON.parse(body);
+    appendFileSync(requestsPath, JSON.stringify(payload) + "\\n");
+    const last = payload.messages?.at(-1)?.content || "";
+    let parsed;
+    try { parsed = JSON.parse(last); } catch { parsed = undefined; }
+    let content;
+    if (parsed?.items) {
+      content = JSON.stringify({ verdicts: parsed.items.map((entry) => ({
+        id: entry.id,
+        verdict: flagEverything ? "flag" : "ok",
+        reason: flagEverything ? "the amounts do not match the statement" : "",
+      })) });
+    } else {
+      extractions += 1;
+      // The first extraction can be wrong; the corrective retry fixes it.
+      const bad = extractions === 1;
+      const overrides = {};
+      if (fabricateValue && bad) overrides.value = "NM-9999-0000";
+      if (badDueDate && bad) overrides.due_date = "September 1, 2026";
+      else if (badDueDate) overrides.due_date = "2026-09-01";
+      content = JSON.stringify([fact(overrides)]);
+    }
+    const data = JSON.stringify({
+      choices: [{ message: { content }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 10 },
+      timings: { predicted_n: 5 },
+    });
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(data);
+  });
+});
+server.listen(0, "127.0.0.1", () => process.stdout.write(String(server.address().port) + "\\n"));
+`,
+	);
+	const child = spawn(process.execPath, [serverPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+	return new Promise((resolveServer, rejectServer) => {
+		let stdout = "";
+		let stderr = "";
+		child.stdout.setEncoding("utf8");
+		child.stderr.setEncoding("utf8");
+		child.stderr.on("data", (chunk) => (stderr += chunk));
+		child.stdout.on("data", (chunk) => {
+			stdout += chunk;
+			const port = stdout.split(/\r?\n/).find((value) => value.trim());
+			if (!port) return;
+			resolveServer({
+				url: `http://127.0.0.1:${port.trim()}/v1/chat/completions`,
+				requestsPath,
+				close: () => new Promise((resolveClose) => { child.once("exit", resolveClose); child.kill(); }),
+			});
+		});
+		child.once("error", rejectServer);
+		child.once("exit", (code) => { if (!stdout.trim()) rejectServer(new Error(`admin worker fixture exited ${code}: ${stderr}`)); });
+	});
+}
+
+const ADMIN_NOTICE = "Renewal Notice\n\nPolicy number: NM-4471-2298\nYour policy renews on 2026-09-01.\n";
+
+test("personal admin processes documents on the bulk service and reviews them on the thinking one", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startAdminWorkerFixture(workspace);
+		try {
+			const source = join(workspace, "notice.txt");
+			writeFileSync(source, ADMIN_NOTICE);
+			const runDirectory = join(workspace, "admin");
+			const cli = script("personal-admin", "personal-admin.py");
+			run(python, [cli, "init", source, "--output", runDirectory]);
+			await runAsyncWithEnvironment(
+				python,
+				[cli, "process", runDirectory, "--base-url", fixture.url, "--think-url", fixture.url],
+				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
+			);
+
+			const results = readFileSync(join(runDirectory, "facts_results.jsonl"), "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+			assert.equal(results.length, 1);
+			assert.equal(results[0].status, "success");
+			assert.equal(results[0].facts.length, 1);
+
+			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			// One extraction call plus one batched review call.
+			assert.equal(requests.length, 2);
+			assert.ok(requests[1].messages.at(-1).content.includes('"facts"'), "second call is the review");
+			// The reviewer cannot judge paraphrased facts without the document.
+			assert.ok(requests[1].messages.at(-1).content.includes('"source"'), "the review packet carries the source text");
+			assert.equal(
+				JSON.parse(readFileSync(join(runDirectory, "verified.jsonl"), "utf8").trim()).verdict,
+				"ok",
+			);
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("personal admin rejects a fabricated reference number and retries", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startAdminWorkerFixture(workspace, { fabricateValue: true });
+		try {
+			const source = join(workspace, "notice.txt");
+			writeFileSync(source, ADMIN_NOTICE);
+			const runDirectory = join(workspace, "admin");
+			const cli = script("personal-admin", "personal-admin.py");
+			run(python, [cli, "init", source, "--output", runDirectory]);
+			await runAsyncWithEnvironment(
+				python,
+				[cli, "process", runDirectory, "--base-url", fixture.url, "--no-verify"],
+				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
+			);
+
+			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			assert.equal(requests.length, 2, "the fabricated reference number costs one corrective retry");
+			assert.match(requests[1].messages.at(-1).content, /does not appear in the document/);
+			const results = JSON.parse(readFileSync(join(runDirectory, "facts_results.jsonl"), "utf8").trim());
+			assert.equal(results.status, "success");
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("personal admin rejects an unparseable due date and retries", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startAdminWorkerFixture(workspace, { badDueDate: true });
+		try {
+			const source = join(workspace, "notice.txt");
+			writeFileSync(source, ADMIN_NOTICE);
+			const runDirectory = join(workspace, "admin");
+			const cli = script("personal-admin", "personal-admin.py");
+			run(python, [cli, "init", source, "--output", runDirectory]);
+			await runAsyncWithEnvironment(
+				python,
+				[cli, "process", runDirectory, "--base-url", fixture.url, "--no-verify"],
+				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
+			);
+
+			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			// A due date that does not parse silently corrupts the deadline
+			// checklist, which sorts ISO strings lexically.
+			assert.equal(requests.length, 2, "the unparseable due date costs one corrective retry");
+			assert.match(requests[1].messages.at(-1).content, /is not a YYYY-MM-DD calendar date/);
+			const results = JSON.parse(readFileSync(join(runDirectory, "facts_results.jsonl"), "utf8").trim());
+			assert.equal(results.facts[0].due_date, "2026-09-01");
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("personal admin re-extracts a flagged document once, not on every resume", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startAdminWorkerFixture(workspace, { flagEverything: true });
+		try {
+			const source = join(workspace, "notice.txt");
+			writeFileSync(source, ADMIN_NOTICE);
+			const runDirectory = join(workspace, "admin");
+			const cli = script("personal-admin", "personal-admin.py");
+			const environment = { PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") };
+			run(python, [cli, "init", source, "--output", runDirectory]);
+			const argv = [cli, "process", runDirectory, "--base-url", fixture.url, "--think-url", fixture.url];
+			await runAsyncWithEnvironment(python, argv, environment);
+
+			const results = readFileSync(join(runDirectory, "facts_results.jsonl"), "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+			// The re-extraction replaces the original rather than adding a duplicate.
+			assert.equal(results.length, 1);
+			assert.equal(results[0].supersedes, true);
+			assert.match(results[0].note, /re-extracted with reasoning/);
+
+			// A flag verdict lives in the journal forever. Resuming must not buy
+			// another reasoning-model extraction for an item already escalated.
+			const before = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").length;
+			await runAsyncWithEnvironment(python, argv, environment);
+			const after = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").length;
+			assert.equal(after, before, "a resumed run re-extracts nothing");
+			assert.equal(readFileSync(join(runDirectory, "facts_results.jsonl"), "utf8").trim().split("\n").length, 1);
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
 test("spreadsheet inspection and row enrichment are reproducible", () => {
 	withWorkspace((workspace) => {
 		const source = join(workspace, "data.csv");

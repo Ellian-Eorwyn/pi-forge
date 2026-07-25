@@ -1072,6 +1072,8 @@ def verify_extractions(args, run_directory, run):
 
     escalations = forge_verify.escalate(flagged, redo, journal_path=run_directory / "verified.jsonl", progress=progress)
     for document_id, outcome in escalations.items():
+        if outcome.get("resumed"):
+            continue  # committed when it was first escalated
         if outcome["ok"]:
             record_extraction(run_directory, run, document_id, "success", outcome["value"], "re-extracted with reasoning after review", supersedes=True)
         else:

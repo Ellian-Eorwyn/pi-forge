@@ -867,6 +867,8 @@ def verify_classifications(args, vault, schema, records, run_dir):
 
     escalations = forge_verify.escalate(flagged, redo, journal_path=journal, progress=progress)
     for rel, outcome in escalations.items():
+        if outcome.get("resumed"):
+            continue  # recorded when it was first escalated
         record = by_path[rel]
         record["verify_reason"] = next(reason for item, reason in flagged if item["id"] == rel)
         if outcome["ok"]:

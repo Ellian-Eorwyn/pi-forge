@@ -130,6 +130,39 @@ class EscalationTests(unittest.TestCase):
             self.assertTrue(rows[0]["escalated"])
             self.assertEqual(rows[0]["reason"], "wrong domain")
 
+    def test_an_item_already_escalated_is_not_redone_on_resume(self):
+        # A flag verdict stays in the journal, so without this guard every
+        # resumed run pays another reasoning-model call for the same item.
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "escalated.jsonl"
+            calls = []
+
+            def redo(item, reason):
+                calls.append(item["id"])
+                return {"domain": "corrected"}
+
+            first = forge_verify.escalate([({"id": "n1"}, "wrong domain")], redo, journal_path=journal)
+            second = forge_verify.escalate([({"id": "n1"}, "wrong domain")], redo, journal_path=journal)
+
+            self.assertEqual(calls, ["n1"])
+            self.assertNotIn("resumed", first["n1"])
+            self.assertTrue(second["n1"]["ok"])
+            self.assertTrue(second["n1"]["resumed"])
+            self.assertNotIn("value", second["n1"])
+
+    def test_a_resumed_failed_escalation_stays_failed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "escalated.jsonl"
+
+            def explode(_item, _reason):
+                raise RuntimeError("model unavailable")
+
+            forge_verify.escalate([({"id": "n1"}, "wrong")], explode, journal_path=journal)
+            resumed = forge_verify.escalate([({"id": "n1"}, "wrong")], explode, journal_path=journal)
+            self.assertFalse(resumed["n1"]["ok"])
+            self.assertTrue(resumed["n1"]["resumed"])
+            self.assertIn("model unavailable", resumed["n1"]["detail"])
+
     def test_a_failed_escalation_becomes_a_human_review_item(self):
         def explode(_item, _reason):
             raise RuntimeError("model unavailable")

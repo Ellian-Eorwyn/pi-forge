@@ -33,8 +33,35 @@ extracted facts separate from suggested steps, and organize rather than advise.
    Use `status <run-directory> --json` to inspect durable progress and source
    drift. The run keeps `run_state.json`, an fsynced `run_events.jsonl`, and its
    existing domain manifests.
-3. Read [references/admin-contract.md](references/admin-contract.md). Extract
-   facts **one document at a time**:
+3. Extract every document with the worker:
+
+   ```bash
+   python3 <skill-directory>/scripts/personal-admin.py process <run-directory>
+   ```
+
+   This is the normal path. Each document is extracted by a single stateless
+   call to the non-thinking service — the fact contract plus that one document,
+   with no conversation carried between documents — so a folder of paperwork
+   does not accumulate in your context and does not spend reasoning tokens per
+   file. Before a result is recorded, due dates are checked for being real
+   `YYYY-MM-DD` calendar dates and reference numbers, phone numbers, and email
+   addresses are checked against the source; a failure costs one corrective
+   retry before the document is marked `needs_review`.
+
+   The batch is then reviewed by the thinking model, which sees each document
+   alongside the facts drawn from it, and flagged documents are re-extracted
+   with reasoning. Use `--limit <n>` for a trial, `--no-verify` to skip review,
+   and `--think-url` to point review elsewhere. Progress is one stderr line per
+   document; stdout is one JSON result.
+
+   Read the result. Report how many documents were processed, how many need
+   review, and what verification flagged. Resume by running `process` again;
+   progress is derived from `facts_results.jsonl`, and a document already
+   re-extracted after review is not redone.
+4. Extract by hand only when you need to: a document the worker marked
+   `needs_review`, or a small set you want to read yourself. Read
+   [references/admin-contract.md](references/admin-contract.md), then request
+   one document at a time:
 
    ```bash
    python3 <skill-directory>/scripts/personal-admin.py next <run-directory>
@@ -51,7 +78,7 @@ extracted facts separate from suggested steps, and organize rather than advise.
 
    Use `--status needs_review|skipped|failed --note "<reason>"` for documents you
    cannot process, rather than empty facts. Resume by calling `next` again.
-4. Assemble the tables, then author the selected Markdown:
+5. Assemble the tables, then author the selected Markdown:
 
    ```bash
    python3 <skill-directory>/scripts/personal-admin.py build <run-directory>
@@ -61,7 +88,7 @@ extracted facts separate from suggested steps, and organize rather than advise.
    / `contact_list.csv`. Author `admin_summary.md`, `next_steps.md`, and any
    other selected deliverables, keeping document facts separate from suggested
    steps and resolving each placeholder.
-5. Validate and report outcomes:
+6. Validate and report outcomes:
 
    ```bash
    python3 <skill-directory>/scripts/personal-admin.py validate <run-directory>

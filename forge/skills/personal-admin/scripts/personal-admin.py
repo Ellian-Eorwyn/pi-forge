@@ -5,11 +5,14 @@ import csv
 import hashlib
 import json
 import os
+import re
 import sys
 from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
+import forge_llm
+import forge_verify
 import run_state
 
 
@@ -145,6 +148,15 @@ MARKDOWN_TEMPLATES = {
 def fail(message, exit_code=1):
     print(f"Error: {message}", file=sys.stderr)
     raise SystemExit(exit_code)
+
+
+def progress(message):
+    """Per-document progress on stderr; stdout stays one JSON result."""
+    print(message, file=sys.stderr, flush=True)
+
+
+class UserError(RuntimeError):
+    """A document could not be extracted; the run records it and continues."""
 
 
 def utc_now():
@@ -431,13 +443,22 @@ def load_results(run_directory, strict=True):
         fail(str(error))
     for warning in warnings:
         print(f"Warning: {warning}", file=sys.stderr)
-    seen = set()
+    # One result per document. A later record may replace an earlier one only
+    # when it says so: review escalation re-extracts a document deliberately,
+    # while an unmarked duplicate is still a bug worth failing on.
+    position = {}
+    effective = []
     for result in results:
         document_id = result.get("documentId")
-        if strict and document_id in seen:
-            fail(f"duplicate result for document {document_id}")
-        seen.add(document_id)
-    return results
+        if document_id in position:
+            if result.get("supersedes"):
+                effective[position[document_id]] = result
+                continue
+            if strict:
+                fail(f"duplicate result for document {document_id}")
+        position[document_id] = len(effective)
+        effective.append(result)
+    return effective
 
 
 def document_order(run):
@@ -507,25 +528,41 @@ def command_status(args):
     print(json.dumps(result, indent=2 if args.json else None))
 
 
-def normalize_facts(raw):
+def validate_facts(raw, fact_types=None):
+    """Normalize extracted facts, returning ``(facts, errors)``.
+
+    Returns errors rather than exiting so the worker can feed them back to the
+    model as a correction; the CLI turns the first one into a failure.
+    """
+    fact_types = list(fact_types or FACT_TYPES)
+    fact_type_set = set(fact_types)
     if not isinstance(raw, list):
-        fail("facts file must contain a JSON array of fact objects")
+        return [], ["facts must be a JSON array of fact objects"]
     facts = []
+    errors = []
     for index, item in enumerate(raw, start=1):
         if not isinstance(item, dict):
-            fail(f"fact {index} is not an object")
+            errors.append(f"fact {index} is not an object")
+            continue
         fact_type = item.get("fact_type")
-        if fact_type not in FACT_TYPE_SET:
-            fail(f"fact {index} has invalid fact_type {fact_type!r}; expected one of {', '.join(FACT_TYPES)}")
+        if fact_type not in fact_type_set:
+            errors.append(f"fact {index} has invalid fact_type {fact_type!r}; expected one of {', '.join(fact_types)}")
+            continue
         if blank(item.get("text")):
-            fail(f"fact {index} requires a nonblank text value")
+            errors.append(f"fact {index} requires a nonblank text value")
+            continue
         confidence = item.get("confidence")
         if confidence not in CONFIDENCES:
-            fail(f"fact {index} has invalid confidence {confidence!r}; expected high, medium, or low")
-        for optional in ("value", "due_date", "locator", "notes"):
-            value = item.get(optional)
-            if value is not None and not isinstance(value, str):
-                fail(f"fact {index} field {optional} must be a string or null")
+            errors.append(f"fact {index} has invalid confidence {confidence!r}; expected high, medium, or low")
+            continue
+        invalid_optional = [
+            optional
+            for optional in ("value", "due_date", "locator", "notes")
+            if item.get(optional) is not None and not isinstance(item.get(optional), str)
+        ]
+        if invalid_optional:
+            errors.append(f"fact {index} field {invalid_optional[0]} must be a string or null")
+            continue
         facts.append(
             {
                 "fact_type": fact_type,
@@ -537,7 +574,406 @@ def normalize_facts(raw):
                 "notes": item.get("notes"),
             }
         )
+    return facts, errors
+
+
+def normalize_facts(raw, fact_types=None):
+    facts, errors = validate_facts(raw, fact_types)
+    if errors:
+        fail(errors[0])
     return facts
+
+
+# --------------------------------------------------------------------------- #
+# Stateless extraction worker
+# --------------------------------------------------------------------------- #
+
+# One document per call, with no conversation carried between them: the whole
+# task is this contract plus this document. That keeps the prompt prefix
+# byte-stable across every call in a run, so the server reuses its cached prefix
+# instead of re-reading a growing conversation.
+EXTRACTION_SYSTEM = """You extract structured, actionable facts from one personal-administration document.
+
+Return a JSON array of fact objects and nothing else. Every fact has exactly these fields:
+- "fact_type": one of {fact_types}
+- "text": the fact in plain language (required, nonblank)
+- "value": the normalized detail — the number, amount, phone, email, or address — or null
+- "due_date": "YYYY-MM-DD" or null
+- "locator": where in the document it appears (page, section, heading), or null
+- "confidence": "high", "medium", or "low"
+- "notes": optional clarification, or null
+
+Rules:
+- Never invent details the document does not support, and never present inference as fact.
+- A "value" is copied from the document, not reconstructed. Reference numbers, account numbers,
+  phone numbers, and email addresses must appear in the document with the same digits and
+  characters written there. If you cannot copy one, use null.
+- "due_date" must be a real calendar date written as YYYY-MM-DD. If the document gives a
+  relative or partial date you cannot resolve, use null and explain in "notes".
+- Organize and record what the document says. Do not give legal, medical, or financial advice.
+- Extract what the document actually contains. An empty array is the right answer for a
+  document with nothing actionable.
+- Work through the fact types in order and ask what the document offers for each one before
+  moving on. Do not stop at deadlines, actions, and contacts: administrative documents also
+  carry reference numbers, dates, fees, requirements, and missing information you are expected
+  to flag.
+"""
+
+MAX_DOCUMENT_CHARACTERS = 48000
+WHITESPACE_RE = re.compile(r"\s+")
+QUOTE_CHARACTERS = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"', "—": "-", "–": "-"})
+ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+IDENTIFIER_STRIP_RE = re.compile(r"[^0-9a-z]+")
+# Below these, a value is too generic to check without inviting false alarms.
+MIN_IDENTIFIER_CHARACTERS = 5
+MIN_IDENTIFIER_DIGITS = 4
+
+
+def extraction_system_prompt(fact_types):
+    return EXTRACTION_SYSTEM.format(fact_types=", ".join(fact_types))
+
+
+def normalize_for_match(text):
+    return WHITESPACE_RE.sub(" ", str(text or "").translate(QUOTE_CHARACTERS)).strip().casefold()
+
+
+def identifier_core(text):
+    """The comparable core of an identifier: letters and digits only.
+
+    ``value`` is contractually the *normalized* detail, so it legitimately
+    differs from the source in punctuation and spacing — "1234-5678" for
+    "1234 5678". Stripping separators on both sides tolerates that while still
+    catching a number whose digits are simply not in the document.
+    """
+    return IDENTIFIER_STRIP_RE.sub("", str(text or "").casefold())
+
+
+def valid_due_date(value):
+    from datetime import date
+
+    if not ISO_DATE_RE.match(str(value or "")):
+        return False
+    try:
+        date.fromisoformat(str(value))
+    except ValueError:
+        return False
+    return True
+
+
+def fact_violations(facts, source_text):
+    """Checks that need no model, run before the one that does.
+
+    Two of them are worth more than any prompt rule. A due date that does not
+    parse silently corrupts the deadline checklist, which sorts ISO strings
+    lexically. And a reference number, phone number, or email that is not in the
+    document is fabricated however plausible it reads — this skill's analogue of
+    quote exactness.
+    """
+    haystack = normalize_for_match(source_text)
+    identifiers = identifier_core(source_text)
+    violations = []
+    for index, fact in enumerate(facts, start=1):
+        due_date = fact.get("due_date")
+        if due_date and not valid_due_date(due_date):
+            violations.append(f"fact {index}: due_date {due_date!r} is not a YYYY-MM-DD calendar date")
+        value = fact.get("value")
+        if blank(value):
+            continue
+        candidate = str(value).strip()
+        if EMAIL_RE.match(candidate):
+            if normalize_for_match(candidate) not in haystack:
+                violations.append(f"fact {index}: email {candidate!r} does not appear in the document")
+            continue
+        # A date-shaped value is a rendering of the source, not a copy of it:
+        # "2026-03-15" for "March 15, 2026" is correct and must not be flagged.
+        if valid_due_date(candidate):
+            continue
+        core = identifier_core(candidate)
+        if len(core) < MIN_IDENTIFIER_CHARACTERS or sum(character.isdigit() for character in core) < MIN_IDENTIFIER_DIGITS:
+            continue
+        if core not in identifiers:
+            violations.append(f"fact {index}: {fact['fact_type']} value {candidate!r} does not appear in the document")
+    return violations
+
+
+def document_chunks(text, budget=MAX_DOCUMENT_CHARACTERS):
+    """Split an oversized document on paragraph boundaries.
+
+    A document too large for one call is covered in pieces rather than
+    truncated, so nothing is silently dropped.
+    """
+    if len(text) <= budget:
+        return [text]
+    chunks = []
+    current = []
+    size = 0
+    for paragraph in text.split("\n\n"):
+        piece = paragraph + "\n\n"
+        if size + len(piece) > budget and current:
+            chunks.append("".join(current))
+            current, size = [], 0
+        current.append(piece)
+        size += len(piece)
+    if current:
+        chunks.append("".join(current))
+    return chunks
+
+
+def document_label(document):
+    """A human-facing name: the recorded title, else the file name."""
+    return document.get("title") or Path(document["sourcePath"]).stem
+
+
+def extraction_user_prompt(title, instructions, text):
+    sections = [f"DOCUMENT TITLE: {title}"]
+    if instructions:
+        sections.append(f"FOCUS: {instructions}")
+    sections.append(f"DOCUMENT:\n{text}")
+    return "\n\n".join(sections)
+
+
+def attempt_extraction(service, messages, fact_types, source_text, args):
+    try:
+        value, _record = forge_llm.call_json_with_retry(
+            service, messages, cache_prompt=args.cache_prompt, timeout=args.request_timeout, task="extract"
+        )
+    except forge_llm.ChatError as error:
+        return [], [str(error)]
+    if isinstance(value, dict):
+        value = value.get("facts") if isinstance(value.get("facts"), list) else None
+    if not isinstance(value, list):
+        return [], ["response was not a JSON array of facts"]
+    facts, errors = validate_facts(value, fact_types)
+    if errors:
+        return [], errors
+    return facts, fact_violations(facts, source_text)
+
+
+def extract_document(service, run, document, text, args):
+    """Extract one document, with one corrective retry on validation failure."""
+    fact_types = run.get("factTypes", FACT_TYPES)
+    system = extraction_system_prompt(fact_types)
+    instructions = run.get("customInstructions", "")
+    facts = []
+    for chunk in document_chunks(text):
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": extraction_user_prompt(document_label(document), instructions, chunk)},
+        ]
+        chunk_facts, errors = attempt_extraction(service, messages, fact_types, chunk, args)
+        if errors:
+            repair = [
+                *messages,
+                {"role": "user", "content": "That response was unusable: " + "; ".join(errors[:5]) + ". Return corrected JSON only."},
+            ]
+            chunk_facts, errors = attempt_extraction(service, repair, fact_types, chunk, args)
+            if errors:
+                raise UserError("; ".join(errors[:5]))
+        facts.extend(chunk_facts)
+    return facts
+
+
+def write_results(run_directory, results):
+    text = "".join(json.dumps(result, ensure_ascii=False) + "\n" for result in results)
+    run_state.atomic_write_text(run_directory / "facts_results.jsonl", text)
+
+
+def _record_facts_state(state, document_id, status, note, remaining):
+    for item in state.get("items", []):
+        if item.get("id") == document_id:
+            item["status"] = status
+            item["attempts"] = item.get("attempts", 0) + 1
+            item["error"] = note if status == "failed" else None
+            break
+    state["phase"] = "extracting" if remaining else "authoring"
+    state["nextAction"] = "next" if remaining else "build"
+    return state
+
+
+def record_facts(run_directory, run, document_id, status, facts, note, supersedes=False):
+    """Commit one document's disposition. Shared by the CLI and the worker so
+    both go through the same journal and state transition.
+
+    ``supersedes`` marks a deliberate replacement of an earlier result, which is
+    how review escalation records a re-extraction.
+    """
+    result = {
+        "documentId": document_id,
+        "status": status,
+        "facts": facts,
+        "note": note,
+        "recordedAt": utc_now(),
+    }
+    if supersedes:
+        result["supersedes"] = True
+    run_state.append_jsonl_fsync(run_directory / "facts_results.jsonl", result)
+    results = load_results(run_directory)
+    by_id = {row["documentId"]: row for row in results}
+    ordered = [by_id[identifier] for identifier in document_order(run) if identifier in by_id]
+    write_results(run_directory, ordered)
+    remaining = len(run["documents"]) - len(ordered)
+    run_state.update_run_state(
+        run_directory,
+        lambda state: _record_facts_state(state, document_id, status, note, remaining),
+        {"type": "item_recorded", "itemId": document_id, "status": status},
+    )
+    return remaining
+
+
+VERIFY_SYSTEM = (
+    "You are reviewing facts extracted from personal-administration documents by a faster model\n"
+    "without reasoning. For each document you get its source text and every fact extracted from it.\n"
+    "Check the facts against the source text.\n"
+    "Flag a document when its extraction is actually wrong: an amount, date, or reference that\n"
+    "contradicts the document, an obligation or deadline attributed to the wrong party, a value\n"
+    "attached to the wrong fact, or inference presented as something the document states.\n"
+    "A defensible extraction is 'ok' even if you would have categorized a fact differently; taste is\n"
+    "not an error. Do not flag a document for being thin if the source genuinely offers little, and\n"
+    "do not flag it for omitting something — you are reviewing what is there, not what is missing."
+)
+# The reviewer needs the document, not a summary of it: these facts are
+# paraphrases with no verbatim quote to check against, so without the source
+# text there is nothing to review and every extraction reads as fine.
+VERIFY_SOURCE_CHARACTERS = 6000
+VERIFY_MAX_FACTS = 60
+
+
+def verification_payload(document_id, document, result, source_text):
+    facts = result.get("facts") or []
+    counts = Counter(fact["fact_type"] for fact in facts)
+    excerpt = source_text[:VERIFY_SOURCE_CHARACTERS]
+    if len(source_text) > VERIFY_SOURCE_CHARACTERS:
+        excerpt += "\n[source truncated for review]"
+    return {
+        "id": document_id,
+        "title": document_label(document),
+        "source": excerpt,
+        "factCount": len(facts),
+        "factTypes": dict(counts),
+        "facts": [
+            {
+                "fact_type": fact["fact_type"],
+                "text": fact["text"][:300],
+                "value": (fact.get("value") or "")[:120],
+                "due_date": fact.get("due_date") or "",
+                "confidence": fact["confidence"],
+            }
+            for fact in facts[:VERIFY_MAX_FACTS]
+        ],
+    }
+
+
+def verify_extractions(args, run_directory, run):
+    """Review every extraction on the thinking model, and redo what it flags."""
+    results = {row["documentId"]: row for row in load_results(run_directory)}
+    documents = {document["documentId"]: document for document in run["documents"]}
+    reviewable = [
+        (document_id, result)
+        for document_id, result in results.items()
+        if result["status"] == "success" and result.get("facts") and document_id in documents
+    ]
+    if not reviewable:
+        return None
+    think = forge_llm.resolve_think_or_chat(base_url=args.think_url, model=args.think_model)
+    if not think["enabled"]:
+        return {"skipped": "no thinking service is configured"}
+    sources = {}
+    for document_id, _result in reviewable:
+        try:
+            sources[document_id] = Path(documents[document_id]["sourcePath"]).read_text(encoding="utf-8", errors="replace")
+        except OSError as error:
+            return {"skipped": f"could not read a source for review: {error}"}
+    items = [
+        verification_payload(document_id, documents[document_id], result, sources[document_id])
+        for document_id, result in reviewable
+    ]
+    progress(f"verifying {len(items)} extractions on {think['url']}")
+    try:
+        verdicts = forge_verify.verify_packets(
+            think,
+            VERIFY_SYSTEM,
+            items,
+            journal_path=run_directory / "verified.jsonl",
+            packet_size=args.verify_packet_size,
+            background=True,
+            timeout=args.request_timeout,
+            progress=progress,
+        )
+    except forge_verify.VerificationError as error:
+        return {"skipped": str(error)}
+
+    flagged = [
+        (item, verdicts[item["id"]]["reason"])
+        for item in items
+        if verdicts.get(item["id"], {}).get("verdict") == forge_verify.VERDICT_FLAG
+    ]
+
+    def redo(item, reason):
+        document = documents[item["id"]]
+        text = Path(document["sourcePath"]).read_text(encoding="utf-8", errors="replace")
+        instructions = run.get("customInstructions", "")
+        objection = f"A reviewer rejected the previous extraction of this document: {reason}. Extract it again, carefully."
+        run_with_note = {**run, "customInstructions": f"{instructions}\n\n{objection}".strip()}
+        return extract_document(think, run_with_note, document, text, args)
+
+    escalations = forge_verify.escalate(flagged, redo, journal_path=run_directory / "verified.jsonl", progress=progress)
+    for document_id, outcome in escalations.items():
+        if outcome.get("resumed"):
+            continue  # committed when it was first escalated
+        if outcome["ok"]:
+            record_facts(run_directory, run, document_id, "success", outcome["value"], "re-extracted with reasoning after review", supersedes=True)
+        else:
+            record_facts(run_directory, run, document_id, "needs_review", None, f"review flagged this and re-extraction failed: {outcome['detail']}", supersedes=True)
+    return forge_verify.summarize(verdicts, escalations)
+
+
+def command_process(args):
+    run_directory = require_run_directory(args.run_directory)
+    run = load_run(run_directory)
+    verify_hashes(run)
+    service = forge_llm.resolve_service("chat", base_url=args.base_url, model=args.model)
+    if not service["enabled"]:
+        fail("connectedServices.chat is disabled; configure the local chat endpoint before processing")
+
+    processed = 0
+    failures = 0
+    limit = args.limit if args.limit and args.limit > 0 else None
+    while True:
+        results = load_results(run_directory)
+        document_id = next_pending(run, results)
+        if document_id is None or (limit is not None and processed >= limit):
+            break
+        document = document_by_id(run, document_id)
+        position = len(results) + 1
+        total = len(run["documents"])
+        label = document_label(document)
+        progress(f"[{position}/{total}] {label}")
+        try:
+            text = Path(document["sourcePath"]).read_text(encoding="utf-8", errors="replace")
+            facts = extract_document(service, run, document, text, args)
+            record_facts(run_directory, run, document_id, "success", facts, None)
+            progress(f"[{position}/{total}] {label}: {len(facts)} facts")
+        except (UserError, OSError) as error:
+            failures += 1
+            record_facts(run_directory, run, document_id, "needs_review", None, f"extraction failed: {error}")
+            progress(f"[{position}/{total}] {label}: needs review ({error})")
+        processed += 1
+
+    verification = verify_extractions(args, run_directory, run) if args.verify else None
+    remaining = len(run["documents"]) - len(load_results(run_directory))
+    print(
+        json.dumps(
+            {
+                "processed": processed,
+                "needsReview": failures,
+                "remaining": remaining,
+                "verification": verification,
+                "nextAction": "process" if remaining else "build",
+            },
+            ensure_ascii=False,
+        )
+    )
 
 
 def command_record(args):
@@ -561,7 +997,7 @@ def command_record(args):
             fail(f"facts file is not valid UTF-8: {facts_path}")
         except json.JSONDecodeError as error:
             fail(f"facts file is not valid JSON: {error}")
-        facts = normalize_facts(raw)
+        facts = normalize_facts(raw, run.get("factTypes", FACT_TYPES))
         note = args.note
     else:
         if args.facts_file:
@@ -570,24 +1006,7 @@ def command_record(args):
             fail(f"--status {args.status} requires --note")
         facts = None
         note = args.note
-    result = {
-        "documentId": args.doc_id,
-        "status": args.status,
-        "facts": facts,
-        "note": note,
-        "recordedAt": utc_now(),
-    }
-    run_state.append_jsonl_fsync(run_directory / "facts_results.jsonl", result)
-    def recorded(state):
-        for item in state["items"]:
-            if item["id"] == args.doc_id:
-                item.update({"status": args.status, "attempts": item.get("attempts", 0) + 1, "error": note if args.status == "failed" else None})
-        remaining_items = [item for item in state["items"] if item["status"] == "pending"]
-        state["phase"] = "authoring" if not remaining_items else "extracting"
-        state["nextAction"] = "build" if not remaining_items else "next"
-        return state
-    run_state.update_run_state(run_directory, recorded, {"type": "item_recorded", "itemId": args.doc_id, "status": args.status})
-    remaining = len(run["documents"]) - len(results) - 1
+    remaining = record_facts(run_directory, run, args.doc_id, args.status, facts, note)
     print(json.dumps({"recorded": args.doc_id, "status": args.status, "facts": len(facts) if facts is not None else 0, "remaining": remaining}))
 
 
@@ -727,10 +1146,9 @@ def command_validate(args):
             if not isinstance(result.get("facts"), list):
                 errors.append(f"successful document {document_id} has no facts list")
             else:
-                try:
-                    normalize_facts(result["facts"])
-                except SystemExit:
-                    errors.append(f"document {document_id} has invalid facts")
+                _facts, fact_errors = validate_facts(result["facts"], run.get("factTypes", FACT_TYPES))
+                if fact_errors:
+                    errors.append(f"document {document_id} has invalid facts: {fact_errors[0]}")
         elif not result.get("note"):
             errors.append(f"non-successful document {document_id} has no note")
     duplicates = sorted(value for value, count in Counter(seen).items() if count > 1)
@@ -816,6 +1234,22 @@ def parser():
     record.add_argument("--note")
     record.set_defaults(handler=command_record)
 
+    process = subparsers.add_parser(
+        "process",
+        help="Extract every pending document without leaving the script, then have the thinking model review the batch.",
+    )
+    process.add_argument("run_directory")
+    process.add_argument("--limit", type=int, help="stop after this many documents")
+    process.add_argument("--base-url", help="chat service (default: connectedServices.chat)")
+    process.add_argument("--model")
+    process.add_argument("--think-url", help="thinking service used for review (default: connectedServices.think)")
+    process.add_argument("--think-model")
+    process.add_argument("--no-verify", action="store_true", help="skip the thinking-model review of extractions")
+    process.add_argument("--verify-packet-size", type=int, default=15)
+    process.add_argument("--no-cache-prompt", action="store_true")
+    process.add_argument("--request-timeout", type=float, default=600)
+    process.set_defaults(handler=command_process)
+
     build = subparsers.add_parser("build", help="Assemble facts, deadline, and contact tables from staged facts.")
     build.add_argument("run_directory")
     build.set_defaults(handler=command_build)
@@ -828,6 +1262,10 @@ def parser():
 
 def main():
     args = parser().parse_args()
+    if hasattr(args, "no_cache_prompt"):
+        args.cache_prompt = not args.no_cache_prompt
+    if hasattr(args, "no_verify"):
+        args.verify = not args.no_verify
     args.handler(args)
 
 

@@ -166,6 +166,19 @@ def _verify_one(service, messages, expected, background, timeout):
         return _parse_verdicts(value, expected)
 
 
+def load_escalations(journal_path):
+    """Escalations already attempted, so a resumed run does not redo them."""
+    if journal_path is None or not journal_path.exists():
+        return {}
+    rows, _warnings = run_state.read_jsonl_recover_tail(journal_path, repair=True)
+    attempts = {}
+    for row in rows:
+        identifier = row.get("id")
+        if identifier is not None and "escalated" in row:
+            attempts[identifier] = row
+    return attempts
+
+
 def escalate(flagged, redo, journal_path=None, progress=None):
     """Redo each flagged item on the thinking model.
 
@@ -173,9 +186,25 @@ def escalate(flagged, redo, journal_path=None, progress=None):
     item for a human. The escalated result always wins over the original: it was
     produced with reasoning, by the stronger configuration, knowing what the
     reviewer objected to.
+
+    A flag verdict stays in the journal forever, so an item already escalated is
+    returned from the journal rather than redone. Without this every resumed run
+    pays a fresh reasoning-model extraction for every item ever flagged. Resumed
+    outcomes carry ``resumed: True``; a caller that commits results must skip
+    them, because the corrected value was committed when it was first produced.
     """
+    attempted = load_escalations(journal_path)
     results = {}
-    for position, (item, reason) in enumerate(flagged, start=1):
+    pending = []
+    for item, reason in flagged:
+        row = attempted.get(item["id"])
+        if row is None:
+            pending.append((item, reason))
+            continue
+        results[item["id"]] = {"ok": bool(row.get("escalated")), "detail": row.get("detail", ""), "resumed": True}
+        if progress:
+            progress(f"[escalate] {item['id']}: already escalated, keeping the recorded outcome")
+    for position, (item, reason) in enumerate(pending, start=1):
         identifier = item["id"]
         record = {"at": run_state.utc_now(), "id": identifier, "reason": reason}
         try:
@@ -189,7 +218,7 @@ def escalate(flagged, redo, journal_path=None, progress=None):
             run_state.append_jsonl_fsync(journal_path, record)
         if progress:
             state = "redone" if results[identifier]["ok"] else "needs review"
-            progress(f"[escalate {position}/{len(flagged)}] {identifier}: {state}")
+            progress(f"[escalate {position}/{len(pending)}] {identifier}: {state}")
     return results
 
 

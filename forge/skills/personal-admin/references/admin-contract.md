@@ -54,6 +54,26 @@ or address; `reference_number` is an account/order/policy/claim/case number;
 reader must provide or meet; `missing_info` is information the document expects
 but does not provide, or that is unclear.
 
+## Checks Applied Before a Result Is Recorded
+
+Both the worker (`process`) and hand extraction produce facts against this
+schema, but the worker also runs two checks that need no model, and a result
+that fails one costs a corrective retry before the document is marked
+`needs_review`:
+
+- `due_date` must be a real `YYYY-MM-DD` calendar date. The deadline checklist
+  sorts these strings lexically, so `March 15, 2026` or `2026-02-30` does not
+  merely look wrong — it silently misorders the checklist.
+- A `value` that reads as an identifier — a reference, account, policy, claim, or
+  phone number, or an email address — must appear in the source document.
+  Comparison ignores punctuation and spacing, because `value` is contractually
+  the *normalized* detail: `1234-5678` matches a source that writes `1234 5678`.
+  A date-shaped value is exempt, since `2026-03-15` is a legitimate rendering of
+  "March 15, 2026".
+
+Both checks exist because a wrong reference number reads exactly as plausibly as
+a right one. Prefer null to a reconstructed value.
+
 ## Facts vs Next Steps
 
 `extracted_facts.csv` and the derived CSVs contain only what the documents
