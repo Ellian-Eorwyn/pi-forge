@@ -44,6 +44,7 @@ from vault_schema import (
     path_is_inside,
     relative_path,
     resolve_schema_path,
+    safe_title,
     serialize_frontmatter,
     sha256_bytes,
     sha256_text,
@@ -262,19 +263,6 @@ def unique_run_directory(vault):
 # --------------------------------------------------------------------------
 # Filenames
 # --------------------------------------------------------------------------
-
-
-def safe_title(value):
-    """Strip characters that break filenames or Obsidian wikilinks.
-
-    Identical rules to vault-connections' safe_title so a title generated here
-    survives every other vault skill unchanged.
-    """
-    text = re.sub(r"\s+", " ", str(value)).strip()
-    text = "".join(character for character in text if ord(character) >= 32)
-    for bad in ("/", "\\", ":", "*", "?", '"', "<", ">", "|", "[", "]", "#", "^"):
-        text = text.replace(bad, "")
-    return text.strip(" .")[:120]
 
 
 def validate_title(value):

@@ -53,6 +53,7 @@ from vault_schema import (
     project_name,
     relative_path,
     resolve_schema_path,
+    safe_title,
     selected_notes,
     serialize_frontmatter,
     sha256_bytes,
@@ -60,6 +61,7 @@ from vault_schema import (
     sha256_text,
     split_frontmatter,
     valid_wikilink,
+    validate_filename_title,
     wikilink_target,
     yaml_scalar,
 )
@@ -1017,14 +1019,6 @@ def classify_target(args, target, mention_lines):
     return {"kind": kind, "title": safe_title(title) or target, "summary": clean_summary(raw.get("summary"))}
 
 
-def safe_title(value):
-    text = re.sub(r"\s+", " ", value).strip()
-    text = "".join(character for character in text if ord(character) >= 32)
-    for bad in ("/", "\\", ":", "*", "?", '"', "<", ">", "|", "[", "]", "#", "^"):
-        text = text.replace(bad, "")
-    return text.strip(" .")[:120]
-
-
 def clean_summary(value):
     if not isinstance(value, str):
         return ""
@@ -1215,17 +1209,6 @@ def existing_basenames(vault, schema_path):
         path.stem.casefold(): relative_path(vault, path)
         for path in selected_notes(vault, schema_path, "vault", None)
     }
-
-
-def validate_filename_title(value, label):
-    if not isinstance(value, str) or not value.strip():
-        raise UserError(f"{label} is empty")
-    cleaned = safe_title(value)
-    if cleaned != value.strip() or not cleaned:
-        raise UserError(f"{label} contains filename-unsafe characters: {value}")
-    if cleaned.casefold() in RESERVED_WINDOWS_NAMES:
-        raise UserError(f"{label} is a reserved filename: {value}")
-    return cleaned
 
 
 def source_title_prefix(run_directory, run_type, explicit):

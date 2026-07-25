@@ -70,6 +70,8 @@ from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
     require_safe_label,
     resolve_schema_path,
     revised_note_text,
+    safe_basename,
+    safe_title,
     section_bounds,
     selected_notes,
     serialize_frontmatter,
@@ -82,6 +84,7 @@ from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
     strip_schema_value,
     subdomain_folder,
     table_after,
+    unsafe_filename_reason,
     valid_wikilink,
     validate_derived_paths,
     yaml_quote,
@@ -731,7 +734,8 @@ def classify_items(args, vault, schema, schema_hash, items, losers, run_dir):
                     record["status"] = "review"
                 else:
                     destination_dir = compile_destination(schema, record["metadata"])
-                    record["destination"] = (destination_dir / path.name).as_posix()
+                    filed_name = filing_name(record, path.name, record_warnings)
+                    record["destination"] = (destination_dir / filed_name).as_posix()
                     revised = revised_note_text(record["metadata"], schema, body)
                     record["frontmatter_changed"] = revised != data.decode("utf-8-sig")
                     record["move_required"] = record["destination"] != rel
@@ -883,7 +887,8 @@ def verify_classifications(args, vault, schema, records, run_dir):
                 record["destination"] = None
             else:
                 destination_dir = compile_destination(schema, record["metadata"])
-                record["destination"] = (destination_dir / (vault / rel).name).as_posix()
+                filed_name = filing_name(record, (vault / rel).name, record.setdefault("warnings", []))
+                record["destination"] = (destination_dir / filed_name).as_posix()
                 record["move_required"] = record["destination"] != rel
         else:
             # Could not be redone, so a human decides rather than shipping a
@@ -919,6 +924,30 @@ def update_item_statuses(run_dir, records):
         return state
 
     run_state.update_run_state(run_dir, mutate)
+
+
+def filing_name(record, name, warnings):
+    """The basename to file a note under, repairing an unsafe one.
+
+    Filing is the last moment a note's name is cheap to change: once it is in a
+    folder and linked to, renaming it means rewriting every link. A name holding
+    `#`, `^`, `[`, `]`, or `|` cannot be linked to and will not sync to mobile,
+    so the note would arrive in its folder already unreachable. Otherwise the
+    name is preserved exactly, as the schema requires.
+    """
+    reason = unsafe_filename_reason(name)
+    if not reason:
+        return name
+    repaired = safe_basename(name)
+    if not repaired:
+        record["needs_review"] = True
+        record["review_reason"] = f"filename {reason} and nothing usable remains after repair"
+        warnings.append(f"{name}: {reason}; cannot be repaired automatically")
+        return name
+    record["filename_repaired"] = True
+    record["original_name"] = name
+    warnings.append(f"{name}: {reason}; filing as {repaired}")
+    return repaired
 
 
 def assign_unique_destination(vault, directory, name, taken_casefold):
@@ -1232,6 +1261,20 @@ def write_plan(run_dir, records, counts, dedupe, base_references, mode, dry_run,
         f"- Failed: {counts['failed']}",
         "",
     ]
+    repaired = [record for record in records if record.get("filename_repaired")]
+    if repaired:
+        report.extend(
+            [
+                "## Filenames Repaired",
+                "",
+                "These names could not be linked to with `[[wikilinks]]` and would not"
+                " sync to mobile, so they were repaired on the way into the vault.",
+                "",
+            ]
+        )
+        for record in sorted(repaired, key=lambda entry: entry["source"]):
+            report.append(f"- `{record['original_name']}` → `{Path(record['destination']).name}`")
+        report.append("")
     report.extend(verification_report(verification, records))
     report.extend(["## Destination Counts", ""])
     if destination_counts:

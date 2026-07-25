@@ -42,6 +42,11 @@ Rules the script enforces, not suggestions:
   the organizer's judgment, not this skill's.
 - A note under `--tiny-words` (120 by default) gets no summary. The descriptive
   filename already carries the gist of a two-sentence reminder.
+- Generated titles pass through `safe_title` in `forge/lib/vault_schema.py`, the
+  one place every vault skill names notes. A title may never contain `#`, `^`,
+  `[`, `]`, or `|`: Obsidian cannot resolve a `[[wikilink]]` to such a note and
+  the file will not sync to mobile. Renaming a transcript therefore repairs an
+  unsafe source name as a side effect.
 
 One known consequence: `note_title` in `forge/lib/vault_schema.py` reads the
 first level-one heading, so a processed note reports its title as "Transcript"

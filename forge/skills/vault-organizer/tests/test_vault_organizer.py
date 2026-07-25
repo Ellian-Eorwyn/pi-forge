@@ -358,6 +358,47 @@ class VaultOrganizerTests(unittest.TestCase):
         )
         self.assertEqual(destination.as_posix(), "04 Technology/4.03 Obsidian")
 
+    def test_safe_title_is_idempotent_and_keeps_names_readable(self):
+        # Brackets and pipes have readable equivalents; the rest are dropped.
+        self.assertEqual(vault_organizer.safe_title("Notes [Draft] | v2"), "Notes (Draft) - v2")
+        self.assertEqual(vault_organizer.safe_title("VPP Insiders #4: Open Discussion"), "VPP Insiders 4 Open Discussion")
+        # Idempotence is what lets safe_title double as the validator.
+        for value in ("Notes [Draft] | v2", "A # B", "^caret^", "already safe"):
+            once = vault_organizer.safe_title(value)
+            self.assertEqual(vault_organizer.safe_title(once), once, value)
+
+    def test_unsafe_filename_reason_names_the_offending_characters(self):
+        reason = vault_organizer.unsafe_filename_reason("Meeting #3 [draft].md")
+        self.assertIn("#", reason)
+        self.assertIn("[", reason)
+        self.assertIn("wikilinks and mobile sync", reason)
+        self.assertIsNone(vault_organizer.unsafe_filename_reason("2026-07-24 - Memo - Groceries.md"))
+
+    def test_filing_repairs_names_that_break_wikilinks(self):
+        record = {}
+        warnings = []
+        filed = vault_organizer.filing_name(record, "VPP Insiders #4: Open Discussion.md", warnings)
+        self.assertEqual(filed, "VPP Insiders 4 Open Discussion.md")
+        self.assertTrue(record["filename_repaired"])
+        self.assertEqual(record["original_name"], "VPP Insiders #4: Open Discussion.md")
+        self.assertTrue(any("wikilinks and mobile sync" in warning for warning in warnings))
+
+    def test_filing_preserves_a_safe_name_exactly(self):
+        record = {}
+        warnings = []
+        filed = vault_organizer.filing_name(record, "2026-07-24 - Therapy - Family Dynamics.md", warnings)
+        self.assertEqual(filed, "2026-07-24 - Therapy - Family Dynamics.md")
+        self.assertNotIn("filename_repaired", record)
+        self.assertEqual(warnings, [])
+
+    def test_filing_holds_a_name_that_cannot_be_repaired(self):
+        record = {}
+        warnings = []
+        filed = vault_organizer.filing_name(record, "#.md", warnings)
+        self.assertEqual(filed, "#.md")
+        self.assertTrue(record["needs_review"])
+        self.assertIn("cannot be repaired", warnings[0])
+
     def test_project_inheritance_and_domain_project_path(self):
         schema = self.schema()
         metadata, warnings = vault_organizer.normalize_metadata(

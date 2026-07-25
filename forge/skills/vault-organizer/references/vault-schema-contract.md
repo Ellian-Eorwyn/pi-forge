@@ -198,6 +198,22 @@ collision) follow the schema's own inbox contract:
 - In `inbox` mode they stay exactly where they are with the reason recorded.
 - Notes that failed to read at all are left in place and reported.
 
+## Filenames
+
+A note keeps its basename through filing, with one exception. A name containing
+`#`, `^`, `[`, `]`, or `|` cannot be the target of a `[[wikilink]]` and will not
+sync to mobile, so the note would arrive in its folder unreachable; names with
+path-illegal characters are repaired for the same reason. Filing is the last
+moment a name is cheap to change — afterwards a rename means rewriting every
+link to it — so the repair happens there: `[` and `]` become `(` and `)`, `|`
+becomes `-`, the rest are dropped. The original name is recorded on the record
+and every repair is listed in the report under "Filenames Repaired". A name with
+nothing usable left is never invented; the note goes to review instead.
+
+The rule itself lives in `safe_title`/`safe_basename` in `forge/lib/vault_schema.py`
+so that every vault skill names notes identically, and is documented for humans
+under "Filename and collision rules" in the vault's schema note.
+
 ## Apply
 
 Dry run is the default. With `--apply`, the script executes quarantines, then
