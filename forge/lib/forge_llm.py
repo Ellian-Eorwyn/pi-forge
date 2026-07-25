@@ -285,10 +285,14 @@ def _post_simple(url, body, timeout, api_key):
         raise ChatError(f"chat endpoint returned invalid JSON: {error}") from error
 
 
-def _post_preemptible(url, body, timeout, api_key, lease, scheduling, env=None):
+def _post_preemptible(url, body, timeout, api_key, lease, scheduling, env=None, allow_preemption=True):
     """POST on a worker thread so the socket can be closed the moment an
     interactive turn appears. Abandoning the request is not enough: the server
-    would keep generating and keep holding the GPU."""
+    would keep generating and keep holding the GPU.
+
+    ``allow_preemption=False`` still claims the slot and refreshes the lease but
+    sees the call through. A short diagnostic probe wants the slot without
+    being abandoned by the first interactive turn that arrives."""
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ChatError(f"unsupported chat URL: {url}")
@@ -325,7 +329,7 @@ def _post_preemptible(url, body, timeout, api_key, lease, scheduling, env=None):
         if time.monotonic() - last_refresh >= 1:
             _write_background_lease(lease, scheduling["backgroundSlot"])
             last_refresh = time.monotonic()
-        if active_interactive_leases(env):
+        if allow_preemption and active_interactive_leases(env):
             preempted = True
             connection.close()
             break
@@ -348,6 +352,7 @@ def call(
     response_format=None,
     cache_prompt=True,
     background=False,
+    allow_preemption=True,
     session=None,
     timeout=DEFAULT_TIMEOUT,
     api_key=None,
@@ -385,7 +390,7 @@ def call(
     started = time.monotonic()
     try:
         if lease is not None:
-            payload = _post_preemptible(service["url"], body, timeout, api_key, lease, scheduling, env)
+            payload = _post_preemptible(service["url"], body, timeout, api_key, lease, scheduling, env, allow_preemption)
         else:
             payload = _post_simple(service["url"], body, timeout, api_key)
     finally:

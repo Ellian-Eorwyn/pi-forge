@@ -24,6 +24,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import run_state
 import forge_embeddings
+import forge_llm
+import forge_verify
 
 
 RUN_SCHEMA_VERSION = 2
@@ -509,51 +511,11 @@ def think_configuration():
     return fallback
 
 
-def active_interactive_leases():
-    directory = forge_agent_directory() / "inference-leases"
-    if not directory.is_dir():
-        return []
-    now_ms = time.time() * 1000
-    active = []
-    for path in directory.glob("*.json"):
-        try:
-            row = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if row.get("kind", "interactive") == "interactive" and now_ms - float(row.get("updatedAtMs", 0)) <= LEASE_STALE_MS:
-            active.append(row)
-    return active
-
-
-def wait_for_interactive_idle(run_directory, scheduling):
-    started = time.monotonic()
-    grace = max(0, scheduling["idleGraceMs"]) / 1000
-    while True:
-        while active_interactive_leases():
-            time.sleep(0.2)
-        if not grace:
-            break
-        time.sleep(grace)
-        if not active_interactive_leases():
-            break
-    waited_ms = int((time.monotonic() - started) * 1000)
-    if waited_ms:
-        append_jsonl(run_directory / "inference_schedule.jsonl", {"at": utc_now(), "event": "idle_wait", "waitedMs": waited_ms})
-
-
-def extract_json_text(value):
-    text = str(value or "").strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        start = min((position for position in (text.find("{"), text.find("[")) if position >= 0), default=-1)
-        end = max(text.rfind("}"), text.rfind("]"))
-        if start < 0 or end < start:
-            raise
-        return json.loads(text[start : end + 1])
+# Lease reading, the idle wait, and JSON extraction now live in forge_llm, which
+# is also what the JavaScript client agrees with. Keeping private copies here
+# meant three implementations of one protocol.
+active_interactive_leases = forge_llm.active_interactive_leases
+extract_json_text = forge_llm.parse_json_content
 
 
 def post_chat_json(
@@ -566,123 +528,39 @@ def post_chat_json(
     parse_content=True,
     background=False,
 ):
-    parsed = urllib.parse.urlsplit(chat["url"])
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        fail(f"unsupported chat URL: {chat['url']}")
-    scheduling = chat["scheduling"]
-    background_lease = None
-    if background:
-        while True:
-            wait_for_interactive_idle(run_directory, scheduling)
-            lease_directory = forge_agent_directory() / "inference-leases"
-            lease_directory.mkdir(parents=True, exist_ok=True)
-            background_lease = lease_directory / f"background-{os.getpid()}-{threading.get_ident()}.json"
-            temporary = background_lease.with_suffix(".tmp")
-            run_state.atomic_write_text(
-                temporary,
-                json.dumps({"pid": os.getpid(), "kind": "background", "slot": scheduling["backgroundSlot"], "updatedAtMs": int(time.time() * 1000)}) + "\n",
-            )
-            temporary.replace(background_lease)
-            if not active_interactive_leases():
-                break
-            background_lease.unlink(missing_ok=True)
+    """One chat call, journaled to the run's inference schedule.
 
-    def clear_background_lease():
-        if background_lease is not None:
-            background_lease.unlink(missing_ok=True)
-
-    def refresh_background_lease():
-        if background_lease is not None:
-            run_state.atomic_write_text(
-                background_lease,
-                json.dumps({"pid": os.getpid(), "kind": "background", "slot": scheduling["backgroundSlot"], "updatedAtMs": int(time.time() * 1000)}) + "\n",
-            )
+    Transport, leases, and preemption belong to forge_llm; what stays here is
+    what is specific to this run: the worker session id that keeps the server's
+    prefix cache keyed to this run, and the schedule journal the report reads.
+    """
     worker_session = "project-extraction-slot-probe"
     config_path = run_directory / "run_config.json"
     if config_path.is_file():
         worker_session = json.loads(config_path.read_text(encoding="utf-8")).get("worker", {}).get("sessionId") or worker_session
-    request = {
-        "model": chat["model"],
-        "user": worker_session,
-        "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-        "temperature": 0.1,
-        "max_tokens": scheduling["backgroundOutputTokens"],
-        "stream": False,
-        "cache_prompt": True,
-    }
-    if background:
-        request["id_slot"] = scheduling["backgroundSlot"]
-    body = json.dumps(request).encode("utf-8")
-    connection_class = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
-    connection = connection_class(parsed.hostname, parsed.port, timeout=600)
-    result = {}
-    failure = {}
-
-    def execute():
-        try:
-            request_path = parsed.path or "/"
-            if parsed.query:
-                request_path += f"?{parsed.query}"
-            connection.request("POST", request_path, body=body, headers={"Content-Type": "application/json", "Authorization": "Bearer local"})
-            response = connection.getresponse()
-            payload = response.read()
-            if response.status >= 400:
-                raise RuntimeError(f"chat endpoint returned HTTP {response.status}: {payload.decode('utf-8', errors='replace')[:500]}")
-            result["payload"] = json.loads(payload)
-        except BaseException as error:
-            failure["error"] = error
-
-    started = time.monotonic()
-    thread = threading.Thread(target=execute, daemon=True)
-    thread.start()
-    preempted = False
-    last_lease_refresh = time.monotonic()
-    while thread.is_alive():
-        thread.join(0.1)
-        if background and time.monotonic() - last_lease_refresh >= 1:
-            refresh_background_lease()
-            last_lease_refresh = time.monotonic()
-        if background and allow_preemption and active_interactive_leases():
-            preempted = True
-            connection.close()
-            break
-    if preempted:
-        thread.join(2)
-        clear_background_lease()
-        append_jsonl(run_directory / "inference_schedule.jsonl", {"at": utc_now(), "event": "preempted", "task": task, "slot": scheduling["backgroundSlot"]})
-        raise InterruptedError("background inference preempted by interactive activity")
-    thread.join()
-    connection.close()
-    if failure:
-        clear_background_lease()
-        raise failure["error"]
-    payload = result["payload"]
-    usage = payload.get("usage") or {}
-    details = usage.get("prompt_tokens_details") or {}
-    timings = payload.get("timings") or {}
-    elapsed_ms = int((time.monotonic() - started) * 1000)
-    record = {
-        "at": utc_now(),
-        "event": "model_call",
-        "task": task,
-        "sessionId": worker_session,
-        "service": chat.get("name", "chat"),
-        "endpoint": chat["url"],
-        "model": chat["model"],
-        "mode": "background" if background else "foreground",
-        "slot": scheduling["backgroundSlot"] if background else None,
-        "promptCharacters": len(system_prompt) + len(user_prompt),
-        "promptTokens": usage.get("prompt_tokens"),
-        "cachedTokens": details.get("cached_tokens", timings.get("cache_n")),
-        "prefillMs": timings.get("prompt_ms"),
-        "generationMs": timings.get("predicted_ms"),
-        "elapsedMs": elapsed_ms,
-    }
-    choices = payload.get("choices") or []
-    record["finishReason"] = choices[0].get("finish_reason") if choices else None
+    try:
+        content, record = forge_llm.call(
+            chat,
+            [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+            temperature=0.1,
+            max_tokens=chat["scheduling"]["backgroundOutputTokens"],
+            cache_prompt=True,
+            background=background,
+            allow_preemption=allow_preemption,
+            session=worker_session,
+            timeout=600,
+            task=task,
+        )
+    except InterruptedError:
+        append_jsonl(
+            run_directory / "inference_schedule.jsonl",
+            {"at": utc_now(), "event": "preempted", "task": task, "slot": chat["scheduling"]["backgroundSlot"]},
+        )
+        raise
+    except forge_llm.ChatError as error:
+        fail(str(error))
+    record = {**record, "sessionId": worker_session, "promptCharacters": len(system_prompt) + len(user_prompt)}
     append_jsonl(run_directory / "inference_schedule.jsonl", record)
-    clear_background_lease()
-    content = ((choices[0].get("message") or {}).get("content") if choices else None)
     if not parse_content:
         return content, record
     try:
@@ -3679,6 +3557,82 @@ def require_worker_runtime(run_directory, background=False):
     return chat
 
 
+EXTRACTION_VERIFY_SYSTEM = (
+    "You are reviewing project controls transcribed from documents by a faster model without\n"
+    "reasoning. Each item shows the quote it came from and how that quote was read: the control\n"
+    "type, who is responsible, how binding it is, and whether the reading was explicit or inferred.\n"
+    "The quotes have already been checked to appear verbatim in the source, so do not re-check them.\n"
+    "Flag an item when the reading does not follow from its quote: an obligation attributed to the\n"
+    "wrong party, something discussed or proposed recorded as required or committed, a date the\n"
+    "quote does not support, or an inference presented as explicit. A defensible reading is 'ok'\n"
+    "even if you would have typed it differently; taste is not an error."
+)
+VERIFY_QUOTE_CHARACTERS = 400
+
+
+def extraction_verification_items(run_directory):
+    """One reviewable item per extracted control, keyed to its packet."""
+    items = []
+    for result in read_jsonl(run_directory / "extraction_results.jsonl"):
+        if result.get("status") != "extracted":
+            continue
+        for position, item in enumerate(result.get("items") or [], start=1):
+            items.append(
+                {
+                    "id": f"{result['packetId']}#{position}",
+                    "item_type": item.get("item_type"),
+                    "title": item.get("title"),
+                    "party": item.get("party"),
+                    "counterparty": item.get("counterparty"),
+                    "date_text": item.get("date_text"),
+                    "commitment_level": item.get("commitment_level"),
+                    "interpretation": item.get("interpretation"),
+                    "quotes": [str(quote)[:VERIFY_QUOTE_CHARACTERS] for quote in (item.get("direct_quotes") or [])],
+                }
+            )
+    return items
+
+
+def verify_extracted_items(run_directory, think, background):
+    """Review how each quote was read, on the thinking model.
+
+    Quote exactness is already enforced when a packet is recorded, so what is
+    left is the judgment a verbatim quote cannot settle: who owes the obligation
+    and how binding it is. Flags are recorded against the item rather than
+    re-extracted — a control the reviewer doubts is a human's call, and the run
+    already has a review manifest for exactly that.
+    """
+    if not think["enabled"]:
+        return {"skipped": "no thinking service is configured"}
+    items = extraction_verification_items(run_directory)
+    if not items:
+        return None
+    journal = run_directory / "verified_extractions.jsonl"
+    try:
+        verdicts = forge_verify.verify_packets(
+            think,
+            EXTRACTION_VERIFY_SYSTEM,
+            items,
+            journal_path=journal,
+            background=background,
+            progress=lambda message: print(message, file=sys.stderr, flush=True),
+        )
+    except forge_verify.VerificationError as error:
+        return {"skipped": str(error)}
+    flagged = {
+        identifier: entry["reason"]
+        for identifier, entry in verdicts.items()
+        if entry["verdict"] == forge_verify.VERDICT_FLAG
+    }
+    summary = forge_verify.summarize(verdicts)
+    if flagged:
+        append_jsonl(
+            run_directory / "inference_schedule.jsonl",
+            {"at": utc_now(), "event": "extraction_review", "flagged": sorted(flagged), "reviewed": len(items)},
+        )
+    return summary
+
+
 def run_worker(run_directory, background=False):
     chat = require_worker_runtime(run_directory, background)
     # Extraction is bulk transcription of evidence and runs without reasoning.
@@ -3693,6 +3647,9 @@ def run_worker(run_directory, background=False):
         control = worker_control(run_directory)
         if control["desiredState"] != "running":
             return
+        # All the extraction, then all the review. Interleaving would swap the
+        # prompt prefix on both servers on every packet.
+        verify_extracted_items(run_directory, think, background)
         command_reconcile(argparse.Namespace(run_directory=str(run_directory), draft=False))
         if not automatic_review(run_directory, think, background):
             return
