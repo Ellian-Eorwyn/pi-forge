@@ -7,6 +7,7 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import { JSDOM, VirtualConsole } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import { resolveConnectedServices } from "../../../lib/connected-services.mjs";
+import { callTextWithRetry, resolveService, serviceDoctor } from "../../../lib/forge-llm.mjs";
 import {
 	DEFAULT_MAX_ATTEMPTS,
 	assertCompatibleRun,
@@ -2201,18 +2202,19 @@ async function callLocalJsonModel(runDirectory, task, prompt, fallback, runtime 
 		temperature: 0.1,
 	};
 	const record = { id: callId, task, startedAt, endedAt: null, endpoint: baseChatUrl, model, request, response: null, status: "failed", error: null };
+	const service = { name: "chat", enabled: true, url: baseChatUrl, model, scheduling: chat.scheduling ?? {} };
 	const execute = async () => {
-		const response = await fetch(baseChatUrl, {
-			method: "POST",
-			headers: { "Content-Type": "application/json", Authorization: "Bearer local" },
-			body: JSON.stringify(request),
+		// The shared client owns transport, retry, and think-tag stripping; the
+		// queue, the budget, and the JSON fallback stay here.
+		const { text, record: telemetry } = await callTextWithRetry(service, request.messages, {
+			temperature: request.temperature,
+			task,
+			timeoutMs: 600_000,
 		});
 		record.endedAt = nowIso();
-		if (!response.ok) throw new Error(`LLM returned HTTP ${response.status}`);
-		const payload = await response.json();
-		record.response = payload;
+		record.response = { content: text };
+		record.telemetry = telemetry;
 		record.status = "success";
-		const text = payload.choices?.[0]?.message?.content ?? "";
 		return { value: extractJsonFromText(text, fallback), record };
 	};
 	try {
@@ -3038,7 +3040,14 @@ async function commandDoctor(options) {
 	}
 	if (!tools.chat.available) remediation.push("Set connectedServices.chat.baseUrl or FORGE_BASE_CHAT_URL for local model calls.");
 	if (!tools.embeddings.available) remediation.push("Set connectedServices.embeddings.url or FORGE_EMBEDDINGS_URL for source ranking.");
-	const report = { tools, capabilities, searxng, chat, embeddings, remediation };
+	// Whether the bulk endpoint is quietly reasoning cannot be read off a
+	// response body, and every model call in a deep run pays for it.
+	let chatProbe = null;
+	if (tools.chat.available && options.probe !== false) {
+		chatProbe = await serviceDoctor(resolveService("chat", { chatUrl: options.chatUrl, chatModel: options.chatModel }), { expectNonThinking: true, timeoutMs: 15_000 });
+		if (chatProbe.warning) remediation.push(chatProbe.warning);
+	}
+	const report = { tools, capabilities, searxng, chat, chatProbe, embeddings, remediation };
 	if (options.json) {
 		process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 		return;

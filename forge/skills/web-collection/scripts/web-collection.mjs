@@ -6,6 +6,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync } from "nod
 import { basename, extname, join, resolve, sep } from "node:path";
 import * as readline from "node:readline/promises";
 import { resolveConnectedServices } from "../../../lib/connected-services.mjs";
+import { callJsonWithRetry, resolveService } from "../../../lib/forge-llm.mjs";
 import { htmlToCleanMarkdown } from "../../../lib/html-cleaner.mjs";
 import {
 	DEFAULT_MAX_ATTEMPTS,
@@ -920,32 +921,29 @@ async function commandHarvest(positionals, flags) {
 }
 
 async function filterLinksWithLlm(links, instruction) {
-	const { baseUrl: baseChatUrl, model: baseModel } = resolveConnectedServices().chat;
+	const service = resolveService("chat", {});
+	if (!service.enabled) fail("connectedServices.chat is disabled; link filtering needs the local chat endpoint");
 	const prompt = `You are an expert web spider. I will provide a list of URLs and an instruction for what I'm looking for. Please return ONLY a JSON array of strings containing the URLs that are most likely to contain the requested information. Do not return any other text.
 Instruction: ${instruction}
 URLs:
 ${links.join("\n")}`;
 
+	let selected;
 	try {
-		const response = await fetch(baseChatUrl, {
-			method: "POST",
-			headers: { "Content-Type": "application/json", "Authorization": "Bearer local" },
-			body: JSON.stringify({
-				model: baseModel,
-				messages: [{ role: "user", content: prompt }],
-			})
-		});
-		if (!response.ok) fail(`LLM API returned HTTP ${response.status}`);
-		const payload = await response.json();
-		const content = payload.choices[0]?.message?.content || "[]";
-		const match = content.match(/\[.*\]/s);
-		const jsonString = match ? match[0] : content;
-		const selected = JSON.parse(jsonString);
-		if (!Array.isArray(selected)) return links;
-		return selected;
+		({ value: selected } = await callJsonWithRetry(service, [{ role: "user", content: prompt }], { task: "filter-links", timeoutMs: 300_000 }));
 	} catch (error) {
 		fail(`Failed to filter links with LLM: ${error.message}`);
 	}
+	if (!Array.isArray(selected)) return links;
+	// The model is choosing from the list, not adding to it: a URL it did not
+	// receive is one it invented, and following it would take the spider
+	// somewhere the page never linked to.
+	const offered = new Set(links);
+	const invented = selected.filter((url) => !offered.has(url));
+	if (invented.length) {
+		process.stderr.write(`Warning: ignoring ${invented.length} URL(s) the model returned that were not among the page's links.\n`);
+	}
+	return selected.filter((url) => offered.has(url));
 }
 
 async function commandSpider(positionals, flags) {
