@@ -39,6 +39,10 @@ const environment = {
 	FORGE_BASE_CHAT_URL: "http://127.0.0.1:1/v1/chat/completions",
 	FORGE_SEARXNG_URL: "",
 	PYTHONDONTWRITEBYTECODE: "1",
+	// Endpoints and model names must never come from the settings of whoever runs
+	// the tests: a developer whose install has been migrated (or not) would other-
+	// wise see different results than CI.
+	PI_FORGE_AGENT_DIR: "/nonexistent-agent-directory",
 };
 
 test("shared run state is atomic, compatible, and recovers a malformed journal tail", () => {
@@ -4106,7 +4110,8 @@ test("document ingest categorizes folders with the base model endpoint", async (
 			const requests = readFileSync(chatServer.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
 			assert.equal(requests.length, 1);
 			assert.equal(requests[0].url, "/v1/chat/completions");
-			assert.equal(requests[0].body.model, "code");
+			// Folder categorization is bulk work, so it belongs on the non-thinking model.
+			assert.equal(requests[0].body.model, "chat");
 			assert.match(requests[0].body.messages[1].content, /essay\.txt/);
 			assert.equal(firstManifestRow(runDirectory).suggested_pipeline, "literature");
 		} finally {

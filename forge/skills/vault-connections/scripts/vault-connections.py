@@ -33,7 +33,9 @@ import forge_llm
 import forge_verify
 import run_state
 from vault_classification import (
+    DEFAULT_BASE_URL,
     build_messages as classification_messages,
+    chat_service,
     request_json_with_retry as classification_request,
     validate_classification,
 )
@@ -64,7 +66,6 @@ from vault_schema import (
 
 WORKFLOW = "vault-connections"
 STATE_DIR = ".vault-connections"
-DEFAULT_BASE_URL = "http://llms:8004/v1/chat/completions"
 DEFAULT_MODEL = "chat"
 PROMPT_VERSION = "vault-connections-v1"
 
@@ -738,33 +739,12 @@ def rank_by_fusion(entries, lexical, semantic, query, limit):
 # --------------------------------------------------------------------------- #
 
 
-def normalize_base_url(value):
-    text = (value or "").rstrip("/")
-    if not text:
-        return DEFAULT_BASE_URL
-    if text.endswith("/chat/completions"):
-        return text
-    if text.endswith("/v1"):
-        return f"{text}/chat/completions"
-    return f"{text}/v1/chat/completions"
-
-
 def extract_json_content(content):
     text = forge_llm.extract_json_content(content)
     start, end = text.find("{"), text.rfind("}")
     if start == -1 or end <= start:
         raise UserError(f"model did not return a JSON object: {text[:200]}")
     return json.loads(text[start:end + 1])
-
-
-def chat_service(args):
-    return {
-        "name": "chat",
-        "enabled": True,
-        "url": args.base_url,
-        "model": args.model,
-        "scheduling": forge_llm.DEFAULT_SERVICES["chat"]["scheduling"],
-    }
 
 
 def request_with_retry(args, messages, service=None):

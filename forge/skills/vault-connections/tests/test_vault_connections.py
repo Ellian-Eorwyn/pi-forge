@@ -1275,6 +1275,44 @@ class VaultConnectionsTest(unittest.TestCase):
         self.assertTrue(checks["chat"]["ok"])
         self.assertTrue(checks["embeddings"]["ok"])
 
+    def test_the_endpoint_comes_from_the_configured_chat_service(self):
+        """Every other test passes --base-url, so none of them prove that a run
+        with no flag finds the agent's configured service. Classification shares
+        one resolution for all commands, so this covers the publishing path too."""
+        agent = Path(self.temporary.name) / "agent"
+        agent.mkdir()
+        (agent / "settings.json").write_text(
+            json.dumps(
+                {
+                    "connectedServices": {
+                        "chat": {
+                            "enabled": True,
+                            "baseUrl": f"{self.base}/v1/chat/completions",
+                            "model": "settings-resolved-model",
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        process = subprocess.run(
+            [sys.executable, str(SCRIPT), "doctor", "--vault", str(self.vault), "--no-verify"],
+            capture_output=True,
+            text=True,
+            env={
+                "FORGE_EMBEDDINGS_URL": f"{self.base}/v1/embeddings",
+                "FORGE_EMBEDDINGS_MODEL": "stub-embed",
+                "PATH": "/usr/bin:/bin",
+                "PI_FORGE_AGENT_DIR": str(agent),
+            },
+        )
+        self.assertTrue(process.stdout.strip(), f"no stdout; stderr={process.stderr[-2000:]}")
+        checks = json.loads(process.stdout)["data"]["checks"]
+        self.assertEqual(checks["chat"]["url"], f"{self.base}/v1/chat/completions")
+        self.assertEqual(checks["chat"]["model"], "settings-resolved-model")
+        self.assertTrue(StubHandler.chat_requests, "the resolved endpoint was never contacted")
+        self.assertEqual(StubHandler.chat_requests[-1]["model"], "settings-resolved-model")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
