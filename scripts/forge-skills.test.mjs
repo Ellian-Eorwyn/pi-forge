@@ -2925,6 +2925,225 @@ test("personal admin re-extracts a flagged document once, not on every resume", 
 	});
 });
 
+function startRowWorkerFixture(workspace, options = {}) {
+	const serverPath = join(workspace, "row-worker-server.mjs");
+	const requestsPath = join(workspace, "row-worker-requests.jsonl");
+	writeFileSync(
+		serverPath,
+		`import { appendFileSync } from "node:fs";
+import { createServer } from "node:http";
+const requestsPath = ${JSON.stringify(requestsPath)};
+const flagEverything = ${JSON.stringify(Boolean(options.flagEverything))};
+const trailingPeriodOnFirst = ${JSON.stringify(Boolean(options.trailingPeriodOnFirst))};
+// Vectors are chosen, not computed: rows sharing a group get the same unit
+// vector so they cluster, and the groups sit far apart so they do not.
+const groups = ${JSON.stringify(options.groups ?? [0, 0, 1])};
+let enrichments = 0;
+const server = createServer((request, response) => {
+  let body = "";
+  request.setEncoding("utf8");
+  request.on("data", (chunk) => { body += chunk; });
+  request.on("end", () => {
+    const payload = JSON.parse(body);
+    if (request.url.includes("/embeddings")) {
+      const data = payload.input.map((_text, index) => {
+        const vector = [0, 0, 0, 0];
+        vector[groups[index] ?? index] = 1;
+        return { index, embedding: vector };
+      });
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ data }));
+      return;
+    }
+    appendFileSync(requestsPath, JSON.stringify(payload) + "\\n");
+    const last = payload.messages?.at(-1)?.content || "";
+    let parsed;
+    try { parsed = JSON.parse(last); } catch { parsed = undefined; }
+    let content;
+    if (parsed?.items) {
+      content = JSON.stringify({ verdicts: parsed.items.map((entry) => ({
+        id: entry.id,
+        verdict: flagEverything ? "flag" : "ok",
+        reason: flagEverything ? "this value does not fit the rows it was copied to" : "",
+      })) });
+    } else {
+      enrichments += 1;
+      const period = trailingPeriodOnFirst && enrichments === 1 ? "." : "";
+      content = JSON.stringify({ status: "completed", value: \`answer \${enrichments}\${period}\` });
+    }
+    const data = JSON.stringify({
+      choices: [{ message: { content }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 10 },
+      timings: { predicted_n: 5 },
+    });
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(data);
+  });
+});
+server.listen(0, "127.0.0.1", () => process.stdout.write(String(server.address().port) + "\\n"));
+`,
+	);
+	const child = spawn(process.execPath, [serverPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+	return new Promise((resolveServer, rejectServer) => {
+		let stdout = "";
+		let stderr = "";
+		child.stdout.setEncoding("utf8");
+		child.stderr.setEncoding("utf8");
+		child.stderr.on("data", (chunk) => (stderr += chunk));
+		child.stdout.on("data", (chunk) => {
+			stdout += chunk;
+			const port = stdout.split(/\r?\n/).find((value) => value.trim());
+			if (!port) return;
+			const origin = `http://127.0.0.1:${port.trim()}`;
+			resolveServer({
+				url: `${origin}/v1/chat/completions`,
+				embeddingsUrl: `${origin}/v1/embeddings`,
+				requestsPath,
+				close: () => new Promise((resolveClose) => { child.once("exit", resolveClose); child.kill(); }),
+			});
+		});
+		child.once("error", rejectServer);
+		child.once("exit", (code) => { if (!stdout.trim()) rejectServer(new Error(`row worker fixture exited ${code}: ${stderr}`)); });
+	});
+}
+
+const ROW_SOURCE = "name,note\nalpha,cannot log in\nbeta,unable to sign in\ngamma,refund my invoice\n";
+
+function initRowRun(workspace, name = "rows") {
+	const source = join(workspace, "tickets.csv");
+	writeFileSync(source, ROW_SOURCE);
+	const runDirectory = join(workspace, name);
+	const cli = script("spreadsheet-analysis", "spreadsheet-analysis.py");
+	run(python, [
+		cli, "row-init", source, "--output", runDirectory,
+		"--column", "Category", "--input-columns", "name", "note",
+		"--instruction", "Classify the ticket.",
+	]);
+	return { cli, runDirectory };
+}
+
+test("row enrichment reuses one answer across near-identical rows", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startRowWorkerFixture(workspace);
+		try {
+			const { cli, runDirectory } = initRowRun(workspace);
+			const output = await runAsyncWithEnvironment(
+				python,
+				[cli, "row-process", runDirectory, "--base-url", fixture.url, "--embeddings-url", fixture.embeddingsUrl, "--no-verify"],
+				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
+			);
+			const report = JSON.parse(output.stdout.trim());
+			// Rows 2 and 3 are the same complaint, so the second copies the first.
+			assert.equal(report.processed, 3);
+			assert.equal(report.modelCalls, 2);
+			assert.equal(report.reusedFromNearIdenticalRows, 1);
+
+			const results = readFileSync(join(runDirectory, "row_results.jsonl"), "utf8")
+				.trim().split("\n").map((line) => JSON.parse(line));
+			assert.deepEqual(results.map((entry) => entry.rowId), [2, 3, 4]);
+			assert.equal(results[1].derivedFrom, 2, "the reused row records where its answer came from");
+			assert.equal(results[0].value, results[1].value);
+			assert.ok(!results[2].derivedFrom, "an unrelated row is answered on its own");
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("row enrichment falls back to one call per row when embeddings are unavailable", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startRowWorkerFixture(workspace);
+		try {
+			const { cli, runDirectory } = initRowRun(workspace);
+			const output = await runAsyncWithEnvironment(
+				python,
+				[cli, "row-process", runDirectory, "--base-url", fixture.url, "--embeddings-url", "http://127.0.0.1:1/v1/embeddings", "--no-verify"],
+				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
+			);
+			const report = JSON.parse(output.stdout.trim());
+			// Reuse is an optimization, not a requirement, but losing it is said out loud.
+			assert.equal(report.modelCalls, 3);
+			assert.equal(report.reusedFromNearIdenticalRows, 0);
+			assert.match(report.clustering, /embeddings unavailable/);
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("row enrichment harmonizes a stray trailing period across the column", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startRowWorkerFixture(workspace, { trailingPeriodOnFirst: true, groups: [0, 1, 2] });
+		try {
+			const { cli, runDirectory } = initRowRun(workspace);
+			const output = await runAsyncWithEnvironment(
+				python,
+				[cli, "row-process", runDirectory, "--base-url", fixture.url, "--embeddings-url", fixture.embeddingsUrl, "--no-verify"],
+				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
+			);
+			// Asking the prompt for this makes it worse; the script can see every
+			// row at once, which no single stateless call can.
+			assert.equal(JSON.parse(output.stdout.trim()).trailingPeriodHarmonized, 1);
+			const values = readFileSync(join(runDirectory, "row_results.jsonl"), "utf8")
+				.trim().split("\n").map((line) => JSON.parse(line).value);
+			assert.deepEqual(values, ["answer 1", "answer 2", "answer 3"]);
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("a rejected reused answer breaks the group instead of copying a new one", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startRowWorkerFixture(workspace, { flagEverything: true });
+		try {
+			const { cli, runDirectory } = initRowRun(workspace);
+			const output = await runAsyncWithEnvironment(
+				python,
+				[cli, "row-process", runDirectory, "--base-url", fixture.url, "--think-url", fixture.url, "--embeddings-url", fixture.embeddingsUrl],
+				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
+			);
+			const report = JSON.parse(output.stdout.trim());
+			// The reviewer rejected the merge, not the wording. Propagating a
+			// replacement would repeat the mistake in every row that copied it.
+			assert.equal(report.verification.reusingRowsReAnsweredIndividually, 1);
+			const results = readFileSync(join(runDirectory, "row_results.jsonl"), "utf8")
+				.trim().split("\n").map((line) => JSON.parse(line));
+			const reused = results.find((entry) => entry.rowId === 3);
+			assert.ok(!reused.derivedFrom, "the row no longer copies a rejected answer");
+			assert.match(reused.note, /re-answered on its own/);
+			assert.notEqual(reused.value, results.find((entry) => entry.rowId === 2).value);
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("row enrichment reviews every reused answer even past the sample limit", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startRowWorkerFixture(workspace);
+		try {
+			const { cli, runDirectory } = initRowRun(workspace);
+			await runAsyncWithEnvironment(
+				python,
+				[cli, "row-process", runDirectory, "--base-url", fixture.url, "--think-url", fixture.url, "--embeddings-url", fixture.embeddingsUrl, "--verify-sample", "0"],
+				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
+			);
+			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			const review = requests.find((entry) => (entry.messages.at(-1).content || "").includes('"items"'));
+			const items = JSON.parse(review.messages.at(-1).content).items;
+			// A sample limit of zero still reviews the representative, because its
+			// answer was copied to rows nobody else will look at.
+			assert.equal(items.length, 1);
+			assert.equal(items[0].id, "2");
+			assert.equal(items[0].reusedBy, 1);
+			assert.ok(Array.isArray(items[0].alsoAppliedTo), "the reviewer sees the rows the value was copied to");
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
 test("spreadsheet inspection and row enrichment are reproducible", () => {
 	withWorkspace((workspace) => {
 		const source = join(workspace, "data.csv");

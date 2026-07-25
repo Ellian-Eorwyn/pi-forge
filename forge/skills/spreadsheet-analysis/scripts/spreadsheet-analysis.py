@@ -19,6 +19,8 @@ from pathlib import Path
 # forge/skills/spreadsheet-analysis/scripts/spreadsheet-analysis.py.
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import forge_embeddings
+import forge_llm
+import forge_verify
 import run_state
 
 
@@ -34,6 +36,23 @@ DEFAULT_CLUSTER_THRESHOLD = 0.85
 
 # Maximum characters of key text embedded per row.
 CLUSTER_KEY_CHARS = 2000
+
+# Enrichment reuses one answer across rows that mean the same thing. The
+# organizer's 0.97 near-duplicate threshold does not transfer here: it asks "is
+# this the same text twice", while reuse asks "do these rows deserve the same
+# answer", which paraphrases satisfy at a looser bound. Measured on a support
+# ticket sheet, three genuine duplicate groups sat between 0.945 and 0.964, so
+# 0.97 reused nothing at all; 0.85 through 0.92 found exactly those three groups
+# with no false merge, and 0.80 began merging distinct problems. 0.92 is the top
+# of that plateau — the most conservative setting that still works.
+ROW_REUSE_THRESHOLD = 0.92
+# A spreadsheet cell holding more than this is a report, not a value.
+MAX_ENRICHMENT_CHARACTERS = 2000
+DEFAULT_VERIFY_SAMPLE = 25
+# When review rejects a merge, its members are re-answered individually on the
+# thinking model. Past this many, that costs more than it is worth and the rest
+# are handed to a human instead of being answered badly or answered slowly.
+MAX_REBUILT_ROWS = 50
 
 
 def fail(message, exit_code=1):
@@ -491,17 +510,24 @@ def command_row_init(args):
         "sha256": sha256(source),
         "sizeBytes": source.stat().st_size,
     }
+    instruction = (args.instruction or "").strip()
+    options = {
+        "sheet": table["name"],
+        "column": args.column,
+        "inputColumns": selected,
+        "startRow": start_row,
+        "endRow": end_row,
+    }
+    # Only fingerprinted when supplied, so a run created without an instruction
+    # still resumes unchanged. When there is one it belongs in the fingerprint:
+    # it defines the output as much as the column selection does.
+    if instruction:
+        options["instruction"] = instruction
     configuration = {
         "workflow": "spreadsheet-row-enrichment",
         "command": "row-init",
         "input": {"path": str(source)},
-        "options": {
-            "sheet": table["name"],
-            "column": args.column,
-            "inputColumns": selected,
-            "startRow": start_row,
-            "endRow": end_row,
-        },
+        "options": options,
     }
     if output.exists():
         try:
@@ -520,6 +546,7 @@ def command_row_init(args):
         "headerRow": 1,
         "outputColumn": args.column,
         "inputColumns": selected,
+        "instruction": instruction,
         "startRow": start_row,
         "endRow": end_row,
         "eligibleRows": eligible,
@@ -596,6 +623,7 @@ def command_row_next(args):
                 "sheet": run["sheet"],
                 "input": run["rows"][str(row_id)],
                 "outputColumn": run["outputColumn"],
+                "instruction": run.get("instruction", ""),
                 "progress": {"processed": len(results), "total": len(run["eligibleRows"])},
             },
             ensure_ascii=False,
@@ -669,26 +697,460 @@ def command_row_record(args):
         if not args.note:
             fail(f"--status {args.status} requires --note")
         value = None
+    remaining = record_row(run_directory, run, args.row_id, args.status, value, args.note)
+    print(json.dumps({"recorded": args.row_id, "status": args.status, "remaining": remaining}))
+
+
+def record_row(run_directory, run, row_id, status, value, note, provenance=None):
+    """Commit one row's disposition. Shared by the CLI and the worker so both go
+    through the same ordering and state transition.
+
+    The file is always rewritten in eligible-row order, which ``validate``
+    requires, so re-recording a row replaces it rather than duplicating it.
+    """
+    results = load_results(run_directory)
     result = {
-        "rowId": args.row_id,
-        "status": args.status,
+        "rowId": row_id,
+        "status": status,
         "value": value,
-        "note": args.note,
+        "note": note,
         "recordedAt": utc_now(),
     }
-    combined = [*results, result]
-    ordered = sorted(combined, key=lambda value: run["eligibleRows"].index(value["rowId"]))
-    run_state.atomic_write_text(run_directory / "row_results.jsonl", "\n".join(json.dumps(value, ensure_ascii=False) for value in ordered) + "\n")
+    if provenance:
+        result.update(provenance)
+    combined = [entry for entry in results if entry["rowId"] != row_id]
+    combined.append(result)
+    ordered = sorted(combined, key=lambda entry: run["eligibleRows"].index(entry["rowId"]))
+    run_state.atomic_write_text(
+        run_directory / "row_results.jsonl",
+        "\n".join(json.dumps(entry, ensure_ascii=False) for entry in ordered) + "\n",
+    )
+
     def recorded(state):
         for item in state["items"]:
-            if item["id"] == args.row_id:
-                item.update({"status": args.status, "attempts": item.get("attempts", 0) + 1, "error": args.note if args.status == "failed" else None})
+            if item["id"] == row_id:
+                item.update({"status": status, "attempts": item.get("attempts", 0) + 1, "error": note if status == "failed" else None})
         if all(item["status"] != "pending" for item in state["items"]):
             state["phase"] = "finalizing"
             state["nextAction"] = "row-finalize"
         return state
-    run_state.update_run_state(run_directory, recorded, {"type": "item_recorded", "itemId": args.row_id, "status": args.status})
-    print(json.dumps({"recorded": args.row_id, "status": args.status, "remaining": len(run["eligibleRows"]) - len(results) - 1}))
+
+    run_state.update_run_state(run_directory, recorded, {"type": "item_recorded", "itemId": row_id, "status": status})
+    return len(run["eligibleRows"]) - len(ordered)
+
+
+# --------------------------------------------------------------------------- #
+# Stateless enrichment worker
+# --------------------------------------------------------------------------- #
+
+# One row per call, with no conversation carried between them. The instruction
+# and the column contract live here so the prefix stays byte-stable across every
+# call in a run; only the row travels in the user message.
+ENRICHMENT_SYSTEM = """You fill in one spreadsheet column, one row at a time.
+
+Output column: "{column}"
+Input columns available on each row: {inputs}
+
+What the output column must contain:
+{instruction}
+
+Return exactly one JSON object and nothing else, either:
+{{"status": "completed", "value": "<the cell value>"}}
+or:
+{{"status": "needs_review", "note": "<what is missing or ambiguous>"}}
+
+Rules:
+- The value is one spreadsheet cell. Keep it brief.
+- Answer every row in the same shape: the same kind of answer, the same wording
+  pattern, the same units, the same capitalization. A column whose cells are
+  each phrased differently cannot be sorted, filtered, or counted, which is what
+  a column is for. Decide the form from the instruction, then hold it.
+- Use only what the row provides. Never invent an identifier, quantity, date, or
+  name the row does not contain.
+- When the row does not support an answer, return needs_review with a note
+  rather than guessing or writing a placeholder.
+- Return no explanation and no text outside the JSON object.
+"""
+
+
+def progress(message):
+    """Per-row progress on stderr; stdout stays one JSON result."""
+    print(message, file=sys.stderr, flush=True)
+
+
+class UserError(RuntimeError):
+    """A row could not be enriched; the run records it and continues."""
+
+
+def enrichment_system_prompt(run, instruction):
+    return ENRICHMENT_SYSTEM.format(
+        column=run["outputColumn"],
+        inputs=", ".join(f'"{column}"' for column in run["inputColumns"]),
+        instruction=instruction,
+    )
+
+
+def row_text(run, row_id):
+    row = run["rows"][str(row_id)]
+    parts = [f"{column}: {row.get(column)}" for column in run["inputColumns"] if not blank(row.get(column))]
+    return " | ".join(parts)[:CLUSTER_KEY_CHARS]
+
+
+def reuse_clusters(run, row_ids, args):
+    """Group rows that mean the same thing, so one answer can serve all of them.
+
+    Returns ``(cluster_of_row, note)``. Embeddings are an optimization here
+    rather than a requirement: if the endpoint is unavailable every row becomes
+    its own cluster and the run costs one call per row, which is what it cost
+    before this existed. That degradation is reported, never silent.
+    """
+    singletons = {row_id: index for index, row_id in enumerate(row_ids)}
+    if args.no_cluster:
+        return singletons, "row reuse disabled with --no-cluster"
+    if len(row_ids) < 2:
+        return singletons, None
+    result = forge_embeddings.embed_texts([row_text(run, row_id) for row_id in row_ids], url=args.embeddings_url)
+    if not result["ok"]:
+        return singletons, f"embeddings unavailable ({result['reason']}); every row was enriched on its own"
+    vectors = [forge_embeddings.normalize(vector) for vector in result["vectors"]]
+    cluster_of_row = {}
+    for index, component in enumerate(forge_embeddings.cluster_components(vectors, args.cluster_threshold)):
+        for position in component:
+            cluster_of_row[row_ids[position]] = index
+    return cluster_of_row, None
+
+
+def attempt_enrichment(service, messages, args):
+    """Returns ``(status, value, note)``, or ``(None, None, error)``."""
+    try:
+        payload, _record = forge_llm.call_json_with_retry(
+            service, messages, cache_prompt=args.cache_prompt, timeout=args.request_timeout, task="enrich"
+        )
+    except forge_llm.ChatError as error:
+        return None, None, str(error)
+    if not isinstance(payload, dict):
+        return None, None, "response was not a JSON object"
+    status = payload.get("status")
+    if status == "needs_review":
+        note = payload.get("note")
+        if blank(note):
+            return None, None, "a needs_review response requires a note"
+        return "needs_review", None, str(note)
+    if status != "completed":
+        return None, None, f'status must be "completed" or "needs_review", received {status!r}'
+    value = payload.get("value")
+    if not isinstance(value, str) or blank(value):
+        return None, None, "a completed response requires a nonblank string value"
+    if len(value) > MAX_ENRICHMENT_CHARACTERS:
+        return None, None, f"value is {len(value)} characters; one cell must be under {MAX_ENRICHMENT_CHARACTERS}"
+    return "completed", value.strip(), None
+
+
+def enrich_row(service, system, run, row_id, args, objection=None):
+    """Enrich one row, with one corrective retry on an unusable response."""
+    payload = {"row": run["rows"][str(row_id)]}
+    if objection:
+        # The objection rides in the user message so the system prefix stays
+        # byte-identical to the one the bulk run warmed.
+        payload["reviewerObjection"] = objection
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    status, value, note = attempt_enrichment(service, messages, args)
+    if status is None:
+        repair = [*messages, {"role": "user", "content": f"That response was unusable: {note}. Return corrected JSON only."}]
+        status, value, note = attempt_enrichment(service, repair, args)
+        if status is None:
+            raise UserError(note)
+    return status, value, note
+
+
+VERIFY_SYSTEM = (
+    "You are reviewing a spreadsheet column filled in by a faster model without reasoning.\n"
+    "For each row you get its input columns and the value written into the output column.\n"
+    "Flag a row when the value is actually wrong: unsupported by the row's own data, an\n"
+    "invented identifier or quantity, an answer to a different question than the column asks,\n"
+    "or a value whose form is inconsistent with the other rows shown in a way that would break\n"
+    "sorting or filtering. A defensible value is 'ok' even if you would have worded it\n"
+    "differently; taste is not an error.\n"
+    "Some rows carry 'alsoAppliedTo': the same value was written into those rows too, because\n"
+    "they were judged to mean the same thing. Check that the value is right for every one of\n"
+    "them, and flag the row if it is not — say which of those rows it does not fit. A value\n"
+    "that is correct for the row shown but wrong for the rows it was copied to is still wrong."
+)
+# Enough of the reusing rows to judge the merge without inflating every packet.
+VERIFY_REUSE_SAMPLE = 5
+
+
+def enrichment_verification_payload(run, entry, reused_rows):
+    payload = {
+        "id": str(entry["rowId"]),
+        "input": run["rows"][str(entry["rowId"])],
+        "value": entry["value"],
+    }
+    if reused_rows:
+        payload["reusedBy"] = len(reused_rows)
+        payload["alsoAppliedTo"] = [run["rows"][str(row_id)] for row_id in reused_rows[:VERIFY_REUSE_SAMPLE]]
+    return payload
+
+
+def verification_sample(results, limit):
+    """Rows to review: every representative whose answer was reused, then a
+    spread of the others.
+
+    Reviewing every row is not worth its cost here — enrichment is high volume
+    and low variance — but a representative is not an ordinary row. Its answer
+    was copied to every member of its cluster, so a wrong one is wrong many
+    times over, and those are always reviewed even past the sample limit.
+    """
+    completed = [entry for entry in results if entry["status"] == "completed"]
+    reusing_rows = {}
+    for entry in completed:
+        representative = entry.get("derivedFrom")
+        if representative is not None:
+            reusing_rows.setdefault(representative, []).append(entry["rowId"])
+    representatives = [entry for entry in completed if reusing_rows.get(entry["rowId"])]
+    others = [entry for entry in completed if not reusing_rows.get(entry["rowId"]) and not entry.get("derivedFrom")]
+    chosen = list(representatives)
+    room = max(0, limit - len(chosen))
+    if others and room:
+        # Evenly spaced rather than the first N, so the sample is spread across
+        # the sheet, and deterministic so a rerun reviews the same rows.
+        step = max(1, len(others) // room)
+        chosen.extend(others[::step][:room])
+    chosen.sort(key=lambda entry: entry["rowId"])
+    return chosen, reusing_rows
+
+
+def verify_enrichments(args, run_directory, run, system):
+    """Review a weighted sample on the thinking model, and redo what it flags."""
+    results = load_results(run_directory)
+    sample, reusing_rows = verification_sample(results, args.verify_sample)
+    completed = sum(1 for entry in results if entry["status"] == "completed")
+    if not sample:
+        return None
+    think = forge_llm.resolve_think_or_chat(base_url=args.think_url, model=args.think_model)
+    if not think["enabled"]:
+        return {"skipped": "no thinking service is configured"}
+    items = [enrichment_verification_payload(run, entry, reusing_rows.get(entry["rowId"], [])) for entry in sample]
+    progress(f"verifying {len(items)} of {completed} enriched rows on {think['url']}")
+    try:
+        verdicts = forge_verify.verify_packets(
+            think,
+            VERIFY_SYSTEM,
+            items,
+            journal_path=run_directory / "verified.jsonl",
+            packet_size=args.verify_packet_size,
+            background=True,
+            timeout=args.request_timeout,
+            progress=progress,
+        )
+    except forge_verify.VerificationError as error:
+        return {"skipped": str(error)}
+
+    flagged = [
+        (item, verdicts[item["id"]]["reason"])
+        for item in items
+        if verdicts.get(item["id"], {}).get("verdict") == forge_verify.VERDICT_FLAG
+    ]
+
+    def redo(item, reason):
+        return enrich_row(think, system, run, int(item["id"]), args, objection=reason)
+
+    escalations = forge_verify.escalate(flagged, redo, journal_path=run_directory / "verified.jsonl", progress=progress)
+    rebuilt = 0
+    unresolved = 0
+    for identifier, outcome in escalations.items():
+        if outcome.get("resumed"):
+            continue  # committed when it was first escalated
+        row_id = int(identifier)
+        had_reusers = bool(reusing_rows.get(row_id))
+        if outcome["ok"]:
+            status, value, note = outcome["value"]
+            record_row(run_directory, run, row_id, status, value, note or "re-answered with reasoning after review")
+            if had_reusers:
+                progress(f"[escalate] row {row_id} was reused by {len(reusing_rows[row_id])} rows; re-answering each on its own")
+                added, failed = rebuild_reusing_rows(run_directory, run, think, system, row_id, reason_for(verdicts, identifier), args)
+                rebuilt += added
+                unresolved += failed
+        else:
+            record_row(run_directory, run, row_id, "needs_review", None, f"review flagged this and re-answering failed: {outcome['detail']}")
+            unresolved += 1
+            if had_reusers:
+                unresolved += orphan_reusing_rows(run_directory, run, row_id, outcome["detail"])
+    summary = forge_verify.summarize(verdicts, escalations)
+    summary["sampled"] = len(items)
+    summary["completed"] = completed
+    summary["coverage"] = "sample plus every reused answer" if len(items) < completed else "all rows"
+    if rebuilt:
+        summary["reusingRowsReAnsweredIndividually"] = rebuilt
+    if unresolved:
+        summary["needsReview"] = summary.get("needsReview", 0) + unresolved
+    return summary
+
+
+def reason_for(verdicts, identifier):
+    return verdicts.get(identifier, {}).get("reason", "")
+
+
+def rebuild_reusing_rows(run_directory, run, think, system, representative, reason, args):
+    """Re-answer the rows that copied a rejected value, one at a time.
+
+    A reviewer who rejects a value because it does not fit the rows it was
+    copied to has rejected the *merge*, not just the wording. Propagating a
+    replacement value would repeat the same mistake with different words — on a
+    deliberately over-broad threshold this turned ten distinct tickets into ten
+    copies of one category and still reported success. So the group is broken up
+    and each row is answered on its own.
+
+    Returns ``(rebuilt, unresolved)``.
+    """
+    derived = [entry for entry in load_results(run_directory) if entry.get("derivedFrom") == representative]
+    rebuilt = 0
+    unresolved = 0
+    for entry in derived[:MAX_REBUILT_ROWS]:
+        row_id = entry["rowId"]
+        try:
+            status, value, note = enrich_row(think, system, run, row_id, args, objection=reason)
+        except (UserError, OSError) as error:
+            unresolved += 1
+            record_row(run_directory, run, row_id, "needs_review", None, f"review rejected the answer copied from row {representative}, and re-answering failed: {error}")
+            continue
+        if status == "completed":
+            rebuilt += 1
+        else:
+            unresolved += 1
+        record_row(run_directory, run, row_id, status, value, note or f"re-answered on its own after review rejected the answer copied from row {representative}")
+    for entry in derived[MAX_REBUILT_ROWS:]:
+        unresolved += 1
+        record_row(
+            run_directory, run, entry["rowId"], "needs_review", None,
+            f"review rejected the answer copied from row {representative}; too many rows reused it to re-answer them all automatically",
+        )
+    return rebuilt, unresolved
+
+
+def orphan_reusing_rows(run_directory, run, representative, detail):
+    """Mark rows that copied a value review rejected and could not be replaced."""
+    derived = [entry for entry in load_results(run_directory) if entry.get("derivedFrom") == representative]
+    for entry in derived:
+        record_row(
+            run_directory, run, entry["rowId"], "needs_review", None,
+            f"copied from row {representative}, which review flagged and could not be re-answered: {detail}",
+        )
+    return len(derived)
+
+
+def harmonize_trailing_period(run_directory, run):
+    """Make the column agree with itself about the trailing period.
+
+    Asking the prompt for this backfires. Naming punctuation as something to keep
+    consistent makes a non-thinking model attend to it without giving it a rule:
+    measured on ten rows, adding that clause took trailing periods from one cell
+    to six. The script is in a better position anyway — a single stateless call
+    cannot see the other rows, and this one can see all of them.
+
+    Only a trailing period on a multi-word value is touched, so a decimal or a
+    numbered value is left alone, and only toward whichever form the column
+    already prefers. Returns the number of cells changed.
+    """
+    results = load_results(run_directory)
+    completed = [entry for entry in results if entry["status"] == "completed" and isinstance(entry.get("value"), str)]
+    eligible = [entry for entry in completed if len(entry["value"].split()) > 1]
+    if len(eligible) < 2:
+        return 0
+    with_period = [entry for entry in eligible if entry["value"].rstrip().endswith(".")]
+    without = [entry for entry in eligible if not entry["value"].rstrip().endswith(".")]
+    if not with_period or not without:
+        return 0
+    minority = with_period if len(with_period) <= len(without) else without
+    for entry in minority:
+        text = entry["value"].rstrip()
+        entry["value"] = text[:-1].rstrip() if text.endswith(".") else f"{text}."
+    run_state.atomic_write_text(
+        run_directory / "row_results.jsonl",
+        "\n".join(json.dumps(entry, ensure_ascii=False) for entry in results) + "\n",
+    )
+    return len(minority)
+
+
+def command_row_process(args):
+    run_directory = require_run_directory(args.run_directory)
+    run = load_run(run_directory)
+    source = require_source(run["source"]["path"])
+    if sha256(source) != run["source"]["sha256"]:
+        fail("source file changed after row-init; refusing to process")
+    instruction = (args.instruction or run.get("instruction") or "").strip()
+    if not instruction:
+        fail("no enrichment instruction; pass --instruction here or set one at row-init")
+    service = forge_llm.resolve_service("chat", base_url=args.base_url, model=args.model)
+    if not service["enabled"]:
+        fail("connectedServices.chat is disabled; configure the local chat endpoint before processing")
+    system = enrichment_system_prompt(run, instruction)
+
+    results = load_results(run_directory)
+    recorded = {entry["rowId"] for entry in results}
+    pending = [row_id for row_id in run["eligibleRows"] if row_id not in recorded]
+    if args.limit and args.limit > 0:
+        pending = pending[: args.limit]
+
+    # Clustered over every eligible row, not just the pending ones, so a resumed
+    # run can still reuse an answer produced before the interruption.
+    cluster_of_row, cluster_note = reuse_clusters(run, run["eligibleRows"], args)
+    cached = {}
+    for entry in results:
+        if entry["status"] == "completed" and not entry.get("derivedFrom"):
+            cluster = cluster_of_row.get(entry["rowId"])
+            if cluster is not None:
+                cached.setdefault(cluster, (entry["rowId"], entry["value"]))
+
+    processed = 0
+    reused = 0
+    failures = 0
+    for row_id in pending:
+        cluster = cluster_of_row.get(row_id)
+        hit = cached.get(cluster)
+        processed += 1
+        if hit is not None:
+            representative, value = hit
+            record_row(run_directory, run, row_id, "completed", value, f"reused the answer from row {representative}", {"derivedFrom": representative})
+            reused += 1
+            progress(f"[{processed}/{len(pending)}] row {row_id}: reused row {representative}")
+            continue
+        progress(f"[{processed}/{len(pending)}] row {row_id}")
+        try:
+            status, value, note = enrich_row(service, system, run, row_id, args)
+        except (UserError, OSError) as error:
+            failures += 1
+            record_row(run_directory, run, row_id, "needs_review", None, f"enrichment failed: {error}")
+            progress(f"[{processed}/{len(pending)}] row {row_id}: needs review ({error})")
+            continue
+        record_row(run_directory, run, row_id, status, value, note)
+        if status == "completed":
+            if cluster is not None:
+                cached[cluster] = (row_id, value)
+        else:
+            failures += 1
+        progress(f"[{processed}/{len(pending)}] row {row_id}: {status}")
+
+    harmonized = harmonize_trailing_period(run_directory, run)
+    verification = verify_enrichments(args, run_directory, run, system) if args.verify else None
+    remaining = len(run["eligibleRows"]) - len(load_results(run_directory))
+    report = {
+        "processed": processed,
+        "modelCalls": processed - reused,
+        "reusedFromNearIdenticalRows": reused,
+        "needsReview": failures,
+        "remaining": remaining,
+        "verification": verification,
+        "nextAction": "row-process" if remaining else "row-finalize",
+    }
+    if harmonized:
+        report["trailingPeriodHarmonized"] = harmonized
+    if cluster_note:
+        report["clustering"] = cluster_note
+    print(json.dumps(report, ensure_ascii=False))
 
 
 def result_map(results):
@@ -1157,6 +1619,7 @@ def parser():
     row_init.add_argument("--input-columns", nargs="+")
     row_init.add_argument("--start-row", type=int)
     row_init.add_argument("--end-row", type=int)
+    row_init.add_argument("--instruction", help="what the output column must contain; required by row-process")
     row_init.set_defaults(handler=command_row_init)
 
     row_next = subparsers.add_parser("row-next", help="Return exactly one pending row as JSON.")
@@ -1183,6 +1646,32 @@ def parser():
     row_record.add_argument("--note")
     row_record.set_defaults(handler=command_row_record)
 
+    row_process = subparsers.add_parser(
+        "row-process",
+        help="Enrich every pending row without leaving the script, reusing one answer across near-identical rows, then have the thinking model review a weighted sample.",
+    )
+    row_process.add_argument("run_directory")
+    row_process.add_argument("--instruction", help="overrides the instruction recorded at row-init")
+    row_process.add_argument("--limit", type=int, help="stop after this many rows")
+    row_process.add_argument("--base-url", help="chat service (default: connectedServices.chat)")
+    row_process.add_argument("--model")
+    row_process.add_argument("--think-url", help="thinking service used for review (default: connectedServices.think)")
+    row_process.add_argument("--think-model")
+    row_process.add_argument("--embeddings-url")
+    row_process.add_argument(
+        "--cluster-threshold",
+        type=float,
+        default=ROW_REUSE_THRESHOLD,
+        help=f"cosine similarity above which one answer is reused across rows (default {ROW_REUSE_THRESHOLD})",
+    )
+    row_process.add_argument("--no-cluster", action="store_true", help="enrich every row on its own, without reuse")
+    row_process.add_argument("--no-verify", action="store_true", help="skip the thinking-model review")
+    row_process.add_argument("--verify-sample", type=int, default=DEFAULT_VERIFY_SAMPLE, help=f"rows to review beyond the reused answers, which are always reviewed (default {DEFAULT_VERIFY_SAMPLE})")
+    row_process.add_argument("--verify-packet-size", type=int, default=15)
+    row_process.add_argument("--no-cache-prompt", action="store_true")
+    row_process.add_argument("--request-timeout", type=float, default=600)
+    row_process.set_defaults(handler=command_row_process)
+
     row_finalize = subparsers.add_parser("row-finalize", help="Write a new enriched spreadsheet after all rows are disposed.")
     row_finalize.add_argument("run_directory")
     row_finalize.set_defaults(handler=command_row_finalize)
@@ -1197,6 +1686,10 @@ def main():
     args = parser().parse_args()
     if getattr(args, "max_categories", 1) < 1:
         fail("--max-categories must be positive")
+    if hasattr(args, "no_cache_prompt"):
+        args.cache_prompt = not args.no_cache_prompt
+    if hasattr(args, "no_verify"):
+        args.verify = not args.no_verify
     args.handler(args)
 
 

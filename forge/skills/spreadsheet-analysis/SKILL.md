@@ -90,14 +90,45 @@ python3 <skill-directory>/scripts/spreadsheet-analysis.py row-init <input> \
   --output <new-run-directory> \
   --column "Requested output" \
   --sheet <sheet-name> \
-  --input-columns "Column A" "Column B"
+  --input-columns "Column A" "Column B" \
+  --instruction "<what the column must contain>"
 ```
 
 Omit `--sheet` for CSV/TSV or to use the active XLSX sheet. Omit
 `--input-columns` to pass every column to the model. Use `--start-row` and
-`--end-row` only for an explicitly bounded source-row range.
+`--end-row` only for an explicitly bounded source-row range. `--instruction` is
+what the worker needs and what the manual path shows you on each row; write it
+as the column's contract, including the form each cell should take.
 
-Then repeat sequentially:
+Fill the column with the worker:
+
+```bash
+python3 <skill-directory>/scripts/spreadsheet-analysis.py row-process <run-directory>
+```
+
+This is the normal path. Each row is one stateless call to the non-thinking
+service — the instruction plus that row — so a sheet does not accumulate in your
+context and does not spend reasoning tokens per row.
+
+Rows that mean the same thing are answered once and the answer is reused, with
+`derivedFrom` recording where each reused value came from. On a support-ticket
+sheet this halved the model calls. Reuse needs the embeddings service; without
+it every row is answered on its own and the report says so. Tune with
+`--cluster-threshold`, or turn it off with `--no-cluster`.
+
+The thinking model then reviews a weighted sample: **every** answer that was
+reused, however large the sample limit, plus a spread of the rest. A reused
+answer is shown alongside the rows it was copied to, so the reviewer can reject
+the grouping and not just the wording — when it does, those rows are re-answered
+individually rather than given a replacement copy. Use `--limit` for a trial,
+`--no-verify` to skip review, `--verify-sample` to widen it.
+
+Read the result and report the reuse count, what review flagged, and that
+verification covered a sample rather than every row. Resume by running
+`row-process` again.
+
+Fill the column by hand when you need to: a row the worker left as
+`needs_review`, or a sheet you want to judge yourself. Then repeat sequentially:
 
 1. Request exactly one pending row:
 

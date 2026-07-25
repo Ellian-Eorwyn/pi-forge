@@ -9,7 +9,7 @@
 - Managed instructions (`AGENTS.md` with its `<project_context>` wrapper): 1554 tokens
 - Skills menu (metadata for all skills): 3131 tokens
 - **Total forge launch context (always processed): 4685 tokens**
-- **Maximum if every `SKILL.md` body is also loaded at once: 36111 tokens**
+- **Maximum if every `SKILL.md` body is also loaded at once: 36529 tokens**
 
 Of the skills menu above, the shared wrapper (instructions and XML envelope, independent of skill count) is ~92 tokens; the rest scales with the number of skills.
 
@@ -31,7 +31,7 @@ Still excluded, because they are owned by the Pi harness rather than this profil
 | [`report-output`](forge/skills/report-output/SKILL.md) | Assemble polished deliverables from processed outputs | 181 | 729 | 884 | Model-visible |
 | [`site-builder`](forge/skills/site-builder/SKILL.md) | Build a static website from a content folder | 190 | 1320 | 1484 | Model-visible |
 | [`skill-builder`](forge/skills/skill-builder/SKILL.md) | Create and validate portable Agent Skills | 192 | 742 | 908 | Model-visible |
-| [`spreadsheet-analysis`](forge/skills/spreadsheet-analysis/SKILL.md) | Analyze and enrich tabular datasets | 161 | 1767 | 1901 | Model-visible |
+| [`spreadsheet-analysis`](forge/skills/spreadsheet-analysis/SKILL.md) | Analyze and enrich tabular datasets | 161 | 2185 | 2319 | Model-visible |
 | [`transcript-cleanup`](forge/skills/transcript-cleanup/SKILL.md) | Clean and structure raw transcripts | 144 | 1127 | 1244 | Model-visible |
 | [`transcription`](forge/skills/transcription/SKILL.md) | Transcribe audio or video, then correct and clean it | 185 | 1517 | 1676 | Model-visible |
 | [`vault-connections`](forge/skills/vault-connections/SKILL.md) | Search an Obsidian vault by meaning, propose links for per-id review, publish completed liter... | 151 | 1722 | 1847 | Model-visible |
