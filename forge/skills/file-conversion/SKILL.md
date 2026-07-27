@@ -1,6 +1,6 @@
 ---
 name: file-conversion
-description: Convert files between formats while preserving originals. Use to transform DOCX, Markdown, EPUB, PDF, HTML, CSV, TSV, XLSX, and text files — including Markdown to reflowable EPUB 3 with chapter navigation, a table of contents, metadata, and an optional cover, EPUB back to clean Markdown with extracted media, and PDF to structured Markdown with heuristic chapter headings and footnotes collected as per-chapter endnotes — for single files or whole folders, with conversion logs and manifests, traceable output filenames, and explicit warnings for lossy conversions, dropped or extracted media, and heuristically reconstructed PDF structure. This is the general-purpose converter for the forge profile.
+description: Convert files between formats while preserving originals. Use for DOCX, Markdown, EPUB, PDF, HTML, CSV, TSV, XLSX, and text, including Markdown to reflowable EPUB 3 with navigation and cover, EPUB back to clean Markdown with extracted media, and PDF to structured Markdown with headings and endnotes. Handles single files or whole folders, with conversion logs, manifests, and explicit warnings for lossy conversions.
 ---
 
 # File Conversion

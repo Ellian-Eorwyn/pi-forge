@@ -1,6 +1,6 @@
 ---
 name: coding
-description: Assist with code repositories, scripts, automation, debugging, and small software tools for information processing. Use to inspect a repository before editing, detect its language, package manager, build, test, and lint setup and conventions, make small targeted reviewable patches, run tests, linters, and type checks, write utility scripts for document processing, scraping, conversion, data cleaning, and reporting, and record a commit-ready change summary and run log without destructive git operations.
+description: Assist with code repositories, scripts, automation, debugging, and small software tools. Use to inspect a repository before editing, detect its language, package manager, build, test, and lint setup, make small targeted reviewable patches, run tests and type checks, and write utility scripts for document processing, scraping, conversion, and data cleaning. Records a commit-ready change summary without destructive git operations.
 ---
 
 # Coding

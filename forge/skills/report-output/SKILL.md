@@ -1,6 +1,6 @@
 ---
 name: report-output
-description: Turn processed forge outputs into polished, skimmable deliverables. Use to assemble reports, briefings, executive summaries, memos, annotated and slide outlines, review notes, source lists, and assumptions/limits from upstream run directories (literature-extraction evidence tables, spreadsheet-analysis analyses, transcript-cleanup summaries, document-ingest documents, web-collection manifests), at a chosen level of detail, with XLSX table assembly and DOCX/HTML rendering, keeping generated commentary separate from extracted source material and never burying uncertainty.
+description: Assemble polished deliverables from processed outputs - reports, briefings, summaries, and slide outlines in DOCX, PDF, Markdown, or HTML. Use as the final step after document-ingest, literature-extraction, project-extraction, or spreadsheet-analysis, when the user wants presentation-ready output rather than more extraction. Keeps generated synthesis traceable to its sources and separate from quoted material.
 ---
 
 # Report Output

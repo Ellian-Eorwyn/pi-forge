@@ -937,6 +937,7 @@ export class AgentSession {
 			selectedTools: validToolNames,
 			toolSnippets,
 			promptGuidelines,
+			includePiDocs: this.settingsManager.getIncludePiDocs(),
 		};
 		return buildSystemPrompt(this._baseSystemPromptOptions);
 	}

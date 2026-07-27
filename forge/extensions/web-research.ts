@@ -19,20 +19,16 @@ interface WebSearchParams {
 	pageNo?: number;
 }
 
+/** Tuning options passed through `advanced`; see ADVANCED_FLAGS. */
+type AdvancedParams = Record<string, unknown>;
+
 interface WebReadParams {
 	urls: string[];
 	output?: string;
 	mode?: string;
 	render?: boolean;
 	noBrowser?: boolean;
-	forceStrategy?: string;
-	cacheDir?: string;
-	forceRefresh?: boolean;
-	playwrightWsEndpoint?: string;
-	delayMs?: number;
-	timeoutMs?: number;
-	maxConcurrency?: number;
-	perDomainConcurrency?: number;
+	advanced?: AdvancedParams;
 }
 
 interface DeepWebResearchParams {
@@ -43,36 +39,9 @@ interface DeepWebResearchParams {
 	maxIterations?: number;
 	limit?: number;
 	readCount?: number;
-	maxQueries?: number;
 	maxSources?: number;
-	maxFollowupQueries?: number;
-	maxModelCalls?: number;
-	maxRuntimeMs?: number;
-	maxEvidenceChars?: number;
-	maxClaimEvidenceItems?: number;
-	embeddingUrl?: string;
-	embeddingModel?: string;
-	noEmbeddings?: boolean;
-	embeddingBatchSize?: number;
-	evidenceBatchSources?: number;
-	evidenceBatchChars?: number;
-	playwrightConcurrency?: number;
-	timeoutMs?: number;
-	delayMs?: number;
-	cacheDir?: string;
-	forceRefresh?: boolean;
-	forceStrategy?: string;
-	noBrowser?: boolean;
-	maxConcurrency?: number;
-	perDomainConcurrency?: number;
-	playwrightWsEndpoint?: string;
-	searxng?: string;
-	categories?: string;
-	engines?: string;
-	language?: string;
-	safesearch?: number;
-	timeRange?: string;
 	render?: boolean;
+	advanced?: AdvancedParams;
 }
 
 interface WebDiscoverParams {
@@ -80,11 +49,7 @@ interface WebDiscoverParams {
 	output?: string;
 	mode?: string;
 	render?: boolean;
-	noBrowser?: boolean;
-	cacheDir?: string;
-	forceRefresh?: boolean;
-	playwrightWsEndpoint?: string;
-	timeoutMs?: number;
+	advanced?: AdvancedParams;
 }
 
 interface AcademicWebResearchParams {
@@ -98,6 +63,74 @@ interface AcademicWebResearchParams {
 
 const extensionDirectory = dirname(fileURLToPath(import.meta.url));
 const webResearchScript = join(extensionDirectory, "..", "skills", "web-research", "scripts", "web-research.mjs");
+
+/**
+ * Acquisition and model-budget knobs the CLI accepts. They are reachable through
+ * the `advanced` object rather than the tool schema: a schema slot costs tokens on
+ * every turn of every session, while these matter only inside a research run. The
+ * full list with defaults lives in skills/web-research/SKILL.md, which is loaded
+ * for exactly those runs. Flag names mirror the CLI's own option table, so the two
+ * must be edited together.
+ */
+export const ADVANCED_FLAGS: Record<string, { flag: string; boolean?: true }> = {
+	cacheDir: { flag: "--cache-dir" },
+	categories: { flag: "--categories" },
+	delayMs: { flag: "--delay-ms" },
+	embeddingBatchSize: { flag: "--embedding-batch-size" },
+	embeddingModel: { flag: "--embedding-model" },
+	embeddingUrl: { flag: "--embedding-url" },
+	engines: { flag: "--engines" },
+	evidenceBatchChars: { flag: "--evidence-batch-chars" },
+	evidenceBatchSources: { flag: "--evidence-batch-sources" },
+	forceRefresh: { flag: "--force-refresh", boolean: true },
+	forceStrategy: { flag: "--force-strategy" },
+	language: { flag: "--language" },
+	maxClaimEvidenceItems: { flag: "--max-claim-evidence-items" },
+	maxConcurrency: { flag: "--max-concurrency" },
+	maxEvidenceChars: { flag: "--max-evidence-chars" },
+	maxFollowupQueries: { flag: "--max-followup-queries" },
+	maxModelCalls: { flag: "--max-model-calls" },
+	maxQueries: { flag: "--max-queries" },
+	maxRuntimeMs: { flag: "--max-runtime-ms" },
+	noBrowser: { flag: "--no-browser", boolean: true },
+	noEmbeddings: { flag: "--no-embeddings", boolean: true },
+	perDomainConcurrency: { flag: "--per-domain-concurrency" },
+	playwrightConcurrency: { flag: "--playwright-concurrency" },
+	playwrightWsEndpoint: { flag: "--playwright-ws" },
+	safesearch: { flag: "--safesearch" },
+	searxng: { flag: "--searxng" },
+	timeRange: { flag: "--time-range" },
+	timeoutMs: { flag: "--timeout-ms" },
+};
+
+const ADVANCED_DESCRIPTION =
+	"Advanced acquisition, embedding, and budget options (for example evidenceBatchChars, playwrightConcurrency, cacheDir, timeoutMs). See the web-research skill for the full list; unknown keys are rejected.";
+
+/**
+ * Unknown or wrongly typed keys fail loudly. Silently dropping them would let a
+ * run report success while ignoring the budget or endpoint it was given.
+ */
+export function buildAdvancedArgs(advanced: AdvancedParams | undefined): string[] {
+	if (!advanced) return [];
+	const args: string[] = [];
+	for (const [key, value] of Object.entries(advanced)) {
+		if (value === undefined || value === null) continue;
+		const option = ADVANCED_FLAGS[key];
+		if (!option) {
+			throw new Error(`Unknown advanced option "${key}". Known options: ${Object.keys(ADVANCED_FLAGS).sort().join(", ")}`);
+		}
+		if (option.boolean) {
+			if (typeof value !== "boolean") throw new Error(`Advanced option "${key}" takes a boolean, received ${typeof value}.`);
+			if (value) args.push(option.flag);
+			continue;
+		}
+		if (typeof value !== "string" && typeof value !== "number") {
+			throw new Error(`Advanced option "${key}" takes a string or number, received ${typeof value}.`);
+		}
+		args.push(option.flag, String(value));
+	}
+	return args;
+}
 
 export default function webResearchExtension(pi: ExtensionAPI) {
 	let deepResearchUsedThisTurn = false;
@@ -122,12 +155,10 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "forge_web_search",
 		label: "Forge web search",
-		description: "Run a quick SearXNG web search and return ranked result metadata.",
-		promptSnippet: "Use forge_web_search for quick current-information lookups through the configured SearXNG service.",
-		promptGuidelines: [
-			"Use forge_web_search for quick web lookups before loading web-research skills.",
-			"For current events use news categories or a time range; for developer topics use it categories or code-focused engines.",
-		],
+		description:
+			"Run a quick SearXNG web search and return ranked result metadata. Categories, engines, and time range are auto-selected from the query when omitted.",
+		promptSnippet: "Quick SearXNG web search",
+		promptGuidelines: ["Reach for the forge web tools directly for quick lookups; load the web-research skill only for full research runs."],
 		parameters: Type.Object({
 			query: Type.String({ description: "Search query." }),
 			output: Type.Optional(Type.String({ description: "Optional new output directory. Defaults under forge-output/web-research." })),
@@ -163,26 +194,16 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "forge_web_read",
 		label: "Forge web read",
-		description: "Read known URLs with rendered Playwright extraction when enabled, falling back to HTTP extraction.",
-		promptSnippet: "Use forge_web_read to extract readable text from specific URLs through the configured Playwright service.",
-		promptGuidelines: [
-			"Use forge_web_read when you already have URLs to inspect.",
-			"Use the returned full text and warnings; load web-collection only when the user needs archived source files or manifests.",
-		],
+		description:
+			"Extract readable text from URLs you already have, with rendered Playwright extraction when enabled and HTTP extraction as fallback. For archived source files or provenance manifests, use the web-collection skill instead.",
+		promptSnippet: "Read specific URLs as text",
 		parameters: Type.Object({
 			urls: Type.Array(Type.String(), { minItems: 1, description: "URLs to read." }),
 			output: Type.Optional(Type.String({ description: "Optional new output directory. Defaults under forge-output/web-research." })),
 			mode: Type.Optional(Type.String({ description: "Acquisition preset: fast, standard, or deep. Defaults to standard." })),
 			render: Type.Optional(Type.Boolean({ description: "Use rendered Playwright extraction. Defaults to true." })),
 			noBrowser: Type.Optional(Type.Boolean({ description: "Disable browser fallback for this run." })),
-			forceStrategy: Type.Optional(Type.String({ description: "Force an acquisition strategy such as direct_http or playwright_dom." })),
-			cacheDir: Type.Optional(Type.String({ description: "Override the reusable web-research cache directory." })),
-			forceRefresh: Type.Optional(Type.Boolean({ description: "Ignore existing cache entries." })),
-			playwrightWsEndpoint: Type.Optional(Type.String({ description: "One-run Playwright WebSocket endpoint override." })),
-			delayMs: Type.Optional(Type.Integer({ minimum: 0, description: "Delay between URL reads in milliseconds." })),
-			timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Request/navigation timeout in milliseconds." })),
-			maxConcurrency: Type.Optional(Type.Integer({ minimum: 1, description: "Global acquisition concurrency budget." })),
-			perDomainConcurrency: Type.Optional(Type.Integer({ minimum: 1, description: "Per-domain acquisition concurrency budget." })),
+			advanced: Type.Optional(Type.Object({}, { additionalProperties: true, description: ADVANCED_DESCRIPTION })),
 		}),
 		executionMode: "sequential",
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
@@ -205,13 +226,9 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "forge_deep_web_research",
 		label: "Deep web research",
-		description: "Run pi-forge deep web research with source provenance, evidence, claims, gaps, and validation artifacts.",
-		promptSnippet:
-			"Use forge_deep_web_research for multi-query web research that must produce source-backed claims and provenance artifacts.",
-		promptGuidelines: [
-			"Use this tool when the user asks for a full research pass, provenance-first research, or source-backed web synthesis.",
-			"Do not present uncited claims from the generated report; cite source, evidence, and claim ids from the run artifacts.",
-		],
+		description:
+			"Multi-query research pass producing source provenance, evidence, claims, gaps, and validation artifacts. Use for a full research pass or source-backed synthesis. Never present uncited claims from the report: cite the source, evidence, and claim ids from the run artifacts.",
+		promptSnippet: "Multi-query research with provenance artifacts",
 		parameters: Type.Object({
 			question: Type.Optional(Type.String({ description: "Research question or synthesis objective." })),
 			queries: Type.Optional(Type.Array(Type.String(), { description: "Seed queries. If omitted, question is used as the seed query." })),
@@ -220,36 +237,9 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 			maxIterations: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum search/read/refine iterations." })),
 			limit: Type.Optional(Type.Integer({ minimum: 1, description: "Search results per query." })),
 			readCount: Type.Optional(Type.Integer({ minimum: 1, description: "Results to read per query." })),
-			maxQueries: Type.Optional(Type.Integer({ minimum: 1, description: "Whole-run cap on searched queries." })),
 			maxSources: Type.Optional(Type.Integer({ minimum: 1, description: "Whole-run cap on unique sources read." })),
-			maxFollowupQueries: Type.Optional(Type.Integer({ minimum: 0, description: "Maximum follow-up queries accepted per expansion step." })),
-			maxModelCalls: Type.Optional(Type.Integer({ minimum: 1, description: "Whole-run cap on local model calls." })),
-			maxRuntimeMs: Type.Optional(Type.Integer({ minimum: 1, description: "Approximate whole-run runtime budget in milliseconds." })),
-			maxEvidenceChars: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum source-text characters sent to evidence extraction." })),
-			maxClaimEvidenceItems: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum evidence items sent to claim registration." })),
-			embeddingUrl: Type.Optional(Type.String({ description: "One-run embeddings endpoint override." })),
-			embeddingModel: Type.Optional(Type.String({ description: "One-run embeddings model override." })),
-			noEmbeddings: Type.Optional(Type.Boolean({ description: "Disable embedding-based source ranking." })),
-			embeddingBatchSize: Type.Optional(Type.Integer({ minimum: 1, description: "Embedding batch size. Defaults to 16." })),
-			evidenceBatchSources: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum sources per evidence extraction model call. Defaults to 3." })),
-			evidenceBatchChars: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum selected source characters per evidence batch. Defaults to 24000." })),
-			playwrightConcurrency: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum concurrent Playwright page/context tasks. Defaults to 1." })),
-			timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Request/navigation timeout in milliseconds." })),
-			delayMs: Type.Optional(Type.Integer({ minimum: 0, description: "Delay between URL reads in milliseconds." })),
-			cacheDir: Type.Optional(Type.String({ description: "Override the reusable web-research cache directory." })),
-			forceRefresh: Type.Optional(Type.Boolean({ description: "Ignore existing cache entries." })),
-			forceStrategy: Type.Optional(Type.String({ description: "Force an acquisition strategy such as direct_http or playwright_dom." })),
-			noBrowser: Type.Optional(Type.Boolean({ description: "Disable browser fallback for this run." })),
-			maxConcurrency: Type.Optional(Type.Integer({ minimum: 1, description: "Global acquisition concurrency budget." })),
-			perDomainConcurrency: Type.Optional(Type.Integer({ minimum: 1, description: "Per-domain acquisition concurrency budget." })),
-			playwrightWsEndpoint: Type.Optional(Type.String({ description: "One-run Playwright WebSocket endpoint override." })),
-			searxng: Type.Optional(Type.String({ description: "Override SearXNG base URL." })),
-			categories: Type.Optional(Type.String({ description: "Comma-separated SearXNG categories." })),
-			engines: Type.Optional(Type.String({ description: "Comma-separated SearXNG engines." })),
-			language: Type.Optional(Type.String({ description: "SearXNG language code." })),
-			safesearch: Type.Optional(Type.Integer({ minimum: 0, maximum: 2, description: "SearXNG safesearch setting." })),
-			timeRange: Type.Optional(Type.String({ description: "SearXNG time range: day, week, month, or year." })),
 			render: Type.Optional(Type.Boolean({ description: "Use rendered extraction when Playwright is available." })),
+			advanced: Type.Optional(Type.Object({}, { additionalProperties: true, description: ADVANCED_DESCRIPTION })),
 		}),
 		executionMode: "sequential",
 		async execute(_toolCallId, params, signal) {
@@ -267,22 +257,15 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "forge_web_discover",
 		label: "Forge web discover",
-		description: "Inspect a URL for embedded structured data and reusable JSON/API endpoints.",
-		promptSnippet: "Use forge_web_discover before scraping an unknown JavaScript-heavy site; prefer reusable endpoints over DOM scraping.",
-		promptGuidelines: [
-			"Use this tool when a page appears JavaScript-heavy or when a reusable domain adapter/API might be created.",
-			"Treat discovery reports as inspectable evidence; do not promote endpoints permanently without verifying stability.",
-		],
+		description:
+			"Inspect a JavaScript-heavy or unknown URL for embedded structured data and reusable JSON/API endpoints, before scraping the DOM. Discovery reports are evidence to inspect, not endpoints to adopt permanently without verifying stability.",
+		promptSnippet: "Find structured data and API endpoints on a page",
 		parameters: Type.Object({
 			url: Type.String({ description: "URL to inspect." }),
 			output: Type.Optional(Type.String({ description: "Optional new output directory. Defaults under forge-output/web-research." })),
 			mode: Type.Optional(Type.String({ description: "Acquisition preset: fast, standard, or deep. Defaults to standard." })),
 			render: Type.Optional(Type.Boolean({ description: "Use Playwright network observation when available." })),
-			noBrowser: Type.Optional(Type.Boolean({ description: "Disable Playwright and inspect static HTML only." })),
-			cacheDir: Type.Optional(Type.String({ description: "Override the reusable web-research cache directory." })),
-			forceRefresh: Type.Optional(Type.Boolean({ description: "Ignore existing cache entries." })),
-			playwrightWsEndpoint: Type.Optional(Type.String({ description: "One-run Playwright WebSocket endpoint override." })),
-			timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Request/navigation timeout in milliseconds." })),
+			advanced: Type.Optional(Type.Object({}, { additionalProperties: true, description: ADVANCED_DESCRIPTION })),
 		}),
 		executionMode: "sequential",
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
@@ -300,13 +283,9 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "forge_academic_web_research",
 		label: "Academic web research",
-		description: "Run pi-forge academic search with deduped canonical works, provider provenance, and RIS exports.",
-		promptSnippet:
-			"Use forge_academic_web_research for scholarly literature discovery that needs deduped works, metadata provenance, and RIS citation exports.",
-		promptGuidelines: [
-			"Use this tool when the user asks for academic articles, literature search, DOI/PubMed/arXiv discovery, or citation-manager-ready exports.",
-			"Treat works.jsonl as the canonical deduped work list and works.ris plus ris/*.ris as the citation export artifacts.",
-		],
+		description:
+			"Scholarly literature search across Crossref, Semantic Scholar, PubMed, and arXiv. Use for academic articles, DOI discovery, or citation-manager-ready exports. Produces works.jsonl as the canonical deduped work list, plus works.ris and ris/*.ris exports.",
+		promptSnippet: "Academic literature search with RIS export",
 		parameters: Type.Object({
 			query: Type.String({ description: "Academic search query." }),
 			output: Type.String({ description: "New output directory. The CLI refuses to overwrite existing directories." }),
@@ -348,14 +327,7 @@ function buildWebReadArgs(input: WebReadParams & { output: string }): string[] {
 	else if (input.render === true) args.push("--render");
 	if (input.mode) args.push("--mode", input.mode);
 	if (input.noBrowser) args.push("--no-browser");
-	if (input.forceStrategy) args.push("--force-strategy", input.forceStrategy);
-	if (input.cacheDir) args.push("--cache-dir", input.cacheDir);
-	if (input.forceRefresh) args.push("--force-refresh");
-	if (input.playwrightWsEndpoint) args.push("--playwright-ws", input.playwrightWsEndpoint);
-	if (input.delayMs !== undefined) args.push("--delay-ms", String(input.delayMs));
-	if (input.timeoutMs !== undefined) args.push("--timeout-ms", String(input.timeoutMs));
-	if (input.maxConcurrency !== undefined) args.push("--max-concurrency", String(input.maxConcurrency));
-	if (input.perDomainConcurrency !== undefined) args.push("--per-domain-concurrency", String(input.perDomainConcurrency));
+	args.push(...buildAdvancedArgs(input.advanced));
 	return args;
 }
 
@@ -369,37 +341,10 @@ function buildDeepResearchArgs(input: DeepWebResearchParams): string[] {
 	if (input.maxIterations !== undefined) args.push("--max-iterations", String(input.maxIterations));
 	if (input.limit !== undefined) args.push("--limit", String(input.limit));
 	if (input.readCount !== undefined) args.push("--read-count", String(input.readCount));
-	if (input.maxQueries !== undefined) args.push("--max-queries", String(input.maxQueries));
 	if (input.maxSources !== undefined) args.push("--max-sources", String(input.maxSources));
-	if (input.maxFollowupQueries !== undefined) args.push("--max-followup-queries", String(input.maxFollowupQueries));
-	if (input.maxModelCalls !== undefined) args.push("--max-model-calls", String(input.maxModelCalls));
-	if (input.maxRuntimeMs !== undefined) args.push("--max-runtime-ms", String(input.maxRuntimeMs));
-	if (input.maxEvidenceChars !== undefined) args.push("--max-evidence-chars", String(input.maxEvidenceChars));
-	if (input.maxClaimEvidenceItems !== undefined) args.push("--max-claim-evidence-items", String(input.maxClaimEvidenceItems));
-	if (input.embeddingUrl) args.push("--embedding-url", input.embeddingUrl);
-	if (input.embeddingModel) args.push("--embedding-model", input.embeddingModel);
-	if (input.noEmbeddings) args.push("--no-embeddings");
-	if (input.embeddingBatchSize !== undefined) args.push("--embedding-batch-size", String(input.embeddingBatchSize));
-	if (input.evidenceBatchSources !== undefined) args.push("--evidence-batch-sources", String(input.evidenceBatchSources));
-	if (input.evidenceBatchChars !== undefined) args.push("--evidence-batch-chars", String(input.evidenceBatchChars));
-	if (input.playwrightConcurrency !== undefined) args.push("--playwright-concurrency", String(input.playwrightConcurrency));
-	if (input.timeoutMs !== undefined) args.push("--timeout-ms", String(input.timeoutMs));
-	if (input.delayMs !== undefined) args.push("--delay-ms", String(input.delayMs));
-	if (input.cacheDir) args.push("--cache-dir", input.cacheDir);
-	if (input.forceRefresh) args.push("--force-refresh");
-	if (input.forceStrategy) args.push("--force-strategy", input.forceStrategy);
-	if (input.noBrowser) args.push("--no-browser");
-	if (input.maxConcurrency !== undefined) args.push("--max-concurrency", String(input.maxConcurrency));
-	if (input.perDomainConcurrency !== undefined) args.push("--per-domain-concurrency", String(input.perDomainConcurrency));
-	if (input.playwrightWsEndpoint) args.push("--playwright-ws", input.playwrightWsEndpoint);
-	if (input.searxng) args.push("--searxng", input.searxng);
-	if (input.categories) args.push("--categories", input.categories);
-	if (input.engines) args.push("--engines", input.engines);
-	if (input.language) args.push("--language", input.language);
-	if (input.safesearch !== undefined) args.push("--safesearch", String(input.safesearch));
-	if (input.timeRange) args.push("--time-range", input.timeRange);
 	if (input.render === false) args.push("--no-render");
 	else if (input.render === true) args.push("--render");
+	args.push(...buildAdvancedArgs(input.advanced));
 	return args;
 }
 
@@ -408,11 +353,7 @@ function buildWebDiscoverArgs(input: WebDiscoverParams & { output: string }): st
 	if (input.mode) args.push("--mode", input.mode);
 	if (input.render === false) args.push("--no-render");
 	else if (input.render === true) args.push("--render");
-	if (input.noBrowser) args.push("--no-browser");
-	if (input.cacheDir) args.push("--cache-dir", input.cacheDir);
-	if (input.forceRefresh) args.push("--force-refresh");
-	if (input.playwrightWsEndpoint) args.push("--playwright-ws", input.playwrightWsEndpoint);
-	if (input.timeoutMs !== undefined) args.push("--timeout-ms", String(input.timeoutMs));
+	args.push(...buildAdvancedArgs(input.advanced));
 	return args;
 }
 

@@ -111,4 +111,35 @@ describe("buildSystemPrompt", () => {
 			expect(prompt.match(/- Use dynamic_tool for summaries\./g)).toHaveLength(1);
 		});
 	});
+
+	describe("pi documentation block", () => {
+		test("is included by default", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: ["read"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).toContain("Pi documentation (read only when the user asks about pi itself");
+			expect(prompt).toContain("docs/extensions.md");
+		});
+
+		test("collapses to a single pointer line when disabled", () => {
+			const full = buildSystemPrompt({ selectedTools: ["read"], contextFiles: [], skills: [], cwd: process.cwd() });
+			const trimmed = buildSystemPrompt({
+				selectedTools: ["read"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+				includePiDocs: false,
+			});
+
+			expect(trimmed).not.toContain("Pi documentation (read only when the user asks about pi itself");
+			expect(trimmed).not.toContain("docs/extensions.md");
+			// The capability survives: the model is still told where pi's own docs live.
+			expect(trimmed).toContain("Pi's own documentation (README.md, docs/, examples/) lives under");
+			expect(trimmed.length).toBeLessThan(full.length);
+		});
+	});
 });

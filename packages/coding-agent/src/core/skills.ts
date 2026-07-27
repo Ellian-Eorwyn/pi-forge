@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "fs";
 import ignore from "ignore";
-import { basename, dirname, join, relative, resolve, sep } from "path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "path";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { canonicalizePath, resolvePath } from "../utils/paths.ts";
@@ -339,25 +339,59 @@ export function formatSkillsForPrompt(skills: Skill[]): string {
 		return "";
 	}
 
+	// Skills usually live together under one directory, so every <location> would
+	// repeat the same long absolute prefix. Name the shared root once and make the
+	// locations relative to it; skills outside it keep their absolute path.
+	const root = commonSkillRoot(visibleSkills);
 	const lines = [
 		"\n\nThe following skills provide specialized instructions for specific tasks.",
 		"Use the read tool to load a skill's file when the task matches its description.",
 		"When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
 		"",
-		"<available_skills>",
 	];
+	if (root) {
+		lines.push(`Locations below are relative to ${root} unless they are absolute paths.`, "");
+	}
+	lines.push("<available_skills>");
 
 	for (const skill of visibleSkills) {
 		lines.push("  <skill>");
 		lines.push(`    <name>${escapeXml(skill.name)}</name>`);
 		lines.push(`    <description>${escapeXml(skill.description)}</description>`);
-		lines.push(`    <location>${escapeXml(skill.filePath)}</location>`);
+		lines.push(`    <location>${escapeXml(relativeSkillLocation(skill.filePath, root))}</location>`);
 		lines.push("  </skill>");
 	}
 
 	lines.push("</available_skills>");
 
 	return lines.join("\n");
+}
+
+/** The deepest directory containing every skill, or undefined when they do not share one. */
+function commonSkillRoot(skills: Skill[]): string | undefined {
+	const directories = skills.filter((skill) => isAbsolute(skill.filePath)).map((skill) => dirname(skill.filePath));
+	// One shared root only pays off across several skills.
+	if (directories.length < 2 || directories.length !== skills.length) {
+		return undefined;
+	}
+	let segments = directories[0].split(sep);
+	for (const directory of directories.slice(1)) {
+		const candidate = directory.split(sep);
+		let shared = 0;
+		while (shared < segments.length && shared < candidate.length && segments[shared] === candidate[shared]) {
+			shared += 1;
+		}
+		segments = segments.slice(0, shared);
+	}
+	const root = segments.join(sep);
+	// A root of "/" or a drive letter saves nothing and reads as noise.
+	return root && root !== sep && segments.length > 1 ? root : undefined;
+}
+
+function relativeSkillLocation(filePath: string, root: string | undefined): string {
+	if (!root) return filePath;
+	const relativePath = relative(root, filePath);
+	return relativePath.startsWith("..") || isAbsolute(relativePath) ? filePath : toPosixPath(relativePath);
 }
 
 function escapeXml(str: string): string {

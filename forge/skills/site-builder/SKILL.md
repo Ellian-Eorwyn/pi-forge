@@ -1,6 +1,6 @@
 ---
 name: site-builder
-description: Build a beautiful, self-contained static informational website from a folder of source material. Use to turn raw documents, Markdown, and images — or upstream forge run directories — into plain HTML, CSS, and minimal vanilla JavaScript that uploads to any server and works immediately, with responsive accessible layouts, a content-tuned theme, client-side search, navigation, breadcrumbs, an on-page table of contents, tag pages, dark mode, and a curated resources section that links out to references found in the sources. Generated synthesis stays separate from quoted source material and traceable to its origin.
+description: Build a beautiful, self-contained static informational website from a folder of source material or an upstream forge run directory. Produces plain HTML, CSS, and minimal vanilla JavaScript that uploads anywhere and works immediately, with responsive accessible layouts, client-side search, navigation, tag pages, and dark mode. Generated synthesis stays separate from quoted source material.
 ---
 
 # Site Builder

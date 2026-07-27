@@ -1,6 +1,6 @@
 ---
 name: transcription
-description: Transcribe an audio or video file to text with NVIDIA Parakeet TDT v3, then deterministically correct names, acronyms, and terms with a persistent user dictionary before cleanup. Use for .mp3, .wav, .m4a, .flac, .ogg, .opus and .mp4, .mov, .mkv, .webm, .avi and similar recordings — lectures, interviews, meetings, calls, voice notes, dictation — when the user wants speech turned into a transcript, optionally routed straight into transcript cleanup. Also use to manage the correction dictionary (add or list misheard names, acronyms, and jargon) or to re-apply it to an existing transcript.
+description: Transcribe audio or video, then correct and clean the result. Use for mp3, wav, m4a, mp4, and other recordings of lectures, interviews, meetings, and voice notes, producing a timestamped raw transcript plus a corrected readable version with speaker labels where they can be identified. For transcripts you already have, use transcript-cleanup; for voice notes already inside an Obsidian vault, use vault-transcripts.
 ---
 
 # Transcription

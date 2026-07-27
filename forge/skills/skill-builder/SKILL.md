@@ -1,6 +1,6 @@
 ---
 name: skill-builder
-description: Design, create, revise, audit, validate, and package Agent Skills for Pi-Forge and other agent harnesses. Use when the user asks to build a new skill, update an existing SKILL.md, validate skill structure, add trigger tests, compare overlap with neighboring skills, choose between a skill, script, extension, reference, asset, or AGENTS.md instruction, or work with .agents/skills, ~/.agents/skills, forge/skills, skill manifests, or Agent Skills-standard compatibility. Do not use for ordinary coding, research, document processing, or site-building unless the task is about turning that workflow into a reusable skill.
+description: Design, create, revise, audit, validate, and package Agent Skills for Pi-Forge and other agent harnesses. Use to build a new skill, update an existing SKILL.md, validate skill structure, add trigger tests, compare overlap with neighboring skills, or choose between a skill, script, extension, reference, and AGENTS.md instruction. Not for ordinary coding or research unless the task is turning it into a reusable skill.
 ---
 
 # Skill Builder

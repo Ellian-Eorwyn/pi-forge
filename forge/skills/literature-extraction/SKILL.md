@@ -1,6 +1,6 @@
 ---
 name: literature-extraction
-description: Extract structured, source-backed evidence from academic articles, reports, policy documents, white papers, and research corpora. Use for single documents or folders that need claims, methods, data sources, findings, limitations, definitions, citations, quoted evidence, variables, populations, technologies, policies, and research gaps captured with provenance, an explicit-versus-inferred distinction, evidence and methods tables, and synthesis for literature reviews, grant writing, coding schemes, annotated bibliographies, and comparison across sources.
+description: Extract structured evidence from research documents - methods, findings, claims, limitations, and stated gaps, each traceable to its source passage. Use for journal articles, preprints, theses, and reports when the user needs the evidence base itself rather than a summary. Run document-ingest first on raw files. For discovering new literature use web-research; for polished write-ups use report-output.
 ---
 
 # Literature Extraction

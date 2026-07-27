@@ -178,6 +178,7 @@ export function vaultContextMessage(vault: VaultInfo): string {
 		"- Finding notes, or answering a question about what is in the vault -> skills/vault-connections/SKILL.md, `search`. Use it before grep; it ranks by meaning, and grep misses notes that never use the query's words.",
 		"- Proposing links between notes, filling `related`, or maintaining the wiki layer -> skills/vault-connections/SKILL.md.",
 		"- Classifying, filing, de-duplicating, or processing the inbox -> skills/vault-organizer/SKILL.md.",
+		"- Raw voice-note or meeting transcripts in the inbox -> skills/vault-transcripts/SKILL.md **before** vault-organizer processes them: it names, cleans, and summarizes each recording and writes advisory frontmatter, and the organizer then classifies and files the result.",
 		"",
 		"Both skills dry-run by default and need explicit approval before `--apply`. Never hand-edit the schema note or note frontmatter; let the skills write them.",
 	);

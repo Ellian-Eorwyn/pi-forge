@@ -6,53 +6,85 @@
 
 - Available skills: 21
 - Model-visible skills at launch: 21
-- Managed instructions (`AGENTS.md` with its `<project_context>` wrapper): 1758 tokens
-- Skills menu (metadata for all skills): 3713 tokens
-- **Total forge launch context (always processed): 5471 tokens**
-- **Maximum if every `SKILL.md` body is also loaded at once: 43910 tokens**
+- Tools offered at launch: 13
+
+| Launch context block | Tokens |
+|---|---:|
+| Base system prompt (intro, tools list, guidelines, connected services) | 390 |
+| Tool JSON schemas (13 tools) | 2760 |
+| Managed instructions (`AGENTS.md` with its `<project_context>` wrapper) | 1081 |
+| Skills menu (metadata for all model-visible skills) | 2972 |
+| **Total launch context (always processed)** | **7203** |
+| Maximum if every `SKILL.md` body is also loaded at once | 45592 |
+
+Of that total, the forge profile itself owns 4053 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
 
 Of the skills menu above, the shared wrapper (instructions and XML envelope, independent of skill count) is ~92 tokens; the rest scales with the number of skills.
 
-This counts everything the forge profile itself feeds at launch: the managed `AGENTS.md` instructions and the skills menu (name, description, and location for every model-visible skill). The maximum adds every complete `SKILL.md` on top of the launch menu — the ceiling if every skill is triggered and read in one session.
+The connected-services append inside the base prompt is 45 tokens, measured with both services enabled.
 
-Still excluded, because they are owned by the Pi harness rather than this profile and vary by machine and tool selection: Pi's base system prompt, the tool JSON schemas, conversation history, and any non-skill files the model reads on demand.
+This is the whole first-turn payload the model processes before the user's first word. The maximum adds every complete `SKILL.md` on top — the ceiling if every skill is triggered and read in one session.
+
+Still excluded, because they are not fixed launch cost: conversation history, the once-per-session vault coordinates the `vault-context` extension injects inside an Obsidian vault, any `AGENTS.md` in the working directory's own ancestry, and non-skill files the model reads on demand.
+
+## Tools
+
+Sorted by launch cost. `Prompt lines` counts a tool's `promptSnippet` and `promptGuidelines` contribution to the base system prompt, and is already included in the base prompt figure above.
+
+| Tool | Source | Parameters | Schema tokens | Prompt lines |
+|---|---|---:|---:|---:|
+| `forge_deep_web_research` | forge extension | 10 | 397 | 19 |
+| `edit` | built-in | 2 | 302 | 153 |
+| `forge_web_read` | forge extension | 6 | 281 | 12 |
+| `forge_web_search` | forge extension | 10 | 275 | 41 |
+| `forge_web_discover` | forge extension | 5 | 254 | 18 |
+| `forge_academic_web_research` | forge extension | 6 | 253 | 19 |
+| `grep` | built-in | 7 | 253 | 16 |
+| `read` | built-in | 3 | 163 | 20 |
+| `find` | built-in | 3 | 147 | 15 |
+| `bash` | built-in | 2 | 129 | 14 |
+| `ls` | built-in | 2 | 111 | 8 |
+| `write` | built-in | 2 | 101 | 22 |
+| `pi_vault_submit_artifact` | forge extension | 5 | 94 | 0 |
 
 ## Skills
 
 | Skill | Summary | Launch metadata tokens | On-demand body tokens | Complete file tokens | Launch visibility |
 |---|---|---:|---:|---:|---|
-| [`coding`](forge/skills/coding/SKILL.md) | Inspect repos and ship small reviewable changes | 160 | 750 | 886 | Model-visible |
+| [`coding`](forge/skills/coding/SKILL.md) | Inspect repos and ship small reviewable changes | 141 | 750 | 867 | Model-visible |
 | [`document-ingest`](forge/skills/document-ingest/SKILL.md) | Normalize documents with provenance | 131 | 3301 | 3406 | Model-visible |
-| [`file-conversion`](forge/skills/file-conversion/SKILL.md) | Convert files, including Markdown and EPUB | 213 | 1238 | 1425 | Model-visible |
-| [`literature-extraction`](forge/skills/literature-extraction/SKILL.md) | Extract structured evidence from research documents | 180 | 3338 | 3491 | Model-visible |
-| [`organize-folder`](forge/skills/organize-folder/SKILL.md) | Sort a messy folder via a reviewable manifest | 167 | 1743 | 1883 | Model-visible |
-| [`personal-admin`](forge/skills/personal-admin/SKILL.md) | Summarize personal documents into action plans | 206 | 1212 | 1392 | Model-visible |
-| [`project-extraction`](forge/skills/project-extraction/SKILL.md) | Search and refresh live project controls | 257 | 2290 | 2520 | Model-visible |
-| [`report-output`](forge/skills/report-output/SKILL.md) | Assemble polished deliverables from processed outputs | 181 | 729 | 884 | Model-visible |
-| [`reviewer-2`](forge/skills/reviewer-2/SKILL.md) | Peer-review a scholarly article note in an Obsidian vault the way a constructive Reviewer 2 w... | 237 | 1972 | 2185 | Model-visible |
-| [`site-builder`](forge/skills/site-builder/SKILL.md) | Build a static website from a content folder | 190 | 1320 | 1484 | Model-visible |
-| [`skill-builder`](forge/skills/skill-builder/SKILL.md) | Create and validate portable Agent Skills | 192 | 742 | 908 | Model-visible |
-| [`spreadsheet-analysis`](forge/skills/spreadsheet-analysis/SKILL.md) | Analyze and enrich tabular datasets | 161 | 2185 | 2319 | Model-visible |
+| [`file-conversion`](forge/skills/file-conversion/SKILL.md) | Convert files, including Markdown and EPUB | 142 | 1238 | 1354 | Model-visible |
+| [`literature-extraction`](forge/skills/literature-extraction/SKILL.md) | Extract structured evidence from research documents | 142 | 3338 | 3452 | Model-visible |
+| [`organize-folder`](forge/skills/organize-folder/SKILL.md) | Sort a messy folder via a reviewable manifest | 132 | 1743 | 1848 | Model-visible |
+| [`personal-admin`](forge/skills/personal-admin/SKILL.md) | Summarize personal documents into action plans | 143 | 1212 | 1329 | Model-visible |
+| [`project-extraction`](forge/skills/project-extraction/SKILL.md) | Search and refresh live project controls | 146 | 2290 | 2409 | Model-visible |
+| [`report-output`](forge/skills/report-output/SKILL.md) | Assemble polished deliverables from processed outputs | 140 | 729 | 843 | Model-visible |
+| [`reviewer-2`](forge/skills/reviewer-2/SKILL.md) | Peer-review a scholarly article note in an Obsidian vault the way a constructive Reviewer 2 w... | 145 | 1972 | 2092 | Model-visible |
+| [`site-builder`](forge/skills/site-builder/SKILL.md) | Build a static website from a content folder | 134 | 1320 | 1428 | Model-visible |
+| [`skill-builder`](forge/skills/skill-builder/SKILL.md) | Create and validate portable Agent Skills | 141 | 742 | 858 | Model-visible |
+| [`spreadsheet-analysis`](forge/skills/spreadsheet-analysis/SKILL.md) | Analyze and enrich tabular datasets | 129 | 2185 | 2286 | Model-visible |
 | [`transcript-cleanup`](forge/skills/transcript-cleanup/SKILL.md) | Clean and structure raw transcripts | 144 | 1127 | 1244 | Model-visible |
-| [`transcription`](forge/skills/transcription/SKILL.md) | Transcribe audio or video, then correct and clean it | 185 | 1517 | 1676 | Model-visible |
-| [`vault-capture`](forge/skills/vault-capture/SKILL.md) | Turn a braindump into schema-valid notes in an Obsidian vault inbox - split unedited thinking... | 162 | 1889 | 2026 | Model-visible |
+| [`transcription`](forge/skills/transcription/SKILL.md) | Transcribe audio or video, then correct and clean it | 141 | 1517 | 1632 | Model-visible |
+| [`vault-capture`](forge/skills/vault-capture/SKILL.md) | Turn a braindump into schema-valid notes in an Obsidian vault inbox - split unedited thinking... | 138 | 1889 | 2000 | Model-visible |
 | [`vault-connections`](forge/skills/vault-connections/SKILL.md) | Search an Obsidian vault by meaning, propose links for per-id review, publish completed liter... | 151 | 2060 | 2185 | Model-visible |
 | [`vault-handoff`](forge/skills/vault-handoff/SKILL.md) | Send completed text artifacts to pi-vault review | 63 | 325 | 363 | Model-visible |
-| [`vault-organizer`](forge/skills/vault-organizer/SKILL.md) | Organize an Obsidian vault or vault inbox from a human-maintained schema note - classify Mark... | 181 | 1237 | 1392 | Model-visible |
-| [`vault-transcripts`](forge/skills/vault-transcripts/SKILL.md) | Process raw voice-note and meeting transcripts sitting in an Obsidian vault inbox - give each... | 183 | 1222 | 1376 | Model-visible |
+| [`vault-organizer`](forge/skills/vault-organizer/SKILL.md) | Organize an Obsidian vault or vault inbox from a human-maintained schema note - classify Mark... | 150 | 1237 | 1361 | Model-visible |
+| [`vault-transcripts`](forge/skills/vault-transcripts/SKILL.md) | Process raw voice-note and meeting transcripts sitting in an Obsidian vault inbox - give each... | 152 | 1222 | 1346 | Model-visible |
 | [`web-collection`](forge/skills/web-collection/SKILL.md) | Archive and organize web sources | 138 | 1971 | 2083 | Model-visible |
-| [`web-research`](forge/skills/web-research/SKILL.md) | Quick web search and page reading for information lookup. | 146 | 3190 | 3311 | Model-visible |
+| [`web-research`](forge/skills/web-research/SKILL.md) | Quick web search and page reading for information lookup. | 146 | 3882 | 4003 | Model-visible |
 
 ## Counting Method
 
 - The skills menu is the exact text produced by Pi's `formatSkillsForPrompt` (name, description, and location per model-visible skill, plus shared instructions and XML envelope).
 - The `AGENTS.md` figure replicates Pi's `<project_context>` wrapper from `buildSystemPrompt` (`packages/coding-agent/src/core/system-prompt.ts`) around the current `forge/AGENTS.md`.
-- Total forge launch context = `AGENTS.md` (wrapped) + skills menu. The maximum adds every complete `SKILL.md` (frontmatter + body) on top, the ceiling when all skills are read in one session.
+- The base system prompt calls the real `buildSystemPrompt` with every tool's `promptSnippet` and `promptGuidelines`, plus the real `formatConnectedServices` output with both services enabled.
+- Tool schemas count `JSON.stringify({name, description, input_schema})` per tool: built-ins from `createToolDefinition`, extension tools captured by loading each `forge/extensions/*.ts` against a stub `ExtensionAPI`.
+- Total launch context = base system prompt + tool schemas + `AGENTS.md` (wrapped) + skills menu. The maximum adds every complete `SKILL.md` (frontmatter + body) on top, the ceiling when all skills are read in one session.
 - Token estimates use Pi's conservative `ceil(characters / 4)` heuristic. Provider tokenizers produce different exact counts.
 - Repository-relative locations keep this report stable across machines. Installed absolute paths can change the real launch count slightly.
 - On-demand body tokens exclude YAML frontmatter; complete file tokens include it and approximate reading the entire file through the read tool.
 
-Regenerate after adding a skill or changing a skill name, description, location, body, or launch visibility:
+Regenerate after adding a skill or tool, or changing a skill name, description, location, body, or launch visibility, a tool schema, or the base prompt text:
 
 ```bash
 npm run forge:skills-report

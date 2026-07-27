@@ -1,6 +1,6 @@
 ---
 name: spreadsheet-analysis
-description: Inspect, profile, clean, transform, summarize, compare, chart, and enrich CSV, TSV, and XLSX tabular data. Use for spreadsheet quality reviews, missing values, duplicates, unusual values, filtering, merging, reshaping, pivot or frequency tables, cleaned exports, embedding-based fuzzy duplicate detection and semantic record linkage or categorization of a text column into reviewable candidate groups, and resumable model-generated output processed one row at a time into a new column.
+description: Analyze and enrich tabular datasets - CSV, TSV, and XLSX. Use to clean messy tables, compute derived columns, summarize and cross-tabulate, find outliers and inconsistencies, and explain what the numbers show. Keeps the original file intact and writes results to a new output. For converting between tabular formats without analysis, use file-conversion.
 ---
 
 # Spreadsheet Analysis

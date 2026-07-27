@@ -1,6 +1,6 @@
 ---
 name: organize-folder
-description: Organize a messy folder and all its subfolders in place through a reviewable, user-editable manifest. Use to sort a pile of files into category folders, route exact duplicates into a duplicates folder instead of deleting them, and propose a destination for every file. The user edits the manifest spreadsheet to correct categories and destinations before anything moves; only on agreement does the agent move files, with full undo and safeguards that refuse system paths, repositories, dependency trees, and bundles.
+description: Sort a messy folder into a sensible structure through a reviewable manifest. Use for downloads, desktops, scanned document dumps, and mixed archives when the user wants files grouped, renamed, or de-duplicated. Proposes every move in a manifest for approval before anything is touched, and never overwrites or deletes a source. For Obsidian vaults use vault-organizer instead.
 ---
 
 # Organize Folder

@@ -51,66 +51,26 @@ default to `.agents/skills/<name>/SKILL.md`.
 When a folder contains grants, awards, proposals, scopes of work, contracts,
 work plans, project reports, presentations, meeting notes, or interviews and
 the user needs deliverables, requirements, dates, actions, or risks tracked,
-route finalized document-ingest outputs to `project-extraction`. Keep its
-`project_status.csv` human-maintained. Use its `run` command for initialization
-or resume, then Inbox intake, serial foreground extraction, model-assisted
-reconciliation, build, and validation. Background mode is opt-in and must use
-the cooperative inference lease. Artifacts do not imply completion: only a
-successful validation transition does. Partial builds must use `--draft` and
-retain coverage warnings. It can produce focused team/workstream views and
-source-backed Gantt outputs. For questions about an existing
-extraction, use its hybrid search first and load full source documents only
-when retrieved passages are insufficient. Use `report-output` only for polished
-downstream deliverables.
+route finalized `document-ingest` outputs to `project-extraction`, and use
+`report-output` only for polished downstream deliverables. The extraction
+workflow, its status file, and its completion rules are in that skill.
 
 ## Vault Workflow
 
-The `vault-context` extension detects an Obsidian vault at or above the working
-directory and injects its coordinates once per session: vault root, schema note,
-note count, and whether the `vault-connections` embedding index exists. When that
-context is present, use `vault-connections` search rather than grep for questions
-about vault content, and `vault-organizer` for filing and de-duplication. `/vault`
-re-scans and reports. Outside a vault the extension does nothing.
+Inside an Obsidian vault the `vault-context` extension injects that vault's
+coordinates and skill routing once per session, and `/vault` re-scans on demand.
+Outside a vault it does nothing, so only the entry points below are stated here.
 
-Raw voice-note and meeting transcripts in `00 Inbox` go through
-`vault-transcripts` **before** `vault-organizer` inbox processing: that skill
-names, cleans, and summarizes a recording and writes advisory frontmatter, and
-the organizer then classifies and files the result.
-
-Route requests such as "send this literature run to my vault", "publish this
-deep research to Obsidian", or "turn these extraction outputs into concept
-notes" to `vault-connections import-run`. It validates the source run without
-mutating it, proposes report copies for `00 Inbox`, and separately proposes
-schema-routed wiki notes. Default wiki kinds are `concept,term`; all seven kinds
-are explicit options. Never create or edit its required vault-owned wiki
-templates. Nothing enters the vault until the user accepts exact `i-NNN` or
-`w-NNN` proposal ids.
+Route requests such as "send this literature run to my vault", "publish this deep
+research to Obsidian", or "turn these extraction outputs into concept notes" to
+`vault-connections import-run`: it never mutates the source run, and nothing
+enters the vault until the user accepts exact proposal ids.
 
 Route "review my article", "be reviewer 2 on this", or "peer review this draft"
-to `reviewer-2`. It comments on substance only — research gaps, thin evidence,
-faulty inference, structural problems, shallow theoretical engagement — and each
-criticism carries its fix, with citations that must resolve against a real
-`web-research` run. It never modifies the article: the output is a new review
-copy in `00 Inbox` reproducing the body verbatim with comment callouts between
-its blocks, and the render proves that byte for byte before writing.
+to `reviewer-2`. It reviews substance only and never modifies the article.
 
-The `vault-workflow` extension adds a plan -> execute -> verify loop for changes
-to an Obsidian vault, driven by the single local model. The user drives phases
-with `/plan`, `/execute`, `/verify` (and `/workflow off`); each phase sets the
-tools and thinking behaviour, so follow the injected phase prompt:
-
-- **plan** — read-only. Interview the user with the questionnaire tool until the
-  goal is unambiguous, ground the plan in the real vault and schema note, write a
-  detailed numbered plan, and ask for approval. Make no changes.
-- **execute** — full vault tools, one change at a time. Dry-run first, show the
-  result, and wait for an explicit "yes" before any `--apply` or file write.
-  Prefer the vetted skills and run them with their default endpoints — bulk
-  per-note calls already go to the non-thinking backend. Run
-  `vault-organizer.py doctor` after editing the schema note. Never delete notes;
-  keep every path inside the vault.
-- **verify** — read-only. Check the result against the plan (`doctor`, `status`,
-  grep, read `report.md`) and report what passed, what did not, and follow-ups.
-
-The vault schema note (`99 Meta/99.02 Schemas/0.00 Vault Schema.md`) is the sole
-source of truth for that vault's folders and frontmatter. See
-[docs/vault-workflow.md](../docs/vault-workflow.md) for the full contract.
+The `vault-workflow` extension adds a plan -> execute -> verify loop driven by
+`/plan`, `/execute`, `/verify`, and `/workflow off`. Each phase sets its own
+tools and thinking behaviour and injects its own rules, so follow the injected
+phase prompt. See [docs/vault-workflow.md](../docs/vault-workflow.md) for the
+full contract.

@@ -1,6 +1,6 @@
 ---
 name: vault-capture
-description: Turn a braindump into schema-valid notes in an Obsidian vault inbox - split unedited thinking into its distinct notes, draft each one as prose, name it, mark it as model-written, and keep the braindump verbatim. Use when the user says make a note on this, here is me talking through it, capture this, write this up as a note, or turn my notes on X into vault notes. For raw voice-note and meeting transcript exports use vault-transcripts instead; run vault-organizer afterwards to file what this writes.
+description: Turn a braindump into schema-valid notes in an Obsidian vault inbox - split unedited thinking into separate notes, give each a real title and schema frontmatter, and keep the user's own words rather than paraphrasing them. Use for stream-of-consciousness dumps, meeting scribbles, and idea lists that should become individual notes. Nothing enters the vault until the user approves the proposed notes.
 ---
 
 # Vault Capture

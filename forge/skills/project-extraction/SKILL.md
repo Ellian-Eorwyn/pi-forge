@@ -1,6 +1,6 @@
 ---
 name: project-extraction
-description: Extract, search, and continuously refresh source-backed project controls, focused team views, schedules, and Gantt charts from grants, awards, proposals, scopes of work, contracts, amendments, work plans, reports, presentations, meetings, interviews, correspondence, budgets, and mixed project folders. Use when users need questions answered from an existing extraction, relevant project documents or controls found quickly, new files processed from a marked Inbox, or deliverables, obligations, requirements, dates, milestones, tasks, decisions, actions, risks, dependencies, stakeholders, acceptance criteria, reporting cadence, proposal checklists, team scope, or timelines tracked across documents. Use document-ingest first for raw files. Do not use for research-claim synthesis or polished publication output; route those to literature-extraction or report-output.
+description: Extract, search, and refresh source-backed project controls, schedules, and Gantt charts from grants, contracts, proposals, scopes of work, work plans, reports, meetings, and mixed project folders. Use to track deliverables, obligations, requirements, dates, milestones, decisions, actions, and risks, to query an existing extraction, or to process new files from a marked project Inbox. Run document-ingest first on raw files.
 ---
 
 # Project Extraction

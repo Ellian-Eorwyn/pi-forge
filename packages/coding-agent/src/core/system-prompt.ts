@@ -2,7 +2,7 @@
  * System prompt construction and project context loading
  */
 
-import { getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
+import { getDocsPath, getExamplesPath, getPackageDir, getReadmePath } from "../config.ts";
 import { formatSkillsForPrompt, type Skill } from "./skills.ts";
 
 export interface BuildSystemPromptOptions {
@@ -22,6 +22,13 @@ export interface BuildSystemPromptOptions {
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** Pre-loaded skills. */
 	skills?: Skill[];
+	/**
+	 * Include the block pointing at pi's own README, docs, and examples.
+	 * Default true. Profiles that are not for working on pi itself can turn it
+	 * off: it costs ~300 tokens of launch context on every session and only pays
+	 * off when the user asks about pi's SDK, extensions, themes, skills, or TUI.
+	 */
+	includePiDocs?: boolean;
 }
 
 /** Build the system prompt with tools, guidelines, and context */
@@ -35,6 +42,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		cwd,
 		contextFiles: providedContextFiles,
 		skills: providedSkills,
+		includePiDocs = true,
 	} = options;
 	const resolvedCwd = cwd;
 	const promptCwd = resolvedCwd.replace(/\\/g, "/");
@@ -80,11 +88,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		return prompt;
 	}
 
-	// Get absolute paths to documentation and examples
-	const readmePath = getReadmePath();
-	const docsPath = getDocsPath();
-	const examplesPath = getExamplesPath();
-
 	// Build tools list based on selected tools.
 	// A tool appears in Available tools only when the caller provides a one-line snippet.
 	const tools = selectedTools || ["read", "bash", "edit", "write"];
@@ -127,6 +130,21 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	const guidelines = guidelinesList.map((g) => `- ${g}`).join("\n");
 
+	const piDocsSection = includePiDocs
+		? `
+
+Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):
+- Main documentation: ${getReadmePath()}
+- Additional docs: ${getDocsPath()}
+- Examples: ${getExamplesPath()} (extensions, custom tools, SDK)
+- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory
+- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md)
+- When working on pi topics, read the docs and examples, and follow .md cross-references before implementing
+- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)`
+		: `
+
+Pi's own documentation (README.md, docs/, examples/) lives under ${getPackageDir()}. Read it only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI.`;
+
 	let prompt = `You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.
 
 Available tools:
@@ -135,16 +153,7 @@ ${toolsList}
 In addition to the tools above, you may have access to other custom tools depending on the project.
 
 Guidelines:
-${guidelines}
-
-Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):
-- Main documentation: ${readmePath}
-- Additional docs: ${docsPath}
-- Examples: ${examplesPath} (extensions, custom tools, SDK)
-- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory
-- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md)
-- When working on pi topics, read the docs and examples, and follow .md cross-references before implementing
-- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)`;
+${guidelines}${piDocsSection}`;
 
 	if (appendSection) {
 		prompt += appendSection;

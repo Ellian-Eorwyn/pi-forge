@@ -14,7 +14,7 @@ import type { Extension, ExtensionFactory, ExtensionRuntime, LoadExtensionsResul
 import { DefaultPackageManager, type PathMetadata, type ResolvedResource } from "./package-manager.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import { loadPromptTemplates } from "./prompt-templates.ts";
-import { SettingsManager } from "./settings-manager.ts";
+import { type ResolvedConnectedServices, SettingsManager } from "./settings-manager.ts";
 import type { Skill } from "./skills.ts";
 import { loadSkills } from "./skills.ts";
 import { createSourceInfo, type SourceInfo } from "./source-info.ts";
@@ -117,25 +117,24 @@ export function loadProjectContextFiles(options: {
 }
 
 function formatConnectedServicesPrompt(settingsManager: SettingsManager): string {
-	const services = settingsManager.getResolvedConnectedServices();
+	return formatConnectedServices(settingsManager.getResolvedConnectedServices());
+}
+
+/** Exported so launch-context reports can measure the exact text without a SettingsManager. */
+export function formatConnectedServices(services: ResolvedConnectedServices): string {
 	const lines = ["# Connected Services", ""];
-	if (services.searxng.enabled) {
-		lines.push(
-			`- SearXNG web search: ${services.searxng.baseUrl}`,
-			"  Use the quick web search tool for current information. The SearXNG JSON API is `<base>/search?format=json&q=<query>` and supports `categories`, `engines`, `language`, `safesearch`, `time_range`, and `pageno`.",
-			"  Use `<base>/config` when you need to inspect enabled engines, categories, and locales.",
-		);
-	} else {
-		lines.push("- SearXNG web search: disabled in settings.");
-	}
-	if (services.playwright.enabled) {
-		lines.push(
-			`- Playwright rendered browsing: ${services.playwright.wsEndpoint}`,
-			"  Use quick page-read tools for rendered pages and downloads that need browser execution. Load `web-research` or `web-collection` skills only for deep research, full archiving, provenance manifests, or complex collection workflows.",
-		);
-	} else {
-		lines.push("- Playwright rendered browsing: disabled in settings.");
-	}
+	// Endpoints only. How to use the web tools belongs to the tool descriptions and
+	// the web-research skill; repeating it here costs launch context on every session.
+	lines.push(
+		services.searxng.enabled
+			? `- SearXNG web search: ${services.searxng.baseUrl} (JSON API at \`<base>/search\`, engine list at \`<base>/config\`)`
+			: "- SearXNG web search: disabled in settings.",
+	);
+	lines.push(
+		services.playwright.enabled
+			? `- Playwright rendered browsing: ${services.playwright.wsEndpoint}`
+			: "- Playwright rendered browsing: disabled in settings.",
+	);
 	return lines.join("\n");
 }
 

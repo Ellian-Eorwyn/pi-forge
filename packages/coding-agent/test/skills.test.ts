@@ -247,6 +247,55 @@ describe("skills", () => {
 			expect(result).toContain("<location>/path/to/skill/SKILL.md</location>");
 		});
 
+		it("should name a shared root once and make locations relative to it", () => {
+			const skills: Skill[] = [
+				createTestSkill({
+					name: "alpha",
+					description: "First.",
+					filePath: "/pkg/forge/skills/alpha/SKILL.md",
+					baseDir: "/pkg/forge/skills/alpha",
+				}),
+				createTestSkill({
+					name: "beta",
+					description: "Second.",
+					filePath: "/pkg/forge/skills/beta/SKILL.md",
+					baseDir: "/pkg/forge/skills/beta",
+				}),
+			];
+
+			const result = formatSkillsForPrompt(skills);
+
+			expect(result).toContain("Locations below are relative to /pkg/forge/skills");
+			expect(result).toContain("<location>alpha/SKILL.md</location>");
+			expect(result).toContain("<location>beta/SKILL.md</location>");
+			// The long prefix is stated once, not once per skill.
+			expect(result.match(/\/pkg\/forge\/skills/g)).toHaveLength(1);
+		});
+
+		it("should keep absolute locations for skills outside the shared root", () => {
+			const skills: Skill[] = [
+				createTestSkill({
+					name: "alpha",
+					description: "First.",
+					filePath: "/pkg/skills/alpha/SKILL.md",
+					baseDir: "/pkg/skills/alpha",
+				}),
+				createTestSkill({
+					name: "beta",
+					description: "Second.",
+					filePath: "/elsewhere/beta/SKILL.md",
+					baseDir: "/elsewhere/beta",
+				}),
+			];
+
+			const result = formatSkillsForPrompt(skills);
+
+			// No useful shared root above "/", so both stay absolute and resolvable.
+			expect(result).not.toContain("Locations below are relative to");
+			expect(result).toContain("<location>/pkg/skills/alpha/SKILL.md</location>");
+			expect(result).toContain("<location>/elsewhere/beta/SKILL.md</location>");
+		});
+
 		it("should include intro text before XML", () => {
 			const skills: Skill[] = [
 				createTestSkill({

@@ -182,6 +182,47 @@ the script auto-selects based on query content:
 
 - **`--pageno`**: Page number for pagination (1-indexed).
 
+### Advanced Tool Options
+
+The `forge_web_read`, `forge_deep_web_research`, and `forge_web_discover` tools
+expose only their common parameters directly. Everything below is reachable
+through their `advanced` object, which maps each key to the CLI flag shown.
+Unknown keys are rejected rather than ignored, so a typo fails the run instead of
+silently changing its budget.
+
+```json
+{"advanced": {"evidenceBatchChars": 12000, "playwrightConcurrency": 2}}
+```
+
+| Key | CLI flag | Purpose |
+|---|---|---|
+| `cacheDir` | `--cache-dir` | Override the reusable acquisition cache directory. |
+| `forceRefresh` | `--force-refresh` | Ignore existing cache entries (boolean). |
+| `forceStrategy` | `--force-strategy` | Force `direct_http`, `playwright_dom`, or another strategy. |
+| `noBrowser` | `--no-browser` | Disable browser fallback (boolean). |
+| `playwrightWsEndpoint` | `--playwright-ws` | One-run Playwright WebSocket endpoint. |
+| `playwrightConcurrency` | `--playwright-concurrency` | Concurrent Playwright page/context tasks. Defaults to 1. |
+| `maxConcurrency` | `--max-concurrency` | Global acquisition concurrency budget. |
+| `perDomainConcurrency` | `--per-domain-concurrency` | Per-domain acquisition concurrency budget. |
+| `delayMs` | `--delay-ms` | Delay between URL reads, in milliseconds. |
+| `timeoutMs` | `--timeout-ms` | Request/navigation timeout, in milliseconds. |
+| `maxQueries` | `--max-queries` | Whole-run cap on searched queries. |
+| `maxFollowupQueries` | `--max-followup-queries` | Follow-up queries accepted per expansion step. |
+| `maxModelCalls` | `--max-model-calls` | Whole-run cap on local model calls. |
+| `maxRuntimeMs` | `--max-runtime-ms` | Approximate whole-run runtime budget. |
+| `maxEvidenceChars` | `--max-evidence-chars` | Source-text characters sent to evidence extraction. |
+| `maxClaimEvidenceItems` | `--max-claim-evidence-items` | Evidence items sent to claim registration. |
+| `evidenceBatchSources` | `--evidence-batch-sources` | Sources per evidence extraction call. Defaults to 3. |
+| `evidenceBatchChars` | `--evidence-batch-chars` | Source characters per evidence batch. Defaults to 24000. |
+| `embeddingUrl` | `--embedding-url` | One-run embeddings endpoint override. |
+| `embeddingModel` | `--embedding-model` | One-run embeddings model override. |
+| `embeddingBatchSize` | `--embedding-batch-size` | Embedding batch size. Defaults to 16. |
+| `noEmbeddings` | `--no-embeddings` | Disable embedding-based source ranking (boolean). |
+| `searxng` | `--searxng` | Override the SearXNG base URL. |
+| `categories`, `engines`, `language`, `safesearch`, `timeRange` | as above | SearXNG parameters, documented in the previous section. |
+
+`forge_web_search` takes the SearXNG parameters directly, not through `advanced`.
+
 ### Auto-Selection Heuristics
 
 When parameters are omitted, the script detects query type:

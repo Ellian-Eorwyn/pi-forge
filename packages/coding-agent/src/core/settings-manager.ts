@@ -150,6 +150,7 @@ export interface Settings {
 	hideThinkingBlock?: boolean;
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows)
 	quietStartup?: boolean;
+	includePiDocs?: boolean; // default: true - point the model at pi's own README/docs/examples in the system prompt
 	defaultProjectTrust?: DefaultProjectTrust; // default: "ask"; global setting only
 	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
 	npmCommand?: string[]; // Command used for npm package lookup/install operations, argv-style (e.g., ["mise", "exec", "node@20", "--", "npm"])
@@ -982,6 +983,10 @@ export class SettingsManager {
 		this.globalSettings.quietStartup = quiet;
 		this.markModified("quietStartup");
 		this.save();
+	}
+
+	getIncludePiDocs(): boolean {
+		return this.settings.includePiDocs ?? true;
 	}
 
 	getDefaultProjectTrust(): DefaultProjectTrust {

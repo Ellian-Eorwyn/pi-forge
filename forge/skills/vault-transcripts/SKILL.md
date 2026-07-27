@@ -1,6 +1,6 @@
 ---
 name: vault-transcripts
-description: Process raw voice-note and meeting transcripts sitting in an Obsidian vault inbox - give each one a dated descriptive filename, schema-valid frontmatter, a one-paragraph summary, and a readable type-aware cleanup, while keeping the original transcription verbatim under a "# Transcript" heading. Use when the user asks to process my voice notes, clean up my voice memo transcripts, rename my recording transcripts, summarize my transcribed meetings or therapy sessions, or tidy the transcript dumps in my vault inbox. Run this before vault-organizer inbox processing.
+description: Process raw voice-note and meeting transcripts sitting in an Obsidian vault inbox - give each recording a real title, clean the speech-to-text artifacts without rewriting the speaker's meaning, write a summary, and add advisory frontmatter. Use before vault-organizer processes the inbox, so the organizer classifies a named, cleaned note. For recordings not yet transcribed use transcription; for transcripts outside a vault use transcript-cleanup.
 ---
 
 # Vault Transcripts

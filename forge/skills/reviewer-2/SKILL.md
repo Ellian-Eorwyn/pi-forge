@@ -1,6 +1,6 @@
 ---
 name: reviewer-2
-description: Peer-review a scholarly article note in an Obsidian vault the way a constructive Reviewer 2 would - find research gaps, thin evidence, faulty inferences, structural problems, and shallow theoretical engagement, back each criticism with real literature from research runs, and write a separate review-copy note whose comments carry the exact prose the author can paste in, plus a ranked meta review and a step-by-step revision plan. Use when the user says review my article, be reviewer 2 on this, peer review this draft, critique my paper, tear this apart, or what would a reviewer say. Substance only - this skill never comments on grammar or prose style and never modifies the article. For literature search with no critique attached use web-research; run vault-organizer afterwards to file the review copy.
+description: Peer-review a scholarly article note in an Obsidian vault the way a constructive Reviewer 2 would - research gaps, thin evidence, faulty inferences, structural problems, and shallow theoretical engagement, each criticism backed by real literature and carrying the prose to fix it, plus a ranked meta review and revision plan. Use for review my article, be reviewer 2, peer review this draft, or critique my paper. Never edits the article.
 ---
 
 # Reviewer 2

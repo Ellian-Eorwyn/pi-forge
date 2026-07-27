@@ -60,6 +60,10 @@ const profileInstructions = readFileSync(sourceAgentsPath, "utf8");
 settings.packages = [profileDirectory, ...retainedPackages];
 settings.defaultProvider = "forge-local";
 settings.defaultModel = "code";
+// Forge is a knowledge-work profile, not a profile for developing pi itself. The
+// pointer block to pi's README/docs/examples costs ~300 tokens of launch context on
+// every session; the package path is still named in the system prompt on demand.
+settings.includePiDocs = false;
 const existingCompaction =
 	settings.compaction !== null && typeof settings.compaction === "object" && !Array.isArray(settings.compaction)
 		? settings.compaction

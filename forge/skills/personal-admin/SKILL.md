@@ -1,6 +1,6 @@
 ---
 name: personal-admin
-description: Process personal, household, medical, financial, insurance, travel, repair, purchase, and bureaucratic documents into clear summaries and action plans. Use for bills, forms, letters, policies, appointment instructions, receipts, order records, and emails pasted as text to extract deadlines, required actions, contacts, account/order/reference numbers, dates, fees, requirements, and missing information, and to draft checklists, next-step plans, call scripts, message drafts, and comparison tables. Works on a single document or a folder, keeps document facts separate from suggested steps, and organizes and summarizes rather than giving legal, medical, or financial advice.
+description: Process personal, household, medical, financial, insurance, travel, repair, and bureaucratic documents into clear summaries and action plans. Use for bills, forms, letters, policies, appointment instructions, receipts, and order records to extract deadlines, required actions, contacts, reference numbers, and fees, and to draft checklists, call scripts, and comparison tables. Gives no legal, medical, or financial advice.
 ---
 
 # Personal Admin
