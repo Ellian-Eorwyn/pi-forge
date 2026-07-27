@@ -4,12 +4,12 @@
 
 ## Launch Context Summary
 
-- Available skills: 20
-- Model-visible skills at launch: 20
-- Managed instructions (`AGENTS.md` with its `<project_context>` wrapper): 1623 tokens
-- Skills menu (metadata for all skills): 3476 tokens
-- **Total forge launch context (always processed): 5098 tokens**
-- **Maximum if every `SKILL.md` body is also loaded at once: 41352 tokens**
+- Available skills: 21
+- Model-visible skills at launch: 21
+- Managed instructions (`AGENTS.md` with its `<project_context>` wrapper): 1758 tokens
+- Skills menu (metadata for all skills): 3713 tokens
+- **Total forge launch context (always processed): 5471 tokens**
+- **Maximum if every `SKILL.md` body is also loaded at once: 43910 tokens**
 
 Of the skills menu above, the shared wrapper (instructions and XML envelope, independent of skill count) is ~92 tokens; the rest scales with the number of skills.
 
@@ -29,6 +29,7 @@ Still excluded, because they are owned by the Pi harness rather than this profil
 | [`personal-admin`](forge/skills/personal-admin/SKILL.md) | Summarize personal documents into action plans | 206 | 1212 | 1392 | Model-visible |
 | [`project-extraction`](forge/skills/project-extraction/SKILL.md) | Search and refresh live project controls | 257 | 2290 | 2520 | Model-visible |
 | [`report-output`](forge/skills/report-output/SKILL.md) | Assemble polished deliverables from processed outputs | 181 | 729 | 884 | Model-visible |
+| [`reviewer-2`](forge/skills/reviewer-2/SKILL.md) | Peer-review a scholarly article note in an Obsidian vault the way a constructive Reviewer 2 w... | 237 | 1972 | 2185 | Model-visible |
 | [`site-builder`](forge/skills/site-builder/SKILL.md) | Build a static website from a content folder | 190 | 1320 | 1484 | Model-visible |
 | [`skill-builder`](forge/skills/skill-builder/SKILL.md) | Create and validate portable Agent Skills | 192 | 742 | 908 | Model-visible |
 | [`spreadsheet-analysis`](forge/skills/spreadsheet-analysis/SKILL.md) | Analyze and enrich tabular datasets | 161 | 2185 | 2319 | Model-visible |

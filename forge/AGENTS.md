@@ -86,6 +86,14 @@ are explicit options. Never create or edit its required vault-owned wiki
 templates. Nothing enters the vault until the user accepts exact `i-NNN` or
 `w-NNN` proposal ids.
 
+Route "review my article", "be reviewer 2 on this", or "peer review this draft"
+to `reviewer-2`. It comments on substance only — research gaps, thin evidence,
+faulty inference, structural problems, shallow theoretical engagement — and each
+criticism carries its fix, with citations that must resolve against a real
+`web-research` run. It never modifies the article: the output is a new review
+copy in `00 Inbox` reproducing the body verbatim with comment callouts between
+its blocks, and the render proves that byte for byte before writing.
+
 The `vault-workflow` extension adds a plan -> execute -> verify loop for changes
 to an Obsidian vault, driven by the single local model. The user drives phases
 with `/plan`, `/execute`, `/verify` (and `/workflow off`); each phase sets the

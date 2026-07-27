@@ -1,0 +1,28 @@
+{
+	"name": "reviewer-2",
+	"type": "pi-forge-skill",
+	"version": "0.1.0",
+	"description": "Peer-review a scholarly article note as a separate review copy - anchored critique callouts on gaps, evidence, logic, theory, and structure, each carrying its fix and citations resolved against real research runs, plus a ranked meta review and revision plan.",
+	"skill_file": "SKILL.md",
+	"scripts_dir": "scripts",
+	"references_dir": "references",
+	"restart_safe": true,
+	"tools": [
+		{
+			"name": "reviewer_2",
+			"description": "Index an article note into anchorable blocks; validate agent-authored review comments against the article and its linked web-research runs (anchors, verbatim quotation, resolvable citations, hedging where only an abstract was read); review them with the thinking model; and render a review copy in '00 Inbox' that interleaves comment callouts with the article body reproduced byte for byte, followed by a meta review, a step-by-step fix plan, generated references, and provenance. Proves the rendered copy strips back to the original body before writing anything. Creates new files only and is inspectable with status/doctor.",
+			"command": "python3 scripts/reviewer-2.py",
+			"destructive": true
+		}
+	],
+	"safety": {
+		"destructive_by_default": false,
+		"requires_review_for_filesystem_changes": false,
+		"preserve_provenance_when_applicable": true,
+		"never_deletes_notes": true,
+		"never_modifies_existing_notes": true,
+		"creates_new_inbox_notes_only": true,
+		"reproduces_article_body_verbatim": true,
+		"marks_generated_notes": true
+	}
+}

@@ -21,6 +21,7 @@ reconciles it.
 - `personal-admin`: Turn personal/admin documents into summaries, decisions, and action plans.
 - `project-extraction`: Run or continuously refresh live project repositories with truthful packet/source coverage, reviewed Inbox intake, serial model-assisted extraction and reconciliation, source-backed controls, focused views, explicitly labeled drafts, and CSV/Mermaid/HTML Gantt outputs while preserving conflicts and human status ownership.
 - `report-output`: Assemble polished deliverables from processed research or document outputs.
+- `reviewer-2`: Peer-review a scholarly article note as a separate review copy in `00 Inbox` - anchored critique callouts on research gaps, evidence, logic, theory, and structure, each carrying its fix and citations resolved against real `web-research` runs, plus a ranked meta review and revision plan; never modifies the article.
 - `skill-builder`: Design, scaffold, validate, and audit portable Agent Skills.
 - `site-builder`: Build static websites from structured content folders.
 - `spreadsheet-analysis`: Analyze, clean, validate, and enrich tabular datasets.
