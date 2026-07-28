@@ -29,6 +29,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import run_state
+import vault_lexicon
+from vault_lexicon import (  # noqa: F401  (re-exported for callers and tests)
+    apply_corrections,
+    compile_corrections,
+    merge_dictionaries,
+    normalize_entry,
+)
 
 
 # Per-backend engine configuration. Models download to the managed cache on
@@ -280,35 +287,12 @@ def project_dictionary_path(explicit=None):
     return (Path.cwd() / ".forge" / "transcription-dictionary.json").resolve()
 
 
-def normalize_entry(entry):
-    if not isinstance(entry, dict):
-        return None
-    correct = str(entry.get("correct", "")).strip()
-    if not correct:
-        return None
-    variants = [str(value).strip() for value in entry.get("variants", []) if str(value).strip()]
-    return {
-        "correct": correct,
-        "variants": sorted(set(variants), key=lambda value: (-len(value), value.lower())),
-        "category": entry.get("category") or "term",
-        "case_sensitive": bool(entry.get("case_sensitive", False)),
-        "whole_word": bool(entry.get("whole_word", True)),
-    }
-
-
 def load_dictionary(path):
-    path = Path(path)
-    if not path.is_file():
-        return []
+    """Shared loader, reported the way this CLI reports everything else."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        fail(f"could not read dictionary {path}: {error}")
-    entries = data.get("entries", data) if isinstance(data, dict) else data
-    if not isinstance(entries, list):
-        fail(f"dictionary {path} must contain a list of entries")
-    normalized = [normalize_entry(entry) for entry in entries]
-    return [entry for entry in normalized if entry]
+        return vault_lexicon.load_dictionary(path)
+    except vault_lexicon.UserError as error:
+        fail(str(error))
 
 
 def save_dictionary(path, entries):
@@ -322,68 +306,39 @@ def save_dictionary(path, entries):
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def merge_dictionaries(global_entries, project_entries):
-    merged = {entry["correct"].lower(): entry for entry in global_entries}
-    for entry in project_entries:
-        merged[entry["correct"].lower()] = entry
-    return sorted(merged.values(), key=lambda entry: entry["correct"].lower())
+def vault_terms(vault):
+    """Terms from a vault's lexicon note, so the two skills share one glossary.
 
-
-def compile_corrections(entries):
-    compiled = []
-    for entry in entries:
-        for variant in entry["variants"]:
-            flags = 0 if entry["case_sensitive"] else re.IGNORECASE
-            pattern = re.escape(variant)
-            pattern = re.sub(r"\\\s+|\\ ", r"\\s+", pattern)
-            if entry["whole_word"]:
-                pattern = rf"(?<!\w){pattern}(?!\w)"
-            compiled.append((variant, entry["correct"], entry["category"], re.compile(pattern, flags)))
-    compiled.sort(key=lambda item: -len(item[0]))
-    return compiled
-
-
-def apply_corrections(text, entries):
-    log = {}
-    for variant, correct, category, regex in compile_corrections(entries):
-        offsets = []
-
-        def record(match):
-            offsets.append(match.start())
-            return correct
-
-        text, count = regex.subn(record, text)
-        if count:
-            key = (correct, variant)
-            existing = log.get(key, {"category": category, "count": 0, "offsets": []})
-            existing["count"] += count
-            existing["offsets"].extend(offsets)
-            log[key] = existing
-    rows = [
-        {
-            "correct": correct,
-            "variant": variant,
-            "category": value["category"],
-            "count": value["count"],
-            "offsets": ";".join(str(offset) for offset in value["offsets"][:50]),
-        }
-        for (correct, variant), value in log.items()
-    ]
-    rows.sort(key=lambda row: (-row["count"], row["correct"].lower()))
-    return text, rows
+    The vault note is the ergonomic surface -- it is editable in Obsidian from
+    anywhere -- and this skill can reach it whenever a vault is named.
+    """
+    if not vault:
+        return []
+    root = Path(vault).expanduser()
+    if not root.is_dir():
+        fail(f"vault root does not exist: {root}")
+    try:
+        path = vault_lexicon.resolve_lexicon_path(root)
+        if path is None:
+            return []
+        return vault_lexicon.parse_lexicon_note(path.read_text(encoding="utf-8"))["terms"]
+    except (vault_lexicon.UserError, OSError) as error:
+        fail(f"could not read the vault lexicon: {error}")
 
 
 def resolve_dictionary(args):
     if getattr(args, "no_dictionary", False):
-        return [], {"global": None, "project": None}
+        return [], {"global": None, "project": None, "vault": None}
     global_path = global_dictionary_path()
     project_path = project_dictionary_path(getattr(args, "project_dictionary", None))
     global_entries = load_dictionary(global_path)
     project_entries = load_dictionary(project_path)
-    merged = merge_dictionaries(global_entries, project_entries)
+    vault_entries = vault_terms(getattr(args, "vault", None))
+    merged = merge_dictionaries(merge_dictionaries(global_entries, project_entries), vault_entries)
     return merged, {
         "global": str(global_path) if global_entries else None,
         "project": str(project_path) if project_entries else None,
+        "vault": str(getattr(args, "vault", None)) if vault_entries else None,
     }
 
 
@@ -1059,12 +1014,15 @@ def scope_path(scope, project_override=None):
 def command_dict_list(args):
     global_entries = load_dictionary(global_dictionary_path())
     project_entries = load_dictionary(project_dictionary_path(args.project_dictionary))
+    vault_entries = vault_terms(getattr(args, "vault", None))
     if args.scope == "global":
         entries = global_entries
     elif args.scope == "project":
         entries = project_entries
+    elif args.scope == "vault":
+        entries = vault_entries
     else:
-        entries = merge_dictionaries(global_entries, project_entries)
+        entries = merge_dictionaries(merge_dictionaries(global_entries, project_entries), vault_entries)
     print(
         json.dumps(
             {
@@ -1148,6 +1106,7 @@ def command_dict_apply(args):
 
 def add_dictionary_arguments(subparser, include_no_dictionary=True):
     subparser.add_argument("--project-dictionary", help="Path to a project dictionary override.")
+    subparser.add_argument("--vault", help="Obsidian vault whose lexicon note adds terms on top.")
     if include_no_dictionary:
         subparser.add_argument("--no-dictionary", action="store_true", help="Skip dictionary corrections.")
 
@@ -1200,8 +1159,9 @@ def parser():
     dict_sub = dictionary.add_subparsers(dest="dict_command", required=True)
 
     dict_list = dict_sub.add_parser("list", help="List dictionary entries.")
-    dict_list.add_argument("--scope", choices=["global", "project", "merged"], default="merged")
+    dict_list.add_argument("--scope", choices=["global", "project", "vault", "merged"], default="merged")
     dict_list.add_argument("--project-dictionary", help="Path to a project dictionary override.")
+    dict_list.add_argument("--vault", help="Obsidian vault whose lexicon note adds terms on top.")
     dict_list.set_defaults(handler=command_dict_list)
 
     dict_add = dict_sub.add_parser("add", help="Add or update a correction entry.")

@@ -1204,6 +1204,190 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("inbox", json.loads(completed.stdout)["errors"][0]["message"])
 
 
+LEXICON = {
+    "terms": [
+        {
+            "correct": "Bodhicitta",
+            "variants": ["Buddhic chitta"],
+            "category": "term",
+            "case_sensitive": False,
+            "whole_word": True,
+            "note": "",
+        }
+    ],
+    "speakers": [
+        {
+            "name": "Marge Anderson",
+            "link": "[[Marge Anderson]]",
+            "appears": "always",
+            "aliases": ["Marge"],
+            "cue": "The other voice in the Slipstream sync.",
+            "role": "Executive Vice President",
+        },
+        {
+            "name": "Alexi Miller",
+            "link": "[[Alexi Miller]]",
+            "appears": "sometimes",
+            "aliases": ["Alexi"],
+            "cue": "",
+            "role": "Director of Building Innovation",
+        },
+    ],
+}
+
+
+class LexiconTests(unittest.TestCase):
+    """The lexicon's contact points with the pipeline's own invariants."""
+
+    def blocks(self, *texts):
+        return [{"speaker": None, "seconds": index, "text": text, "raw": f"*0:0{index}*\n{text}\n\n"}
+                for index, text in enumerate(texts, start=1)]
+
+    def test_corrections_rewrite_the_prompt_text_and_never_the_raw_export(self):
+        blocks = self.blocks("we talked about Buddhic chitta for an hour")
+        corrected, rows = vt.correct_blocks(blocks, LEXICON["terms"])
+        self.assertIn("Bodhicitta", corrected[0]["text"])
+        self.assertEqual(corrected[0]["raw"], blocks[0]["raw"])
+        self.assertEqual(rows, [{"correct": "Bodhicitta", "variant": "Buddhic chitta", "count": 1}])
+
+    def test_a_corrected_term_does_not_read_as_fabrication(self):
+        # The gate compares against the corrected source, so a tier-one
+        # correction is simply present on both sides.
+        source = "we talked about Bodhicitta for an hour"
+        self.assertEqual(vt.check_chunk("We talked about Bodhicitta for an hour.", source, {}, False, False), [])
+
+    def test_a_model_correction_is_fabrication_unless_it_was_offered(self):
+        source = "we talked about Buddhistta for an hour"
+        cleaned = "We talked about Bodhicitta for an hour."
+        self.assertIn("bodhicitta", vt.added_words(source, cleaned, []))
+        self.assertEqual(vt.added_words(source, cleaned, ["Bodhicitta"]), [])
+
+    def test_the_gate_takes_the_offered_terms_from_the_payload(self):
+        source = "we covered Buddhistta and Lhojjong and Tongkapa and Shantee Deva and Adisha today"
+        cleaned = "We covered Bodhicitta and Lojong and Tsongkhapa and Śāntideva and Atiśa today."
+        terms = ["Bodhicitta", "Lojong", "Tsongkhapa", "Śāntideva", "Atiśa"]
+        self.assertIn("not in the chunk", vt.check_chunk(cleaned, source, {}, False, False)[0])
+        glossary = [{"term": term, "heardAs": "x"} for term in terms]
+        self.assertEqual(vt.check_chunk(cleaned, source, {}, False, False, glossary), [])
+
+    def test_an_applied_offer_becomes_a_proposal(self):
+        glossary = [{"term": "Bodhicitta", "heardAs": "Bodhi citta"}]
+        source = "we talked about Bodhi citta"
+        self.assertEqual(
+            vt.accepted_corrections(source, "We talked about Bodhicitta.", glossary),
+            [{"correct": "Bodhicitta", "variant": "Bodhi citta"}],
+        )
+        # Declined offers are not proposed.
+        self.assertEqual(vt.accepted_corrections(source, "We talked about Bodhi citta.", glossary), [])
+
+    def test_the_roster_reaches_classification_from_anywhere_in_the_recording(self):
+        blocks = self.blocks(*(["nothing much to see here"] * 400), "and then Alexi sent the numbers over")
+        item = {"path": "00 Inbox/a.md", "filename_hint": None, "sha256": "x",
+                "stats": {"blocks": len(blocks), "words": 2000, "duration_seconds": 60}}
+        payload = vt.classify_payload(item, {"preamble": "", "blocks": blocks, "trailing": ""}, LEXICON)
+        offered = {entry["name"] for entry in payload["knownSpeakers"]}
+        # Alexi is named far past the head excerpt the model is shown.
+        self.assertNotIn("Alexi", payload["head"])
+        self.assertEqual(offered, {"Marge Anderson", "Alexi Miller"})
+
+    def test_a_roster_name_outside_the_offered_list_is_dropped(self):
+        record, warnings = self.classified(
+            {"who": "Someone Invented", "kind": "name", "confidence": "high", "source": "roster",
+             "evidence": "you are presenting at the USGBC session"}
+        )
+        self.assertEqual(record["speakers"]["Speaker 1"]["who"], "unknown")
+        self.assertTrue(any("not in the offered roster" in warning for warning in warnings))
+
+    def classified(self, entry, roster_names=("Marge Anderson",)):
+        parsed = {
+            "preamble": "",
+            "blocks": [
+                {"speaker": "Speaker 1", "seconds": 1, "text": "I need the numbers before Friday", "raw": ""},
+                {"speaker": "Speaker 2", "seconds": 2, "text": "you are presenting at the USGBC session", "raw": ""},
+            ],
+            "trailing": "",
+        }
+        value = {
+            "recording_type": "meeting",
+            "material_role": "personal-exchange",
+            "title": "A Real Meeting Title",
+            "effective_speakers": 2,
+            "speakers": {"Speaker 1": entry},
+        }
+        return vt.validate_classification(value, {"path": "00 Inbox/a.md", "stats": {}}, parsed, list(roster_names))
+
+    def test_an_offered_roster_name_survives_and_is_spelled_the_roster_way(self):
+        record, _warnings = self.classified(
+            {"who": "marge anderson", "kind": "name", "confidence": "medium", "source": "roster",
+             "evidence": "you are presenting at the USGBC session"}
+        )
+        self.assertEqual(record["speakers"]["Speaker 1"]["who"], "Marge Anderson")
+
+    def test_quoting_the_cue_back_is_not_evidence(self):
+        # The observed failure: the model repeats the roster cue verbatim and
+        # attaches a real person to whichever label came first.
+        record, warnings = self.classified(
+            {"who": "Marge Anderson", "kind": "name", "confidence": "medium", "source": "roster",
+             "evidence": "The other voice in my recurring Slipstream one-to-one."}
+        )
+        self.assertEqual(record["speakers"]["Speaker 1"]["who"], "unknown")
+        self.assertTrue(any("not from the transcript" in warning for warning in warnings))
+
+    def test_a_roster_name_with_no_evidence_at_all_is_dropped(self):
+        record, warnings = self.classified(
+            {"who": "Marge Anderson", "kind": "name", "confidence": "medium", "source": "roster"}
+        )
+        self.assertEqual(record["speakers"]["Speaker 1"]["who"], "unknown")
+        self.assertTrue(any("not from the transcript" in warning for warning in warnings))
+
+    def test_a_roster_identification_is_usable_at_medium_confidence(self):
+        labels = ["Speaker 1", "Speaker 2"]
+        speakers = {
+            "Speaker 1": {"who": "Marge Anderson", "kind": "name", "confidence": "medium", "source": "roster"},
+            "Speaker 2": {"who": "Someone", "kind": "name", "confidence": "medium", "source": "transcript"},
+        }
+        mapping, drop = vt.derive_speaker_map(labels, speakers, 2, "names", None, LEXICON)
+        self.assertFalse(drop)
+        # The roster carries the identification; a medium transcript guess does not.
+        self.assertEqual(mapping, {"Speaker 1": "Marge Anderson", "Speaker 2": "Speaker 2"})
+
+    def test_an_alias_is_written_as_the_name_the_vault_files(self):
+        speakers = {"Speaker 1": {"who": "Marge", "kind": "name", "confidence": "high", "source": "transcript"}}
+        mapping, _drop = vt.derive_speaker_map(["Speaker 1", "Speaker 2"], speakers, 2, "names", None, LEXICON)
+        self.assertEqual(mapping["Speaker 1"], "Marge Anderson")
+
+    def test_a_corrected_term_is_not_counted_as_a_dropped_source_word(self):
+        # The rare-word check measures against the source the cleanup read, not
+        # the raw export, or every correction reads as a vanished distinctive word.
+        class Args:
+            compiled_lexicon = LEXICON
+
+        parsed = {"preamble": "", "blocks": self.blocks("we talked about Buddhic chitta"), "trailing": ""}
+        corrected = vt.corrected_source_text(parsed, Args())
+        self.assertIn("Bodhicitta", corrected)
+        self.assertNotIn("Buddhic chitta", corrected)
+        # A correction the model made on offer counts too, though it is not
+        # recorded in the dictionary yet.
+        parsed = {"preamble": "", "blocks": self.blocks("he explained Bodhi citta"), "trailing": ""}
+        proposals = [{"correct": "Bodhicitta", "variant": "Bodhi citta"}]
+        self.assertIn("Bodhicitta", vt.corrected_source_text(parsed, Args(), proposals))
+
+    def test_the_report_names_corrections_proposals_and_roster_speakers(self):
+        records = [
+            {
+                "source": "00 Inbox/a.md",
+                "corrections": [{"correct": "Bodhicitta", "variant": "Buddhic chitta", "count": 3}],
+                "proposals": [{"correct": "Bodhicitta", "variant": "Bodhi citta"}],
+                "roster_speakers": ["Marge Anderson"],
+            }
+        ]
+        report = "\n".join(vt.lexicon_report(records))
+        self.assertIn("`Buddhic chitta` → `Bodhicitta` ×3", report)
+        self.assertIn("Marge Anderson", report)
+        self.assertIn("`Bodhi citta` → `Bodhicitta`", report)
+        self.assertEqual(vt.lexicon_report([{"source": "x"}]), [])
+
+
 def run_dir_of(result):
     return Path(result["data"]["run_directory"])
 

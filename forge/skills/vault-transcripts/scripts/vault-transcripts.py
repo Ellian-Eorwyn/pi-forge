@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import forge_llm
 import forge_verify
 import run_state
+import vault_lexicon
 import vault_voice
 from vault_schema import (
     INBOX_DIR,
@@ -452,6 +453,31 @@ def serialize_parsed(parsed):
     return parsed["preamble"] + "".join(block["raw"] for block in parsed["blocks"]) + parsed["trailing"]
 
 
+def correct_blocks(blocks, entries):
+    """Replace recorded mistranscriptions in the text the model will read.
+
+    Only ``text`` is touched. ``raw`` is what the note preserves verbatim under
+    ``# Transcript`` and what the fidelity check reads, so leaving it alone
+    keeps the original export byte-exact while the cleaned copy gets the
+    spelling the owner actually uses.
+    """
+    if not entries:
+        return blocks, []
+    totals = {}
+    corrected = []
+    for block in blocks:
+        text, rows = vault_lexicon.apply_corrections(block["text"], entries)
+        for row in rows:
+            key = (row["correct"], row["variant"])
+            totals[key] = totals.get(key, 0) + row["count"]
+        corrected.append({**block, "text": text})
+    summary = [
+        {"correct": correct, "variant": variant, "count": count}
+        for (correct, variant), count in sorted(totals.items(), key=lambda item: (-item[1], item[0][0].lower()))
+    ]
+    return corrected, summary
+
+
 def transcript_stats(parsed):
     blocks = parsed["blocks"]
     labels = Counter(block["speaker"] for block in blocks if block["speaker"])
@@ -686,7 +712,7 @@ Return exactly one JSON object and nothing else:
 {"recording_type": "memo" | "journal" | "conversation" | "meeting" | "therapy" | "lecture" | "other",
  "material_role": "owner-authored" | "personal-exchange" | "external-source" | "unknown",
  "title": "<short descriptive title>",
- "speakers": {"<label exactly as given>": {"who": "<name, role, or unknown>", "kind": "name" | "role" | "unknown", "confidence": "high" | "medium" | "low"}},
+ "speakers": {"<label exactly as given>": {"who": "<name, role, or unknown>", "kind": "name" | "role" | "unknown", "confidence": "high" | "medium" | "low", "source": "transcript" | "roster", "evidence": "<the words that identify them, or null>"}},
  "effective_speakers": <how many people are actually speaking>,
  "spoken_date": "<YYYY-MM-DD or null>",
  "evidence": "<the exact sentence from the transcript that states that date, or null>",
@@ -719,11 +745,40 @@ other wrapper for the act of recording — go straight to the subject. If
 lightly normalized, unless the transcript shows it is wrong.
 
 speakers - one entry for every label in "labels", using the label text exactly.
-Name a person only from evidence inside the transcript: someone is addressed by
-name, introduces themselves, or is named as the speaker. Never infer a name from
-the subject matter. Use kind "role" for an unnamed but identifiable role
-("Therapist", "Interviewer", "Instructor"), and {"who": "unknown", "kind":
-"unknown"} when there is no evidence.
+Name a person only from evidence: someone is addressed by name, introduces
+themselves, is named as the speaker, or is identified by a roster cue as
+described below. Never infer a name from the subject matter — speaking about
+someone is not evidence that they are speaking. Use kind "role" for an unnamed
+but identifiable role ("Therapist", "Interviewer", "Instructor"), and
+{"who": "unknown", "kind": "unknown"} when there is no evidence.
+
+Set "source" to where the identification came from: "transcript" when the
+recording names them, "roster" when it took a "knownSpeakers" cue to know who
+the voice is.
+
+"evidence" is always a quote from the transcript, never from the roster. Quoting
+a cue back is not evidence — the cue is the claim, and the transcript is what
+has to support it. Quote the words that tie this identification to THIS label:
+what this speaker said about themselves, or what another speaker said to or
+about them.
+
+knownSpeakers - people the vault owner has recorded, given when any of them may
+be here. It is a candidate list, not an attendance list, and being on it is
+never by itself evidence that someone is present. Use it two ways:
+- Spelling. A name the transcript states in mangled form takes the roster
+  spelling: "Alexei Miller" heard for a listed "Alexi Miller" is that person.
+- Identity. An entry's "cue" and "role" describe one particular voice. Work out
+  which label is that voice by what each label actually says: whose work, whose
+  meeting, whose title, who is addressed about what. Name that label with
+  confidence "medium" and quote the transcript words that made it that label and
+  not another one. When the cue fits every voice equally, or none clearly, it
+  fits nobody: leave them unknown.
+
+The person recording is usually one of the speakers and is not on the roster, so
+a cue phrased from their side ("the other voice", "my therapist", "my manager")
+describes someone other than whoever is recording. Only ever use a name spelled
+as "knownSpeakers" gives it. If two entries fit one voice equally well, name
+neither.
 
 effective_speakers - how many people are really talking. This transcriber splits
 one voice into several labels, so labels are an upper bound, not an answer. If
@@ -736,7 +791,7 @@ needs_review - true when the recording is too garbled, too short, or too
 ambiguous to title honestly."""
 
 
-def classify_payload(item, parsed):
+def classify_payload(item, parsed, lexicon=None):
     blocks = parsed["blocks"]
     labels = ordered_labels(blocks)
     rendered = render_turns(collapse_turns(blocks, {label: label for label in labels}))
@@ -756,6 +811,11 @@ def classify_payload(item, parsed):
         payload["handwrittenPreamble"] = parsed["preamble"].strip()[:1000]
     if len(rendered) > CLASSIFY_HEAD_CHARS:
         payload["tail"] = rendered[-CLASSIFY_TAIL_CHARS:]
+    # Roster matching reads the whole recording, not the excerpt the model gets:
+    # a name is said once, usually nowhere near the beginning.
+    roster = vault_lexicon.candidate_speakers(rendered, (lexicon or {}).get("speakers", []))
+    if roster:
+        payload["knownSpeakers"] = vault_lexicon.speaker_offers(roster)
     return payload
 
 
@@ -763,7 +823,7 @@ def normalize_body_text(body):
     return re.sub(r"\s+", " ", body).casefold()
 
 
-def validate_classification(value, item, parsed):
+def validate_classification(value, item, parsed, roster_names=()):
     """Validate untrusted classification output. Returns (record, warnings)."""
     warnings = []
     if not isinstance(value, dict):
@@ -780,6 +840,8 @@ def validate_classification(value, item, parsed):
         title = validate_title(value.get("title"))
 
     labels = ordered_labels(parsed["blocks"])
+    offered = {vault_lexicon.fold(name): name for name in roster_names}
+    spoken = normalize_body_text(" ".join(block["text"] for block in parsed["blocks"]))
     speakers = {}
     raw_speakers = value.get("speakers") if isinstance(value.get("speakers"), dict) else {}
     for label in labels:
@@ -787,10 +849,39 @@ def validate_classification(value, item, parsed):
         who = entry.get("who") if isinstance(entry.get("who"), str) else "unknown"
         kind = entry.get("kind") if entry.get("kind") in {"name", "role", "unknown"} else "unknown"
         confidence = entry.get("confidence") if entry.get("confidence") in {"high", "medium", "low"} else "low"
+        source = entry.get("source") if entry.get("source") in {"transcript", "roster"} else "transcript"
+        evidence = entry.get("evidence") if isinstance(entry.get("evidence"), str) else None
         who = safe_title(who)[:40]
         if not who or who.casefold() == "unknown":
             who, kind = "unknown", "unknown"
-        speakers[label] = {"who": who, "kind": kind, "confidence": confidence}
+        if who != "unknown" and source == "roster":
+            # A roster identification is only as good as the roster. Anything
+            # else claiming that provenance is the model inventing a person,
+            # which is the one failure this shortcut could introduce.
+            match = offered.get(vault_lexicon.fold(who))
+            if match is None:
+                warnings.append(f"dropped roster speaker {who!r} for {label}: not in the offered roster")
+                who, kind, confidence = "unknown", "unknown", "low"
+            elif not evidence or normalize_body_text(evidence) not in spoken:
+                # The roster says who may be here; only the transcript says
+                # which voice they are. Quoting the cue back proves the model
+                # never did that second step, and the observed failure is
+                # attaching a real person to the wrong label.
+                warnings.append(
+                    f"dropped roster speaker {match!r} for {label}: evidence is not from the transcript"
+                )
+                who, kind, confidence = "unknown", "unknown", "low"
+            else:
+                who = match
+        if who == "unknown":
+            source, evidence = "transcript", None
+        speakers[label] = {
+            "who": who,
+            "kind": kind,
+            "confidence": confidence,
+            "source": source,
+            "evidence": (evidence or "")[:200] or None,
+        }
     unexpected = sorted(set(raw_speakers) - set(labels))
     if unexpected:
         warnings.append(f"classification named speakers that are not in the transcript: {', '.join(unexpected[:5])}")
@@ -846,12 +937,18 @@ def validate_classification(value, item, parsed):
     }, warnings
 
 
-def derive_speaker_map(labels, speakers, effective, policy, owner):
+def derive_speaker_map(labels, speakers, effective, policy, owner, lexicon=None):
     """Decide what each original label is called in the cleaned transcript.
 
     Labels the transcriber invented get merged and relabelled; labels that are
     already someone's real name are kept under every policy, because the source
     knew something the model is only guessing at.
+
+    A roster identification is accepted at "medium" confidence where a
+    transcript-only one needs "high". The roster is the owner's own knowledge of
+    who they record, so it is better evidence than the model's reading of a
+    voice, and it is the only thing that can name the second voice in a session
+    where nobody says a name aloud.
     """
     if not labels:
         return {}, False
@@ -865,10 +962,11 @@ def derive_speaker_map(labels, speakers, effective, policy, owner):
         else:
             entry = speakers.get(label, {})
             who, kind, confidence = entry.get("who", "unknown"), entry.get("kind"), entry.get("confidence")
+            from_roster = entry.get("source") == "roster"
             display = f"Speaker {position}"
-            if who != "unknown" and confidence == "high":
+            if who != "unknown" and (confidence == "high" or (from_roster and confidence == "medium")):
                 if policy == "names":
-                    display = who
+                    display = vault_lexicon.canonical_name(lexicon, who) or who
                 elif policy == "roles" and (kind == "role" or (owner and who.casefold() == owner.casefold())):
                     display = who
         if display in used:
@@ -899,7 +997,8 @@ def classify_items(args, vault, items, run_dir, skip):
         try:
             data = (vault / item["path"]).read_bytes()
             parsed = parse_transcript(split_frontmatter(data)["body"])
-            payload = classify_payload(item, parsed)
+            payload = classify_payload(item, parsed, getattr(args, "compiled_lexicon", None))
+            roster_names = [offer["name"] for offer in payload.get("knownSpeakers", [])]
             messages = [
                 {"role": "system", "content": CLASSIFY_SYSTEM},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
@@ -915,7 +1014,7 @@ def classify_items(args, vault, items, run_dir, skip):
                 task="classify-transcript",
             )
             try:
-                classification, record_warnings = validate_classification(value, item, parsed)
+                classification, record_warnings = validate_classification(value, item, parsed, roster_names)
             except UserError as error:
                 repair = messages + [
                     {
@@ -933,7 +1032,7 @@ def classify_items(args, vault, items, run_dir, skip):
                     api_key=args.api_key,
                     task="classify-transcript-repair",
                 )
-                classification, record_warnings = validate_classification(value, item, parsed)
+                classification, record_warnings = validate_classification(value, item, parsed, roster_names)
             record = {
                 "path": item["path"],
                 "sha256": item["sha256"],
@@ -1025,7 +1124,14 @@ Chunk context:
 - "previousTail" is the end of the previous cleaned chunk. If this chunk
   continues that sentence or that speaker's turn, continue it cleanly.
 - "speakers" maps each label to the name to use. Use those names exactly. When a
-  label maps to null there is one speaker only: use no labels at all."""
+  label maps to null there is one speaker only: use no labels at all.
+- "glossary" lists specialist terms and names the vault owner uses that this
+  chunk appears to contain in mistranscribed form. Each entry gives the correct
+  spelling and the words the transcriber produced instead. Where that passage
+  really is that term — the sound and the sense both fit — write the correct
+  spelling. Where it is not, leave the text alone. Never introduce a glossary
+  term into a passage that did not say it; a list of likely terms is not
+  permission to add one, and this is the one rule here that outranks tidiness."""
 
 
 def voice_context_for(record):
@@ -1063,6 +1169,7 @@ def cleanup_payload(
     drop_labels,
     tiny,
     voice=None,
+    lexicon=None,
 ):
     turns = collapse_turns(chunk, {} if drop_labels else speaker_map)
     payload = {
@@ -1095,6 +1202,12 @@ def cleanup_payload(
         payload["headingsSoFar"] = headings[-12:]
     if previous_tail:
         payload["previousTail"] = previous_tail[-300:]
+    # Only terms this chunk plausibly garbled. Recorded variants were already
+    # replaced in code before the chunk got here, so whatever is left is a
+    # mistranscription nobody has written down yet.
+    glossary = vault_lexicon.near_miss_terms(payload["chunk"], vault_lexicon.term_candidates(lexicon))
+    if glossary:
+        payload["glossary"] = glossary
     return payload, payload["chunk"]
 
 
@@ -1162,7 +1275,7 @@ def heading_lines(markdown):
     return [line.strip() for line in str(markdown).splitlines() if line.strip().startswith("#")]
 
 
-def check_chunk(cleaned, source, speaker_map, drop_labels, tiny):
+def check_chunk(cleaned, source, speaker_map, drop_labels, tiny, glossary=()):
     """Deterministic gate on one cleaned chunk. Returns a list of problems."""
     problems = []
     if not isinstance(cleaned, str) or not cleaned.strip():
@@ -1178,6 +1291,10 @@ def check_chunk(cleaned, source, speaker_map, drop_labels, tiny):
             problems.append(f"kept a transcript timestamp: {line.strip()!r}")
             break
     allowed = [] if drop_labels else [value for value in speaker_map.values() if value]
+    # A corrected term is a word the source does not contain — that is the whole
+    # point of correcting it — so the terms actually offered for this chunk have
+    # to be allowed, or every successful correction reads as fabrication.
+    allowed = allowed + [offer["term"] for offer in glossary]
     invented = added_words(source, cleaned, allowed)
     if len(invented) > MAX_INVENTED_WORDS:
         problems.append(f"these words are not in the chunk: {', '.join(invented[:8])}")
@@ -1188,7 +1305,7 @@ def check_chunk(cleaned, source, speaker_map, drop_labels, tiny):
     return problems
 
 
-def clean_chunk_once(args, service, messages, source, speaker_map, drop_labels, tiny, task):
+def clean_chunk_once(args, service, messages, source, speaker_map, drop_labels, tiny, task, glossary=()):
     value, _call = forge_llm.call_json_with_retry(
         service,
         messages,
@@ -1200,7 +1317,7 @@ def clean_chunk_once(args, service, messages, source, speaker_map, drop_labels, 
         task=task,
     )
     cleaned = value.get("cleaned") if isinstance(value, dict) else None
-    problems = check_chunk(cleaned, source, speaker_map, drop_labels, tiny)
+    problems = check_chunk(cleaned, source, speaker_map, drop_labels, tiny, glossary)
     chunk_summary = value.get("chunk_summary") if isinstance(value, dict) else ""
     if not isinstance(chunk_summary, str):
         chunk_summary = ""
@@ -1214,8 +1331,9 @@ def clean_one_chunk(args, service, payload, source, speaker_map, drop_labels, ti
         {"role": "system", "content": system},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
+    glossary = payload.get("glossary", ())
     cleaned, summary, problems = clean_chunk_once(
-        args, service, messages, source, speaker_map, drop_labels, tiny, "clean-transcript-chunk"
+        args, service, messages, source, speaker_map, drop_labels, tiny, "clean-transcript-chunk", glossary
     )
     if not problems:
         return cleaned, summary
@@ -1230,11 +1348,30 @@ def clean_one_chunk(args, service, payload, source, speaker_map, drop_labels, ti
         }
     ]
     cleaned, summary, retry_problems = clean_chunk_once(
-        args, service, repair, source, speaker_map, drop_labels, tiny, "clean-transcript-chunk-repair"
+        args, service, repair, source, speaker_map, drop_labels, tiny, "clean-transcript-chunk-repair", glossary
     )
     if retry_problems:
         raise UserError(retry_problems[0])
     return cleaned, summary
+
+
+def accepted_corrections(source, cleaned, glossary):
+    """Offered terms the model actually applied to this chunk.
+
+    The offer named the words the transcriber produced, so an accepted offer is
+    a variant worth recording: next run it is corrected in code for free,
+    without a model deciding anything.
+    """
+    if not glossary or not isinstance(cleaned, str):
+        return []
+    before = {vault_lexicon.fold(word) for word in content_words(source)}
+    after = {vault_lexicon.fold(word) for word in content_words(cleaned)}
+    accepted = []
+    for offer in glossary:
+        parts = [vault_lexicon.fold(word) for word in content_words(offer["term"])]
+        if parts and all(part in after for part in parts) and not all(part in before for part in parts):
+            accepted.append({"correct": offer["term"], "variant": offer["heardAs"]})
+    return accepted
 
 
 def clean_items(args, vault, items, class_records, run_dir, skip):
@@ -1268,20 +1405,25 @@ def clean_items(args, vault, items, class_records, run_dir, skip):
             warnings.append(f"{item['path']}: could not re-read for cleanup ({error})")
             results[item["path"]] = {"error": str(error)}
             continue
+        lexicon = getattr(args, "compiled_lexicon", None)
         labels = ordered_labels(parsed["blocks"])
         speaker_map, drop_labels = derive_speaker_map(
-            labels, record["speakers"], record["effective_speakers"], args.speaker_policy, args.owner
+            labels, record["speakers"], record["effective_speakers"], args.speaker_policy, args.owner, lexicon
         )
         tiny = item["stats"]["words"] < args.tiny_words
-        chunks = chunk_blocks(parsed["blocks"])
-        prepared.append((item, record, parsed, speaker_map, drop_labels, tiny, chunks))
+        # Corrections land before chunking, so the model reads the right
+        # spelling and the added-words gate compares against the same text.
+        blocks, corrections = correct_blocks(parsed["blocks"], (lexicon or {}).get("terms", []))
+        chunks = chunk_blocks(blocks)
+        prepared.append((item, record, parsed, speaker_map, drop_labels, tiny, chunks, corrections))
         total_chunks += len(chunks)
     done = 0
     durations = []
-    for item, record, parsed, speaker_map, drop_labels, tiny, chunks in prepared:
+    for item, record, parsed, speaker_map, drop_labels, tiny, chunks, corrections in prepared:
         cleaned_chunks = []
         summaries = []
         headings = []
+        proposals = []
         previous_tail = ""
         failure = None
         for index, chunk in enumerate(chunks, start=1):
@@ -1293,6 +1435,7 @@ def clean_items(args, vault, items, class_records, run_dir, skip):
                 cleaned_chunks.append(cleaned)
                 summaries.append(row.get("chunk_summary", ""))
                 headings.extend(heading_lines(cleaned))
+                proposals.extend(row.get("proposals") or [])
                 previous_tail = cleaned[-300:]
                 continue
             if row is not None and row.get("status") == "failed":
@@ -1310,6 +1453,7 @@ def clean_items(args, vault, items, class_records, run_dir, skip):
                 drop_labels,
                 tiny,
                 getattr(args, "compiled_voice", None),
+                getattr(args, "compiled_lexicon", None),
             )
             try:
                 cleaned, chunk_summary = clean_one_chunk(
@@ -1343,6 +1487,8 @@ def clean_items(args, vault, items, class_records, run_dir, skip):
             name = f"{sha256_text(item['path'])[:12]}-{index:04d}.md"
             (artifacts / name).write_text(cleaned, encoding="utf-8")
             elapsed = round(time.time() - started, 3)
+            accepted = accepted_corrections(source, cleaned, payload.get("glossary", []))
+            proposals.extend(accepted)
             run_state.append_jsonl_fsync(
                 journal_path,
                 {
@@ -1354,6 +1500,7 @@ def clean_items(args, vault, items, class_records, run_dir, skip):
                     "artifact": name,
                     "cleaned_sha256": sha256_text(cleaned),
                     "chunk_summary": chunk_summary,
+                    "proposals": accepted,
                     "seconds": elapsed,
                 },
             )
@@ -1371,6 +1518,8 @@ def clean_items(args, vault, items, class_records, run_dir, skip):
             "speaker_map": speaker_map,
             "drop_labels": drop_labels,
             "tiny": tiny,
+            "corrections": corrections,
+            "proposals": proposals,
             "error": failure,
         }
     return results, warnings
@@ -1787,7 +1936,27 @@ def frontmatter_metadata(schema, recording_type):
     return metadata
 
 
-def check_note(item, cleaned, summary, note_text, head, parsed, args):
+def corrected_source_text(parsed, args, proposals=()):
+    """The source as the cleanup actually saw it.
+
+    Corrected terms are distinctive by definition, which is exactly what the
+    rare-word check counts. Measuring the cleaned text against the uncorrected
+    source would score every successful correction as a dropped word and hold
+    back the term-heavy recordings the lexicon helps most.
+    """
+    text = " ".join(block["text"] for block in parsed["blocks"])
+    lexicon = getattr(args, "compiled_lexicon", None)
+    entries = list((lexicon or {}).get("terms", []))
+    # What the model corrected on offer is not in the dictionary yet, so it has
+    # to be applied here too or it reads the same way.
+    entries.extend(
+        vault_lexicon.normalize_entry({"correct": row["correct"], "variants": [row["variant"]]})
+        for row in proposals or ()
+    )
+    return vault_lexicon.apply_corrections(text, entries)[0] if entries else text
+
+
+def check_note(item, cleaned, summary, note_text, head, parsed, args, proposals=()):
     """Every deterministic check that can fail a note, in one place.
 
     Returns (problems, measurements). A problem holds the note back: it keeps
@@ -1799,7 +1968,7 @@ def check_note(item, cleaned, summary, note_text, head, parsed, args):
         problems.append(f"generated section must contain exactly one level-one heading (found {heads})")
     if not note_text.endswith(item["raw_body"]):
         problems.append("raw transcript section is not byte-identical to the source body")
-    source_text = " ".join(block["text"] for block in parsed["blocks"])
+    source_text = corrected_source_text(parsed, args, proposals)
     source_words = len(source_text.split())
     # Prose only. A short dialogue carries one "**Name:**" per turn, and counting
     # those as content makes faithful cleanup of a chatty exchange look padded.
@@ -1957,7 +2126,14 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
                 reflection=summary_row.get("reflection"),
             )
             problems, measurements = check_note(
-                {**item, "raw_body": raw_body}, cleaned_result["cleaned"], summary, note_text, head, parsed, args
+                {**item, "raw_body": raw_body},
+                cleaned_result["cleaned"],
+                summary,
+                note_text,
+                head,
+                parsed,
+                args,
+                cleaned_result.get("proposals") or [],
             )
         except (OSError, UnicodeDecodeError, UserError, ValueError) as error:
             message = f"{type(error).__name__}: {error}"
@@ -1983,6 +2159,15 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
             else "personal exchange or ambiguous material; owner voice not applied"
         )
         assembled["speaker_map"] = cleaned_result["speaker_map"]
+        assembled["corrections"] = cleaned_result.get("corrections") or []
+        assembled["proposals"] = cleaned_result.get("proposals") or []
+        assembled["roster_speakers"] = sorted(
+            {
+                entry["who"]
+                for entry in (record.get("speakers") or {}).values()
+                if entry.get("source") == "roster" and entry.get("who") not in (None, "unknown")
+            }
+        )
         assembled["chunks"] = cleaned_result["chunks"]
         assembled["tiny"] = cleaned_result["tiny"]
         assembled["measurements"] = measurements
@@ -2077,7 +2262,17 @@ Flag an item only when it is actually wrong on that evidence:
 - the title does not describe this recording, or names the medium instead of the content,
 - the summary states something the transcript does not support, or is too vague
   to tell the reader what the recording was,
-- a speaker is given a real name the transcript does not justify.
+- a speaker is given a real name that neither the transcript nor the roster justifies.
+
+Names in "rosterSpeakers" come from the vault owner's own roster of people they
+record. The roster settles that this person may be in the recording, so do not
+flag such a name merely because the excerpt never says it aloud — that is what
+the roster is for, and it is not a contradiction.
+
+The roster settles nothing about **which** speaker they are. Check that
+attribution against the excerpt like any other claim: whose work, whose meeting,
+whose title, who is addressed about what. Flag it when the excerpt shows the
+name is on the wrong voice, and say which voice it belongs to.
 
 A defensible title or summary is 'ok' even if you would have written it
 differently; taste is not an error. You are seeing excerpts, so do not flag a
@@ -2126,14 +2321,22 @@ def verify_note_payload(vault, record, item):
         "speakers": {key: value for key, value in (record.get("speaker_map") or {}).items() if value},
         "rawHead": rendered[:VERIFY_HEAD_CHARS],
     }
+    if record.get("roster_speakers"):
+        payload["rosterSpeakers"] = record["roster_speakers"]
     if len(rendered) > VERIFY_HEAD_CHARS:
         payload["rawTail"] = rendered[-VERIFY_TAIL_CHARS:]
     return payload
 
 
-def fidelity_payloads(vault, record, run_dir):
+def fidelity_payloads(vault, record, run_dir, lexicon=None):
     """One packet item per sampled utterance, paired with the cleaned window it
-    should appear in. Long files are sampled rather than re-read whole."""
+    should appear in. Long files are sampled rather than re-read whole.
+
+    Samples are corrected the same way the cleaned copy was. Comparing a
+    corrected passage against the mistranscription it came from would read every
+    successful correction as the cleanup drifting from the source.
+    """
+    entries = (lexicon or {}).get("terms", [])
     try:
         cleaned_note = (run_dir / "assembled" / record["artifact"]).read_text(encoding="utf-8")
     except (OSError, KeyError, TypeError):
@@ -2147,12 +2350,13 @@ def fidelity_payloads(vault, record, run_dir):
     words = content_words(cleaned)
     items = []
     for position, block in enumerate(fidelity_samples(record["source"], parsed["blocks"]), start=1):
-        score, at = best_containment(block["text"], words)
+        utterance = vault_lexicon.apply_corrections(block["text"], entries)[0] if entries else block["text"]
+        score, at = best_containment(utterance, words)
         window = " ".join(words[max(0, at - 40) : at + 120])
         items.append(
             {
                 "id": f"{record['source']}#s{position}",
-                "sourceUtterance": block["text"],
+                "sourceUtterance": utterance,
                 "cleanedPassage": window,
                 "containment": round(score, 3),
             }
@@ -2185,7 +2389,9 @@ def verify_records(args, vault, items_by_path, records, run_dir):
         # Every chunked file, plus a sample of the single-chunk ones: a file the
         # model read in one pass has already passed the deterministic locator.
         if record.get("chunks", 1) > 1 or position % FIDELITY_SAMPLE_RATE == 0:
-            fidelity_items.extend(fidelity_payloads(vault, record, run_dir))
+            fidelity_items.extend(
+                fidelity_payloads(vault, record, run_dir, getattr(args, "compiled_lexicon", None))
+            )
 
     journal = run_dir / "verified.jsonl"
     fidelity_journal = run_dir / "verified-fidelity.jsonl"
@@ -2383,7 +2589,14 @@ def reassemble_escalated(args, vault, schema, items_by_path, clean_results, reco
                 reflection=record.get("reflection"),
             )
             problems, measurements = check_note(
-                {**item, "raw_body": raw_body}, cleaned, record["summary"], note_text, head, parsed, args
+                {**item, "raw_body": raw_body},
+                cleaned,
+                record["summary"],
+                note_text,
+                head,
+                parsed,
+                args,
+                record.get("proposals") or [],
             )
             record["measurements"] = measurements
             record["checks"] = problems
@@ -2522,6 +2735,47 @@ def verification_report(verification, records):
     return lines
 
 
+def lexicon_report(records):
+    """The lexicon section of report.md: what was corrected, who was named from
+    the roster, and what is worth adding to the dictionary."""
+    applied = {}
+    proposed = {}
+    named = []
+    for record in records:
+        for row in record.get("corrections") or []:
+            key = (row["correct"], row["variant"])
+            applied[key] = applied.get(key, 0) + row["count"]
+        for row in record.get("proposals") or []:
+            key = (row["correct"], row["variant"])
+            proposed[key] = proposed.get(key, 0) + 1
+        for name in record.get("roster_speakers") or []:
+            named.append((record["source"], name))
+    if not applied and not proposed and not named:
+        return []
+    lines = ["## Lexicon", ""]
+    if applied:
+        lines.extend([f"- Corrected in code: {sum(applied.values())} across {len(applied)} spellings"])
+        for (correct, variant), count in sorted(applied.items(), key=lambda item: (-item[1], item[0][0].lower()))[:20]:
+            lines.append(f"  - `{variant}` → `{correct}` ×{count}")
+    if named:
+        lines.append(f"- Speakers named from the roster: {len(named)}")
+        for source, name in named[:20]:
+            lines.append(f"  - `{Path(source).name}`: {name}")
+    if proposed:
+        lines.extend(
+            [
+                "",
+                "These spellings the model fixed are not in the dictionary yet. Adding one",
+                "makes it a free code-level correction on every future run:",
+                "",
+            ]
+        )
+        for (correct, variant), count in sorted(proposed.items(), key=lambda item: (-item[1], item[0][0].lower()))[:20]:
+            lines.append(f"- `{variant}` → `{correct}` (seen {count}×)")
+    lines.append("")
+    return lines
+
+
 def append_listing(report, entries, formatter, limit=60):
     for entry in entries[:limit]:
         report.append(formatter(entry))
@@ -2580,6 +2834,7 @@ def write_plan(run_dir, records, counts, dedupe, dry_run, vault, schema_hash, op
         "",
     ]
     report.extend(verification_report(verification, records))
+    report.extend(lexicon_report(records))
     # One block per note rather than a table: the summary is the thing worth
     # reading before approving, and a table cell would truncate it.
     report.extend(["## Notes To Process", ""])
@@ -2759,6 +3014,19 @@ def chat_service(args):
     }
 
 
+def dictionary_path(args):
+    """The standalone transcription dictionary, merged under the vault note.
+
+    That skill corrects a different engine's output than this inbox carries, so
+    the two variant lists barely overlap; a variant this engine never produces
+    costs nothing, which makes merging strictly more coverage.
+    """
+    if args.no_lexicon:
+        return None
+    path = vault_lexicon.default_dictionary_path()
+    return path if path.is_file() else None
+
+
 def resolved_options(args):
     return {
         "model": args.model,
@@ -2775,6 +3043,8 @@ def resolved_options(args):
         "schema": args.schema,
         "voice": args.voice,
         "no_voice": args.no_voice,
+        "lexicon": args.lexicon,
+        "no_lexicon": args.no_lexicon,
     }
 
 
@@ -2791,6 +3061,8 @@ RESUMABLE_OPTION_FLAGS = {
     "schema": "--schema",
     "voice": "--voice",
     "no_voice": "--no-voice",
+    "lexicon": "--lexicon",
+    "no_lexicon": "--no-lexicon",
 }
 
 
@@ -2812,7 +3084,7 @@ def adopt_stored_options(args, state):
     args.cache_prompt = stored.get("cache_prompt", args.cache_prompt)
 
 
-def run_configuration(args, vault, schema_hash, voice_path, voice_hash):
+def run_configuration(args, vault, schema_hash, voice_path, voice_hash, lexicon_path, lexicon_hash):
     return {
         "workflow": WORKFLOW,
         "command": "process",
@@ -2820,6 +3092,7 @@ def run_configuration(args, vault, schema_hash, voice_path, voice_hash):
             "vault": str(vault),
             "schema_hash": schema_hash,
             **vault_voice.voice_state(voice_path, voice_hash, "per-transcript"),
+            **vault_lexicon.lexicon_state(lexicon_path, lexicon_hash, dictionary_path(args)),
         },
         "options": resolved_options(args),
     }
@@ -2844,7 +3117,16 @@ def process(args):
     voice_path = vault_voice.resolve_voice_path(vault, args.voice, disabled=args.no_voice)
     voice, voice_hash = vault_voice.compiled_voice_for(vault, voice_path, cache_dir=vault / STATE_DIR / "cache")
     args.compiled_voice = voice
-    configuration = run_configuration(args, vault, schema_hash, voice_path, voice_hash)
+    lexicon_path = vault_lexicon.resolve_lexicon_path(vault, args.lexicon, disabled=args.no_lexicon)
+    lexicon, lexicon_hash = vault_lexicon.load_lexicon(
+        vault,
+        lexicon_path,
+        schema=schema,
+        cache_dir=vault / STATE_DIR / "cache",
+        dictionary_path=dictionary_path(args),
+    )
+    args.compiled_lexicon = lexicon
+    configuration = run_configuration(args, vault, schema_hash, voice_path, voice_hash, lexicon_path, lexicon_hash)
     if resuming:
         try:
             run_state.assert_compatible_run(state, configuration)
@@ -3130,6 +3412,45 @@ def doctor(args):
             warnings.append(f"voice note could not be read: {error}")
     checks["voice"] = voice_check
     ok = ok and voice_check["ok"]
+    lexicon_check = {"ok": True, "configured": False}
+    if checks["vault"]["ok"]:
+        try:
+            lexicon_path = vault_lexicon.resolve_lexicon_path(vault, args.lexicon, disabled=args.no_lexicon)
+            dictionary = dictionary_path(args)
+            lexicon, lexicon_hash = vault_lexicon.load_lexicon(
+                vault,
+                lexicon_path,
+                schema=schema,
+                cache_dir=vault / STATE_DIR / "cache",
+                dictionary_path=dictionary,
+            )
+            if lexicon is None:
+                lexicon_check["detail"] = (
+                    "disabled with --no-lexicon"
+                    if args.no_lexicon
+                    else f"no terms or speakers; the note default is {vault_lexicon.DEFAULT_LEXICON}"
+                )
+            else:
+                lexicon_check = {
+                    "ok": True,
+                    "configured": True,
+                    "path": str(lexicon_path) if lexicon_path else None,
+                    "dictionary": str(dictionary) if dictionary else None,
+                    "lexicon_hash": lexicon_hash,
+                    "compiler_version": vault_lexicon.COMPILED_LEXICON_VERSION,
+                    **vault_lexicon.lexicon_digest(lexicon),
+                }
+                if lexicon_path is None:
+                    warnings.append(
+                        f"no lexicon note; the roster is the directory notes and the terms are the "
+                        f"standalone dictionary. Create {vault_lexicon.DEFAULT_LEXICON} to add "
+                        "nicknames, cues, and who actually appears in recordings"
+                    )
+        except UserError as error:
+            lexicon_check = {"ok": False, "configured": True, "detail": str(error)}
+            warnings.append(f"lexicon note could not be read: {error}")
+    checks["lexicon"] = lexicon_check
+    ok = ok and lexicon_check["ok"]
     # Cleanup is one call per chunk, so a backend that reasons first costs
     # hundreds of hidden tokens per chunk. Report that before a long run, not
     # halfway through one.
@@ -3177,6 +3498,8 @@ def parse_args(argv):
     parser.add_argument("--schema", action=TrackingAction)
     parser.add_argument("--voice", action=TrackingAction, help="voice-and-style note (default: the vault's, when present)")
     parser.add_argument("--no-voice", action="store_true", help="disable the vault voice policy for this run")
+    parser.add_argument("--lexicon", action=TrackingAction, help="speakers-and-terms note (default: the vault's, when present)")
+    parser.add_argument("--no-lexicon", action="store_true", help="disable term correction and the speaker roster")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--run", help="existing run directory to resume")
     parser.add_argument("--limit", type=int, action=TrackingAction)
@@ -3223,6 +3546,9 @@ def parse_args(argv):
     args.voice = args.voice or os.environ.get("VAULT_TRANSCRIPTS_VOICE") or None
     if args.no_voice and args.voice and args.voice_provided:
         raise UserError("--voice and --no-voice cannot be used together")
+    args.lexicon = args.lexicon or os.environ.get("VAULT_TRANSCRIPTS_LEXICON") or None
+    if args.no_lexicon and args.lexicon and args.lexicon_provided:
+        raise UserError("--lexicon and --no-lexicon cannot be used together")
     args.cache_prompt = not args.no_cache_prompt
     args.verify = not args.no_verify
     return args

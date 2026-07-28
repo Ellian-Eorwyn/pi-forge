@@ -72,12 +72,35 @@ fingerprinted into a run, so a resumed run refuses to change them.
 | --- | --- | --- |
 | `--filename-pattern` | `date-type-topic` | `2026-07-24 - Therapy - Facing Family Dynamics.md`. Also `date-topic` and `date-time-topic`. |
 | `--summary-style` | `callout` | A `> [!summary]` callout. Also `paragraph` and `heading`. |
-| `--speaker-policy` | `names` | Real names where the transcript justifies them, roles otherwise. Also `roles` and `generic`. See the reference doc. |
+| `--speaker-policy` | `names` | Real names where the transcript or the roster justifies them, roles otherwise. Also `roles` and `generic`. See the reference doc. |
 | `--tiny-words` / `--tiny-summary` | `120` / `omit` | Under 120 words: light cleanup, no summary. |
 | `--voice` / `--no-voice` | vault policy / off | Select a policy note or explicitly disable it. |
+| `--lexicon` / `--no-lexicon` | vault note / off | Select a speakers-and-terms note or disable corrections and the roster. |
 
 `--owner <name>` is only consulted by `--speaker-policy roles`, where it lets the
 recorder's own name through while other names stay generic.
+
+## Terms and speakers
+
+`99 Meta/99.02 Schemas/0.02 Speakers and Terms.md` holds two tables the owner
+edits. `## Terms` maps a correct spelling to the forms the transcriber produces;
+`## Speakers` marks who turns up in recordings. Both are optional, and the
+standalone `transcription` dictionary merges underneath the terms table.
+
+Every person note under the directory's contacts folder joins the roster
+automatically, at `sometimes`, with its role compiled from the note — so the
+table only needs rows for what a note cannot say:
+
+| `Appears` | Meaning |
+| --- | --- |
+| `always` | Offered on every recording. For the handful of recurring voices — a partner, a therapist, a standing one-to-one — where nobody says a name aloud. |
+| `sometimes` | The default. Offered only when the recording mentions their name, an alias, or something close enough to be that name misheard. |
+| `never` | Never proposed as a speaker. Their name still gets spelled correctly when they are talked *about*. |
+
+Report the Lexicon section when it appears: what was corrected in code, who was
+named from the roster, and the spellings the model fixed that are not recorded
+yet. Offer to add those with `transcription`'s `dict add`, or as a row in the
+note — either lands where the next run will find it.
 
 ## Rules
 

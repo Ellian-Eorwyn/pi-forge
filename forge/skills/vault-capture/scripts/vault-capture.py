@@ -41,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import forge_llm
 import forge_verify
 import run_state
+import vault_lexicon
 import vault_voice
 from vault_schema import (
     INBOX_DIR,
@@ -547,6 +548,8 @@ How to write it:
 
 When `thisNote.styleForThisKind` is present it is the vault owner's own rule for this kind of note, and it wins over the general guidance above. `relevantVocabulary` contains only policy definitions whose terms occur in this material. When `styleExamples` are present they are notes this person wrote themselves: match their register, sentence length, and vocabulary. Do not copy their subject matter.
 
+`glossary` lists specialist terms and names this person uses that the material appears to contain in mistranscribed or misspelled form, each with the words that were produced instead. Where a passage really is that term — the sound and the sense both fit — write the correct spelling; where it is not, leave the text alone. Never introduce a glossary term into a passage that did not say it. `knownPeople` gives the vault's spelling and wikilink for people this material mentions: use that spelling, and when the note links a person, link them as the `wikilink` given rather than inventing a target.
+
 For a journal note, keep the cleaned authorial account first. Mechanically correct written text without changing its wording or meaning. For spoken material, remove filler, false starts, and accidental repetition while preserving emphasis, meaningful self-correction, uncertainty, wording, and sequence. Then add only the non-empty reflection sections `## Observations`, `## Interpretations`, `## Open questions`, and `## Connections`, in that order. Do not diagnose the person or override what their words mean. Under Connections, use only `connectionCandidates` as vault wikilinks. A connection from general knowledge must begin `Outside knowledge:` and be explicitly qualified.
 
 Return exactly one JSON object:
@@ -570,6 +573,8 @@ def draft_payload(
     type_style=None,
     connection_candidates=None,
     relevant_vocabulary=None,
+    glossary=None,
+    known_people=None,
 ):
     payload = {
         "braindump": item["text"][:DRAFT_INPUT_CHARS],
@@ -592,6 +597,10 @@ def draft_payload(
         payload["connectionCandidates"] = connection_candidates
     if relevant_vocabulary:
         payload["relevantVocabulary"] = relevant_vocabulary
+    if glossary:
+        payload["glossary"] = glossary
+    if known_people:
+        payload["knownPeople"] = known_people
     return payload
 
 
@@ -632,6 +641,8 @@ def draft_items(args, service, system, planned, run_dir):
                     entry.get("type_style"),
                     entry.get("connection_candidates"),
                     entry.get("relevant_vocabulary"),
+                    entry.get("glossary"),
+                    entry.get("known_people"),
                 ),
                 "draft-note",
             )
@@ -1645,6 +1656,13 @@ def capture(args):
     schema, schema_hash = compiled_schema_for(vault, schema_path, cache_dir=vault / STATE_DIR / "cache")
     voice_path = vault_voice.resolve_voice_path(vault, args.voice, disabled=args.no_voice)
     voice, voice_hash = vault_voice.compiled_voice_for(vault, voice_path, cache_dir=vault / STATE_DIR / "cache")
+    lexicon, _lexicon_hash = vault_lexicon.load_lexicon(
+        vault,
+        vault_lexicon.resolve_lexicon_path(vault),
+        schema=schema,
+        cache_dir=vault / STATE_DIR / "cache",
+        dictionary_path=vault_lexicon.default_dictionary_path(),
+    )
     warnings = []
 
     with run_state.run_lock(vault / STATE_DIR):
@@ -1718,6 +1736,12 @@ def capture(args):
             )
             entry["type_style"] = compiled["per_type_rule"]
             entry["relevant_vocabulary"] = compiled["vocabulary"]
+            material = f"{entry['note']['gist']}\n{entry['item']['text']}"
+            entry["glossary"] = vault_lexicon.near_miss_terms(material, vault_lexicon.term_candidates(lexicon))
+            entry["known_people"] = [
+                {"name": person["name"], "wikilink": person["link"] or f"[[{person['name']}]]"}
+                for person in vault_lexicon.candidate_speakers(material, (lexicon or {}).get("speakers", []))
+            ]
             if note_type == "journal":
                 candidates, warning = collect_connection_candidates(vault, entry["note"]["gist"])
                 entry["connection_candidates"] = candidates

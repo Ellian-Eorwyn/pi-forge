@@ -93,13 +93,18 @@ across jobs; an optional per-project file
 overrides or extends it. Corrections are applied with word-boundary and
 case rules and **every replacement is logged** — never silent.
 
+Pass `--vault <path>` to merge an Obsidian vault's
+`99 Meta/99.02 Schemas/0.02 Speakers and Terms.md` on top of both. That note is
+the same glossary the vault skills use, so a term recorded in either place is
+corrected everywhere; use it whenever the recording is destined for a vault.
+
 Grow it with use. When the user confirms a misheard term, add it:
 
 ```bash
 python3 <skill-directory>/scripts/transcription.py dict add \
   --correct "Kubernetes" --variant "cube are netties" --variant "kubernetis" \
   --category term [--scope global|project] [--case-sensitive] [--substring]
-python3 <skill-directory>/scripts/transcription.py dict list --scope merged
+python3 <skill-directory>/scripts/transcription.py dict list --scope merged [--vault <path>]
 ```
 
 Use `--category name|acronym|term`. Default matching is whole-word and

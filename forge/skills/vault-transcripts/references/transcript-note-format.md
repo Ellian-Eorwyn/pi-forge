@@ -148,9 +148,58 @@ answer. A 56-minute meeting in this corpus carries 640 speaker lines.
 5. Labels the export already supplies as real names are kept under every policy.
    The source knew something the model would only be guessing at.
 6. A name is never inferred from subject matter. Speaking about Gillian is not
-   evidence that Gillian is speaking.
+   evidence that Gillian is speaking. **The roster does not weaken this rule.**
+   It is a source of *identity* — who this voice is — never a source of *topic*.
+7. Under `names`, the roster is a third source of justification alongside the
+   transcript, offered as `knownSpeakers` and used two ways:
+   - **Spelling.** A name the transcript does state, in whatever form the
+     transcriber heard, is written the way the vault files that person.
+   - **Identity.** A roster entry's cue and role describe one particular voice.
+     Which label is that voice is settled by what each label actually says —
+     whose work, whose meeting, whose title. Because the owner knows who they
+     record and the model does not, a roster identification is accepted at
+     `medium` confidence where a transcript-only one needs `high`.
+
+   Two deterministic gates stand behind that, both of them because the observed
+   failure mode is a real person attached to the wrong label:
+   - Only a name that was actually offered is accepted. Anything else claiming
+     roster provenance is the model inventing a person.
+   - The cited evidence must appear in the transcript. The roster settles who
+     may be present; only the transcript settles which voice they are, and
+     quoting the cue back proves that second step was never taken.
+
+   Both failures drop the name to `unknown` with a warning. The thinking model
+   is then told not to flag a roster name for being absent from the excerpt —
+   that is what the roster is for — but to check the attribution like any other
+   claim, and to say which voice a misplaced name belongs to.
 
 The raw section always keeps the original labels, whatever the policy did.
+
+## Part D — terms
+
+Specialist vocabulary is mistranscribed the same way every time, and no context
+recovers it. Corrections come in two tiers, and both leave the raw section alone:
+
+1. **Recorded variants** are replaced in code, before the chunk reaches a model.
+   Longest variant first, whole-word by default. This costs nothing and cannot
+   go wrong, and because it happens before chunking, the corrected spelling is
+   what the added-words check compares against.
+2. **Near misses** — a canonical spelling that something in this chunk sounds
+   like but is not — are offered to the model as `glossary`, with the words the
+   transcriber produced. The model rewrites only where sound and sense both fit,
+   and may never introduce an offered term into a passage that did not say it.
+   Offered terms are added to the added-words allowance, since a correction is a
+   new word by construction.
+
+A near miss requires the same opening letter and a 0.72 similarity, calibrated
+against real mistranscriptions: an engine mangles a term's vowels and endings,
+almost never its first sound, and without that constraint "Lojong" matches the
+ordinary word "jong" more strongly than it matches several of its own real
+variants. Sampled utterances are corrected before the fidelity comparison, or
+every successful correction would read as the cleanup drifting from the source.
+
+Corrections the model made that are not yet recorded are proposed in the report,
+so the next run can make them free.
 
 ## What the checks enforce before a model ever reviews the result
 
