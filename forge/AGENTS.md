@@ -48,6 +48,12 @@ default to `.agents/skills/<name>/SKILL.md`.
 - Log transformations and make lossy operations visible.
 - Keep outputs readable by both people and future agents.
 
+Route Gmail-style `.eml` conversion to `file-conversion` when the user only
+needs deterministic per-message Markdown. Route folders containing multiple
+emails to `document-ingest`; it preserves each message and attachment, then
+uses the non-thinking `chat` service for bounded evidence extraction and the
+thinking `think` service for verification and the cited aggregate digest.
+
 When a folder contains grants, awards, proposals, scopes of work, contracts,
 work plans, project reports, presentations, meeting notes, or interviews and
 the user needs deliverables, requirements, dates, actions, or risks tracked,

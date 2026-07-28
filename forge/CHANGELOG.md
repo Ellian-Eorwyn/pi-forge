@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added deterministic Gmail-style EML-to-Markdown conversion with preserved attachment manifests, plus document-ingest email batches that extract exact-quote evidence on the chat service, verify and synthesize on the thinking service, and publish a hash-bound cited digest.
 - Added a packaged restart-safe batch run contract and shared Python/JavaScript state helpers, with resumable document ingestion, file conversion, web collection/research, transcription chunks, transactional finalization, input refresh/retry controls, and context-bounded literature synthesis and deliverable queues.
 - Added a refreshable `project-extraction` skill with source-backed evidence, reconciled control registers, a human-maintained status overlay, project-aware document routing, and PPTX OOXML ingestion.
 - Added direct-first web research acquisition with stage artifacts, cache metadata, structured extraction, and explicit endpoint discovery.

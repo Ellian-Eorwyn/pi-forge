@@ -882,6 +882,92 @@ server.listen(0, "127.0.0.1", () => {
 	});
 }
 
+function startEmailDigestFixture(workspace) {
+	const requestsPath = join(workspace, "email-digest-requests.jsonl");
+	const serverPath = join(workspace, "email-digest-server.mjs");
+	writeFileSync(
+		serverPath,
+		`import { appendFileSync } from "node:fs";
+import { createServer } from "node:http";
+
+const requestsPath = ${JSON.stringify(requestsPath)};
+const server = createServer((request, response) => {
+	let body = "";
+	request.setEncoding("utf8");
+	request.on("data", chunk => body += chunk);
+	request.on("end", () => {
+		const payload = JSON.parse(body);
+		appendFileSync(requestsPath, JSON.stringify(payload) + "\\n");
+		const system = payload.messages?.[0]?.content || "";
+		const user = payload.messages?.at(-1)?.content || "";
+		let content = "general";
+		if (system.includes("Extract only important information")) {
+			const parsed = JSON.parse(user);
+			const quote = parsed.markdown.includes("final report is due Friday")
+				? "The final report is due Friday."
+				: "I will send the revised budget on Tuesday.";
+			const statement = quote.startsWith("The final")
+				? "The final report is due Friday."
+				: "The revised budget will be sent on Tuesday.";
+			content = JSON.stringify({ items: [{ kind: "deadline", statement, quote }] });
+		} else if (system.includes("Create a concise email-corpus digest")) {
+			const parsed = JSON.parse(user);
+			const ids = [];
+			const visit = value => {
+				if (Array.isArray(value)) for (const item of value) visit(item);
+				else if (value && typeof value === "object") {
+					if (typeof value.id === "string" && value.id.startsWith("ev-")) ids.push(value.id);
+					for (const child of Object.values(value)) visit(child);
+				}
+			};
+			visit(parsed);
+			const unique = [...new Set(ids)];
+			content = JSON.stringify({
+				summary: [{ text: "The correspondence sets report and budget deadlines.", evidenceIds: unique }],
+				outline: [{ heading: "Deadlines", items: [
+					{ text: "The final report is due Friday.", evidenceIds: [unique[0]] },
+					{ text: "The revised budget is expected Tuesday.", evidenceIds: [unique.at(-1)] },
+				] }],
+			});
+		} else if (system.includes('"verdicts"') || system.includes("Review extracted email evidence") || system.includes("Review one email-digest claim")) {
+			const parsed = JSON.parse(user);
+			content = JSON.stringify({ verdicts: parsed.items.map(item => ({ id: item.id, verdict: "ok", reason: "" })) });
+		}
+		response.writeHead(200, { "Content-Type": "application/json" });
+		response.end(JSON.stringify({
+			choices: [{ message: { content } }],
+			usage: { prompt_tokens: 100, completion_tokens: 40, total_tokens: 140 },
+		}));
+	});
+});
+
+server.listen(0, "127.0.0.1", () => process.stdout.write(String(server.address().port) + "\\n"));
+`,
+	);
+	const child = spawn(process.execPath, [serverPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+	return new Promise((resolveServer, rejectServer) => {
+		let stdout = "";
+		let stderr = "";
+		child.stdout.setEncoding("utf8");
+		child.stderr.setEncoding("utf8");
+		child.stderr.on("data", (chunk) => (stderr += chunk));
+		child.stdout.on("data", (chunk) => {
+			stdout += chunk;
+			const port = stdout.split(/\r?\n/).find((value) => value.trim());
+			if (!port) return;
+			resolveServer({
+				url: `http://127.0.0.1:${port.trim()}/v1/chat/completions`,
+				requestsPath,
+				close: () => new Promise((resolveClose) => { child.once("exit", resolveClose); child.kill(); }),
+			});
+		});
+		child.once("error", rejectServer);
+		child.once("exit", (code) => {
+			if (!stdout.trim()) rejectServer(new Error(`email digest fixture exited before startup with code ${code}: ${stderr}`));
+		});
+	});
+}
+
 function startProjectExtractionWorkerFixture(workspace, rejectBackgroundSlot = false, cachedTokens = 500, extractionDelayMs = 0, responseMode = "normal") {
 	const requestsPath = join(workspace, "project-worker-requests.jsonl");
 	const serverPath = join(workspace, "project-worker-server.mjs");
@@ -1037,6 +1123,178 @@ test("transcript cleanup and file conversion preserve their source", () => {
 			1,
 		);
 		assert.equal(jsonOutput(run(python, [script("file-conversion", "file-conversion.py"), "validate", conversionRun])).valid, true);
+	});
+});
+
+test("file conversion deterministically converts EML and validates preserved attachments", () => {
+	withWorkspace((workspace) => {
+		const source = join(workspace, "project-update.eml");
+		writeFileSync(
+			source,
+			`From: Alex <alex@example.com>
+To: Sam <sam@example.com>
+Subject: Project update
+Date: Mon, 27 Jul 2026 10:00:00 -0700
+Message-ID: <project-update@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="forge-boundary"
+
+--forge-boundary
+Content-Type: text/plain; charset="utf-8"
+
+The final report is due Friday.
+--forge-boundary
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename="../budget.csv"
+Content-Transfer-Encoding: base64
+
+YnVkZ2V0IGRhdGE=
+--forge-boundary--
+`,
+		);
+		const sourceHash = sha256(source);
+		const runDirectory = join(workspace, "eml-conversion");
+		const converted = jsonOutput(
+			run(python, [script("file-conversion", "file-conversion.py"), "convert", source, "--to", "md", "--output", runDirectory]),
+		);
+		assert.equal(converted.success, 1);
+		assert.equal(sha256(source), sourceHash);
+		const markdown = readFileSync(join(runDirectory, "converted", "project-update.md"), "utf8");
+		assert.match(markdown, /# Project update/);
+		assert.match(markdown, /The final report is due Friday\./);
+		assert.match(markdown, /attachments\/project-update-[a-f0-9]{12}\/budget\.csv/);
+		const attachmentRows = parseCsvRows(readFileSync(join(runDirectory, "attachment_manifest.csv"), "utf8"));
+		assert.deepEqual(attachmentRows[0], [
+			"source_path",
+			"source_sha256",
+			"part_path",
+			"filename",
+			"original_filename",
+			"mime_type",
+			"disposition",
+			"content_id",
+			"byte_size",
+			"sha256",
+			"output_path",
+		]);
+		const attachmentPath = join(runDirectory, attachmentRows[1][10]);
+		assert.equal(readFileSync(attachmentPath, "utf8"), "budget data");
+		assert.equal(jsonOutput(run(python, [script("file-conversion", "file-conversion.py"), "validate", runDirectory])).valid, true);
+		writeFileSync(attachmentPath, "tampered");
+		runFailure(
+			python,
+			[script("file-conversion", "file-conversion.py"), "validate", runDirectory],
+			/attachment hash differs|attachment size differs/,
+		);
+	});
+});
+
+test("document ingest builds and verifies a provenance-backed digest for multiple EML files", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const sourceDirectory = join(workspace, "emails");
+		mkdirSync(sourceDirectory);
+		writeFileSync(
+			join(sourceDirectory, "first.eml"),
+			`From: Alex <alex@example.com>
+To: Sam <sam@example.com>
+Subject: Report schedule
+Date: Mon, 27 Jul 2026 10:00:00 -0700
+Message-ID: <first@example.com>
+Content-Type: text/plain; charset="utf-8"
+
+The final report is due Friday.
+`,
+		);
+		writeFileSync(
+			join(sourceDirectory, "second.eml"),
+			`From: Sam <sam@example.com>
+To: Alex <alex@example.com>
+Subject: Re: Report schedule
+Date: Mon, 27 Jul 2026 11:00:00 -0700
+Message-ID: <second@example.com>
+In-Reply-To: <first@example.com>
+References: <first@example.com>
+Content-Type: text/plain; charset="utf-8"
+
+I will send the revised budget on Tuesday.
+`,
+		);
+		const fixture = await startEmailDigestFixture(workspace);
+		try {
+			const runDirectory = join(sourceDirectory, "Ingest");
+			const prepared = jsonOutput(
+				await runAsyncWithEnvironment(
+					process.execPath,
+					[script("document-ingest", "document-ingest.mjs"), "prepare", sourceDirectory, "--output", runDirectory],
+					{ FORGE_BASE_CHAT_URL: fixture.url, FORGE_BASE_MODEL: "chat-fixture" },
+				),
+			);
+			assert.equal(prepared.counts.success, 2);
+			const status = jsonOutput(run(process.execPath, [script("document-ingest", "document-ingest.mjs"), "status", runDirectory]));
+			assert.equal(status.nextAction, "process_emails");
+			assert.equal(status.valid, false);
+			assert.match(status.errors.join("\n"), /email_evidence\.jsonl is required/);
+
+			const processed = jsonOutput(
+				await runAsyncWithEnvironment(
+					process.execPath,
+					[
+						script("document-ingest", "document-ingest.mjs"),
+						"process-emails",
+						runDirectory,
+						"--base-url",
+						fixture.url,
+						"--model",
+						"chat-fixture",
+						"--think-url",
+						fixture.url,
+						"--think-model",
+						"think-fixture",
+					],
+					{},
+				),
+			);
+			assert.equal(processed.emails, 2);
+			assert.equal(processed.verification.evidence.needsReview, 0);
+			assert.equal(processed.verification.claims.needsReview, 0);
+			assert.equal(jsonOutput(run(process.execPath, [script("document-ingest", "document-ingest.mjs"), "validate", runDirectory])).valid, true);
+
+			const digestPath = join(runDirectory, "email_digest.md");
+			const digest = readFileSync(digestPath, "utf8");
+			assert.ok(digest.indexOf("## Summary") < digest.indexOf("## Important Information"));
+			assert.match(digest, /\[evidence:ev-[a-f0-9]{16}/);
+			const evidence = readFileSync(join(runDirectory, "email_evidence.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			assert.equal(evidence.length, 2);
+			assert.equal(new Set(evidence.map((item) => item.threadId)).size, 1);
+			assert.equal(evidence.every((item) => item.quote && item.markdownStartLine >= 1), true);
+			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			assert.ok(requests.some((request) => request.model === "chat-fixture"));
+			assert.ok(requests.some((request) => request.model === "think-fixture"));
+
+			const originalDigest = digest;
+			writeFileSync(digestPath, `${digest}\nFabricated claim.\n`);
+			runFailure(
+				process.execPath,
+				[script("document-ingest", "document-ingest.mjs"), "validate", runDirectory],
+				/does not match the structured digest|verification is missing, incomplete, or stale/,
+			);
+			writeFileSync(digestPath, originalDigest);
+			const finalized = jsonOutput(
+				run(process.execPath, [
+					script("document-ingest", "document-ingest.mjs"),
+					"finalize",
+					runDirectory,
+					"--destination",
+					sourceDirectory,
+				]),
+			);
+			assert.equal(finalized.publishedMarkdown, 2);
+			assert.equal(finalized.generatedArtifacts, 1);
+			assert.equal(existsSync(join(sourceDirectory, "Generated", "email_digest.md")), true);
+			assert.equal(existsSync(join(sourceDirectory, "Originals", "first.eml")), true);
+		} finally {
+			await fixture.close();
+		}
 	});
 });
 
@@ -3371,6 +3629,7 @@ test("extracted organize-folder and spreadsheet tools expose structured executio
 });
 
 test("shared library Python tests pass", () => {
+	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_eml_parser.py")]);
 	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_forge_llm.py")]);
 });
 

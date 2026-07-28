@@ -23,6 +23,7 @@ derived/
   glmocr-response.json # only when GLM-OCR SDK OCR ran
   glmocr-layout.json   # only when GLM-OCR SDK returned layout JSON
   vision-pages/  # unresolved PDF pages rendered as page-NNNN.png
+  attachments/   # hash-verified MIME attachments from EML sources
 ```
 
 `working/extracted.md` and `working/chunks/` contain deterministic intermediate
@@ -70,6 +71,46 @@ Allowed origins are `embedded-metadata`, `document-text`, `filename`, and
 `user-provided`. Allowed confidence values are `high`, `medium`, and `low`.
 Use nulls when no defensible value exists. Preserve an embedded raw date when
 its normalized interpretation is uncertain.
+
+## EML Email Sources
+
+Parse `.eml` with Python's standard RFC/MIME libraries. Decode RFC 2047
+headers, prefer a usable `text/plain` body over `text/html`, and convert HTML
+conservatively without loading remote resources. Preserve selected headers,
+all decoded raw headers, the chosen MIME part, threading identifiers, and
+attachment records under `metadata.email`.
+
+Extract parts with a filename, attachment disposition, or `message/rfc822`
+content under `derived/attachments/`. Sanitize filenames, resolve collisions
+deterministically, and record MIME part path, original and output filename,
+media type, disposition, Content-ID, byte size, and SHA-256. Attachment
+contents are not evidence for an email digest unless separately ingested.
+
+Use `Message-ID`, `In-Reply-To`, and `References` to group threads. Never group
+messages from subject similarity alone.
+
+For two or more successfully parsed emails, require these run-root artifacts:
+
+```text
+email_evidence.jsonl
+email_digest_state.json
+email_digest.json
+email_digest.md
+verified-email-evidence.jsonl
+verified-email-digest.jsonl
+email_digest_verification.json
+```
+
+Each evidence record contains a stable id, email document id, source hash,
+statement, exact quote, Markdown line range, type, and thread id. Deterministic
+validation must prove the quote occurs at that range. Every digest claim cites
+one or more evidence ids. `email_digest.md` is rendered from
+`email_digest.json`; it begins with `## Summary`, followed by
+`## Important Information`, then coverage and a source index.
+
+Final validation requires the exact current source snapshot, evidence file,
+rendered digest, and complete thinking-service verification hashes. Missing or
+stale verification blocks finalization.
 
 ## Final Output Filename
 
@@ -215,7 +256,8 @@ Roles are `original`, `final_markdown`, and `generated_artifact`.
 `destination_path` is relative to the finalized source folder. Generated
 artifacts include user-facing files such as `evidence_table.csv`,
 `methods_matrix.csv`, `claims_matrix.md`, `key_terms.md`,
-`literature_summary.md`, `citation_notes.md`, and `research_gaps.md`.
+`literature_summary.md`, `citation_notes.md`, `research_gaps.md`, and
+`email_digest.md`.
 Advisory processing files such as `claim_clusters.csv` and `claim_clusters.md`
 remain in `Ingest/`.
 

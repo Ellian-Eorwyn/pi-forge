@@ -14,8 +14,8 @@ reconciles it.
 ## Built-in capabilities
 
 - `coding`: Inspect repositories and ship small, reviewable code changes.
-- `document-ingest`: Normalize documents into structured text with provenance.
-- `file-conversion`: Convert files between common working formats with per-file checkpoints.
+- `document-ingest`: Normalize documents and Gmail-style EML batches into structured text with source maps, exact-quote evidence, split chat/think verification, and a cited aggregate email digest.
+- `file-conversion`: Convert files, including deterministic EML-to-Markdown with preserved attachment manifests, between common working formats with per-file checkpoints.
 - `literature-extraction`: Extract structured evidence, claims, metadata, and citations from research documents.
 - `organize-folder`: Sort messy folders through a reviewable manifest before making changes.
 - `personal-admin`: Turn personal/admin documents into summaries, decisions, and action plans.

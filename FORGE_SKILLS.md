@@ -12,12 +12,12 @@
 |---|---:|
 | Base system prompt (intro, tools list, guidelines, connected services) | 390 |
 | Tool JSON schemas (13 tools) | 2760 |
-| Managed instructions (`AGENTS.md` with its `<project_context>` wrapper) | 1081 |
-| Skills menu (metadata for all model-visible skills) | 2972 |
-| **Total launch context (always processed)** | **7203** |
-| Maximum if every `SKILL.md` body is also loaded at once | 45592 |
+| Managed instructions (`AGENTS.md` with its `<project_context>` wrapper) | 1176 |
+| Skills menu (metadata for all model-visible skills) | 2968 |
+| **Total launch context (always processed)** | **7293** |
+| Maximum if every `SKILL.md` body is also loaded at once | 46139 |
 
-Of that total, the forge profile itself owns 4053 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
+Of that total, the forge profile itself owns 4143 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
 
 Of the skills menu above, the shared wrapper (instructions and XML envelope, independent of skill count) is ~92 tokens; the rest scales with the number of skills.
 
@@ -52,8 +52,8 @@ Sorted by launch cost. `Prompt lines` counts a tool's `promptSnippet` and `promp
 | Skill | Summary | Launch metadata tokens | On-demand body tokens | Complete file tokens | Launch visibility |
 |---|---|---:|---:|---:|---|
 | [`coding`](forge/skills/coding/SKILL.md) | Inspect repos and ship small reviewable changes | 141 | 750 | 867 | Model-visible |
-| [`document-ingest`](forge/skills/document-ingest/SKILL.md) | Normalize documents with provenance | 131 | 3301 | 3406 | Model-visible |
-| [`file-conversion`](forge/skills/file-conversion/SKILL.md) | Convert files, including Markdown and EPUB | 142 | 1238 | 1354 | Model-visible |
+| [`document-ingest`](forge/skills/document-ingest/SKILL.md) | Normalize documents and email with provenance | 127 | 3645 | 3746 | Model-visible |
+| [`file-conversion`](forge/skills/file-conversion/SKILL.md) | Convert files and EML with originals preserved | 142 | 1355 | 1471 | Model-visible |
 | [`literature-extraction`](forge/skills/literature-extraction/SKILL.md) | Extract structured evidence from research documents | 142 | 3338 | 3452 | Model-visible |
 | [`organize-folder`](forge/skills/organize-folder/SKILL.md) | Sort a messy folder via a reviewable manifest | 132 | 1743 | 1848 | Model-visible |
 | [`personal-admin`](forge/skills/personal-admin/SKILL.md) | Summarize personal documents into action plans | 143 | 1212 | 1329 | Model-visible |

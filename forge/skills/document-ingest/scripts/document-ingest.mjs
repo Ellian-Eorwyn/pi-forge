@@ -33,7 +33,7 @@ import {
 	withRunLock,
 } from "../../../lib/run-state.mjs";
 import { callJsonWithRetry, callTextWithRetry, resolveService, resolveThinkService } from "../../../lib/forge-llm.mjs";
-import { escalate, summarize, verifyPackets, VERDICT_FLAG } from "../../../lib/forge-verify.mjs";
+import { buildPackets, escalate, summarize, verifyPackets, VERDICT_FLAG } from "../../../lib/forge-verify.mjs";
 
 const DEFAULT_CHUNK_CHARACTERS = 150_000;
 const DEFAULT_GLMOCR_URL = "http://llms:5002/glmocr/parse";
@@ -44,7 +44,7 @@ const MAXIMUM_PUNCTUATION_RATIO = 0.55;
 const MAXIMUM_DOT_RUN_RATIO = 0.2;
 const IMAGE_EXTENSIONS = new Set([".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"]);
 const AUDIO_VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".mkv", ".webm", ".avi", ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus"]);
-const SUPPORTED_EXTENSIONS = new Set([".pdf", ".docx", ".pptx", ".txt", ".md", ".markdown", ".json", ".html", ".htm", ".rtf", ...IMAGE_EXTENSIONS, ...AUDIO_VIDEO_EXTENSIONS]);
+const SUPPORTED_EXTENSIONS = new Set([".pdf", ".docx", ".pptx", ".txt", ".md", ".markdown", ".json", ".html", ".htm", ".rtf", ".eml", ...IMAGE_EXTENSIONS, ...AUDIO_VIDEO_EXTENSIONS]);
 const RESERVED_WORKSPACE_DIRECTORIES = new Set(["Ingest", "Originals", "Generated"]);
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const GENERATED_ARTIFACT_NAMES = new Set([
@@ -55,6 +55,7 @@ const GENERATED_ARTIFACT_NAMES = new Set([
 	"literature_summary.md",
 	"citation_notes.md",
 	"research_gaps.md",
+	"email_digest.md",
 ]);
 const MANIFEST_COLUMNS = [
 	"document_id",
@@ -87,6 +88,14 @@ const EVIDENCE_FIELDS = ["title", "author", "date", "source"];
 const EVIDENCE_ORIGINS = ["embedded-metadata", "document-text", "filename", "user-provided"];
 const EVIDENCE_CONFIDENCES = ["high", "medium", "low"];
 const SOURCE_MAP_METHODS = ["page-extraction", "document-conversion", "transcript-conversion", "model-alignment", "vision-transcription"];
+const EMAIL_EVIDENCE_PATH = "email_evidence.jsonl";
+const EMAIL_DIGEST_STATE_PATH = "email_digest_state.json";
+const EMAIL_DIGEST_JSON_PATH = "email_digest.json";
+const EMAIL_DIGEST_MARKDOWN_PATH = "email_digest.md";
+const EMAIL_EVIDENCE_VERIFICATION_PATH = "verified-email-evidence.jsonl";
+const EMAIL_DIGEST_VERDICTS_PATH = "verified-email-digest.jsonl";
+const EMAIL_DIGEST_VERIFICATION_PATH = "email_digest_verification.json";
+const EMAIL_SYNTHESIS_PACKET_CHARACTERS = 80_000;
 
 function fail(message, exitCode = 1) {
 	process.stderr.write(`Error: ${message}\n`);
@@ -132,6 +141,7 @@ function printDoctor(asJson) {
 		pdfOcr: tools.ocrmypdf.available && tools.tesseract.available,
 		ffmpegMedia: tools.ffmpeg.available,
 		glmocrSdk: tools.glmocr.available,
+		emlParsing: tools.python3.available,
 	};
 	const remediation = [];
 	if (!tools.pandoc.available) remediation.push("Install Pandoc (macOS: brew install pandoc; Debian/Ubuntu: apt install pandoc).");
@@ -810,6 +820,56 @@ function extractText(filePath) {
 	};
 }
 
+function extractEml(filePath, documentDirectory, tools) {
+	if (!tools.python3.available) throw new Error("Python 3 is required for EML ingestion but was not found on PATH");
+	const helper = resolve(SCRIPT_DIRECTORY, "..", "..", "..", "lib", "eml_parser.py");
+	const attachmentDirectory = join(documentDirectory, "derived", "attachments");
+	const result = run("python3", [
+		helper,
+		filePath,
+		"--attachments",
+		attachmentDirectory,
+		"--attachment-link-prefix",
+		"derived/attachments",
+	]);
+	if (result.error || result.status !== 0) {
+		throw new Error(`EML conversion failed: ${result.stderr.trim() || result.error?.message || `exit status ${result.status}`}`);
+	}
+	let parsed;
+	try {
+		parsed = JSON.parse(result.stdout);
+	} catch {
+		throw new Error("EML conversion returned invalid JSON");
+	}
+	for (const attachment of parsed.email?.attachments ?? []) {
+		attachment.path = `derived/attachments/${attachment.filename}`;
+	}
+	const headers = parsed.email?.selectedHeaders ?? {};
+	return {
+		markdown: ensureFinalNewline(parsed.markdown ?? ""),
+		method: "python-email-parser",
+		pageCount: null,
+		warnings: [...(parsed.warnings ?? []), ...textWarnings(parsed.markdown ?? "")],
+		embedded: {
+			title: headers.subject ?? null,
+			author: headers.from ?? null,
+			date: headers.dateIso ?? headers.date ?? null,
+			source: headers.messageId ?? null,
+		},
+		sourceMapEntries: parsed.sourceMapEntries ?? [],
+		email: parsed.email,
+		ocr: { mode: "not-applicable", attempted: false, used: false, reason: null, candidatePages: [], beforeQuality: [], afterQuality: [], unresolvedPages: [], derivedPath: null, derivedSha256: null, error: null },
+	};
+}
+
+function emailMarkdownFilename(email, filePath) {
+	const headers = email?.selectedHeaders ?? {};
+	const date = typeof headers.dateIso === "string" ? headers.dateIso.slice(0, 10) : "";
+	const subject = headers.subject || safeStem(filePath);
+	const from = headers.from?.replace(/\s*<[^>]+>\s*$/, "").trim() ?? "";
+	return safeMarkdownFilename([date, subject, from].filter(Boolean).join(" - "));
+}
+
 function cleanMarkdownMetadata(filePath, markdown) {
 	const title = markdown.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? null;
 	const source = markdown.match(/^\s*(?:source|derived from|zoom export)\s*:\s*(.+)$/im)?.[1]?.trim() ?? null;
@@ -1070,6 +1130,7 @@ async function prepareDocument(filePath, runDirectory, options, tools, usedDirec
 	if (format === "pdf") extracted = await extractPdf(filePath, documentDirectory, options, tools);
 	else if (format === "pptx") extracted = extractPptx(filePath, tools);
 	else if (format === "json") extracted = extractZoomTranscriptJson(filePath);
+	else if (format === "eml") extracted = extractEml(filePath, documentDirectory, tools);
 	else if (format === "md" && options.cleanMarkdownFastPath) extracted = extractCleanMarkdown(filePath);
 	else if (IMAGE_EXTENSIONS.has(extname(filePath).toLowerCase())) {
 		if (options.ocr === "never") throw new Error("image ingestion requires OCR, but OCR was disabled");
@@ -1102,7 +1163,10 @@ async function prepareDocument(filePath, runDirectory, options, tools, usedDirec
 	if (chunks.some((chunk) => unicodeLength(chunk) > options.chunkCharacters)) {
 		warnings.push("A single paragraph exceeds the chunk threshold and was preserved without splitting.");
 	}
-	const deterministicClean = extracted.method === "direct-clean-markdown" && warnings.length === 0 && chunks.length === 1 && /^#\s+\S/m.test(extracted.markdown);
+	const deterministicClean =
+		warnings.length === 0 &&
+		chunks.length === 1 &&
+		((extracted.method === "direct-clean-markdown" && /^#\s+\S/m.test(extracted.markdown)) || extracted.method === "python-email-parser");
 	const extraction = {
 		status: deterministicClean ? "success" : "needs_review",
 		method: extracted.method,
@@ -1134,9 +1198,19 @@ async function prepareDocument(filePath, runDirectory, options, tools, usedDirec
 			source: evidence(extracted.embedded.source, "embedded-metadata", "medium", extracted.embedded.source ? "embedded metadata: source" : null),
 		},
 		structure: markdownStructure(extracted.markdown),
-		review: { completed: deterministicClean, notes: deterministicClean ? ["Clean Markdown validated deterministically during Inbox intake."] : [] },
-		finalOutput: deterministicClean ? { filename: basename(filePath).replace(/\.markdown$/i, ".md"), namingReason: "Preserved already-clean Markdown filename." } : { filename: null, namingReason: null },
+		review: {
+			completed: deterministicClean,
+			notes: deterministicClean
+				? [extracted.method === "python-email-parser" ? "RFC/MIME email conversion validated deterministically." : "Clean Markdown validated deterministically during Inbox intake."]
+				: [],
+		},
+		finalOutput: deterministicClean
+			? extracted.method === "python-email-parser"
+				? { filename: emailMarkdownFilename(extracted.email, filePath), namingReason: "Uses the email date, subject, and sender when available." }
+				: { filename: basename(filePath).replace(/\.markdown$/i, ".md"), namingReason: "Preserved already-clean Markdown filename." }
+			: { filename: null, namingReason: null },
 	};
+	if (extracted.email) metadata.email = extracted.email;
 	writeJson(join(documentDirectory, "metadata.json"), metadata);
 	writeJson(join(documentDirectory, "source_map.json"), {
 		schemaVersion: 1,
@@ -1222,6 +1296,7 @@ function prepareConfiguration(options) {
 }
 
 function pipelineFor(format, folderCategory) {
+	if (format === "eml") return "email-digest";
 	if (format === "json") return folderCategory === "project" ? "transcript-cleanup,project-extraction" : "transcript-cleanup";
 	if (["mp4", "mov", "mkv", "webm", "avi", "mp3", "wav", "m4a", "flac", "ogg", "opus"].includes(format)) {
 		return folderCategory === "project" ? "transcription,transcript-cleanup,project-extraction" : "transcription,transcript-cleanup";
@@ -1505,6 +1580,669 @@ function validateFinalOutput(value, label, errors) {
 	}
 }
 
+function validateEmailMetadata(documentDirectory, metadata, label, errors) {
+	const email = metadata.email;
+	if (!email || typeof email !== "object" || Array.isArray(email)) {
+		errors.push(`${label}.email metadata is missing`);
+		return;
+	}
+	if (!Array.isArray(email.headers) || !email.selectedHeaders || !email.body || !Array.isArray(email.attachments)) {
+		errors.push(`${label}.email metadata is invalid`);
+		return;
+	}
+	const document = readFileSync(join(documentDirectory, "document.md"), "utf8");
+	for (const [index, attachment] of email.attachments.entries()) {
+		const attachmentPath = resolve(documentDirectory, attachment.path ?? "");
+		const attachmentRoot = resolve(documentDirectory, "derived", "attachments");
+		if (!attachmentPath.startsWith(`${attachmentRoot}${sep}`) || !existsSync(attachmentPath) || !lstatSync(attachmentPath).isFile()) {
+			errors.push(`${label}.email attachment ${index + 1} is missing or outside derived/attachments`);
+			continue;
+		}
+		if (sha256(readFileSync(attachmentPath)) !== attachment.sha256) errors.push(`${label}.email attachment ${index + 1} hash does not match metadata`);
+		if (statSync(attachmentPath).size !== attachment.byteSize) errors.push(`${label}.email attachment ${index + 1} size does not match metadata`);
+		if (!document.includes(`(${attachment.link})`)) errors.push(`${label}.document.md does not link email attachment ${index + 1}`);
+	}
+}
+
+function hashJson(value) {
+	return sha256(Buffer.from(JSON.stringify(value)));
+}
+
+function readJsonLines(filePath) {
+	if (!existsSync(filePath)) return [];
+	return readFileSync(filePath, "utf8")
+		.split(/\r?\n/)
+		.filter((line) => line.trim())
+		.map((line, index) => {
+			try {
+				return JSON.parse(line);
+			} catch {
+				throw new Error(`${basename(filePath)} line ${index + 1} is invalid JSON`);
+			}
+		});
+}
+
+function writeJsonLines(filePath, rows) {
+	atomicWriteFile(filePath, rows.length ? `${rows.map((row) => JSON.stringify(row)).join("\n")}\n` : "");
+}
+
+function successfulEmailRows(runDirectory) {
+	return readManifestRows(runDirectory).filter((row) => row.source_format === "eml" && row.status === "success");
+}
+
+function emailSourceSnapshot(rows) {
+	return rows
+		.map((row) => ({ documentId: row.document_id, sourcePath: row.source_path, sourceSha256: row.source_sha256, outputDirectory: row.output_directory }))
+		.sort((left, right) => left.documentId.localeCompare(right.documentId));
+}
+
+function emailThreadIds(runDirectory, rows) {
+	const headersByDocument = new Map();
+	const documentByMessageId = new Map();
+	for (const row of rows) {
+		const metadata = loadDocumentMetadata(documentDirectoryForRow(runDirectory, row));
+		const headers = metadata.email?.selectedHeaders ?? {};
+		headersByDocument.set(row.document_id, headers);
+		if (headers.messageId) documentByMessageId.set(headers.messageId, row.document_id);
+	}
+	const parentByDocument = new Map();
+	for (const row of rows) {
+		const headers = headersByDocument.get(row.document_id);
+		const candidates = [...(headers.inReplyToIds ?? []), ...(headers.referencesIds ?? []).reverse()];
+		const parent = candidates.map((identifier) => documentByMessageId.get(identifier)).find((identifier) => identifier && identifier !== row.document_id);
+		if (parent) parentByDocument.set(row.document_id, parent);
+	}
+	const rootOf = (documentId) => {
+		const seen = new Set([documentId]);
+		let current = documentId;
+		while (parentByDocument.has(current) && !seen.has(parentByDocument.get(current))) {
+			current = parentByDocument.get(current);
+			seen.add(current);
+		}
+		return current;
+	};
+	return new Map(rows.map((row) => [row.document_id, `thread-${sha256(Buffer.from(rootOf(row.document_id))).slice(0, 16)}`]));
+}
+
+function emailDigestRequired(runDirectory) {
+	return successfulEmailRows(runDirectory).length >= 2;
+}
+
+function lineNumberAt(value, offset) {
+	return (value.slice(0, offset).match(/\n/g) ?? []).length + 1;
+}
+
+function evidenceCitation(evidenceIds) {
+	return `[${evidenceIds.map((identifier) => `evidence:${identifier}`).join("; ")}]`;
+}
+
+function digestClaims(digest) {
+	return [
+		...(digest.summary ?? []),
+		...(digest.outline ?? []).flatMap((section) => section.items ?? []),
+	];
+}
+
+function renderEmailDigest(digest, evidenceRows) {
+	const evidenceById = new Map(evidenceRows.map((row) => [row.id, row]));
+	const lines = ["# Email Digest", "", "## Summary", ""];
+	for (const claim of digest.summary) lines.push(`- ${claim.text} ${evidenceCitation(claim.evidenceIds)}`);
+	lines.push("", "## Important Information", "");
+	for (const section of digest.outline) {
+		lines.push(`### ${section.heading}`, "");
+		for (const claim of section.items) lines.push(`- ${claim.text} ${evidenceCitation(claim.evidenceIds)}`);
+		lines.push("");
+	}
+	lines.push("## Coverage", "");
+	lines.push(`- Included emails: ${digest.coverage.included}`);
+	lines.push(`- Excluded emails: ${digest.coverage.excluded.length}`);
+	for (const excluded of digest.coverage.excluded) lines.push(`- Excluded \`${excluded.sourcePath}\`: ${excluded.status}${excluded.error ? ` — ${excluded.error}` : ""}`);
+	lines.push("", "## Source Index", "");
+	const usedIds = [...new Set(digestClaims(digest).flatMap((claim) => claim.evidenceIds))].sort();
+	for (const identifier of usedIds) {
+		const evidence = evidenceById.get(identifier);
+		if (!evidence) continue;
+		lines.push(
+			`- \`${identifier}\` — \`${evidence.emailId}\`, lines ${evidence.markdownStartLine}-${evidence.markdownEndLine}, source SHA-256 \`${evidence.sourceSha256}\``,
+		);
+	}
+	return `${lines.join("\n").trimEnd()}\n`;
+}
+
+function validateEvidenceRecord(runDirectory, snapshotById, evidence, errors) {
+	const snapshot = snapshotById.get(evidence.emailId);
+	if (!snapshot) {
+		errors.push(`email evidence ${evidence.id} names an unknown email ${evidence.emailId}`);
+		return;
+	}
+	if (evidence.sourceSha256 !== snapshot.sourceSha256) errors.push(`email evidence ${evidence.id} source hash is stale`);
+	if (!evidence.id || typeof evidence.statement !== "string" || !evidence.statement.trim() || typeof evidence.quote !== "string" || !evidence.quote.trim()) {
+		errors.push(`email evidence ${evidence.id ?? "(missing id)"} lacks a statement or exact quote`);
+		return;
+	}
+	const markdown = readFileSync(join(runDirectory, snapshot.outputDirectory, "document.md"), "utf8");
+	const lines = markdown.split("\n");
+	if (
+		!Number.isInteger(evidence.markdownStartLine) ||
+		!Number.isInteger(evidence.markdownEndLine) ||
+		evidence.markdownStartLine < 1 ||
+		evidence.markdownEndLine < evidence.markdownStartLine ||
+		evidence.markdownEndLine > lines.length
+	) {
+		errors.push(`email evidence ${evidence.id} has invalid Markdown line ranges`);
+		return;
+	}
+	const cited = lines.slice(evidence.markdownStartLine - 1, evidence.markdownEndLine).join("\n");
+	if (!cited.includes(evidence.quote)) errors.push(`email evidence ${evidence.id} quote is not present at its cited line range`);
+}
+
+function validateEmailDigest(runDirectory, manifestRows, errors) {
+	const rows = manifestRows.filter((row) => row.source_format === "eml" && row.status === "success");
+	if (rows.length < 2) return;
+	const required = [
+		EMAIL_EVIDENCE_PATH,
+		EMAIL_DIGEST_STATE_PATH,
+		EMAIL_DIGEST_JSON_PATH,
+		EMAIL_DIGEST_MARKDOWN_PATH,
+		EMAIL_DIGEST_VERIFICATION_PATH,
+	];
+	for (const name of required) {
+		if (!existsSync(join(runDirectory, name))) errors.push(`${name} is required for a multi-email ingest batch`);
+	}
+	if (required.some((name) => !existsSync(join(runDirectory, name)))) return;
+	let evidenceRows;
+	let state;
+	let digest;
+	let verification;
+	try {
+		evidenceRows = readJsonLines(join(runDirectory, EMAIL_EVIDENCE_PATH));
+		state = JSON.parse(readFileSync(join(runDirectory, EMAIL_DIGEST_STATE_PATH), "utf8"));
+		digest = JSON.parse(readFileSync(join(runDirectory, EMAIL_DIGEST_JSON_PATH), "utf8"));
+		verification = JSON.parse(readFileSync(join(runDirectory, EMAIL_DIGEST_VERIFICATION_PATH), "utf8"));
+	} catch (error) {
+		errors.push(`email digest artifacts are invalid: ${error.message}`);
+		return;
+	}
+	const snapshot = emailSourceSnapshot(rows);
+	const snapshotHash = hashJson(snapshot);
+	const snapshotById = new Map(snapshot.map((item) => [item.documentId, item]));
+	if (state.schemaVersion !== 1 || state.sourceSnapshotSha256 !== snapshotHash || digest.sourceSnapshotSha256 !== snapshotHash) {
+		errors.push("email digest source snapshot is stale");
+	}
+	if (state.phase !== "complete") errors.push("email digest processing is not complete");
+	const evidenceIds = new Set();
+	for (const evidence of evidenceRows) {
+		if (evidenceIds.has(evidence.id)) errors.push(`duplicate email evidence id: ${evidence.id}`);
+		evidenceIds.add(evidence.id);
+		validateEvidenceRecord(runDirectory, snapshotById, evidence, errors);
+	}
+	const evidenceHash = sha256(readFileSync(join(runDirectory, EMAIL_EVIDENCE_PATH)));
+	if (digest.evidenceSha256 !== evidenceHash || verification.evidenceSha256 !== evidenceHash) errors.push("email digest evidence hash is stale");
+	if (!Array.isArray(digest.summary) || digest.summary.length === 0) errors.push("email digest summary must contain at least one claim");
+	if (!Array.isArray(digest.outline) || digest.outline.length === 0) errors.push("email digest important-information outline must contain at least one section");
+	const claims = digestClaims(digest);
+	const claimIds = new Set();
+	for (const claim of claims) {
+		if (!claim.id || claimIds.has(claim.id)) errors.push(`email digest claim id is missing or duplicated: ${claim.id ?? "(missing)"}`);
+		claimIds.add(claim.id);
+		if (typeof claim.text !== "string" || !claim.text.trim()) errors.push(`email digest claim ${claim.id} has no text`);
+		if (!Array.isArray(claim.evidenceIds) || claim.evidenceIds.length === 0) errors.push(`email digest claim ${claim.id} has no provenance`);
+		for (const identifier of claim.evidenceIds ?? []) {
+			if (!evidenceIds.has(identifier)) errors.push(`email digest claim ${claim.id} cites unknown evidence ${identifier}`);
+		}
+	}
+	const expectedMarkdown = renderEmailDigest(digest, evidenceRows);
+	const markdown = readFileSync(join(runDirectory, EMAIL_DIGEST_MARKDOWN_PATH), "utf8");
+	if (markdown !== expectedMarkdown) errors.push("email_digest.md does not match the structured digest");
+	const digestHash = sha256(Buffer.from(markdown));
+	if (
+		verification.schemaVersion !== 1 ||
+		verification.completed !== true ||
+		verification.needsReview !== 0 ||
+		verification.digestSha256 !== digestHash ||
+		verification.sourceSnapshotSha256 !== snapshotHash ||
+		verification.evidence?.verified !== evidenceRows.length ||
+		verification.evidence?.needsReview !== 0
+	) {
+		errors.push("email digest final verification is missing, incomplete, or stale");
+	}
+	const verifiedClaimIds = [...(verification.claimIds ?? [])].sort();
+	if (verifiedClaimIds.join(",") !== [...claimIds].sort().join(",")) errors.push("email digest verification does not cover every current claim");
+}
+
+const EMAIL_EVIDENCE_SYSTEM = `Extract only important information directly supported by one email segment.
+Focus on decisions, requests, commitments, deadlines, risks, unresolved questions, and substantive context.
+Do not use attachment content, external knowledge, or implications not stated in the segment.
+For every item, copy a short exact quote from the segment. Do not rewrite the quote.
+Return exactly one JSON object:
+{"items":[{"kind":"decision|request|commitment|deadline|risk|question|context","statement":"concise supported statement","quote":"exact source quote"}]}`;
+
+const EMAIL_EVIDENCE_VERIFY_SYSTEM = `Review extracted email evidence against its exact quoted source.
+Flag an item if the statement is not entailed by the quote, the quote is too fragmentary to support it,
+or the item presents inference as fact. Importance and wording preferences are not errors.`;
+
+const EMAIL_DIGEST_SYSTEM = `Create a concise email-corpus digest from provenance-backed evidence only.
+Return exactly one JSON object:
+{"summary":[{"text":"claim","evidenceIds":["id"]}],"outline":[{"heading":"content-driven heading","items":[{"text":"claim","evidenceIds":["id"]}]}]}
+Every claim must cite one or more supplied evidence ids. Do not cite unknown ids. Do not add facts,
+dates, people, causal claims, or conclusions absent from the supplied evidence. Omit empty categories.`;
+
+const EMAIL_DIGEST_VERIFY_SYSTEM = `Review one email-digest claim against all of its cited evidence.
+Flag it if any factual part is unsupported, overstated, contradicted, or presented more certainly than
+the evidence allows. The claim may paraphrase, but its complete meaning must be entailed by the citations.`;
+
+function emailSegments(markdown, maximumCharacters = 60_000) {
+	const lines = markdown.split("\n");
+	const segments = [];
+	let startLine = 1;
+	let current = [];
+	let characters = 0;
+	for (const [index, line] of lines.entries()) {
+		const size = line.length + 1;
+		if (current.length > 0 && characters + size > maximumCharacters) {
+			segments.push({ startLine, markdown: current.join("\n") });
+			startLine = index + 1;
+			current = [];
+			characters = 0;
+		}
+		current.push(line);
+		characters += size;
+	}
+	if (current.length) segments.push({ startLine, markdown: current.join("\n") });
+	return segments;
+}
+
+function normalizeEvidenceItems(value, document, segment, row) {
+	if (!value || typeof value !== "object" || !Array.isArray(value.items)) throw new Error('response must contain an "items" array');
+	const records = [];
+	for (const item of value.items) {
+		if (!item || typeof item !== "object" || typeof item.statement !== "string" || !item.statement.trim() || typeof item.quote !== "string" || !item.quote.trim()) {
+			throw new Error("every evidence item requires a nonblank statement and exact quote");
+		}
+		const localOffset = segment.markdown.indexOf(item.quote);
+		if (localOffset < 0) throw new Error(`quote was not copied exactly from the email segment: ${item.quote.slice(0, 80)}`);
+		const globalLine = segment.startLine + lineNumberAt(segment.markdown, localOffset) - 1;
+		const endLine = globalLine + (item.quote.match(/\n/g) ?? []).length;
+		const identifier = `ev-${sha256(Buffer.from(`${row.document_id}\n${globalLine}\n${item.quote}\n${item.statement}`)).slice(0, 16)}`;
+		records.push({
+			id: identifier,
+			emailId: row.document_id,
+			sourceSha256: row.source_sha256,
+			kind: String(item.kind ?? "context"),
+			statement: item.statement.trim(),
+			quote: item.quote,
+			markdownStartLine: globalLine,
+			markdownEndLine: endLine,
+			threadId: row.threadId ?? `thread-${sha256(Buffer.from(row.document_id)).slice(0, 16)}`,
+		});
+	}
+	return records;
+}
+
+async function extractEmailSegment(service, document, segment, row, timeoutMs) {
+	const messages = [
+		{ role: "system", content: EMAIL_EVIDENCE_SYSTEM },
+		{ role: "user", content: JSON.stringify({ emailId: row.document_id, startLine: segment.startLine, markdown: segment.markdown }) },
+	];
+	let outcome;
+	try {
+		outcome = await callJsonWithRetry(service, messages, { timeoutMs, task: "email-evidence" });
+		return normalizeEvidenceItems(outcome.value, document, segment, row);
+	} catch (error) {
+		const repair = [...messages, { role: "user", content: `That response was unusable: ${error.message}. Return corrected JSON only.` }];
+		outcome = await callJsonWithRetry(service, repair, { timeoutMs, task: "email-evidence-repair" });
+		return normalizeEvidenceItems(outcome.value, document, segment, row);
+	}
+}
+
+function normalizeDigestCandidate(value, allowedEvidenceIds) {
+	if (!value || typeof value !== "object" || !Array.isArray(value.summary) || !Array.isArray(value.outline)) {
+		throw new Error("digest response must contain summary and outline arrays");
+	}
+	const normalizeClaim = (claim) => {
+		if (!claim || typeof claim.text !== "string" || !claim.text.trim() || !Array.isArray(claim.evidenceIds) || claim.evidenceIds.length === 0) {
+			throw new Error("every digest claim requires text and evidenceIds");
+		}
+		const evidenceIds = [...new Set(claim.evidenceIds.map(String))];
+		const unknown = evidenceIds.filter((identifier) => !allowedEvidenceIds.has(identifier));
+		if (unknown.length) throw new Error(`digest cited unknown evidence ids: ${unknown.slice(0, 5).join(", ")}`);
+		return { text: claim.text.trim(), evidenceIds };
+	};
+	return {
+		summary: value.summary.map(normalizeClaim),
+		outline: value.outline.map((section) => {
+			if (!section || typeof section.heading !== "string" || !section.heading.trim() || !Array.isArray(section.items)) {
+				throw new Error("every outline section requires a heading and items");
+			}
+			return { heading: section.heading.trim(), items: section.items.map(normalizeClaim) };
+		}),
+	};
+}
+
+async function callDigestAuthor(service, payload, allowedEvidenceIds, timeoutMs, task) {
+	const messages = [
+		{ role: "system", content: EMAIL_DIGEST_SYSTEM },
+		{ role: "user", content: JSON.stringify(payload) },
+	];
+	try {
+		const { value } = await callJsonWithRetry(service, messages, { timeoutMs, task });
+		return normalizeDigestCandidate(value, allowedEvidenceIds);
+	} catch (error) {
+		const repair = [...messages, { role: "user", content: `That response was unusable: ${error.message}. Return corrected JSON only.` }];
+		const { value } = await callJsonWithRetry(service, repair, { timeoutMs, task: `${task}-repair` });
+		return normalizeDigestCandidate(value, allowedEvidenceIds);
+	}
+}
+
+function compactDigestClaims(candidate) {
+	return [
+		...candidate.summary,
+		...candidate.outline.flatMap((section) => section.items.map((item) => ({ ...item, heading: section.heading }))),
+	];
+}
+
+async function authorEmailDigest(chat, think, evidenceRows, timeoutMs) {
+	const allowed = new Set(evidenceRows.map((row) => row.id));
+	const evidencePayloads = evidenceRows.map((row) => ({
+		id: row.id,
+		emailId: row.emailId,
+		threadId: row.threadId,
+		kind: row.kind,
+		statement: row.statement,
+		quote: row.quote,
+	}));
+	const packets = buildPackets(evidencePayloads, 40, EMAIL_SYNTHESIS_PACKET_CHARACTERS);
+	let candidates = [];
+	if (packets.length === 1) {
+		return callDigestAuthor(think, { evidence: packets[0] }, allowed, timeoutMs, "email-digest");
+	}
+	for (const packet of packets) {
+		const partial = await callDigestAuthor(chat, { evidence: packet, stage: "bounded reduction" }, allowed, timeoutMs, "email-digest-reduction");
+		candidates.push(...compactDigestClaims(partial));
+	}
+	while (JSON.stringify(candidates).length > EMAIL_SYNTHESIS_PACKET_CHARACTERS) {
+		const reduced = [];
+		for (const packet of buildPackets(candidates, 40, EMAIL_SYNTHESIS_PACKET_CHARACTERS)) {
+			const partial = await callDigestAuthor(chat, { candidateClaims: packet, stage: "recursive bounded reduction" }, allowed, timeoutMs, "email-digest-reduction");
+			reduced.push(...compactDigestClaims(partial));
+		}
+		if (reduced.length >= candidates.length && JSON.stringify(reduced).length >= JSON.stringify(candidates).length) {
+			throw new Error("email digest reduction did not converge within the context budget");
+		}
+		candidates = reduced;
+	}
+	return callDigestAuthor(think, { candidateClaims: candidates, stage: "final synthesis" }, allowed, timeoutMs, "email-digest");
+}
+
+function assignDigestClaimIds(candidate) {
+	return {
+		summary: candidate.summary.map((claim, index) => ({ id: `summary-${String(index + 1).padStart(3, "0")}`, ...claim })),
+		outline: candidate.outline.map((section, sectionIndex) => ({
+			heading: section.heading,
+			items: section.items.map((claim, itemIndex) => ({
+				id: `outline-${String(sectionIndex + 1).padStart(3, "0")}-${String(itemIndex + 1).padStart(3, "0")}`,
+				...claim,
+			})),
+		})),
+	};
+}
+
+async function correctDigestClaim(think, claim, evidenceById, reason, timeoutMs) {
+	const cited = claim.evidenceIds.map((identifier) => evidenceById.get(identifier)).filter(Boolean);
+	const messages = [
+		{
+			role: "system",
+			content:
+				'Correct one unsupported digest claim using only the supplied evidence. Return {"text":"corrected claim","evidenceIds":["id"]} or {"omit":true} when no supported claim remains.',
+		},
+		{ role: "user", content: JSON.stringify({ claim, evidence: cited, reviewerObjection: reason }) },
+	];
+	const { value } = await callJsonWithRetry(think, messages, { timeoutMs, task: "email-digest-escalation" });
+	if (value?.omit === true) return { omit: true };
+	const allowed = new Set(cited.map((item) => item.id));
+	const normalized = normalizeDigestCandidate({ summary: [value], outline: [] }, allowed).summary[0];
+	return { id: claim.id, ...normalized };
+}
+
+function replaceOrRemoveDigestClaim(digest, identifier, replacement) {
+	digest.summary = digest.summary.flatMap((claim) => (claim.id !== identifier ? [claim] : replacement?.omit ? [] : [replacement]));
+	digest.outline = digest.outline
+		.map((section) => ({
+			...section,
+			items: section.items.flatMap((claim) => (claim.id !== identifier ? [claim] : replacement?.omit ? [] : [replacement])),
+		}))
+		.filter((section) => section.items.length > 0);
+}
+
+function emailCoverage(rows) {
+	return {
+		included: rows.filter((row) => row.source_format === "eml" && row.status === "success").length,
+		excluded: rows
+			.filter((row) => row.source_format === "eml" && row.status !== "success")
+			.map((row) => ({ sourcePath: row.source_path, status: row.status, error: row.error || "" })),
+	};
+}
+
+function parseProcessEmailsArguments(args) {
+	if (args.length < 1) fail("process-emails requires a run directory");
+	const runDirectory = resolve(args[0]);
+	let verifyPacketSize = 15;
+	let timeoutMs = 600_000;
+	const resolveOptions = {};
+	for (let position = 1; position < args.length; position += 1) {
+		if (args[position] === "--base-url") resolveOptions.chatUrl = args[++position] ?? fail("--base-url requires a url");
+		else if (args[position] === "--model") resolveOptions.chatModel = args[++position] ?? fail("--model requires a name");
+		else if (args[position] === "--think-url") resolveOptions.thinkUrl = args[++position] ?? fail("--think-url requires a url");
+		else if (args[position] === "--think-model") resolveOptions.thinkModel = args[++position] ?? fail("--think-model requires a name");
+		else if (args[position] === "--verify-packet-size") verifyPacketSize = Number.parseInt(args[++position] ?? "", 10);
+		else if (args[position] === "--request-timeout") timeoutMs = Number.parseFloat(args[++position] ?? "") * 1000;
+		else fail(`unknown process-emails option: ${args[position]}`);
+	}
+	if (!Number.isInteger(verifyPacketSize) || verifyPacketSize < 1) fail("--verify-packet-size must be a positive integer");
+	if (!Number.isFinite(timeoutMs) || timeoutMs < 1) fail("--request-timeout must be positive");
+	return { runDirectory, verifyPacketSize, timeoutMs, resolveOptions };
+}
+
+async function commandProcessEmails(args) {
+	const options = parseProcessEmailsArguments(args);
+	requireRunDirectory(options.runDirectory);
+	const allRows = readManifestRows(options.runDirectory);
+	const pendingEmails = allRows.filter((row) => row.source_format === "eml" && row.status === "needs_review");
+	if (pendingEmails.length) fail("all EML documents must complete review before process-emails");
+	const rows = allRows.filter((row) => row.source_format === "eml" && row.status === "success");
+	if (rows.length < 2) fail("process-emails requires at least two successfully ingested EML files");
+	const chat = resolveService("chat", options.resolveOptions);
+	const think = resolveThinkService(options.resolveOptions);
+	if (!chat.enabled) fail("connectedServices.chat is disabled; configure the local chat endpoint before processing");
+	if (!think.enabled) fail("no thinking or fallback chat service is configured for email verification");
+	const snapshot = emailSourceSnapshot(rows);
+	const snapshotHash = hashJson(snapshot);
+	const threadIds = emailThreadIds(options.runDirectory, rows);
+	const statePath = join(options.runDirectory, EMAIL_DIGEST_STATE_PATH);
+	let state = existsSync(statePath)
+		? JSON.parse(readFileSync(statePath, "utf8"))
+		: { schemaVersion: 1, sourceSnapshot: snapshot, sourceSnapshotSha256: snapshotHash, completedEmailIds: [], phase: "extracting" };
+	if (state.sourceSnapshotSha256 !== snapshotHash) fail("existing email digest state uses a different source snapshot; run refresh and start a new digest");
+	if (state.phase === "complete") {
+		const validation = validateRun(options.runDirectory, { emit: false, exitOnError: false });
+		if (!validation.valid) fail(`completed email digest no longer validates: ${validation.errors.join("; ")}`);
+		const digest = JSON.parse(readFileSync(join(options.runDirectory, EMAIL_DIGEST_JSON_PATH), "utf8"));
+		process.stdout.write(
+			`${JSON.stringify(
+				{
+					runDirectory: options.runDirectory,
+					alreadyComplete: true,
+					emails: rows.length,
+					evidence: readJsonLines(join(options.runDirectory, EMAIL_EVIDENCE_PATH)).length,
+					claims: digestClaims(digest).length,
+					digest: join(options.runDirectory, EMAIL_DIGEST_MARKDOWN_PATH),
+					nextAction: "validate",
+				},
+				null,
+				2,
+			)}\n`,
+		);
+		return;
+	}
+	const evidencePath = join(options.runDirectory, EMAIL_EVIDENCE_PATH);
+	let evidenceRows = readJsonLines(evidencePath);
+	const completed = new Set(state.completedEmailIds ?? []);
+	const progress = (message) => process.stderr.write(`${message}\n`);
+	for (const row of rows) {
+		if (completed.has(row.document_id)) continue;
+		const workerRow = { ...row, threadId: threadIds.get(row.document_id) };
+		const documentDirectory = documentDirectoryForRow(options.runDirectory, row);
+		const metadata = loadDocumentMetadata(documentDirectory);
+		const markdown = readFileSync(join(documentDirectory, "document.md"), "utf8");
+		const extracted = [];
+		const attachmentsHeading = markdown.indexOf("\n## Attachments\n");
+		const evidenceMarkdown = attachmentsHeading >= 0 ? markdown.slice(0, attachmentsHeading) : markdown;
+		const segments = emailSegments(evidenceMarkdown);
+		for (const [index, segment] of segments.entries()) {
+			progress(`[${row.document_id}] email segment ${index + 1}/${segments.length}`);
+			extracted.push(...(await extractEmailSegment(chat, metadata, segment, workerRow, options.timeoutMs)));
+		}
+		evidenceRows = evidenceRows.filter((item) => item.emailId !== row.document_id);
+		const unique = new Map(extracted.map((item) => [item.id, item]));
+		evidenceRows.push(...unique.values());
+		evidenceRows.sort((left, right) => left.emailId.localeCompare(right.emailId) || left.markdownStartLine - right.markdownStartLine || left.id.localeCompare(right.id));
+		writeJsonLines(evidencePath, evidenceRows);
+		completed.add(row.document_id);
+		state = { ...state, completedEmailIds: [...completed].sort(), phase: "extracting" };
+		writeJsonReplacing(statePath, state);
+		appendRunEvent(options.runDirectory, { type: "email_evidence_completed", documentId: row.document_id, items: unique.size });
+	}
+	if (!evidenceRows.length) fail("email evidence extraction produced no supported important information");
+	const evidenceHash = sha256(readFileSync(evidencePath));
+	if (state.evidenceSha256 && state.evidenceSha256 !== evidenceHash) fail("email evidence changed after verification began; start a new digest run");
+	state = { ...state, evidenceSha256: evidenceHash, phase: "verifying-evidence" };
+	writeJsonReplacing(statePath, state);
+
+	const evidenceItems = evidenceRows.map((item) => ({ id: item.id, statement: item.statement, quote: item.quote, kind: item.kind }));
+	const evidenceVerdicts = await verifyPackets(think, EMAIL_EVIDENCE_VERIFY_SYSTEM, evidenceItems, {
+		journalPath: join(options.runDirectory, EMAIL_EVIDENCE_VERIFICATION_PATH),
+		packetSize: options.verifyPacketSize,
+		background: true,
+		timeoutMs: options.timeoutMs,
+		progress,
+	});
+	const evidenceById = new Map(evidenceRows.map((item) => [item.id, item]));
+	const flaggedEvidence = evidenceItems
+		.filter((item) => evidenceVerdicts[item.id]?.verdict === VERDICT_FLAG)
+		.map((item) => [item, evidenceVerdicts[item.id].reason]);
+	const evidenceEscalations = await escalate(
+		flaggedEvidence,
+		async (item, reason) => {
+			const original = evidenceById.get(item.id);
+			const snapshotItem = snapshot.find((candidate) => candidate.documentId === original.emailId);
+			const markdown = readFileSync(join(options.runDirectory, snapshotItem.outputDirectory, "document.md"), "utf8");
+			const attachmentsHeading = markdown.indexOf("\n## Attachments\n");
+			const segment = { startLine: 1, markdown: attachmentsHeading >= 0 ? markdown.slice(0, attachmentsHeading) : markdown };
+			const row = rows.find((candidate) => candidate.document_id === original.emailId);
+			const workerRow = { ...row, threadId: threadIds.get(row.document_id) };
+			const metadata = loadDocumentMetadata(join(options.runDirectory, snapshotItem.outputDirectory));
+			const corrected = await extractEmailSegment(
+				think,
+				metadata,
+				segment,
+				workerRow,
+				options.timeoutMs,
+			);
+			const replacement = corrected.find((candidate) => candidate.quote === original.quote) ?? corrected[0];
+			if (!replacement) throw new Error(`review rejected evidence and re-extraction produced no replacement: ${reason}`);
+			return { ...replacement, id: original.id };
+		},
+		{ journalPath: join(options.runDirectory, EMAIL_EVIDENCE_VERIFICATION_PATH), progress },
+	);
+	for (const [identifier, outcome] of Object.entries(evidenceEscalations)) {
+		if (outcome.resumed || !outcome.ok) continue;
+		const index = evidenceRows.findIndex((item) => item.id === identifier);
+		if (index >= 0) evidenceRows[index] = outcome.value;
+	}
+	const evidenceSummary = summarize(evidenceVerdicts, evidenceEscalations);
+	if (evidenceSummary.needsReview > 0) fail("email evidence verification left items needing review");
+	writeJsonLines(evidencePath, evidenceRows);
+	const verifiedEvidenceHash = sha256(readFileSync(evidencePath));
+	state = { ...state, evidenceSha256: verifiedEvidenceHash, phase: "synthesizing" };
+	writeJsonReplacing(statePath, state);
+
+	const candidate = assignDigestClaimIds(await authorEmailDigest(chat, think, evidenceRows, options.timeoutMs));
+	const digest = {
+		schemaVersion: 1,
+		sourceSnapshotSha256: snapshotHash,
+		evidenceSha256: verifiedEvidenceHash,
+		...candidate,
+		coverage: emailCoverage(allRows),
+	};
+	if (!digest.summary.length || !digest.outline.length) fail("email digest must contain both a summary and an important-information outline");
+	const digestEvidenceById = new Map(evidenceRows.map((item) => [item.id, item]));
+	const claimItems = digestClaims(digest).map((claim) => ({
+		id: claim.id,
+		text: claim.text,
+		evidence: claim.evidenceIds.map((identifier) => digestEvidenceById.get(identifier)),
+	}));
+	const claimVerdicts = await verifyPackets(think, EMAIL_DIGEST_VERIFY_SYSTEM, claimItems, {
+		journalPath: join(options.runDirectory, EMAIL_DIGEST_VERDICTS_PATH),
+		packetSize: options.verifyPacketSize,
+		background: true,
+		timeoutMs: options.timeoutMs,
+		progress,
+	});
+	const claimById = new Map(digestClaims(digest).map((claim) => [claim.id, claim]));
+	const flaggedClaims = claimItems
+		.filter((item) => claimVerdicts[item.id]?.verdict === VERDICT_FLAG)
+		.map((item) => [item, claimVerdicts[item.id].reason]);
+	const claimEscalations = await escalate(
+		flaggedClaims,
+		async (item, reason) => correctDigestClaim(think, claimById.get(item.id), digestEvidenceById, reason, options.timeoutMs),
+		{ journalPath: join(options.runDirectory, EMAIL_DIGEST_VERDICTS_PATH), progress },
+	);
+	for (const [identifier, outcome] of Object.entries(claimEscalations)) {
+		if (outcome.resumed || !outcome.ok) continue;
+		replaceOrRemoveDigestClaim(digest, identifier, outcome.value);
+	}
+	const claimSummary = summarize(claimVerdicts, claimEscalations);
+	if (claimSummary.needsReview > 0) fail("email digest verification left claims needing review");
+	if (!digest.summary.length || !digest.outline.length) fail("verification removed all summary or outline claims");
+	const markdown = renderEmailDigest(digest, evidenceRows);
+	writeJsonReplacing(join(options.runDirectory, EMAIL_DIGEST_JSON_PATH), digest);
+	atomicWriteFile(join(options.runDirectory, EMAIL_DIGEST_MARKDOWN_PATH), markdown);
+	writeJsonReplacing(join(options.runDirectory, EMAIL_DIGEST_VERIFICATION_PATH), {
+		schemaVersion: 1,
+		completed: true,
+		service: { role: "think", url: think.url, model: think.model, fallback: think.fallback ?? null },
+		sourceSnapshotSha256: snapshotHash,
+		evidenceSha256: verifiedEvidenceHash,
+		digestSha256: sha256(Buffer.from(markdown)),
+		claimIds: digestClaims(digest).map((claim) => claim.id).sort(),
+		evidence: evidenceSummary,
+		claims: claimSummary,
+		needsReview: 0,
+	});
+	state = { ...state, evidenceSha256: verifiedEvidenceHash, digestSha256: sha256(Buffer.from(markdown)), phase: "complete" };
+	writeJsonReplacing(statePath, state);
+	updateRunState(options.runDirectory, (draft) => {
+		draft.phase = "validation";
+		draft.nextAction = "validate";
+		return draft;
+	}, { type: "email_digest_completed", emails: rows.length, evidence: evidenceRows.length, claims: digestClaims(digest).length });
+	process.stdout.write(
+		`${JSON.stringify(
+			{
+				runDirectory: options.runDirectory,
+				emails: rows.length,
+				evidence: evidenceRows.length,
+				claims: digestClaims(digest).length,
+				verification: { evidence: evidenceSummary, claims: claimSummary },
+				digest: join(options.runDirectory, EMAIL_DIGEST_MARKDOWN_PATH),
+				nextAction: "validate",
+			},
+			null,
+			2,
+		)}\n`,
+	);
+}
+
 function validateRun(runDirectory, { emit = true, exitOnError = true, fixHints = false } = {}) {
 	const errors = [];
 	const warnings = [];
@@ -1545,6 +2283,7 @@ function validateRun(runDirectory, { emit = true, exitOnError = true, fixHints =
 		if (metadata.extraction?.status !== row.status) errors.push(`${row.output_directory} extraction status does not match manifest.csv`);
 		for (const field of ["title", "author", "date", "source"]) validateEvidence(metadata.fields?.[field], `${row.output_directory}.fields.${field}`, errors);
 		validateFinalOutput(metadata.finalOutput, `${row.output_directory}.finalOutput`, errors);
+		if (row.source_format === "eml") validateEmailMetadata(documentDirectory, metadata, row.output_directory, errors);
 		if (metadata.review?.completed !== true) errors.push(`${row.output_directory} model review is not marked complete`);
 		if (sourceMap.schemaVersion !== 1 || sourceMap.documentId !== row.document_id || sourceMap.markdownFile !== "document.md" || !Array.isArray(sourceMap.entries)) {
 			errors.push(`${row.output_directory}/source_map.json is invalid`);
@@ -1657,6 +2396,13 @@ function validateRun(runDirectory, { emit = true, exitOnError = true, fixHints =
 		if ((metadata.fields.author.value ?? "") !== row.author) errors.push(`${row.output_directory} author does not match manifest.csv`);
 		if ((metadata.fields.date.value ?? "") !== row.document_date) errors.push(`${row.output_directory} date does not match manifest.csv`);
 	}
+	validateEmailDigest(
+		runDirectory,
+		parsed
+			.filter((row) => row.some((field) => field !== ""))
+			.map((values) => Object.fromEntries(MANIFEST_COLUMNS.map((column, index) => [column, values[index] ?? ""]))),
+		errors,
+	);
 	const result = { valid: errors.length === 0, errors, warnings };
 	if (fixHints) result.issues = errors.map(issueForValidationError);
 	if (emit) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
@@ -1830,11 +2576,19 @@ function conciseStatus(runDirectory) {
 	const validation = validateRun(runDirectory, { emit: false, exitOnError: false, fixHints: true });
 	const state = loadRunState(runDirectory, RUN_STATE_WORKFLOW);
 	const drift = runInputDrift(runDirectory, state);
+	const digestStatePath = join(runDirectory, EMAIL_DIGEST_STATE_PATH);
+	const digestComplete = existsSync(digestStatePath) && JSON.parse(readFileSync(digestStatePath, "utf8")).phase === "complete";
+	const nextAction =
+		pendingReview.length > 0
+			? "review"
+			: emailDigestRequired(runDirectory) && !digestComplete
+				? "process_emails"
+				: state.nextAction;
 	return {
 		runDirectory,
 		status: state.status,
 		phase: state.phase,
-		nextAction: state.nextAction,
+		nextAction,
 		counts,
 		pendingReview,
 		inputDrift: drift,
@@ -2797,7 +3551,7 @@ async function commandRun(args) {
 		runDirectory: options.prepareOptions.output,
 		prepared,
 		status,
-		nextAction: status.pendingReview.length > 0 ? "review" : status.valid ? "finalize_or_handoff" : "repair_validation_errors",
+		nextAction: status.nextAction === "process_emails" ? "process_emails" : status.pendingReview.length > 0 ? "review" : status.valid ? "finalize_or_handoff" : "repair_validation_errors",
 	};
 	if (options.destination && status.valid) {
 		const finalized = commandFinalizeReturning({
@@ -2864,6 +3618,7 @@ function usage() {
   document-ingest.mjs retry <run-directory> (--item <id> | --all-failed)
   document-ingest.mjs next-review <run-directory>
   document-ingest.mjs process-chunks <run-directory> [--base-url URL] [--model NAME] [--think-url URL] [--think-model NAME] [--no-verify] [--verify-packet-size N] [--request-timeout SECONDS]
+  document-ingest.mjs process-emails <run-directory> [--base-url URL] [--model NAME] [--think-url URL] [--think-model NAME] [--verify-packet-size N] [--request-timeout SECONDS]
   document-ingest.mjs record-review-unit <run-directory> --doc-id <document-id> --kind chunk|vision-page --index N --reviewed-file <markdown>
   document-ingest.mjs record-review <run-directory> --review-file <review.json>
   document-ingest.mjs record-transcript <run-directory> --doc-id <document-id> --transcript <cleaned.md> [--title TEXT] [--author TEXT] [--filename NAME.md]
@@ -2888,6 +3643,7 @@ else if (command === "refresh") commandRefresh(args);
 else if (command === "retry") commandRetry(args);
 else if (command === "next-review") commandNextReview(args);
 else if (command === "process-chunks") await commandProcessChunks(args);
+else if (command === "process-emails") await commandProcessEmails(args);
 else if (command === "record-review-unit") commandRecordReviewUnit(args);
 else if (command === "record-review") commandRecordReview(args);
 else if (command === "record-transcript") commandRecordTranscript(args);

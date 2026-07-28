@@ -1,8 +1,8 @@
 {
 	"name": "file-conversion",
 	"type": "pi-forge-skill",
-	"version": "0.1.0",
-	"description": "Convert files, including Markdown and EPUB.",
+	"version": "0.2.0",
+	"description": "Convert files, including EML, Markdown, and EPUB.",
 	"skill_file": "SKILL.md",
 	"scripts_dir": "scripts",
 	"schemas_dir": "schemas",
@@ -12,7 +12,7 @@
 	"tools": [
 		{
 			"name": "file_conversion",
-			"description": "Convert files between working formats and validate conversion manifests.",
+			"description": "Convert files, including deterministic EML-to-Markdown, and validate conversion and attachment manifests.",
 			"command": "python3 scripts/file-conversion.py",
 			"destructive": false
 		}

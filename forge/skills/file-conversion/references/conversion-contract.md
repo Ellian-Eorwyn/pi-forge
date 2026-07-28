@@ -12,7 +12,9 @@ lossy conversion honestly.
   converted/
     <safe-stem>.<target>     # one output per converted source
     media/<stem>/…           # media extracted from DOCX/HTML/EPUB sources
+    attachments/<stem>-<hash>/… # MIME attachments extracted from EML
     <stem>/<sheet>.csv       # one CSV per sheet for multi-sheet XLSX
+  attachment_manifest.csv
   conversion_log.md
   conversion_manifest.csv
   warnings.md
@@ -35,10 +37,33 @@ manifest history.
 | `csv`  | `.csv`, `.tsv` | `xlsx` | openpyxl |
 | `xlsx` | `.xlsx` | `csv` | openpyxl |
 | `txt`  | `.txt` | `txt` (cleanup) | in-process |
+| `eml`  | `.eml` | `md` | Python standard-library RFC/MIME parser |
 
 A source/target pair outside this matrix is `skipped`, not `failed`. Missing
 tools produce a `failed` row with actionable remediation rather than a silent
 empty output.
+
+## EML to Markdown
+
+Decode RFC 2047 headers and MIME bodies deterministically. Prefer a nonempty
+`text/plain` body; otherwise convert the selected HTML body conservatively and
+warn that no plain-text alternative existed. Do not fetch remote images,
+styles, links, or other resources.
+
+Write one Markdown document per `.eml`, containing selected headers, the
+complete chosen body, and links to preserved attachments. Treat parts with a
+filename, attachment disposition, or `message/rfc822` type as attachments.
+Sanitize their names, resolve collisions with numeric suffixes, and store them
+under `converted/attachments/<stem>-<source-hash-prefix>/`.
+
+`attachment_manifest.csv` contains:
+
+```text
+source_path,source_sha256,part_path,filename,original_filename,mime_type,disposition,content_id,byte_size,sha256,output_path
+```
+
+Conversion does not summarize emails or inspect attachment contents. Use
+`document-ingest` for a model-authored, verified multi-email digest.
 
 ## Markdown to EPUB
 
@@ -159,6 +184,10 @@ targets, XML documents, and cover declaration. EPUBCheck runs when installed;
 otherwise validation reports that only structural checks were performed.
 Missing outputs or changed sources are errors; counts of `skipped` and `failed`
 rows are reported as warnings for review.
+
+For EML conversions, validation also confines every attachment path under
+`converted/attachments/`, verifies its byte size and SHA-256, and confirms the
+Markdown output links each recorded attachment.
 
 For EPUB→Markdown, validation reparses the Markdown, checks referenced media and
 the preserved cover, verifies chapter heading coverage, rejects leaked EPUB

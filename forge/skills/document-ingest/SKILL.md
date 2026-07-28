@@ -1,6 +1,6 @@
 ---
 name: document-ingest
-description: One-stop-shop folder ingestion pipeline. Ingest, normalize, and process folders of documents, presentations, images, audio, and video files. Automatically categorizes folders and routes files to the appropriate specialized skills (transcription, personal-admin, literature-extraction, project-extraction). Uses a hybrid deterministic and LLM-driven orchestration approach.
+description: Ingest and normalize folders of documents, Gmail-style EML email exports, presentations, images, audio, and video. Categorizes folders and routes files to provenance-backed multi-email digests, transcription, personal-admin, literature-extraction, and project-extraction. Uses deterministic extraction plus split non-thinking and thinking model processing.
 ---
 
 # Document Ingest
@@ -45,6 +45,12 @@ provenance-linked Markdown. If cleaned Markdown explicitly names the JSON
 export as its source, archive the JSON as a represented provenance sidecar
 instead of reviewing it as a second evidence source.
 
+For two or more successfully parsed `.eml` files, preserve one full Markdown
+document per email and run `process-emails` before validation. Publish the
+verified aggregate as `Generated/email_digest.md`. Do not treat Gmail Takeout
+`.mbox` archives as `.eml`, interpret attachment contents automatically, or
+group messages by similar subjects.
+
 ## Command Card
 
 - `doctor --json`: capability check.
@@ -54,6 +60,7 @@ instead of reviewing it as a second evidence source.
 - `retry <run-directory> --item <id>|--all-failed`: explicitly requeue permanent failures.
 - `next-review <run-directory>`: one structured review packet with allowed enum values, paths, metadata, and exact recording commands.
 - `process-chunks <run-directory>`: clean every pending chunk of every multi-chunk document script-side on the non-thinking service, then review the batch on the thinking one.
+- `process-emails <run-directory>`: extract exact-quote evidence from each email on the non-thinking service, verify and synthesize on the thinking service, and produce a hash-bound cited digest.
 - `record-review-unit <run-directory> --doc-id <id> --kind chunk|vision-page --index <n> --reviewed-file <markdown>`: atomically commit one granular review unit.
 - `record-review <run-directory> --review-file <review.json>`: atomically update `metadata.json`, `manifest.csv`, and `extraction_report.md` after model review.
 - `record-transcript <run-directory> --doc-id <id> --transcript <cleaned.md>`: atomically install a cleaned transcript as the final document text and repair transcript chunk validation state.
@@ -159,6 +166,20 @@ folder ingestion, review, finalization, and literature handoff.
    - If the pipeline ends with `project-extraction`, include the cleaned
      transcript in the finalized folder before starting project extraction.
 
+   Once every `.eml` document has completed deterministic or model review, run
+   the email batch workflow when at least two succeeded:
+
+   ```bash
+   node <skill-directory>/scripts/document-ingest.mjs process-emails <new-directory>
+   ```
+
+   This processes bounded email segments statelessly on
+   `connectedServices.chat`, requires exact quotes and resolvable Markdown line
+   ranges, reviews all evidence on `connectedServices.think`, then authors and
+   verifies the digest from that evidence. It resumes committed per-email work.
+   `validate` and `finalize` fail closed if the source, evidence, digest, or
+   verification hashes are stale.
+
 4. As you complete each file, update your internal task checklist or the `manifest.csv` to track progress. Ensure every successfully processed file is reviewed.
 
 5. Validate the completed run (this checks the formatting of the document ingest outputs):
@@ -226,6 +247,9 @@ folder ingestion, review, finalization, and literature handoff.
   compatible marked run. Use `status` to inspect drift and `refresh` before
   adopting source revisions.
 - Do not upload files to external internet APIs unless using a locally configured backend.
+- Never fetch remote images or links from email HTML. Preserve and hash
+  attachments under the run directory, but do not summarize their contents
+  unless the user separately ingests them.
 - Keep automatically generated OCR PDFs under `derived/ocr.pdf` and media under `derived/audio.mp3`.
 - Do not install system packages. Report missing capabilities and the commands that require them.
 - Legacy `.ppt`, Keynote, and ODP are unsupported in v1. PPTX charts,

@@ -1,4 +1,4 @@
 interface:
   display_name: "File Conversion"
-  short_description: "Convert files, including Markdown and EPUB"
-  default_prompt: "Use $file-conversion to convert these files to the requested format with originals preserved."
+  short_description: "Convert files and EML with originals preserved"
+  default_prompt: "Use $file-conversion to convert these files or EML emails deterministically with originals preserved."

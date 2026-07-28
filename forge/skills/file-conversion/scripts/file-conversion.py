@@ -25,6 +25,7 @@ from pathlib import Path, PurePosixPath
 from xml.etree import ElementTree
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
+import eml_parser
 import run_state
 
 
@@ -56,6 +57,19 @@ MANIFEST_COLUMNS = [
     "cover_path",
     "cover_sha256",
 ]
+ATTACHMENT_MANIFEST_COLUMNS = [
+    "source_path",
+    "source_sha256",
+    "part_path",
+    "filename",
+    "original_filename",
+    "mime_type",
+    "disposition",
+    "content_id",
+    "byte_size",
+    "sha256",
+    "output_path",
+]
 
 # Source group -> recognized extensions.
 GROUP_EXTENSIONS = {
@@ -67,6 +81,7 @@ GROUP_EXTENSIONS = {
     "csv": {".csv", ".tsv"},
     "xlsx": {".xlsx"},
     "txt": {".txt"},
+    "eml": {".eml"},
 }
 EXTENSION_GROUP = {ext: group for group, exts in GROUP_EXTENSIONS.items() for ext in exts}
 
@@ -80,6 +95,7 @@ ALLOWED_TARGETS = {
     "csv": {"xlsx"},
     "xlsx": {"csv"},
     "txt": {"txt"},
+    "eml": {"md"},
 }
 ALL_TARGETS = sorted({target for targets in ALLOWED_TARGETS.values() for target in targets})
 
@@ -281,6 +297,24 @@ def write_conversion_manifest(path, rows):
     writer.writeheader()
     writer.writerows(rows)
     run_state.atomic_write_text(path, handle.getvalue())
+
+
+def write_attachment_manifest(path, rows):
+    handle = io.StringIO(newline="")
+    writer = csv.DictWriter(handle, fieldnames=ATTACHMENT_MANIFEST_COLUMNS, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(rows)
+    run_state.atomic_write_text(path, handle.getvalue())
+
+
+def read_attachment_manifest(path):
+    if not path.is_file():
+        return []
+    with path.open(encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames != ATTACHMENT_MANIFEST_COLUMNS:
+            raise RuntimeError("attachment_manifest.csv columns do not match the required contract")
+        return list(reader)
 
 
 def iter_input_files(root):
@@ -1313,6 +1347,35 @@ def run_txt_cleanup(source, output):
     return text_warnings(text)
 
 
+def run_eml_to_markdown(source, output, converted_dir, stem):
+    attachment_key = f"{stem}-{sha256(source)[:12]}"
+    attachment_directory = converted_dir / "attachments" / attachment_key
+    result = eml_parser.parse_eml(
+        source,
+        attachment_directory=attachment_directory,
+        attachment_link_prefix=f"attachments/{attachment_key}",
+    )
+    output.write_text(result["markdown"], encoding="utf-8")
+    attachments = []
+    for attachment in result["email"]["attachments"]:
+        attachments.append(
+            {
+                "source_path": str(source),
+                "source_sha256": result["source"]["sha256"],
+                "part_path": attachment["partPath"],
+                "filename": attachment["filename"],
+                "original_filename": attachment["originalFilename"] or "",
+                "mime_type": attachment["mimeType"],
+                "disposition": attachment["disposition"],
+                "content_id": attachment["contentId"] or "",
+                "byte_size": attachment["byteSize"],
+                "sha256": attachment["sha256"],
+                "output_path": str(Path(attachment["path"]).relative_to(converted_dir.parent)),
+            }
+        )
+    return result["warnings"], attachments
+
+
 def unique_output(converted_dir, stem, extension, used):
     candidate = f"{stem}.{extension}"
     index = 1
@@ -1327,8 +1390,9 @@ def convert_one(source, target, converted_dir, used_names, options=None):
     options = options or {}
     group = EXTENSION_GROUP.get(source.suffix.lower())
     if group is None or target not in ALLOWED_TARGETS.get(group, set()):
-        return {"status": "skipped", "output": None, "warnings": [], "error": f"{source.suffix or '(none)'} cannot convert to {target}"}
+        return {"status": "skipped", "output": None, "warnings": [], "attachments": [], "error": f"{source.suffix or '(none)'} cannot convert to {target}"}
     stem = safe_stem(source)
+    attachments = []
     try:
         if group == "csv":
             output = unique_output(converted_dir, stem, "xlsx", used_names)
@@ -1344,6 +1408,9 @@ def convert_one(source, target, converted_dir, used_names, options=None):
         elif group == "txt":
             output = unique_output(converted_dir, stem, "txt", used_names)
             warnings = run_txt_cleanup(source, output)
+        elif group == "eml":
+            output = unique_output(converted_dir, stem, "md", used_names)
+            warnings, attachments = run_eml_to_markdown(source, output, converted_dir, stem)
         elif group == "epub":
             output = unique_output(converted_dir, stem, "md", used_names)
             warnings = run_epub_to_markdown(source, output, converted_dir)
@@ -1356,9 +1423,9 @@ def convert_one(source, target, converted_dir, used_names, options=None):
             warnings = run_pandoc(source, output, target, media_dir)
     except Exception as error:  # handlers may raise tool/library-specific errors; keep the batch going
         message = str(error) or error.__class__.__name__
-        return {"status": "failed", "output": None, "warnings": [], "error": message}
+        return {"status": "failed", "output": None, "warnings": [], "attachments": [], "error": message}
     status = "needs_review" if warnings else "success"
-    return {"status": status, "output": output, "warnings": warnings, "error": ""}
+    return {"status": status, "output": output, "warnings": warnings, "attachments": attachments, "error": ""}
 
 
 def command_doctor(args):
@@ -1567,10 +1634,13 @@ def command_convert(args):
         )
         run_state.initialize_run_state(output, state)
         write_conversion_manifest(output / "conversion_manifest.csv", [conversion_row(item, args.target, cover) for item in items])
+        write_attachment_manifest(output / "attachment_manifest.csv", [])
     manifest_path = output / "conversion_manifest.csv"
+    attachment_manifest_path = output / "attachment_manifest.csv"
     state = run_state.load_run_state(output, "file-conversion")
     with manifest_path.open(encoding="utf-8-sig", newline="") as handle:
         rows_by_key = {(row["source_path"], row["source_sha256"]): row for row in csv.DictReader(handle)}
+    attachment_rows = read_attachment_manifest(attachment_manifest_path)
     used_names = {Path(row["output_path"]).name.lower() for row in rows_by_key.values() if row.get("output_path")}
     with run_state.run_lock(output):
         for snapshot in state["items"]:
@@ -1598,6 +1668,13 @@ def command_convert(args):
                 item.update({"status": outcome["status"], "outputPath": output_rel, "warningCount": len(outcome["warnings"]), "error": outcome["error"] or None, "transient": transient})
                 rows_by_key[(item["path"], item["sha256"])] = conversion_row(item, args.target, cover)
                 write_conversion_manifest(manifest_path, list(rows_by_key.values()))
+                attachment_rows = [
+                    row
+                    for row in attachment_rows
+                    if (row["source_path"], row["source_sha256"]) != (item["path"], item["sha256"])
+                ]
+                attachment_rows.extend(outcome["attachments"])
+                write_attachment_manifest(attachment_manifest_path, attachment_rows)
                 state = run_state.update_run_state(
                     output,
                     lambda draft, updated=item: mark_conversion_finished(draft, updated),
@@ -1912,6 +1989,27 @@ def command_validate(args):
     errors = []
     warnings = []
     counts = Counter()
+    attachment_manifest_path = run_directory / "attachment_manifest.csv"
+    try:
+        attachment_rows = read_attachment_manifest(attachment_manifest_path)
+    except RuntimeError as error:
+        attachment_rows = []
+        errors.append(str(error))
+    attachments_by_source = {}
+    for attachment in attachment_rows:
+        key = (attachment.get("source_path"), attachment.get("source_sha256"))
+        attachments_by_source.setdefault(key, []).append(attachment)
+        output_path = run_directory / attachment.get("output_path", "")
+        resolved_output = output_path.resolve()
+        if not attachment.get("output_path") or not resolved_output.is_relative_to((run_directory / "converted" / "attachments").resolve()):
+            errors.append(f"attachment output is outside converted/attachments: {attachment.get('output_path') or '(none)'}")
+        elif not output_path.is_file():
+            errors.append(f"converted attachment is missing: {attachment.get('output_path')}")
+        else:
+            if sha256(output_path) != attachment.get("sha256"):
+                errors.append(f"converted attachment hash differs from manifest: {attachment.get('output_path')}")
+            if str(output_path.stat().st_size) != str(attachment.get("byte_size")):
+                errors.append(f"converted attachment size differs from manifest: {attachment.get('output_path')}")
     for row in rows:
         counts[row.get("status")] += 1
         source = Path(row.get("source_path", ""))
@@ -1941,6 +2039,13 @@ def command_validate(args):
                 markdown_errors, markdown_warnings = validate_epub_markdown(source, output)
                 errors.extend(f"{output.name}: {error}" for error in markdown_errors)
                 warnings.extend(f"{output.name}: {warning}" for warning in markdown_warnings)
+            elif row.get("source_format") == "eml" and row.get("target_format") == "md":
+                if not attachment_manifest_path.is_file():
+                    errors.append("attachment_manifest.csv is missing for EML conversion")
+                for attachment in attachments_by_source.get((row.get("source_path"), row.get("source_sha256")), []):
+                    link = Path(attachment["output_path"]).relative_to("converted")
+                    if str(link).replace("\\", "/") not in output.read_text(encoding="utf-8", errors="replace"):
+                        errors.append(f"{output.name} does not link attachment {attachment['filename']}")
     if counts["failed"]:
         warnings.append(f"{counts['failed']} files failed conversion; see conversion_manifest.csv error column.")
     if counts["skipped"]:

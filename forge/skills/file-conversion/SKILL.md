@@ -1,6 +1,6 @@
 ---
 name: file-conversion
-description: Convert files between formats while preserving originals. Use for DOCX, Markdown, EPUB, PDF, HTML, CSV, TSV, XLSX, and text, including Markdown to reflowable EPUB 3 with navigation and cover, EPUB back to clean Markdown with extracted media, and PDF to structured Markdown with headings and endnotes. Handles single files or whole folders, with conversion logs, manifests, and explicit warnings for lossy conversions.
+description: Convert files between formats while preserving originals. Use for Gmail-style EML email exports, DOCX, Markdown, EPUB, PDF, HTML, CSV, TSV, XLSX, and text, including deterministic EML to Markdown with attachment manifests, Markdown to reflowable EPUB 3, EPUB back to clean Markdown, and PDF to structured Markdown. Handles single files or folders with checkpoints, provenance, and explicit lossy-conversion warnings.
 ---
 
 # File Conversion
@@ -42,7 +42,12 @@ disclose lossy conversions. This is the profile's general-purpose converter.
    `<input>` is files and/or directories; folders are discovered recursively,
    skipping hidden paths and symlinks. Targets are `md`, `docx`, `html`, `txt`,
    `epub`, `csv`, and `xlsx`. Use `--from <ext>` to restrict a batch to one source
-   extension. Sources that cannot produce the target are skipped, not failed.
+   extension. `.eml` converts deterministically to `md`; each email remains a
+   separate Markdown file and MIME attachments are preserved under
+   `converted/attachments/` with `attachment_manifest.csv`. This conversion
+   never calls a model or creates a corpus digest; use `document-ingest` for a
+   verified multi-email summary. Sources that cannot produce the target are
+   skipped, not failed.
    For a single Markdown book, optional metadata and a cover can be supplied:
 
    ```bash
@@ -90,6 +95,8 @@ disclose lossy conversions. This is the profile's general-purpose converter.
 
 - Preserve originals. Never modify a source; all outputs go under `converted/`.
 - Keep output filenames traceable to their sources via the manifest.
+- Never fetch remote email resources. Preserve `.eml` attachments with safe
+  names and hashes, but do not interpret their contents automatically.
 - Never claim complex formatting survived when it did not. Flag formatting loss,
   dropped or extracted media, and missing tables. PDF→Markdown reconstructs
   chapter headings and footnotes (collected as per-chapter `## Endnotes`)
