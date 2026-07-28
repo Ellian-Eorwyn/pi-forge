@@ -19,8 +19,10 @@ user's existing work. Inspect before editing and record what was done.
 
    Add `--json` for machine-readable output.
 2. Choose a new output directory under `forge-output/coding/<repo-stem>/`. If it
-   exists, use the next numbered suffix. Profile the repository before touching
-   any code:
+   exists, use the next numbered suffix. Inside an Obsidian vault use the vault
+   workflow root instead — `99 Meta/99.06 Workflows/Coding/<repo-stem>/`, at the
+   absolute path the injected vault context names. Profile the repository before
+   touching any code:
 
    ```bash
    node <skill-directory>/scripts/coding.mjs inspect <repo> --output <new-directory>

@@ -24,8 +24,12 @@ ffmpeg normalizes every input to 16 kHz mono PCM WAV before recognition.
 
 ## Run Layout
 
+The run directory is `forge-output/transcription/<source-stem>/`, or
+`99 Meta/99.06 Workflows/Transcriptions/<source-stem>/` inside an Obsidian vault.
+Its layout is the same either way:
+
 ```
-forge-output/transcription/<source-stem>/
+<run-directory>/
   run_state.json               # chunk statuses, attempts, and next action
   run_events.jsonl             # fsynced transition journal
   audio/

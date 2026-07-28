@@ -44,7 +44,10 @@ local embeddings endpoint ranks chunks before evidence extraction.
    `doctor` reports SearXNG connectivity, Playwright availability, the
    configured browser endpoint, and remediation steps.
 
-2. Choose a command:
+2. Choose a command. `<run-directory>` goes under
+   `forge-output/web-research/`, or under the vault workflow root
+   `99 Meta/99.06 Workflows/Web Research/` inside an Obsidian vault — the
+   `web_research` tools resolve that themselves when `output` is omitted:
 
    - **`research`** — Full workflow: search → read top results → report.
      The default choice for most information lookups:

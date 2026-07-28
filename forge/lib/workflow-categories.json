@@ -1,0 +1,20 @@
+{
+	"comment": "Skill name -> folder label used under the vault's Meta/Workflows folder. A skill absent from `categories` falls back to forge-output/<skill>/ even inside a vault. Labels are mirrored in each skill's SKILL.md so the model sees its own value without loading this file.",
+	"categories": {
+		"coding": "Coding",
+		"file-conversion": "File Conversions",
+		"literature-extraction": "Literature Extractions",
+		"organize-folder": "Folder Organization",
+		"personal-admin": "Personal Admin",
+		"project-extraction": "Project Extractions",
+		"report-output": "Reports",
+		"reviewer-2": "Peer Reviews",
+		"site-builder": "Site Builds",
+		"spreadsheet-analysis": "Spreadsheet Analyses",
+		"transcript-cleanup": "Transcript Cleanups",
+		"transcription": "Transcriptions",
+		"vault-capture": "Captures",
+		"web-collection": "Web Collections",
+		"web-research": "Web Research"
+	}
+}

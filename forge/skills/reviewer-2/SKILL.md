@@ -64,8 +64,11 @@ equal the original body byte for byte, or nothing is written at all.
    `web-research deep` when the point needs what a source actually argues rather
    than that it exists. Cite only what those runs returned; a citation that
    resolves to nothing is refused, and that is deliberate.
-7. Author the comments file at `forge-output/reviewer-2/<slug>/comments.json`,
-   following `references/comment-format.md`. Then render:
+7. Author the comments file at `forge-output/reviewer-2/<slug>/comments.json` —
+   inside an Obsidian vault, at the vault workflow root instead,
+   `99 Meta/99.06 Workflows/Peer Reviews/<slug>/comments.json`, using the
+   absolute path the injected vault context names. Follow
+   `references/comment-format.md`. Then render:
 
    ```bash
    python3 <skill-directory>/scripts/reviewer-2.py render --run <run-directory> --comments <comments.json>

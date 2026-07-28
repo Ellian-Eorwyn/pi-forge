@@ -18,7 +18,10 @@ Analyze tabular data reproducibly while preserving every source file.
 
 2. Create a new output directory under
    `forge-output/spreadsheet-analysis/<source-stem>/`. If it exists, use a
-   numbered suffix. Never overwrite a source or existing output.
+   numbered suffix. Inside an Obsidian vault use the vault workflow root
+   instead — `99 Meta/99.06 Workflows/Spreadsheet Analyses/<source-stem>/`, at
+   the absolute path the injected vault context names. Never overwrite a source
+   or existing output.
 3. Profile the input before interpreting or transforming it:
 
    ```bash

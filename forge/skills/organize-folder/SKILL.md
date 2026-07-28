@@ -20,7 +20,10 @@ are relocated, never deleted, and every move is reversible.
 
 2. Confirm the target folder with the user. Create a new run directory under
    `forge-output/organize-folder/<folder-name>/`; if it exists, use a numbered
-   suffix. Scan the folder into a reviewable manifest and profile:
+   suffix. Inside an Obsidian vault use the vault workflow root instead —
+   `99 Meta/99.06 Workflows/Folder Organization/<folder-name>/`, at the absolute
+   path the injected vault context names. Scan the folder into a reviewable
+   manifest and profile:
 
    ```bash
    python3 <skill-directory>/scripts/organize-folder.py scan <target-folder> \

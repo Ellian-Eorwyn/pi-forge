@@ -23,9 +23,12 @@ the original sources; produce new files only.
    instance unless overridden for one run by `FORGE_SEARXNG_URL` or
    `--searxng <url>`.
 2. Use an output directory under `forge-output/web-collection/<source-stem>/`.
-   Repeating the same command resumes its compatible incomplete run or returns
-   its completion summary. Use a numbered suffix only for an independent run;
-   unrelated or legacy directories are refused.
+   Inside an Obsidian vault use the vault workflow root instead —
+   `99 Meta/99.06 Workflows/Web Collections/<source-stem>/`, at the absolute path
+   the injected vault context names. Repeating the same command resumes its
+   compatible incomplete run or returns its completion summary. Use a numbered
+   suffix only for an independent run; unrelated or legacy directories are
+   refused.
 3. Pick a command:
    - **collect** named URLs:
 

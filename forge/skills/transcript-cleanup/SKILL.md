@@ -29,7 +29,10 @@ interpretation, and uncertainty visible.
    a path, filename, date, or checksum.
 4. Create a dedicated output directory under
    `forge-output/transcript-cleanup/<source-stem>/`. If it exists, use the next
-   numbered suffix. Do not overwrite existing output.
+   numbered suffix. Inside an Obsidian vault use the vault workflow root
+   instead — `99 Meta/99.06 Workflows/Transcript Cleanups/<source-stem>/`, at the
+   absolute path the injected vault context names. Do not overwrite existing
+   output.
 5. Follow the selected output track below. Create separate artifacts only when
    requested.
 6. Review the result against the source before finishing. Report omissions,

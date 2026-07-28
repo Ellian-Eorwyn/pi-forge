@@ -23,6 +23,9 @@ write the literature run to:
 <input-folder>/Generated/Literature-Extraction
 ```
 
+Inside an Obsidian vault, write it to the vault workflow root instead —
+`99 Meta/99.06 Workflows/Literature Extractions/<input-stem>/`.
+
 The default folder discovery skips `Ingest/`, `Originals/`, and `Generated/`, so
 this processes only the finalized clean Markdown files at the source folder
 surface.
@@ -66,7 +69,15 @@ surface.
    `forge-output/literature-extraction/<input-stem>/`. If it contains a
    compatible run, resume it; use a numbered suffix only for an independent
    run. When invoked from `document-ingest`, instead use
-   `<input-folder>/Generated/Literature-Extraction`. Then initialize the run:
+   `<input-folder>/Generated/Literature-Extraction`.
+
+   Inside an Obsidian vault the vault workflow root replaces both — use
+   `99 Meta/99.06 Workflows/Literature Extractions/<input-stem>/`, at the
+   absolute path the injected vault context names, even when the sources came
+   from `document-ingest`. A `Generated/` tree inside a domain folder is exactly
+   what that root exists to prevent.
+
+   Then initialize the run:
 
    ```bash
    python3 <skill-directory>/scripts/literature-extraction.py init <input> --output <new-directory>

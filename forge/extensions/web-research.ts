@@ -1,10 +1,11 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { resolveWorkflowRoot } from "./vault-context.ts";
 
 interface WebSearchParams {
 	query: string;
@@ -375,9 +376,10 @@ function readResearchReport(output: string): { query: unknown; params: unknown; 
 	};
 }
 
-function defaultOutputDirectory(cwd: string, command: string, seed: string): string {
-	const root = join(cwd, "forge-output", "web-research");
-	mkdirSync(root, { recursive: true });
+export function defaultOutputDirectory(cwd: string, command: string, seed: string): string {
+	// Inside an Obsidian vault this is the schema-derived workflows folder; the
+	// resolver creates it and falls back to forge-output/web-research elsewhere.
+	const root = resolveWorkflowRoot(cwd, "web-research");
 	const hash = createHash("sha256").update(seed).digest("hex").slice(0, 8);
 	const stem = safeStem(`${command}-${seed}`).slice(0, 48) || command;
 	for (let index = 1; index <= 1000; index += 1) {

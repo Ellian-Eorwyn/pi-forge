@@ -19,7 +19,10 @@ synthesis separate from extracted source content, and make uncertainty visible.
 
 2. Create a new output directory under
    `forge-output/report-output/<title-or-stem>/`. If it exists, use a numbered
-   suffix. Register inputs and scaffold deliverables for a detail level:
+   suffix. Inside an Obsidian vault use the vault workflow root instead —
+   `99 Meta/99.06 Workflows/Reports/<title-or-stem>/`, at the absolute path the
+   injected vault context names. Register inputs and scaffold deliverables for a
+   detail level:
 
    ```bash
    python3 <skill-directory>/scripts/report-output.py init <inputs...> \

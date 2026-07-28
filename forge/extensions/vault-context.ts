@@ -15,7 +15,7 @@
  * few known paths. Outside a vault this extension does nothing at all.
  */
 
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -28,6 +28,21 @@ const MAX_ASCEND = 24;
 const MAX_NOTES_COUNTED = 50000;
 const MAX_SCHEMA_SEARCH_DEPTH = 3;
 
+// The schema's registry values for the folder that holds generated run
+// directories. The folder *name* is compiled from the schema's numbers and
+// labels, never hardcoded: renumbering `meta` renames every path beneath it.
+const META_DOMAIN_VALUE = "meta";
+const WORKFLOWS_SUBDOMAIN_VALUE = "workflows";
+const WORKFLOWS_FOLDER_PATTERN = /^\d{1,2}\.\d{2} Workflows$/;
+const CATEGORY_MAP_URL = new URL("../lib/workflow-categories.json", import.meta.url);
+/** Marks a directory whose contents are machine artifacts, not vault notes. */
+const WORKSPACE_MARKER = ".forge-workspace";
+const WORKSPACE_MARKER_CONTENT = [
+	"pi-forge workspace. Generated run directories live here.",
+	"vault-organizer and vault-connections skip any directory containing this file.",
+	"",
+].join("\n");
+
 interface VaultInfo {
 	root: string;
 	name: string;
@@ -37,6 +52,8 @@ interface VaultInfo {
 	wikiDomain: boolean;
 	organizerState: boolean;
 	indexedNotes?: number;
+	/** Vault-relative folder holding generated run directories, when resolvable. */
+	workflowsFolder?: string;
 }
 
 /** Nearest ancestor of `from` (inclusive) that contains a `.obsidian` directory. */
@@ -70,6 +87,9 @@ function countNotes(root: string): { count: number; truncated: boolean } {
 			if (entry.isSymbolicLink()) continue;
 			if (entry.isDirectory()) {
 				if (entry.name.startsWith(".") || SKIPPED_DIRECTORIES.has(entry.name)) continue;
+				// Marked workspaces hold run artifacts, which the skills do not treat
+				// as notes; counting them would disagree with what discovery selects.
+				if (existsSync(join(directory, entry.name, WORKSPACE_MARKER))) continue;
 				queue.push(join(directory, entry.name));
 				continue;
 			}
@@ -128,6 +148,115 @@ function hasWikiDomain(root: string, schemaNote: string | undefined): boolean {
 	}
 }
 
+let categoryCache: Record<string, string> | undefined;
+
+/** Skill name -> folder label under the workflows folder. Absent means "no vault route". */
+function workflowCategories(): Record<string, string> {
+	if (categoryCache) return categoryCache;
+	try {
+		const parsed = JSON.parse(readFileSync(CATEGORY_MAP_URL, "utf8")) as { categories?: unknown };
+		categoryCache =
+			parsed.categories && typeof parsed.categories === "object" ? (parsed.categories as Record<string, string>) : {};
+	} catch {
+		// A missing or malformed map is not fatal; every skill falls back to forge-output/.
+		categoryCache = {};
+	}
+	return categoryCache;
+}
+
+function pad2(value: number): string {
+	return value < 10 ? `0${value}` : String(value);
+}
+
+/** One `| \`value\` | \`number\` | \`Label\` | …` row from a schema registry table. */
+function registryRow(text: string, value: string): { number: number; label: string } | undefined {
+	const match = new RegExp(`^\\|\\s*\`${value}\`\\s*\\|\\s*\`(\\d{1,2})\`\\s*\\|\\s*\`([^\`|]+)\`\\s*\\|`, "m").exec(text);
+	if (!match) return undefined;
+	const number = Number.parseInt(match[1] as string, 10);
+	const label = (match[2] as string).trim();
+	if (!Number.isInteger(number) || number < 1 || number > 99 || label.length === 0) return undefined;
+	return { number, label };
+}
+
+/** The `### <domain>` subdomain table only, so a same-named row elsewhere cannot match. */
+function subdomainSection(text: string, domain: string): string {
+	const start = new RegExp(`^###\\s+${domain}\\s*$`, "m").exec(text);
+	if (!start) return "";
+	const rest = text.slice(start.index + start[0].length);
+	const end = /^#{2,3}\s+\S/m.exec(rest);
+	return end ? rest.slice(0, end.index) : rest;
+}
+
+/** Compile `<pad2(domain)> <Domain>/<domain>.<pad2(sub)> <Sub>` from the schema's registries. */
+function workflowsFolderFromSchema(root: string, schemaNote: string | undefined): string | undefined {
+	if (!schemaNote) return undefined;
+	let text: string;
+	try {
+		text = readFileSync(join(root, schemaNote), "utf8");
+	} catch {
+		return undefined;
+	}
+	const domain = registryRow(text, META_DOMAIN_VALUE);
+	if (!domain) return undefined;
+	const subdomain = registryRow(subdomainSection(text, META_DOMAIN_VALUE), WORKFLOWS_SUBDOMAIN_VALUE);
+	if (!subdomain) return undefined;
+	return join(
+		`${pad2(domain.number)} ${domain.label}`,
+		`${domain.number}.${pad2(subdomain.number)} ${subdomain.label}`,
+	);
+}
+
+/** Fallback for a vault with no readable schema: an existing `NN.MM Workflows` folder. */
+function workflowsFolderOnDisk(root: string): string | undefined {
+	let entries: ReturnType<typeof readdirSync>;
+	try {
+		entries = readdirSync(root, { withFileTypes: true });
+	} catch {
+		return undefined;
+	}
+	for (const entry of entries) {
+		if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+		if (entry.name.startsWith(".") || SKIPPED_DIRECTORIES.has(entry.name)) continue;
+		let children: ReturnType<typeof readdirSync>;
+		try {
+			children = readdirSync(join(root, entry.name), { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const child of children) {
+			if (child.isDirectory() && WORKFLOWS_FOLDER_PATTERN.test(child.name)) return join(entry.name, child.name);
+		}
+	}
+	return undefined;
+}
+
+function findWorkflowsFolder(root: string, schemaNote: string | undefined): string | undefined {
+	return workflowsFolderFromSchema(root, schemaNote) ?? workflowsFolderOnDisk(root);
+}
+
+/**
+ * Where `skill` should write its generated run directories.
+ *
+ * Inside a vault whose workflows folder resolves, that is a per-skill category
+ * folder under it, marked so the organizer and the index leave the artifacts
+ * alone. Everywhere else it is the unchanged `forge-output/<skill>/`.
+ */
+export function resolveWorkflowRoot(cwd: string, skill: string): string {
+	const category = workflowCategories()[skill];
+	const vaultRoot = category ? findVaultRoot(cwd) : undefined;
+	const workflowsFolder = vaultRoot ? findWorkflowsFolder(vaultRoot, findSchemaNote(vaultRoot)) : undefined;
+	if (!vaultRoot || !workflowsFolder || !category) {
+		const fallback = join(cwd, "forge-output", skill);
+		mkdirSync(fallback, { recursive: true });
+		return fallback;
+	}
+	const directory = join(vaultRoot, workflowsFolder, category);
+	mkdirSync(directory, { recursive: true });
+	const marker = join(directory, WORKSPACE_MARKER);
+	if (!existsSync(marker)) writeFileSync(marker, WORKSPACE_MARKER_CONTENT);
+	return directory;
+}
+
 export function inspectVault(cwd: string): VaultInfo | undefined {
 	const root = findVaultRoot(cwd);
 	if (!root) return undefined;
@@ -142,6 +271,7 @@ export function inspectVault(cwd: string): VaultInfo | undefined {
 		wikiDomain: hasWikiDomain(root, schemaNote),
 		organizerState: existsSync(join(root, ".vault-organizer")),
 		indexedNotes: readIndexedNoteCount(root),
+		workflowsFolder: findWorkflowsFolder(root, schemaNote),
 	};
 }
 
@@ -170,6 +300,23 @@ export function vaultContextMessage(vault: VaultInfo): string {
 	}
 	if (vault.schemaNote && !vault.organizerState) {
 		lines.push("- vault-organizer has never run here, so notes are not yet guaranteed to match the schema. Dry-run before proposing any apply.");
+	}
+
+	if (vault.workflowsFolder) {
+		lines.push(
+			"",
+			"Where generated output goes:",
+			`- Workflow root: ${join(vault.root, vault.workflowsFolder)}`,
+			"- Every skill that would otherwise write to `forge-output/<skill>/` writes to `<workflow root>/<Category>/<stem>/` instead. Each SKILL.md names its own category; do not invent one.",
+			"- This wins over a skill's `<source-folder>/Generated/…` convention inside the vault, so no run directory lands in a domain folder.",
+			"- Those category folders carry a `.forge-workspace` marker and are skipped by vault-organizer and vault-connections. Run artifacts are not notes.",
+			"- To make a finished report an actual note, use vault-connections `import-run`. Never hand-copy a run artifact into a domain folder.",
+		);
+	} else {
+		lines.push(
+			"",
+			`- No workflows folder resolved from the schema, so generated output stays in \`forge-output/<skill>/\`. Say so if the user expects it in the vault.`,
+		);
 	}
 
 	lines.push(

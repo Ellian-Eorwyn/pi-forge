@@ -53,6 +53,10 @@ repository checkout, so updates do not remove the local model cache.
      --output forge-output/transcription/<source-stem> --type <type>
    ```
 
+   Inside an Obsidian vault pass the vault workflow root instead —
+   `99 Meta/99.06 Workflows/Transcriptions/<source-stem>` — at the absolute path
+   the injected vault context names.
+
    The script preserves the source (records its SHA-256), normalizes
    audio with ffmpeg, chunks long recordings, writes `raw_transcript.txt`,
    `raw_segments.json`, `raw_transcript.srt`, applies the dictionary into

@@ -19,6 +19,13 @@ Use finalized Markdown/text from `document-ingest` and CSV exports from
 <source-folder>/Generated/Project-Extraction
 ```
 
+Otherwise write it to `forge-output/project-extraction/<input-stem>/`. Inside an
+Obsidian vault the vault workflow root replaces both — use
+`99 Meta/99.06 Workflows/Project Extractions/<input-stem>/`, at the absolute path
+the injected vault context names, even when the sources came from
+`document-ingest`. The run's `Inbox/` is derived from the inputs, not the output,
+so it stays with the sources either way.
+
 If the folder includes recordings, complete `transcription` and
 `transcript-cleanup` before this workflow. Use `report-output` only after the
 registers are valid when polished DOCX, HTML, briefings, or slide outlines are

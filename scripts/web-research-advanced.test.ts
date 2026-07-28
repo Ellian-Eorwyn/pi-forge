@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { ADVANCED_FLAGS, buildAdvancedArgs } from "../forge/extensions/web-research.ts";
+import { ADVANCED_FLAGS, buildAdvancedArgs, defaultOutputDirectory } from "../forge/extensions/web-research.ts";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const cliPath = join(repositoryRoot, "forge", "skills", "web-research", "scripts", "web-research.mjs");
@@ -48,4 +49,49 @@ test("unknown and mistyped options fail loudly instead of being dropped", () => 
 	assert.throws(() => buildAdvancedArgs({ notAnOption: 1 }), /Unknown advanced option "notAnOption"/);
 	assert.throws(() => buildAdvancedArgs({ noEmbeddings: "yes" }), /takes a boolean/);
 	assert.throws(() => buildAdvancedArgs({ cacheDir: { nested: true } }), /takes a string or number/);
+});
+
+const VAULT_SCHEMA = `# Vault Schema
+
+## Domains
+
+| Value | Number | Label | Definition |
+| --- | --- | --- | --- |
+| \`meta\` | \`99\` | \`Meta\` | Notes about the knowledge system itself. |
+
+## Subdomains
+
+### meta
+
+| Value | Number | Label | Definition |
+| --- | --- | --- | --- |
+| \`workflows\` | \`6\` | \`Workflows\` | Capture, automation, and maintenance workflows. |
+`;
+
+test("a run started inside a vault lands in the workflows folder, not at the vault root", () => {
+	const root = mkdtempSync(join(tmpdir(), "web-research-vault-"));
+	try {
+		mkdirSync(join(root, ".obsidian"), { recursive: true });
+		mkdirSync(join(root, "99 Meta", "99.02 Schemas"), { recursive: true });
+		writeFileSync(join(root, "99 Meta", "99.02 Schemas", "0.00 Vault Schema.md"), VAULT_SCHEMA);
+
+		const directory = defaultOutputDirectory(root, "search", "a query");
+		assert.equal(dirname(directory), join(root, "99 Meta", "99.06 Workflows", "Web Research"));
+		assert.match(directory, /[/\\]search-a-query-[0-9a-f]{8}$/);
+		// A second run with the same seed must not adopt the first run's directory.
+		mkdirSync(directory, { recursive: true });
+		assert.equal(defaultOutputDirectory(root, "search", "a query"), `${directory}-2`);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("outside a vault the run directory stays under forge-output", () => {
+	const root = mkdtempSync(join(tmpdir(), "web-research-plain-"));
+	try {
+		const directory = defaultOutputDirectory(root, "search", "a query");
+		assert.equal(dirname(directory), join(root, "forge-output", "web-research"));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });

@@ -30,8 +30,11 @@ disclose lossy conversions. This is the profile's general-purpose converter.
    This writes under pi-forge's isolated agent state; it never installs Java or
    another system package.
 2. Use an output directory under `forge-output/file-conversion/<input-stem>/`.
-   Repeating the same command resumes its compatible incomplete run or returns
-   its completion summary; use a numbered suffix only for an independent run.
+   Inside an Obsidian vault use the vault workflow root instead —
+   `99 Meta/99.06 Workflows/File Conversions/<input-stem>/`, at the absolute path
+   the injected vault context names. Repeating the same command resumes its
+   compatible incomplete run or returns its completion summary; use a numbered
+   suffix only for an independent run.
    Convert files or folders to one target format:
 
    ```bash

@@ -19,7 +19,10 @@ extracted facts separate from suggested steps, and organize rather than advise.
    This skill consumes `document.md`, `.md`, and `.txt` (paste emails or notes
    into a `.txt`). Convert PDF, DOCX, HTML, and RTF with `document-ingest` first.
 2. Use an output directory under
-   `forge-output/personal-admin/<title-or-stem>/`. Repeating `init` with the
+   `forge-output/personal-admin/<title-or-stem>/`. Inside an Obsidian vault use
+   the vault workflow root instead —
+   `99 Meta/99.06 Workflows/Personal Admin/<title-or-stem>/`, at the absolute
+   path the injected vault context names. Repeating `init` with the
    same paths and options resumes a compatible marked run; use a numbered
    suffix only for an independent run. Initialize the run:
 

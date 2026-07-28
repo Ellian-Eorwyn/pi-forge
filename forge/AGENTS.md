@@ -20,6 +20,11 @@ default to `.agents/skills/<name>/SKILL.md`.
   path contains a compatible incomplete batch run, resume it. If it contains a
   compatible complete run, report its completion summary. Use a numbered path
   only for a genuinely independent run; never adopt an unmarked legacy folder.
+- The output directory is `forge-output/<skill>/` by default. Inside an Obsidian
+  vault it is the vault's workflow root instead — `99 Meta/99.06 Workflows` in a
+  default schema — with one category folder per skill, named in that skill's
+  `SKILL.md`. The `vault-context` extension injects the resolved absolute path;
+  never guess it, and never write a run directory into a domain folder.
 - Use working copies for transformations that could alter source content.
 - Keep sensitive material local and avoid unnecessary copies.
 

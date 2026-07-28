@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import vaultContextExtension, { inspectVault, vaultContextMessage } from "../forge/extensions/vault-context.ts";
+import vaultContextExtension, {
+	inspectVault,
+	resolveWorkflowRoot,
+	vaultContextMessage,
+} from "../forge/extensions/vault-context.ts";
 
 type Handler = (...args: unknown[]) => unknown;
 
@@ -18,6 +22,37 @@ const SCHEMA_WITH_WIKI = `# Vault Schema
 `;
 
 const SCHEMA_WITHOUT_WIKI = SCHEMA_WITH_WIKI.replace(/^\| `wiki`.*$/m, "");
+
+/** A schema carrying the `meta` domain and its `workflows` subdomain, as the real vault does. */
+function schemaWithMeta(metaNumber = 99, workflowsNumber = 6): string {
+	return `# Vault Schema
+
+## Domains
+
+| Value | Number | Label | Definition |
+| --- | --- | --- | --- |
+| \`personal\` | \`1\` | \`Personal\` | Personal material. |
+| \`wiki\` | \`9\` | \`Wiki\` | Cross-cutting entity notes. |
+| \`meta\` | \`${metaNumber}\` | \`Meta\` | Notes about the knowledge system itself. |
+
+## Subdomains
+
+### personal
+
+| Value | Number | Label | Definition |
+| --- | --- | --- | --- |
+| \`workflows\` | \`3\` | \`Decoy\` | A same-named row under another domain. |
+
+### meta
+
+| Value | Number | Label | Definition |
+| --- | --- | --- | --- |
+| \`schemas\` | \`2\` | \`Schemas\` | Controlled vocabularies. |
+| \`workflows\` | \`${workflowsNumber}\` | \`Workflows\` | Capture, automation, and maintenance workflows. |
+
+## Project registry
+`;
+}
 
 function makeVault(options: { schema?: string; schemaAt?: string; notes?: string[]; indexed?: number } = {}) {
 	const root = mkdtempSync(join(tmpdir(), "vault-context-"));
@@ -173,6 +208,120 @@ test("the injected message flags a missing schema, a missing index, and a missin
 	try {
 		const withoutSchema = vaultContextMessage(inspectVault(bare) as NonNullable<ReturnType<typeof inspectVault>>);
 		assert.match(withoutSchema, /Schema note: NOT FOUND/);
+	} finally {
+		rmSync(bare, { recursive: true, force: true });
+	}
+});
+
+test("the workflow root is the schema-compiled Meta/Workflows folder for a mapped skill", () => {
+	const root = makeVault({ schema: schemaWithMeta(), notes: ["A.md"] });
+	try {
+		const resolved = resolveWorkflowRoot(join(root, "01 Personal"), "web-research");
+		assert.equal(resolved, join(root, "99 Meta", "99.06 Workflows", "Web Research"));
+		assert.ok(existsSync(resolved));
+		// The decoy `workflows` row under `### personal` must not win.
+		assert.doesNotMatch(resolved, /Decoy/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("renumbering the meta domain or the workflows subdomain moves the workflow root", () => {
+	const root = makeVault({ schema: schemaWithMeta(8, 12), notes: ["A.md"] });
+	try {
+		assert.equal(
+			resolveWorkflowRoot(root, "literature-extraction"),
+			join(root, "08 Meta", "8.12 Workflows", "Literature Extractions"),
+		);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("run artifacts in a marked workspace are left out of the note count", () => {
+	const root = makeVault({ schema: schemaWithMeta(), notes: ["01 Personal/A.md"] });
+	try {
+		assert.equal(inspectVault(root)?.noteCount, 2); // the note plus the schema note
+		const workspace = resolveWorkflowRoot(root, "web-research");
+		mkdirSync(join(workspace, "run-a"), { recursive: true });
+		writeFileSync(join(workspace, "run-a", "research_report.md"), "# Report\n");
+		assert.equal(inspectVault(root)?.noteCount, 2);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("the workflow root carries a marker that keeps the organizer and the index out", () => {
+	const root = makeVault({ schema: schemaWithMeta(), notes: ["A.md"] });
+	try {
+		const resolved = resolveWorkflowRoot(root, "web-research");
+		const marker = join(resolved, ".forge-workspace");
+		assert.ok(existsSync(marker));
+		const contents = readFileSync(marker, "utf8");
+		// Resolving again must not rewrite a marker a user may have edited.
+		writeFileSync(marker, `${contents}edited\n`);
+		assert.equal(resolveWorkflowRoot(root, "web-research"), resolved);
+		assert.match(readFileSync(marker, "utf8"), /edited/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a vault whose schema declares no workflows subdomain falls back to an existing folder", () => {
+	const root = makeVault({ schema: SCHEMA_WITH_WIKI, notes: ["A.md"] });
+	try {
+		mkdirSync(join(root, "99 Meta", "99.06 Workflows"), { recursive: true });
+		assert.equal(
+			resolveWorkflowRoot(root, "web-research"),
+			join(root, "99 Meta", "99.06 Workflows", "Web Research"),
+		);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("with no schema and no workflows folder the vault keeps today's forge-output path", () => {
+	const root = makeVault({ notes: ["A.md"] });
+	try {
+		assert.equal(resolveWorkflowRoot(root, "web-research"), join(root, "forge-output", "web-research"));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("outside a vault, and for an unmapped skill inside one, the root stays forge-output", () => {
+	const plain = mkdtempSync(join(tmpdir(), "vault-context-plain-"));
+	try {
+		assert.equal(resolveWorkflowRoot(plain, "web-research"), join(plain, "forge-output", "web-research"));
+	} finally {
+		rmSync(plain, { recursive: true, force: true });
+	}
+
+	const root = makeVault({ schema: schemaWithMeta(), notes: ["A.md"] });
+	try {
+		assert.equal(resolveWorkflowRoot(root, "vault-organizer"), join(root, "forge-output", "vault-organizer"));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("the injected message names the resolved workflow root, or says none resolved", () => {
+	const root = makeVault({ schema: schemaWithMeta(), notes: ["A.md"] });
+	try {
+		const message = vaultContextMessage(inspectVault(root) as NonNullable<ReturnType<typeof inspectVault>>);
+		assert.match(message, /Workflow root: /);
+		assert.ok(message.includes(join(root, "99 Meta", "99.06 Workflows")));
+		assert.match(message, /\.forge-workspace/);
+		assert.match(message, /import-run/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+
+	const bare = makeVault({ schema: SCHEMA_WITH_WIKI, notes: ["A.md"] });
+	try {
+		const message = vaultContextMessage(inspectVault(bare) as NonNullable<ReturnType<typeof inspectVault>>);
+		assert.doesNotMatch(message, /Workflow root: /);
+		assert.match(message, /No workflows folder resolved/);
 	} finally {
 		rmSync(bare, { recursive: true, force: true });
 	}

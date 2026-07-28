@@ -22,8 +22,10 @@ from quoted material, and never invent facts the sources do not support.
    ```
 
 2. Create a new output directory under `forge-output/site-builder/<title-stem>/`.
-   If it exists, use a numbered suffix. Register the inputs and scaffold the
-   site:
+   If it exists, use a numbered suffix. Inside an Obsidian vault use the vault
+   workflow root instead — `99 Meta/99.06 Workflows/Site Builds/<title-stem>/`,
+   at the absolute path the injected vault context names. Register the inputs and
+   scaffold the site:
 
    ```bash
    node <skill-directory>/scripts/site-builder.mjs init <inputs...> \
