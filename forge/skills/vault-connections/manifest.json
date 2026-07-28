@@ -10,7 +10,7 @@
 	"tools": [
 		{
 			"name": "vault_connections",
-			"description": "Search vault notes, propose links, validate and publish completed research runs as per-id inbox/wiki proposals, and apply accepted notes with drift and collision preflight; runs are inspectable with status/doctor.",
+			"description": "Search vault notes, propose links, validate and publish completed research runs as per-id inbox/wiki proposals, apply source-derived voice policy only to generated synthesis and wiki prose, and apply accepted notes with policy, source, schema, template, and collision preflight; runs are inspectable with status/doctor.",
 			"command": "python3 scripts/vault-connections.py",
 			"destructive": true
 		}

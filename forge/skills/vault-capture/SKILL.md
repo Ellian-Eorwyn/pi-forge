@@ -38,7 +38,10 @@ writes.
    tokens on every one.
 3. **Write the user's words to a file, verbatim.** When the braindump arrived in
    chat, save exactly what they said to `forge-output/vault-capture/<slug>.md`
-   before running anything. Do not paraphrase, tidy, summarize, or reorder it —
+   before running anything — or, inside the vault, to
+   `99 Meta/99.06 Workflows/Captures/<slug>.md`, at the absolute path the
+   injected vault context names.
+   Do not paraphrase, tidy, summarize, or reorder it —
    that file is what gets preserved in the note, and a cleaned-up copy makes the
    preservation a lie. Then pass the path.
 4. Capture:
@@ -85,6 +88,7 @@ independently, and one bad input never blocks the others.
 | `--dry-run` | off | Plan, check, and verify without writing. |
 | `--force` | off | Synthesize from input that looks like a transcript export. |
 | `--voice` | the vault's | The voice-and-style note. |
+| `--no-voice` | off | Disable the voice policy for this run. |
 | `--no-exemplars` | off | Draft without showing the model the user's own notes. |
 
 These are fingerprinted into a run, so a resumed run refuses to change them.
@@ -96,9 +100,11 @@ Two mechanisms, both optional and both degrading to nothing:
 1. **The voice note** — `99 Meta/99.02 Schemas/0.01 Voice and Style.md`, the
    companion to the schema note. The schema says how notes are *structured*;
    this says how they are *written*. Sections: `## Global voice`,
-   `## Per-type style`, `## Vocabulary`, `## Formatting`, `## Never do`. The
-   user writes it; this skill reads it and never creates it. A vault without one
-   captures exactly as before.
+   `## Per-type style`, `## Vocabulary`, `## Formatting`, `## Never do`. Rules
+   may be scoped under `### Universal`, `### Owner-authored`, and
+   `### Source-derived`. Capture always selects owner-authored mode because its
+   input is the vault owner's braindump. The user writes the note; this skill
+   reads it and never creates it. A vault without one captures exactly as before.
 2. **Style examples** — before drafting, the nearest notes to this topic are
    pulled from the vault through `vault-connections search` and shown to the
    model as examples of how this person writes. Anything the pipeline itself
@@ -124,7 +130,14 @@ The voice note is a note the user wrote, so editing it follows the same rule as
 every other existing note: propose, show, and change nothing without being told
 which proposals to take. The previous version is backed up into the run first,
 and a note that changed since the proposal was made is refused rather than
-overwritten.
+overwritten. Accepted edits preserve frontmatter, scoped rules, and unrelated
+human-authored sections.
+
+Journal drafts keep the cleaned authorial account first, then add only non-empty
+`## Observations`, `## Interpretations`, `## Open questions`, and
+`## Connections` sections. Vault connections are valid wikilinks found through
+hybrid search; broader-knowledge connections begin `Outside knowledge:`. The
+original braindump remains byte-identical under `# Braindump`.
 
 ## Rules
 

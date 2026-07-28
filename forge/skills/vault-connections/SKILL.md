@@ -65,8 +65,9 @@ Nothing is written without the user naming the proposal ids they approve.
    python3 <skill-directory>/scripts/vault-connections.py import-run <run-directory> --vault <vault> --notes
    ```
 
-   This groups the run's claims into one note per subtopic, writes each an
-   opening paragraph, and renders the rest deterministically: a `## Findings`
+   This groups the run's claims into one note per subtopic, writes each a
+   source-policy introduction under `## Synthesis`, and renders the rest
+   deterministically: a `## Findings`
    list of the claims with the quotes behind them, a `## Sources` list of URLs,
    and a `## Provenance` block naming the source run, its fingerprint, and the
    claim ids. Every note is a proposal like any other, forced to
@@ -127,6 +128,12 @@ Nothing is written without the user naming the proposal ids they approve.
 - Imported reports preserve their Markdown body exactly while replacing old
   frontmatter with canonical schema-ordered metadata. They are proposed for
   `00 Inbox`; no source-run file is changed.
+- `--voice <path>` selects the policy note and `--no-voice` disables it.
+  Source-derived policy applies only to generated wiki definitions and research
+  synthesis. Search, link judgment, frontmatter-only edits, imported bodies,
+  and deterministic provenance never receive owner-voice imitation.
+- Generated critique, when a workflow actually produces it, belongs under a
+  separate `## Critique`; it is never blended into source description.
 - Imported wiki notes use vault-owned templates from the schema-compiled
   `meta/templates` route. Pi-Forge documents the required template shape but
   never creates or edits those templates.

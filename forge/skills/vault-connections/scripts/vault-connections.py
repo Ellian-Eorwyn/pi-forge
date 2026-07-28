@@ -32,6 +32,7 @@ import forge_embeddings
 import forge_llm
 import forge_verify
 import run_state
+import vault_voice
 from vault_classification import (
     DEFAULT_BASE_URL,
     build_messages as classification_messages,
@@ -74,7 +75,7 @@ from vault_schema import (
 WORKFLOW = "vault-connections"
 STATE_DIR = ".vault-connections"
 DEFAULT_MODEL = "chat"
-PROMPT_VERSION = "vault-connections-v1"
+PROMPT_VERSION = "vault-connections-v2"
 
 EMBED_BODY_CHARS = 2000
 EMBED_HEADING_CHARS = 600
@@ -759,6 +760,37 @@ WIKI_SYSTEM = (
 )
 
 
+def load_voice(args, vault):
+    voice_path = vault_voice.resolve_voice_path(
+        vault,
+        getattr(args, "voice", None),
+        disabled=getattr(args, "no_voice", False),
+    )
+    voice, voice_hash = vault_voice.compiled_voice_for(vault, voice_path, cache_dir=cache_dir(vault))
+    args.compiled_voice = voice
+    args.voice_path = voice_path
+    args.voice_hash = voice_hash
+    return voice_path, voice, voice_hash
+
+
+def source_system(args, base):
+    prefix = vault_voice.prompt_prefix(getattr(args, "compiled_voice", None), vault_voice.CONTEXT_SOURCE)
+    return f"{base}\n\n{prefix}" if prefix else base
+
+
+def source_context(args, note_type, material):
+    compiled = vault_voice.compile_voice(
+        getattr(args, "compiled_voice", None),
+        vault_voice.CONTEXT_SOURCE,
+        note_type=note_type,
+        material=material,
+    )
+    return {
+        "styleForThisKind": compiled["per_type_rule"],
+        "relevantVocabulary": compiled["vocabulary"],
+    }
+
+
 def note_brief(entry, body):
     location = " / ".join(part for part in [entry.get("domain"), entry.get("subdomain")] if part) or "unfiled"
     excerpt = re.sub(r"\n{3,}", "\n\n", body).strip()[:JUDGE_EXCERPT_CHARS]
@@ -944,11 +976,20 @@ def unresolved_targets(entries, min_mentions):
 
 
 def classify_target(args, target, mention_lines):
+    material = f"{target}\n" + "\n".join(mention_lines)
     messages = with_prefill(
         args,
         [
-            {"role": "system", "content": WIKI_SYSTEM},
-            {"role": "user", "content": f"LINK TARGET: {target}\n\nMENTIONED IN:\n" + "\n".join(mention_lines)},
+            {"role": "system", "content": source_system(args, WIKI_SYSTEM)},
+            {
+                "role": "user",
+                "content": "LINK TARGET: "
+                + target
+                + "\n\nMENTIONED IN:\n"
+                + "\n".join(mention_lines)
+                + "\n\nVOICE POLICY FOR GENERATED SOURCE PROSE:\n"
+                + json.dumps(source_context(args, "concept", material), ensure_ascii=False),
+            },
         ],
     )
     raw = request_with_retry(args, messages)
@@ -1364,8 +1405,20 @@ def harvest_entity_candidates(args, records, kinds, limit=None):
             with_prefill(
                 args,
                 [
-                    {"role": "system", "content": ENTITY_SYSTEM},
-                    {"role": "user", "content": "RESEARCH ENTITY CANDIDATES\n" + json.dumps(payload, ensure_ascii=False)},
+                    {"role": "system", "content": source_system(args, ENTITY_SYSTEM)},
+                    {
+                        "role": "user",
+                        "content": "RESEARCH ENTITY CANDIDATES\n"
+                        + json.dumps(
+                            {
+                                **payload,
+                                "voicePolicy": source_context(
+                                    args, "source", json.dumps(payload["records"], ensure_ascii=False)
+                                ),
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
                 ],
             ),
         )
@@ -1701,7 +1754,7 @@ def validate_topic_notes(value, claims, limit):
 def render_subtopic_note(note, summary, claims, evidence, sources, run_directory, fingerprint, flagged=frozenset()):
     """Deterministic body. The model writes the summary; code writes everything
     that has to be exact."""
-    lines = [summary.strip(), "", "## Findings", ""]
+    lines = ["## Synthesis", "", summary.strip(), "", "## Findings", ""]
     used_sources = []
     dropped_quotes = []
     for claim_id in note["claimIds"]:
@@ -1815,8 +1868,20 @@ def harvest_subtopic_notes(args, run_directory, records, fingerprint, limit=None
         summary_value = classification_request(
             args,
             [
-                {"role": "system", "content": NOTE_SUMMARY_SYSTEM},
-                {"role": "user", "content": json.dumps({"title": note["title"], "claims": details}, ensure_ascii=False)},
+                {"role": "system", "content": source_system(args, NOTE_SUMMARY_SYSTEM)},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "title": note["title"],
+                            "claims": details,
+                            "voicePolicy": source_context(
+                                args, "source", json.dumps(details, ensure_ascii=False)
+                            ),
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
             ],
         )
         summary = summary_value.get("summary") if isinstance(summary_value, dict) else None
@@ -1901,6 +1966,7 @@ def verification_report_rows(verification):
 def command_import_run(args):
     vault = resolve_vault(args, initialize_state=False)
     schema_path, schema, schema_hash = load_schema(args, vault, use_cache=False)
+    voice_path, _voice, voice_hash = load_voice(args, vault)
     run_directory = Path(args.query).expanduser().resolve()
     if not run_directory.is_dir():
         raise UserError(f"run directory does not exist: {run_directory}")
@@ -2081,6 +2147,7 @@ def command_import_run(args):
             {"kind": kind, "path": templates[kind]["path"], "sha256": templates[kind]["sha256"]}
             for kind in (kinds if templates is not None else ())
         ],
+        **vault_voice.voice_state(voice_path, voice_hash, vault_voice.CONTEXT_SOURCE),
     }
     run_state.initialize_run_state(
         run_dir,
@@ -2428,6 +2495,7 @@ def annotate_proposals(args, proposals, run_dir, warnings):
 def command_wiki(args):
     vault = resolve_vault(args)
     schema_path, schema, schema_hash = load_schema(args, vault)
+    voice_path, _voice, voice_hash = load_voice(args, vault)
     entries, store, embedding_info, warnings = ensure_index(args, vault, schema_path)
     if WIKI_DOMAIN not in schema["domains"]:
         raise UserError(
@@ -2516,7 +2584,15 @@ def command_wiki(args):
     run_state.initialize_run_state(
         run_dir,
         run_state.create_run_state(
-            WORKFLOW, "wiki", {"vault": str(vault), "schemaHash": schema_hash}, resolved_options(args), phase="proposed"
+            WORKFLOW,
+            "wiki",
+            {
+                "vault": str(vault),
+                "schemaHash": schema_hash,
+                **vault_voice.voice_state(voice_path, voice_hash, vault_voice.CONTEXT_SOURCE),
+            },
+            resolved_options(args),
+            phase="proposed",
         ),
     )
     run_state.atomic_write_json(
@@ -2628,7 +2704,7 @@ def finish_run(run_dir, proposals, counts, histogram, warnings, vault, mode, ext
     )
 
 
-def verify_import_state(vault, schema_hash, state):
+def verify_import_state(vault, schema_hash, state, voice_path=None, voice_hash=None):
     recorded = state.get("input") or {}
     errors = []
     recorded_vault = recorded.get("vault")
@@ -2636,6 +2712,11 @@ def verify_import_state(vault, schema_hash, state):
         errors.append(f"apply vault differs from originating vault: {recorded_vault or '<missing>'}")
     if recorded.get("schemaHash") != schema_hash:
         errors.append("schema hash changed after proposal generation")
+    if "voice_hash" in recorded:
+        current_voice = vault_voice.voice_state(voice_path, voice_hash, recorded.get("voice_context_mode") or "source")
+        for key in ("voice_path", "voice_hash", "voice_compiler_version", "voice_context_mode"):
+            if recorded.get(key) != current_voice.get(key):
+                errors.append(f"{key} changed after proposal generation")
     for item in recorded.get("sourceFiles") or []:
         path = Path(item.get("path") or "")
         if not path.is_file():
@@ -2737,6 +2818,7 @@ def preflight_link_edits(vault, schema, proposals):
 def command_apply(args):
     vault = resolve_vault(args)
     schema_path, schema, schema_hash = load_schema(args, vault)
+    voice_path, _voice, voice_hash = load_voice(args, vault)
     run_dir = Path(args.run).expanduser().resolve()
     if not (run_dir / "proposals.jsonl").is_file():
         raise UserError(f"no proposals.jsonl in {run_dir}")
@@ -2780,8 +2862,9 @@ def command_apply(args):
     already_present = set()
     if link_proposals:
         preflight_link_edits(vault, schema, link_proposals)
+    if state.get("command") in {"import-run", "wiki"} and creates:
+        verify_import_state(vault, schema_hash, state, voice_path, voice_hash)
     if import_apply and creates:
-        verify_import_state(vault, schema_hash, state)
         already_present = preflight_import_creates(vault, schema_path, schema, state, creates)
 
     results = {"notes_updated": 0, "links_added": 0, "notes_created": 0, "skipped": 0}
@@ -2912,6 +2995,7 @@ def command_doctor(args):
     checks = {"vault": {"ok": os.access(vault, os.W_OK), "path": str(vault)}}
     warnings = []
     ok = checks["vault"]["ok"]
+    schema = {}
     try:
         schema_path, schema, schema_hash = load_schema(args, vault)
         checks["schema"] = {
@@ -2943,6 +3027,47 @@ def command_doctor(args):
     except UserError as error:
         checks["schema"] = {"ok": False, "detail": str(error)}
         ok = False
+
+    voice_check = {
+        "ok": True,
+        "configured": False,
+        "stages": {
+            "wiki definitions and research-note synthesis": "source",
+            "search, link judgment, frontmatter, provenance, imported bodies": "none",
+        },
+    }
+    try:
+        voice_path, voice, voice_hash = load_voice(args, vault)
+        if voice_path is None:
+            voice_check["detail"] = (
+                "disabled with --no-voice"
+                if getattr(args, "no_voice", False)
+                else f"no voice note; default is {vault_voice.DEFAULT_VOICE}"
+            )
+        else:
+            unknown_types = sorted(set(voice.get("per_type", {})) - set(schema.get("types", {})))
+            voice_check = {
+                "ok": True,
+                "configured": True,
+                "path": str(voice_path),
+                "voice_hash": voice_hash,
+                "compiler_version": vault_voice.COMPILED_VOICE_VERSION,
+                "recognized_scopes": voice.get("recognized_scopes", []),
+                "types_with_style": sorted(voice.get("per_type", {})),
+                "unknown_scopes": voice.get("unknown_scopes", []),
+                "unknown_schema_types": unknown_types,
+                "stages": {
+                    "wiki definitions and research-note synthesis": "source",
+                    "search, link judgment, frontmatter, provenance, imported bodies": "none",
+                },
+            }
+            if unknown_types:
+                warnings.append("voice note has unknown schema note types: " + ", ".join(unknown_types))
+    except UserError as error:
+        voice_check = {"ok": False, "configured": True, "detail": str(error)}
+        warnings.append(f"voice note could not be read: {error}")
+    checks["voice"] = voice_check
+    ok = ok and voice_check["ok"]
 
     # One call per candidate pair, so hidden reasoning is charged per pair.
     chat_probe = forge_llm.service_doctor(
@@ -2994,6 +3119,8 @@ def resolved_options(args):
         "includeArtifacts": args.include_artifact,
         "titlePrefix": args.title_prefix,
         "promptVersion": PROMPT_VERSION,
+        "voice": getattr(args, "voice", None),
+        "noVoice": getattr(args, "no_voice", False),
     }
 
 
@@ -3005,6 +3132,8 @@ def parse_args(argv):
     parser.add_argument("query", nargs="?", help="search query, or source run directory for import-run")
     parser.add_argument("--vault")
     parser.add_argument("--schema")
+    parser.add_argument("--voice", help="voice-and-style note (default: the vault's, when present)")
+    parser.add_argument("--no-voice", action="store_true", help="disable the vault voice policy for this run")
     parser.add_argument("--run", help="run directory (apply, status)")
     parser.add_argument("--accept", help="comma-separated proposal ids to apply")
     parser.add_argument("--reject", help="comma-separated proposal ids to record as rejected")
@@ -3085,6 +3214,9 @@ def parse_args(argv):
     args.base_url = resolved["url"]
     args.model = resolved["model"]
     args.api_key = args.api_key or os.environ.get("VAULT_CONNECTIONS_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
+    args.voice = args.voice or os.environ.get("VAULT_CONNECTIONS_VOICE") or None
+    if args.no_voice and args.voice and "--voice" in argv:
+        raise UserError("--voice and --no-voice cannot be used together")
     args.embeddings_url = forge_embeddings.endpoint_url(args.embeddings_url)
     args.embeddings_model = forge_embeddings.model_name(args.embeddings_model)
     args.cache_prompt = not args.no_cache_prompt

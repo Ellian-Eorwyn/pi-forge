@@ -684,6 +684,22 @@ class NoteBuildingTests(unittest.TestCase):
         self.assertNotIn("[!summary]", head)
         self.assertNotIn("\n\n\n", head)
 
+    def test_journal_reflection_sits_before_the_raw_transcript(self):
+        reflection = "## Observations\n\n- The owner described a difficult week."
+        note, head = vt.build_note(
+            self.schema,
+            vt.frontmatter_metadata(self.schema, "journal"),
+            "A short summary.",
+            "callout",
+            "",
+            "Cleaned authorial text.",
+            "raw journal\n",
+            reflection=reflection,
+        )
+        self.assertLess(note.index("Cleaned authorial text."), note.index("## Observations"))
+        self.assertLess(note.index("## Observations"), note.index("# Transcript"))
+        self.assertIn(reflection, head)
+
     def check(self, body, cleaned, summary="A summary of the recording."):
         parsed = vt.parse_transcript(body)
         item = {
@@ -731,6 +747,52 @@ class NoteBuildingTests(unittest.TestCase):
         )
         problems, _measurements = vt.check_note(item, cleaned, "A summary.", note, head, parsed, self.args)
         self.assertIn("handwritten preamble did not survive into the generated section", problems)
+
+
+class VoiceBoundaryTests(unittest.TestCase):
+    def test_only_single_speaker_memo_and_journal_get_owner_mode(self):
+        owner = {"material_role": "owner-authored", "recording_type": "journal", "effective_speakers": 1}
+        conversation = {
+            "material_role": "personal-exchange",
+            "recording_type": "conversation",
+            "effective_speakers": 2,
+        }
+        source = {"material_role": "external-source", "recording_type": "lecture", "effective_speakers": 1}
+        self.assertEqual(vt.voice_context_for(owner), "owner")
+        self.assertEqual(vt.voice_context_for(conversation), "none")
+        self.assertEqual(vt.voice_context_for(source), "source")
+
+    def test_inconsistent_owner_classification_is_held_for_review(self):
+        body = transcript(DIALOGUE_BLOCKS)
+        parsed = vt.parse_transcript(body)
+        item = {"path": "00 Inbox/x.md"}
+        value = {
+            "recording_type": "conversation",
+            "material_role": "owner-authored",
+            "title": "Deployment Window Review",
+            "speakers": {},
+            "effective_speakers": 2,
+            "spoken_date": None,
+            "needs_review": False,
+        }
+        record, warnings = vt.validate_classification(value, item, parsed)
+        self.assertTrue(record["needs_review"])
+        self.assertIn("inconsistent", record["review_reason"])
+        self.assertTrue(any("inconsistent" in warning for warning in warnings))
+
+    def test_external_source_payload_requests_structured_full_content(self):
+        voice = vt.vault_voice.parse_voice_note(
+            "## Global voice\n\n### Source-derived\n\n- Describe source claims analytically.\n"
+        )
+        record = {
+            "recording_type": "lecture",
+            "material_role": "external-source",
+            "effective_speakers": 1,
+        }
+        chunk = [{"speaker": None, "seconds": 0, "timestamp": "00:00", "text": "The mechanism has two parts."}]
+        payload, _source = vt.cleanup_payload(record, chunk, 1, 1, [], "", {}, True, False, voice)
+        self.assertTrue(payload["structuredFullContent"])
+        self.assertEqual(payload["materialRole"], "external-source")
 
 
 class PipelineTests(unittest.TestCase):

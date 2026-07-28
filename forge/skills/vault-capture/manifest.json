@@ -10,7 +10,7 @@
 	"tools": [
 		{
 			"name": "vault_capture",
-			"description": "Split a braindump into its distinct notes, draft each one as prose in the vault owner's own voice, write schema-valid frontmatter with a forced 'capture_type: generated', and create the notes in '00 Inbox' while keeping the braindump verbatim under a '# Braindump' heading; also proposes approval-gated edits to the vault's voice-and-style note from style feedback. Creates new files only and is inspectable with status/doctor.",
+			"description": "Split an owner-authored braindump into distinct notes, apply the vault's scoped voice policy and vault-first journal reflection, write schema-valid frontmatter with a forced 'capture_type: generated', and create notes in '00 Inbox' while keeping the braindump verbatim under '# Braindump'; also proposes approval-gated, content-preserving voice-policy edits. Creates new files only and is inspectable with status/doctor.",
 			"command": "python3 scripts/vault-capture.py",
 			"destructive": true
 		}

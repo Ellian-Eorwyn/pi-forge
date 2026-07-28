@@ -25,6 +25,9 @@ processed_by:
 
 <cleaned transcript — headings ## or deeper>
 
+<owner journal reflection only, with non-empty Observations, Interpretations,
+Open questions, and Connections sections>
+
 # Transcript
 
 <the original transcription, byte for byte>
@@ -97,6 +100,26 @@ These outrank every style rule below.
 | `meeting` | `##` heading per topic. Closing `## Decisions` and `## Action Items` bullets **only** when the recording contains explicit decisions or assignments; `Unassigned` and `Not stated` rather than an inferred owner or deadline. |
 | `lecture` | `##` and `###` headings following the material, the lecturer's own examples kept, audience questions as dialogue. |
 | `other` | Treat as `memo` if one voice, `conversation` if several. |
+
+An external-source lecture, podcast, video, webinar, or other confidently
+identified source receives structured full-content cleanup. The editor may
+remove filler and redundancy, regroup related passages, and improve headings
+and readability, but may not condense the material into study notes: every
+substantive claim, example, qualification, and disagreement survives.
+
+Owner-authored mode is valid only for a single-speaker memo or journal.
+Conversation, therapy, and meeting recordings retain their speaker-aware
+contracts and never imitate the owner's prose. Unknown material receives no
+voice rules and stays reviewable.
+
+For an owner journal, written text receives mechanical correction only. Spoken
+text receives a light fidelity edit: filler, false starts, and accidental
+repetition may be removed while emphasis, meaningful self-correction,
+uncertainty, wording, and sequence remain. A generated reflection follows the
+cleaned authorial section. Empty reflection sections are omitted; vault
+connections are valid wikilinks found by hybrid search, and broader-knowledge
+connections begin `Outside knowledge:`. The reflection is not part of transcript
+fidelity measurement.
 
 A note under the tiny threshold gets punctuation, casing, and one short
 paragraph. No headings, no lists, no restructuring.

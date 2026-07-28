@@ -1101,6 +1101,8 @@ class VaultConnectionsTest(unittest.TestCase):
         self.assertEqual(len(notes), 1)
         self.assertEqual(result["data"]["counts"]["subtopic_notes_proposed"], 1)
         content = notes[0]["content"]
+        self.assertIn("## Synthesis", content)
+        self.assertLess(content.index("## Synthesis"), content.index("## Findings"))
         self.assertIn("## Findings", content)
         self.assertIn("Tree canopy reduces surface temperature.", content)
         self.assertIn('"Shade lowered surface temperature by nine degrees."', content)
@@ -1293,6 +1295,35 @@ class VaultConnectionsTest(unittest.TestCase):
         with self.assertRaisesRegex(vault_connections.UserError, "schema hash changed"):
             vault_connections.command_apply(apply_args)
         self.assertFalse((self.vault / "00 Inbox").exists())
+
+    def test_import_apply_refuses_voice_policy_drift(self):
+        self.seed_wiki_templates()
+        voice = self.write(
+            "99 Meta/99.02 Schemas/0.01 Voice and Style.md",
+            "## Global voice\n\n### Source-derived\n\n- Describe source claims analytically.\n",
+        )
+        source_run = self.make_literature_run()
+        StubHandler.entities = []
+        with patch.object(
+            vault_connections,
+            "invoke_upstream_validator",
+            return_value={"valid": True, "complete": True, "warnings": []},
+        ):
+            proposed = vault_connections.command_import_run(self.import_args(source_run))
+        voice.write_text(
+            "## Global voice\n\n### Source-derived\n\n- Describe source claims plainly.\n",
+            encoding="utf-8",
+        )
+        apply_args = SimpleNamespace(
+            vault=str(self.vault),
+            schema=None,
+            run=proposed["data"]["runDirectory"],
+            accept="i-001",
+            reject=None,
+            dry_run=False,
+        )
+        with self.assertRaisesRegex(vault_connections.UserError, "voice_hash changed"):
+            vault_connections.command_apply(apply_args)
 
     def test_all_seven_wiki_kinds_use_schema_types_and_compiled_folders(self):
         self.seed_wiki_templates()

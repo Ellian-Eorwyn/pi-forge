@@ -217,6 +217,13 @@ helper chooses metadata, then `status: complete` and
 `capture_type: generated` are forced. A classified `type: source` also receives
 `source_kind: generated`. Frontmatter is serialized in schema order.
 
+Imported artifact bodies do not receive voice processing. Generated wiki
+definitions and deep-research introductions use the source-derived scope of the
+vault voice policy. A subtopic introduction is always labeled `## Synthesis`;
+an optional critique is emitted only as a separate `## Critique`. Voice-note
+path, hash, compiler version, and selected source context are recorded in run
+state so apply refuses policy drift.
+
 Wiki candidates are harvested from structured item, claim, evidence, and source
 records. Model output must cite real upstream identifiers; unsupported
 candidates are discarded. Candidates are deduplicated by canonical

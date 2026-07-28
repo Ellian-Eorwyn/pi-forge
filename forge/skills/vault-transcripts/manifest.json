@@ -10,7 +10,7 @@
 	"tools": [
 		{
 			"name": "vault_transcripts",
-			"description": "Process raw transcripts in an Obsidian vault inbox: derive a dated descriptive filename, write schema-valid frontmatter, add a one-paragraph summary and a type-aware cleaned transcript, and keep the original transcription under a '# Transcript' heading; runs are dry-run by default and inspectable with status/doctor.",
+			"description": "Process raw transcripts in an Obsidian vault inbox: classify owner material, personal exchanges, external sources, and unknown material; apply scoped voice only where valid; add type-aware cleanup, summaries, and owner-journal reflection; and keep the original transcription under '# Transcript'. Runs are dry-run by default and inspectable with status/doctor.",
 			"command": "python3 scripts/vault-transcripts.py",
 			"destructive": true
 		}

@@ -26,6 +26,7 @@ import os
 import random
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -36,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import forge_llm
 import forge_verify
 import run_state
+import vault_voice
 from vault_schema import (
     INBOX_DIR,
     RESERVED_WINDOWS_NAMES,
@@ -52,7 +54,7 @@ from vault_schema import (
 )
 
 WORKFLOW = "vault-transcripts"
-PROMPT_VERSION = "vault-transcripts-v2"
+PROMPT_VERSION = "vault-transcripts-v3"
 STATE_DIR = ".vault-transcripts"
 QUARANTINE_SUBDIR = "duplicates"
 RUN_STATE_BATCH = 25
@@ -60,6 +62,7 @@ RUN_STATE_BATCH = 25
 # Recording kinds. The cleanup contract in references/transcript-note-format.md
 # defines one output style per kind; TYPE_LABELS is what reaches a filename.
 RECORDING_TYPES = ("memo", "journal", "conversation", "meeting", "therapy", "lecture", "other")
+MATERIAL_ROLES = ("owner-authored", "personal-exchange", "external-source", "unknown")
 TYPE_LABELS = {
     "memo": "Memo",
     "journal": "Journal",
@@ -681,6 +684,7 @@ CLASSIFY_SYSTEM = """You read one voice recording's transcript and report what i
 
 Return exactly one JSON object and nothing else:
 {"recording_type": "memo" | "journal" | "conversation" | "meeting" | "therapy" | "lecture" | "other",
+ "material_role": "owner-authored" | "personal-exchange" | "external-source" | "unknown",
  "title": "<short descriptive title>",
  "speakers": {"<label exactly as given>": {"who": "<name, role, or unknown>", "kind": "name" | "role" | "unknown", "confidence": "high" | "medium" | "low"}},
  "effective_speakers": <how many people are actually speaking>,
@@ -699,6 +703,12 @@ recording_type - check these in order and take the first that fits:
 - other: none of the above fits.
 Do not default to memo because the recording is short. A two-minute reflection
 on a hard day is a journal; a two-minute list of errands is a memo.
+
+material_role:
+- owner-authored: a single-speaker memo or journal made by the vault owner.
+- personal-exchange: a conversation, therapy session, or meeting involving the owner.
+- external-source: a lecture, podcast, video, webinar, or other recording primarily imported as a source.
+- unknown: evidence is insufficient. Never guess owner authorship.
 
 title - what the recording is ABOUT, in 3 to 8 words, title case. Name the
 subject the way the person would look for it later. Never name the medium:
@@ -790,6 +800,22 @@ def validate_classification(value, item, parsed):
         effective = len(labels) or 1
     effective = max(1, min(effective, len(labels) or 1))
 
+    material_role = value.get("material_role")
+    if material_role not in MATERIAL_ROLES:
+        if recording_type in {"memo", "journal"} and effective == 1:
+            material_role = "owner-authored"
+        elif recording_type in {"conversation", "meeting", "therapy"}:
+            material_role = "personal-exchange"
+        elif recording_type == "lecture":
+            material_role = "external-source"
+        else:
+            material_role = "unknown"
+        warnings.append(f"classification omitted material_role; inferred {material_role}")
+    if material_role == "owner-authored" and (recording_type not in {"memo", "journal"} or effective != 1):
+        needs_review = True
+        review_reason = "owner-authored classification is inconsistent with a single-speaker memo or journal"
+        warnings.append(review_reason)
+
     spoken_date = None
     raw_date = value.get("spoken_date")
     if isinstance(raw_date, str) and raw_date.strip():
@@ -810,6 +836,7 @@ def validate_classification(value, item, parsed):
 
     return {
         "recording_type": recording_type,
+        "material_role": material_role,
         "title": title,
         "speakers": speakers,
         "effective_speakers": effective,
@@ -923,6 +950,7 @@ def classify_items(args, vault, items, run_dir, skip):
                 "source": "failed",
                 "warnings": [message],
                 "recording_type": "other",
+                "material_role": "unknown",
                 "title": None,
                 "speakers": {},
                 "effective_speakers": 1,
@@ -981,6 +1009,10 @@ Style by "recordingType":
   rather than inferring an owner or a deadline.
 - lecture: "##" and "###" headings following the material, with the lecturer's
   own examples kept. Audience questions as dialogue.
+- external source (when "structuredFullContent" is true): remove filler and
+  redundancy, regroup related passages, add headings, and improve readability.
+  This is structured full-content cleanup, not a condensed study note: preserve
+  every substantive claim, example, qualification, and disagreement.
 - tiny (when "tiny" is true): the chunk is a few sentences. Fix punctuation and
   casing, join it into one short paragraph, and stop. No headings, no lists.
 
@@ -996,14 +1028,63 @@ Chunk context:
   label maps to null there is one speaker only: use no labels at all."""
 
 
-def cleanup_payload(record, chunk, chunk_index, chunk_count, headings, previous_tail, speaker_map, drop_labels, tiny):
+def voice_context_for(record):
+    """Select policy mode without inferring owner voice from ambiguous material."""
+    if (
+        record.get("material_role") == "owner-authored"
+        and record.get("recording_type") in {"memo", "journal"}
+        and record.get("effective_speakers") == 1
+    ):
+        return vault_voice.CONTEXT_OWNER
+    if record.get("material_role") == "external-source":
+        return vault_voice.CONTEXT_SOURCE
+    return vault_voice.CONTEXT_NONE
+
+
+def voice_note_type_for(record):
+    if voice_context_for(record) == vault_voice.CONTEXT_SOURCE:
+        return "source"
+    return TYPE_TO_NOTE_TYPE[record["recording_type"]]
+
+
+def cleanup_system(voice, context_mode):
+    prefix = vault_voice.prompt_prefix(voice, context_mode)
+    return f"{CLEANUP_SYSTEM}\n\n{prefix}" if prefix else CLEANUP_SYSTEM
+
+
+def cleanup_payload(
+    record,
+    chunk,
+    chunk_index,
+    chunk_count,
+    headings,
+    previous_tail,
+    speaker_map,
+    drop_labels,
+    tiny,
+    voice=None,
+):
     turns = collapse_turns(chunk, {} if drop_labels else speaker_map)
     payload = {
         "recordingType": record["recording_type"],
         "chunkIndex": chunk_index,
         "chunkCount": chunk_count,
         "chunk": render_turns(turns),
+        "materialRole": record.get("material_role", "unknown"),
     }
+    context_mode = voice_context_for(record)
+    compiled = vault_voice.compile_voice(
+        voice,
+        context_mode,
+        note_type=voice_note_type_for(record),
+        material=payload["chunk"],
+    )
+    if compiled["per_type_rule"]:
+        payload["styleForThisKind"] = compiled["per_type_rule"]
+    if compiled["vocabulary"]:
+        payload["relevantVocabulary"] = compiled["vocabulary"]
+    if context_mode == vault_voice.CONTEXT_SOURCE:
+        payload["structuredFullContent"] = True
     if tiny:
         payload["tiny"] = True
     if drop_labels:
@@ -1219,10 +1300,28 @@ def clean_items(args, vault, items, class_records, run_dir, skip):
                 break
             started = time.time()
             payload, source = cleanup_payload(
-                record, chunk, index, len(chunks), headings, previous_tail, speaker_map, drop_labels, tiny
+                record,
+                chunk,
+                index,
+                len(chunks),
+                headings,
+                previous_tail,
+                speaker_map,
+                drop_labels,
+                tiny,
+                getattr(args, "compiled_voice", None),
             )
             try:
-                cleaned, chunk_summary = clean_one_chunk(args, service, payload, source, speaker_map, drop_labels, tiny)
+                cleaned, chunk_summary = clean_one_chunk(
+                    args,
+                    service,
+                    payload,
+                    source,
+                    speaker_map,
+                    drop_labels,
+                    tiny,
+                    system=cleanup_system(getattr(args, "compiled_voice", None), voice_context_for(record)),
+                )
             except InterruptedError as error:
                 raise UserError(f"cleanup was preempted by interactive activity: {error}") from error
             except (forge_llm.ChatError, UserError, ValueError) as error:
@@ -1307,8 +1406,117 @@ Rules:
   through; for therapy, the topics worked on, described plainly and without
   clinical interpretation.
 - Use the names in "speakers" when they carry information. When the speakers are
-  unnamed, write about the subject matter instead of about "Speaker 1" — generic
-  labels tell the reader nothing."""
+unnamed, write about the subject matter instead of about "Speaker 1" — generic
+labels tell the reader nothing."""
+
+REFLECTION_SYSTEM = """You add a careful reflection after the owner's cleaned journal text.
+
+Return exactly one JSON object:
+{"observations": ["..."], "interpretations": ["..."], "open_questions": ["..."], "connections": ["..."]}
+
+Rules:
+- Observations state what the owner directly described before interpreting it.
+- Interpretations are tentative and never diagnose, override, or claim privileged access to the owner's meaning.
+- Open questions preserve uncertainty and invite later reflection.
+- Connections must be directly relevant. Use a supplied vault wikilink exactly when it fits.
+- A connection from general knowledge must begin `Outside knowledge:` and remain explicitly qualified.
+- Do not manufacture a connection to fill a section. Empty arrays are correct.
+- Keep each item concise. Do not repeat the cleaned journal.
+"""
+
+
+def summary_system(voice, context_mode):
+    prefix = vault_voice.prompt_prefix(voice, context_mode)
+    return f"{SUMMARY_SYSTEM}\n\n{prefix}" if prefix else SUMMARY_SYSTEM
+
+
+def connections_script():
+    return Path(__file__).resolve().parents[2] / "vault-connections" / "scripts" / "vault-connections.py"
+
+
+def journal_connection_candidates(vault, query):
+    script = connections_script()
+    if not script.is_file():
+        return [], "vault-connections is not installed; journal reflection has no vault candidates"
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(script), "search", query, "--vault", str(vault), "--search-limit", "10"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return [], f"vault search failed: {error}"
+    if completed.returncode != 0:
+        return [], "vault search failed; journal reflection has no vault candidates"
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return [], "vault search returned unreadable output"
+    candidates = []
+    for hit in (payload.get("data") or {}).get("hits") or []:
+        relative = hit.get("path") if isinstance(hit, dict) else None
+        if (
+            relative
+            and relative.endswith(".md")
+            and not relative.startswith(f"{INBOX_DIR}/")
+            and (vault / relative).is_file()
+        ):
+            candidates.append({"path": relative, "wikilink": f"[[{Path(relative).stem}]]"})
+    return candidates[:8], None
+
+
+def validate_reflection(value, allowed_wikilinks):
+    if not isinstance(value, dict):
+        raise UserError("journal reflection response is not an object")
+    headings = (
+        ("observations", "Observations"),
+        ("interpretations", "Interpretations"),
+        ("open_questions", "Open questions"),
+        ("connections", "Connections"),
+    )
+    sections = []
+    for key, heading in headings:
+        raw = value.get(key, [])
+        if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
+            raise UserError(f"journal reflection {key} must be an array of strings")
+        items = [re.sub(r"\s+", " ", item).strip() for item in raw if item.strip()]
+        if key == "connections":
+            for item in items:
+                links = re.findall(r"\[\[[^\]]+\]\]", item)
+                if any(link not in allowed_wikilinks for link in links):
+                    raise UserError("journal reflection used a wikilink that was not found in the vault")
+                if not links and not item.startswith("Outside knowledge:"):
+                    raise UserError("non-vault journal connections must begin 'Outside knowledge:'")
+        if items:
+            sections.extend([f"## {heading}", "", *(f"- {item}" for item in items), ""])
+    return "\n".join(sections).strip()
+
+
+def reflect_journal(args, service, record, cleaned, candidates):
+    payload = {
+        "title": record["title"],
+        "cleanedJournal": cleaned[:12000],
+        "vaultCandidates": candidates,
+    }
+    system = REFLECTION_SYSTEM
+    prefix = vault_voice.prompt_prefix(getattr(args, "compiled_voice", None), vault_voice.CONTEXT_OWNER)
+    if prefix:
+        system += "\n\n" + prefix
+    value, _call = forge_llm.call_json_with_retry(
+        service,
+        [
+            {"role": "system", "content": system},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ],
+        temperature=0,
+        cache_prompt=args.cache_prompt,
+        response_format={"type": "json_object"},
+        timeout=args.request_timeout,
+        api_key=args.api_key,
+        task="reflect-journal",
+    )
+    return validate_reflection(value, {entry["wikilink"] for entry in candidates})
 
 
 def check_summary(summary):
@@ -1365,7 +1573,7 @@ def summarize_one(args, service, messages):
     return re.sub(r"\s+", " ", summary).strip()
 
 
-def summarize_items(args, items, class_records, clean_results, run_dir, skip):
+def summarize_items(args, vault, items, class_records, clean_results, run_dir, skip):
     journal_path = run_dir / "summaries.jsonl"
     prior, _ = run_state.read_jsonl_recover_tail(journal_path, repair=True)
     journal = {(row["path"], row["sha256"]): row for row in prior if row.get("path") and row.get("sha256")}
@@ -1395,9 +1603,21 @@ def summarize_items(args, items, class_records, clean_results, run_dir, skip):
         body = cleaned["cleaned"]
         payload = {
             "recordingType": record["recording_type"],
+            "materialRole": record.get("material_role", "unknown"),
             "title": record["title"],
             "durationSeconds": item["stats"]["duration_seconds"],
         }
+        context_mode = voice_context_for(record)
+        compiled = vault_voice.compile_voice(
+            getattr(args, "compiled_voice", None),
+            context_mode,
+            note_type=voice_note_type_for(record),
+            material=body,
+        )
+        if compiled["per_type_rule"]:
+            payload["styleForThisKind"] = compiled["per_type_rule"]
+        if compiled["vocabulary"]:
+            payload["relevantVocabulary"] = compiled["vocabulary"]
         if cleaned["speaker_map"] and not cleaned["drop_labels"]:
             payload["speakers"] = sorted({value for value in cleaned["speaker_map"].values() if value})
         if cleaned["tiny"]:
@@ -1410,14 +1630,25 @@ def summarize_items(args, items, class_records, clean_results, run_dir, skip):
         else:
             payload["cleaned"] = body
         messages = [
-            {"role": "system", "content": SUMMARY_SYSTEM},
+            {
+                "role": "system",
+                "content": summary_system(getattr(args, "compiled_voice", None), context_mode),
+            },
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
         try:
+            summary = summarize_one(args, service, messages)
+            reflection = None
+            if context_mode == vault_voice.CONTEXT_OWNER and record["recording_type"] == "journal":
+                candidates, warning = journal_connection_candidates(vault, f"{record['title']} {summary}")
+                if warning:
+                    warnings.append(f"{item['path']}: {warning}")
+                reflection = reflect_journal(args, service, record, body, candidates)
             row = {
                 "path": item["path"],
                 "sha256": item["sha256"],
-                "summary": summarize_one(args, service, messages),
+                "summary": summary,
+                "reflection": reflection,
                 "skipped": None,
             }
         except InterruptedError as error:
@@ -1517,7 +1748,7 @@ def render_summary(summary, style):
     return summary
 
 
-def build_note(schema, metadata, summary, style, preamble, cleaned, raw_body):
+def build_note(schema, metadata, summary, style, preamble, cleaned, raw_body, reflection=None):
     """Assemble the final note. The head is generated; everything after the
     ``# Transcript`` marker is the original body, byte for byte."""
     sections = []
@@ -1526,6 +1757,8 @@ def build_note(schema, metadata, summary, style, preamble, cleaned, raw_body):
     if preamble.strip():
         sections.append(preamble.strip())
     sections.append(cleaned.strip())
+    if reflection:
+        sections.append(reflection.strip())
     head = serialize_frontmatter(metadata, schema) + "\n" + "\n\n".join(sections) + "\n\n# Transcript\n\n"
     return head + raw_body, head
 
@@ -1714,7 +1947,14 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
             parsed = parse_transcript(raw_body)
             metadata = frontmatter_metadata(schema, record["recording_type"])
             note_text, head = build_note(
-                schema, metadata, summary, args.summary_style, parsed["preamble"], cleaned_result["cleaned"], raw_body
+                schema,
+                metadata,
+                summary,
+                args.summary_style,
+                parsed["preamble"],
+                cleaned_result["cleaned"],
+                raw_body,
+                reflection=summary_row.get("reflection"),
             )
             problems, measurements = check_note(
                 {**item, "raw_body": raw_body}, cleaned_result["cleaned"], summary, note_text, head, parsed, args
@@ -1729,6 +1969,19 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
         assembled["recording_type"] = record["recording_type"]
         assembled["title"] = record["title"]
         assembled["summary"] = summary
+        assembled["reflection"] = summary_row.get("reflection")
+        assembled["material_role"] = record.get("material_role", "unknown")
+        assembled["voice_context_mode"] = voice_context_for(record)
+        assembled["voice_applied"] = bool(
+            getattr(args, "compiled_voice", None) and assembled["voice_context_mode"] != vault_voice.CONTEXT_NONE
+        )
+        assembled["voice_reason"] = (
+            "single-speaker owner memo or journal"
+            if assembled["voice_context_mode"] == vault_voice.CONTEXT_OWNER
+            else "external source"
+            if assembled["voice_context_mode"] == vault_voice.CONTEXT_SOURCE
+            else "personal exchange or ambiguous material; owner voice not applied"
+        )
         assembled["speaker_map"] = cleaned_result["speaker_map"]
         assembled["chunks"] = cleaned_result["chunks"]
         assembled["tiny"] = cleaned_result["tiny"]
@@ -1771,6 +2024,25 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
 
     ordered = {record["source"]: record for record in records}
     result = [ordered[item["path"]] for item in items if item["path"] in ordered]
+    for assembled in result:
+        classification = class_records.get(assembled["source"])
+        if not classification:
+            continue
+        context_mode = voice_context_for(classification)
+        assembled.setdefault("material_role", classification.get("material_role", "unknown"))
+        assembled.setdefault("voice_context_mode", context_mode)
+        assembled.setdefault(
+            "voice_applied",
+            bool(getattr(args, "compiled_voice", None) and context_mode != vault_voice.CONTEXT_NONE),
+        )
+        assembled.setdefault(
+            "voice_reason",
+            "single-speaker owner memo or journal"
+            if context_mode == vault_voice.CONTEXT_OWNER
+            else "external source"
+            if context_mode == vault_voice.CONTEXT_SOURCE
+            else "personal exchange or ambiguous material; owner voice not applied",
+        )
     run_state.atomic_write_json(run_dir / "assembled.json", {"records": plan_for_json(result)})
     return result, warnings
 
@@ -2101,7 +2373,14 @@ def reassemble_escalated(args, vault, schema, items_by_path, clean_results, reco
             parsed = parse_transcript(raw_body)
             metadata = frontmatter_metadata(schema, record["recording_type"])
             note_text, head = build_note(
-                schema, metadata, record["summary"], args.summary_style, parsed["preamble"], cleaned, raw_body
+                schema,
+                metadata,
+                record["summary"],
+                args.summary_style,
+                parsed["preamble"],
+                cleaned,
+                raw_body,
+                reflection=record.get("reflection"),
             )
             problems, measurements = check_note(
                 {**item, "raw_body": raw_body}, cleaned, record["summary"], note_text, head, parsed, args
@@ -2323,6 +2602,7 @@ def write_plan(run_dir, records, counts, dedupe, dry_run, vault, schema_hash, op
                     f"### {Path(record['destination']).name}",
                     "",
                     f"- Was `{Path(record['source']).name}` · {' · '.join(facts)}",
+                    f"- Voice policy: `{record.get('voice_context_mode', 'none')}` — {record.get('voice_reason', 'not applicable')}",
                     f"- {record.get('summary') or '_No summary: short enough that the title says it._'}",
                     "",
                 ]
@@ -2332,7 +2612,12 @@ def write_plan(run_dir, records, counts, dedupe, dry_run, vault, schema_hash, op
     report.extend(["## Renames", ""])
     append_listing(report, processed, lambda record: f"- `{record['source']}` → `{record['destination']}`")
     report.extend(["", "## Held For Review", "", "These notes were not renamed or rewritten.", ""])
-    append_listing(report, review, lambda record: f"- `{record['source']}`: {record['review_reason']}")
+    append_listing(
+        report,
+        review,
+        lambda record: f"- `{record['source']}`: {record['review_reason']} "
+        f"(voice `{record.get('voice_context_mode', 'none')}`: {record.get('voice_reason', 'not applicable')})",
+    )
     report.extend(["", "## Duplicates", "", f"Quarantined into `{dedupe.get('quarantine_root')}` and recoverable.", ""])
     append_listing(
         report,
@@ -2488,6 +2773,8 @@ def resolved_options(args):
         "prompt_version": PROMPT_VERSION,
         "cache_prompt": args.cache_prompt,
         "schema": args.schema,
+        "voice": args.voice,
+        "no_voice": args.no_voice,
     }
 
 
@@ -2502,6 +2789,8 @@ RESUMABLE_OPTION_FLAGS = {
     "tiny_summary": "--tiny-summary",
     "limit": "--limit",
     "schema": "--schema",
+    "voice": "--voice",
+    "no_voice": "--no-voice",
 }
 
 
@@ -2523,11 +2812,15 @@ def adopt_stored_options(args, state):
     args.cache_prompt = stored.get("cache_prompt", args.cache_prompt)
 
 
-def run_configuration(args, vault, schema_hash):
+def run_configuration(args, vault, schema_hash, voice_path, voice_hash):
     return {
         "workflow": WORKFLOW,
         "command": "process",
-        "input": {"vault": str(vault), "schema_hash": schema_hash},
+        "input": {
+            "vault": str(vault),
+            "schema_hash": schema_hash,
+            **vault_voice.voice_state(voice_path, voice_hash, "per-transcript"),
+        },
         "options": resolved_options(args),
     }
 
@@ -2548,7 +2841,10 @@ def process(args):
         adopt_stored_options(args, state)
     schema_path = resolve_schema_path(vault, args.schema)
     schema, schema_hash = compiled_schema_for(vault, schema_path, cache_dir=vault / STATE_DIR / "cache")
-    configuration = run_configuration(args, vault, schema_hash)
+    voice_path = vault_voice.resolve_voice_path(vault, args.voice, disabled=args.no_voice)
+    voice, voice_hash = vault_voice.compiled_voice_for(vault, voice_path, cache_dir=vault / STATE_DIR / "cache")
+    args.compiled_voice = voice
+    configuration = run_configuration(args, vault, schema_hash, voice_path, voice_hash)
     if resuming:
         try:
             run_state.assert_compatible_run(state, configuration)
@@ -2649,7 +2945,7 @@ def process(args):
         warnings.extend(stage_warnings)
         phase(run_dir, "summarize", event={"type": "phase", "phase": "clean", "notes": len(clean_results)})
 
-        summaries, stage_warnings = summarize_items(args, items, class_records, clean_results, run_dir, skip)
+        summaries, stage_warnings = summarize_items(args, vault, items, class_records, clean_results, run_dir, skip)
         warnings.extend(stage_warnings)
         phase(run_dir, "assemble", event={"type": "phase", "phase": "summarize", "notes": len(summaries)})
 
@@ -2689,7 +2985,10 @@ def process(args):
             not args.apply,
             vault,
             schema_hash,
-            resolved_options(args),
+            {
+                **resolved_options(args),
+                **vault_voice.voice_state(voice_path, voice_hash, "per-transcript"),
+            },
             warnings,
             verification,
         )
@@ -2774,6 +3073,7 @@ def doctor(args):
         items = scan_inbox(vault, args.limit)
         checks["inbox"]["notes"] = len(items)
         checks["inbox"]["transcripts"] = sum(1 for item in items if item["is_transcript"])
+    schema = {}
     schema_check = {"ok": False}
     if checks["vault"]["ok"]:
         try:
@@ -2786,6 +3086,50 @@ def doctor(args):
             schema_check = {"ok": False, "detail": str(error)}
     checks["schema"] = schema_check
     ok = ok and schema_check["ok"]
+    voice_check = {
+        "ok": True,
+        "configured": False,
+        "stages": {
+            "owner memo/journal cleanup, summary, reflection": "owner",
+            "external-source cleanup and summary": "source",
+            "meeting, conversation, therapy, ambiguous": "none",
+        },
+    }
+    if checks["vault"]["ok"]:
+        try:
+            voice_path = vault_voice.resolve_voice_path(vault, args.voice, disabled=args.no_voice)
+            if voice_path is None:
+                voice_check["detail"] = (
+                    "disabled with --no-voice" if args.no_voice else f"no voice note; default is {vault_voice.DEFAULT_VOICE}"
+                )
+            else:
+                voice, voice_hash = vault_voice.compiled_voice_for(
+                    vault, voice_path, cache_dir=vault / STATE_DIR / "cache"
+                )
+                unknown_types = sorted(set(voice.get("per_type", {})) - set(schema.get("types", {})))
+                voice_check = {
+                    "ok": True,
+                    "configured": True,
+                    "path": str(voice_path),
+                    "voice_hash": voice_hash,
+                    "compiler_version": vault_voice.COMPILED_VOICE_VERSION,
+                    "recognized_scopes": voice.get("recognized_scopes", []),
+                    "types_with_style": sorted(voice.get("per_type", {})),
+                    "unknown_scopes": voice.get("unknown_scopes", []),
+                    "unknown_schema_types": unknown_types,
+                    "stages": {
+                        "owner memo/journal cleanup, summary, reflection": "owner",
+                        "external-source cleanup and summary": "source",
+                        "meeting, conversation, therapy, ambiguous": "none",
+                    },
+                }
+                if unknown_types:
+                    warnings.append("voice note has unknown schema note types: " + ", ".join(unknown_types))
+        except UserError as error:
+            voice_check = {"ok": False, "configured": True, "detail": str(error)}
+            warnings.append(f"voice note could not be read: {error}")
+    checks["voice"] = voice_check
+    ok = ok and voice_check["ok"]
     # Cleanup is one call per chunk, so a backend that reasons first costs
     # hundreds of hidden tokens per chunk. Report that before a long run, not
     # halfway through one.
@@ -2831,6 +3175,8 @@ def parse_args(argv):
     parser.add_argument("mode", choices=["process", "status", "doctor"])
     parser.add_argument("--vault")
     parser.add_argument("--schema", action=TrackingAction)
+    parser.add_argument("--voice", action=TrackingAction, help="voice-and-style note (default: the vault's, when present)")
+    parser.add_argument("--no-voice", action="store_true", help="disable the vault voice policy for this run")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--run", help="existing run directory to resume")
     parser.add_argument("--limit", type=int, action=TrackingAction)
@@ -2874,6 +3220,9 @@ def parse_args(argv):
     args.model = resolved["model"]
     args.api_key = args.api_key or os.environ.get("VAULT_TRANSCRIPTS_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
     args.schema = args.schema or os.environ.get("VAULT_TRANSCRIPTS_SCHEMA") or None
+    args.voice = args.voice or os.environ.get("VAULT_TRANSCRIPTS_VOICE") or None
+    if args.no_voice and args.voice and args.voice_provided:
+        raise UserError("--voice and --no-voice cannot be used together")
     args.cache_prompt = not args.no_cache_prompt
     args.verify = not args.no_verify
     return args

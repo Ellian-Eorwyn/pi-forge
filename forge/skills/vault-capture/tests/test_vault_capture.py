@@ -769,6 +769,13 @@ class VoiceTests(CaptureFixture):
             self.result_of(self.capture(server.url))
         self.assertEqual(self.notes_in_inbox(), ["Espresso Machine Gasket Replacement.md"])
 
+    def test_no_voice_disables_an_existing_policy(self):
+        self.write_voice()
+        with StubServer() as server:
+            self.result_of(self.capture(server.url, "--no-voice"))
+        system = server.stage_requests("draft")[0]["messages"][0]["content"]
+        self.assertNotIn("Never call me", system)
+
     def test_an_unreadable_voice_note_stops_the_run(self):
         self.write_voice("# Voice and Style\n\nJust some prose, no sections.\n")
         with StubServer() as server:
@@ -928,6 +935,37 @@ class PreferencesTests(CaptureFixture):
         voice = vault_voice.parse_voice_note(path.read_text(encoding="utf-8"))
         self.assertEqual(voice["per_type"]["journal"], "Chronological paragraphs, no headings.")
         self.assertIn("task", voice["per_type"], "the existing row survives")
+
+    def test_applying_preferences_preserves_frontmatter_and_unknown_sections(self):
+        text = (
+            "---\ntype: system\nstatus: active\ndomain: meta\nsubdomain: schemas\ncapture_type: manual\n---\n\n"
+            + VOICE_NOTE
+            + "\n## Human notes\n\nKeep this paragraph exactly.\n"
+        )
+        path = self.write_voice(text)
+        edit = {
+            "section": "global",
+            "scope": "owner-authored",
+            "operation": "add",
+            "text": "Keep the owner's uncertainty visible.",
+            "reason": "asked",
+        }
+        proposed = self.propose(None, "preserve uncertainty", [edit])
+        self.result_of(
+            run_script(
+                "preferences",
+                "--vault",
+                str(self.vault),
+                "--run",
+                proposed["data"]["run_directory"],
+                "--accept",
+                "p-001",
+            )
+        )
+        rendered = path.read_text(encoding="utf-8")
+        self.assertTrue(rendered.startswith("---\ntype: system\n"))
+        self.assertIn("## Human notes\n\nKeep this paragraph exactly.", rendered)
+        self.assertIn("### Owner-Authored", rendered)
 
 
 class VerificationTests(CaptureFixture):

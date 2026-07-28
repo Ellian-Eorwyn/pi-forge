@@ -57,7 +57,7 @@ from vault_schema import (
 )
 
 WORKFLOW = "vault-capture"
-PROMPT_VERSION = "vault-capture-v1"
+PROMPT_VERSION = "vault-capture-v2"
 STATE_DIR = ".vault-capture"
 
 # What a braindump can turn into. The kind reaches the note's `type`, so each
@@ -502,6 +502,19 @@ def collect_exemplars(vault, query, wanted=EXEMPLAR_COUNT, note_type=None):
     return kept, None
 
 
+def collect_connection_candidates(vault, query):
+    """Return only existing notes, so generated journal wikilinks resolve."""
+    paths, warning = search_vault(vault, query)
+    if warning:
+        return [], warning
+    candidates = []
+    for relative in paths:
+        path = vault / relative
+        if path.is_file() and relative.endswith(".md") and not relative.startswith(f"{INBOX_DIR}/"):
+            candidates.append({"path": relative, "wikilink": f"[[{Path(relative).stem}]]"})
+    return candidates[:8], None
+
+
 # --------------------------------------------------------------------------- #
 # Draft
 # --------------------------------------------------------------------------- #
@@ -532,7 +545,9 @@ How to write it:
 - Keep the person's own terms for things. If they call it "the gasket thing", it is the gasket thing.
 - Say what is unresolved as unresolved. Do not tidy an open question into a conclusion.
 
-When `thisNote.styleForThisKind` is present it is the vault owner's own rule for this kind of note, and it wins over the general guidance above. When `styleExamples` are present they are notes this person wrote themselves: match their register, sentence length, and vocabulary. Do not copy their subject matter.
+When `thisNote.styleForThisKind` is present it is the vault owner's own rule for this kind of note, and it wins over the general guidance above. `relevantVocabulary` contains only policy definitions whose terms occur in this material. When `styleExamples` are present they are notes this person wrote themselves: match their register, sentence length, and vocabulary. Do not copy their subject matter.
+
+For a journal note, keep the cleaned authorial account first. Mechanically correct written text without changing its wording or meaning. For spoken material, remove filler, false starts, and accidental repetition while preserving emphasis, meaningful self-correction, uncertainty, wording, and sequence. Then add only the non-empty reflection sections `## Observations`, `## Interpretations`, `## Open questions`, and `## Connections`, in that order. Do not diagnose the person or override what their words mean. Under Connections, use only `connectionCandidates` as vault wikilinks. A connection from general knowledge must begin `Outside knowledge:` and be explicitly qualified.
 
 Return exactly one JSON object:
 
@@ -547,7 +562,15 @@ def draft_system_prompt(voice_segment=""):
     return f"{system}\n\n{voice_segment}" if voice_segment else system
 
 
-def draft_payload(item, note, exemplars=None, siblings=None, type_style=None):
+def draft_payload(
+    item,
+    note,
+    exemplars=None,
+    siblings=None,
+    type_style=None,
+    connection_candidates=None,
+    relevant_vocabulary=None,
+):
     payload = {
         "braindump": item["text"][:DRAFT_INPUT_CHARS],
         "thisNote": {
@@ -565,6 +588,10 @@ def draft_payload(item, note, exemplars=None, siblings=None, type_style=None):
         payload["thisNote"]["styleForThisKind"] = type_style
     if exemplars:
         payload["styleExamples"] = exemplars
+    if connection_candidates:
+        payload["connectionCandidates"] = connection_candidates
+    if relevant_vocabulary:
+        payload["relevantVocabulary"] = relevant_vocabulary
     return payload
 
 
@@ -603,6 +630,8 @@ def draft_items(args, service, system, planned, run_dir):
                     entry.get("exemplars"),
                     entry.get("siblings"),
                     entry.get("type_style"),
+                    entry.get("connection_candidates"),
+                    entry.get("relevant_vocabulary"),
                 ),
                 "draft-note",
             )
@@ -1263,12 +1292,14 @@ The note has exactly five sections, and every edit belongs to one of them:
 
 Return exactly one JSON object:
 
-{"edits": [{"section": "global|per_type|vocabulary|formatting|never", "operation": "add|amend|remove", "type": "note type, only for per_type", "text": "The rule, written as an instruction.", "replaces": "the existing bullet this amends or removes, exactly", "reason": "why this feedback implies this rule"}], "needs_review": false, "review_reason": null}
+{"edits": [{"section": "global|per_type|vocabulary|formatting|never", "scope": "universal|owner-authored|source-derived", "operation": "add|amend|remove", "type": "note type, only for per_type", "text": "The rule, written as an instruction.", "replaces": "the existing bullet this amends or removes, exactly", "reason": "why this feedback implies this rule"}], "needs_review": false, "review_reason": null}
 
 Rules for what you propose:
 
 - Write a rule the pipeline can follow. "Be less formal" is not actionable; "Keep contractions" is.
 - One rule per edit. Do not combine two pieces of guidance into one bullet.
+- Scope owner voice and fidelity rules as `owner-authored`; source description and critique rules as `source-derived`;
+  use `universal` only when the rule genuinely applies to both.
 - Propose only what the feedback supports. Inventing rules the person did not ask for is how a style note becomes something they no longer recognize.
 - `amend` and `remove` must quote the existing bullet exactly in `replaces`.
 - An empty `edits` list is a legitimate answer when the feedback is about one note rather than about how notes should read in general. Say why in `review_reason`."""
@@ -1311,6 +1342,9 @@ def validate_edits(value, voice):
         note_type = entry.get("type")
         if section == "per_type" and operation != "remove" and (not isinstance(note_type, str) or not note_type.strip()):
             raise UserError(f"edit {position} is a per-type rule without a type")
+        scope = entry.get("scope") or "universal"
+        if scope not in vault_voice.KNOWN_SCOPES:
+            raise UserError(f"edit {position} names an unknown scope {scope!r}")
         edits.append(
             {
                 "id": f"p-{position:03d}",
@@ -1319,6 +1353,7 @@ def validate_edits(value, voice):
                 "text": (text or "").strip(),
                 "replaces": (replaces or "").strip(),
                 "type": (note_type or "").strip(),
+                "scope": scope,
                 "reason": entry.get("reason") if isinstance(entry.get("reason"), str) else "",
             }
         )
@@ -1333,6 +1368,15 @@ def apply_edits(voice, edits):
         "vocabulary": list(voice.get("vocabulary", [])),
         "formatting": list(voice.get("formatting", [])),
         "never": list(voice.get("never", [])),
+        "scope_map": {
+            "global": list(voice.get("scope_map", {}).get("global", [])),
+            "per_type": dict(voice.get("scope_map", {}).get("per_type", {})),
+            "vocabulary": list(voice.get("scope_map", {}).get("vocabulary", [])),
+            "formatting": list(voice.get("scope_map", {}).get("formatting", [])),
+            "never": list(voice.get("scope_map", {}).get("never", [])),
+        },
+        "recognized_scopes": list(voice.get("recognized_scopes", [])),
+        "unknown_scopes": list(voice.get("unknown_scopes", [])),
     }
     for edit in edits:
         section = edit["section"]
@@ -1341,19 +1385,28 @@ def apply_edits(voice, edits):
                 for note_type, style in list(updated["per_type"].items()):
                     if style.strip() == edit["replaces"]:
                         del updated["per_type"][note_type]
+                        updated["scope_map"]["per_type"].pop(note_type, None)
             else:
                 updated["per_type"][edit["type"]] = edit["text"]
+                updated["scope_map"]["per_type"][edit["type"]] = edit["scope"]
             continue
         bullets = updated[section]
+        scopes = updated["scope_map"][section]
+        if not scopes:
+            scopes.extend(["universal"] * len(bullets))
         if edit["operation"] == "add":
             if edit["text"] not in bullets:
                 bullets.append(edit["text"])
+                scopes.append(edit["scope"])
         elif edit["operation"] == "amend":
             for index, bullet in enumerate(bullets):
                 if bullet.strip() == edit["replaces"]:
                     bullets[index] = edit["text"]
+                    scopes[index] = edit["scope"]
         else:
-            updated[section] = [bullet for bullet in bullets if bullet.strip() != edit["replaces"]]
+            kept = [(bullet, scope) for bullet, scope in zip(bullets, scopes) if bullet.strip() != edit["replaces"]]
+            updated[section] = [bullet for bullet, _scope in kept]
+            updated["scope_map"][section] = [scope for _bullet, scope in kept]
     return updated
 
 
@@ -1376,7 +1429,7 @@ def preferences(args):
     vault = Path(args.vault).expanduser().resolve()
     if not vault.is_dir():
         raise UserError(f"vault root does not exist: {vault}")
-    voice_path = vault_voice.resolve_voice_path(vault, args.voice)
+    voice_path = vault_voice.resolve_voice_path(vault, args.voice, disabled=args.no_voice)
     if voice_path is None:
         raise UserError(
             f"this vault has no voice note. Create {vault / vault_voice.DEFAULT_VOICE} with at least one of the "
@@ -1402,7 +1455,7 @@ def preferences(args):
     # Prove the result is still a readable voice note before offering it. A
     # proposal that would break the note is a bug, not a decision to hand over.
     proposed = apply_edits(voice, edits)
-    rendered = vault_voice.render_voice_note(proposed)
+    rendered = vault_voice.render_voice_note(proposed, original_text=current_text)
     try:
         vault_voice.parse_voice_note(rendered)
     except UserError as error:
@@ -1486,7 +1539,8 @@ def apply_preferences(args, vault, voice_path, voice, current_hash):
             data={"voice_note": str(voice_path), "accepted": [], "rejected": rejected_ids},
         )
     updated = apply_edits(voice, accepted)
-    rendered = vault_voice.render_voice_note(updated)
+    original_text = voice_path.read_text(encoding="utf-8")
+    rendered = vault_voice.render_voice_note(updated, original_text=original_text)
     vault_voice.parse_voice_note(rendered)  # raises rather than writing an unreadable note
     backup = run_dir / "backup" / voice_path.name
     backup.parent.mkdir(parents=True, exist_ok=True)
@@ -1541,6 +1595,7 @@ def resolved_options(args):
         "cache_prompt": args.cache_prompt,
         "schema": args.schema,
         "voice": args.voice,
+        "no_voice": args.no_voice,
         "exemplars": args.exemplars,
     }
 
@@ -1552,6 +1607,7 @@ RESUMABLE_OPTION_FLAGS = {
     "max_notes": "--max-notes",
     "schema": "--schema",
     "voice": "--voice",
+    "no_voice": "--no-voice",
 }
 
 
@@ -1587,7 +1643,7 @@ def capture(args):
         adopt_stored_options(args, state)
     schema_path = resolve_schema_path(vault, args.schema)
     schema, schema_hash = compiled_schema_for(vault, schema_path, cache_dir=vault / STATE_DIR / "cache")
-    voice_path = vault_voice.resolve_voice_path(vault, args.voice)
+    voice_path = vault_voice.resolve_voice_path(vault, args.voice, disabled=args.no_voice)
     voice, voice_hash = vault_voice.compiled_voice_for(vault, voice_path, cache_dir=vault / STATE_DIR / "cache")
     warnings = []
 
@@ -1605,7 +1661,7 @@ def capture(args):
                 # A changed voice note means a resumed run would draft its
                 # remaining notes to different rules than the ones it started
                 # with, so it is part of what makes a run compatible.
-                "voice_hash": vault_voice.voice_fingerprint(voice_hash),
+                **vault_voice.voice_state(voice_path, voice_hash, vault_voice.CONTEXT_OWNER),
                 "sources": [{"source": item["source"], "sha256": item["sha256"]} for item in items],
             },
             "options": resolved_options(args),
@@ -1654,7 +1710,20 @@ def capture(args):
         seen_warnings = set()
         for entry in planned:
             note_type = note_type_for(entry["note"]["kind"], schema)
-            entry["type_style"] = (voice or {}).get("per_type", {}).get(note_type)
+            compiled = vault_voice.compile_voice(
+                voice,
+                vault_voice.CONTEXT_OWNER,
+                note_type=note_type,
+                material=f"{entry['note']['gist']}\n{entry['item']['text']}",
+            )
+            entry["type_style"] = compiled["per_type_rule"]
+            entry["relevant_vocabulary"] = compiled["vocabulary"]
+            if note_type == "journal":
+                candidates, warning = collect_connection_candidates(vault, entry["note"]["gist"])
+                entry["connection_candidates"] = candidates
+                if warning and warning not in seen_warnings:
+                    seen_warnings.add(warning)
+                    warnings.append(warning)
             if not args.exemplars:
                 continue
             exemplars, warning = collect_exemplars(vault, entry["note"]["gist"], note_type=note_type)
@@ -1672,7 +1741,7 @@ def capture(args):
         # One voice segment per run, not per note: the per-type row would change
         # the system prompt between calls and throw away the prefix cache. Type
         # guidance rides in the user message with everything else that varies.
-        system = draft_system_prompt(vault_voice.prompt_segment(voice))
+        system = draft_system_prompt(vault_voice.prompt_prefix(voice, vault_voice.CONTEXT_OWNER))
         warnings.extend(draft_items(args, service, system, planned, run_dir))
 
         grouped = {}
@@ -1713,7 +1782,12 @@ def capture(args):
             counts,
             args.dry_run,
             vault,
-            {**resolved_options(args), "voice_note": str(voice_path) if voice_path else None},
+            {
+                **resolved_options(args),
+                **vault_voice.voice_state(voice_path, voice_hash, vault_voice.CONTEXT_OWNER),
+                "voice_applied": bool(voice),
+                "voice_reason": "vault-capture input is owner-authored braindump material",
+            },
             warnings,
             verification,
         )
@@ -1794,6 +1868,7 @@ def doctor(args):
     inbox = vault / INBOX_DIR
     checks["inbox"] = {"ok": inbox.is_dir() and os.access(inbox, os.W_OK), "path": str(inbox)}
     ok = ok and checks["inbox"]["ok"]
+    schema = {}
     schema_check = {"ok": False}
     if checks["vault"]["ok"]:
         try:
@@ -1809,24 +1884,36 @@ def doctor(args):
     # A vault with no voice note is healthy: notes are drafted the way this
     # skill would have drafted them anyway. Only a note that cannot be read is
     # a problem, because that is a rule the user wrote and nothing is applying.
-    voice_check = {"ok": True, "configured": False}
+    voice_check = {
+        "ok": True,
+        "configured": False,
+        "stages": {"draft": "owner", "split": "none", "verification": "none"},
+    }
     if checks["vault"]["ok"]:
         try:
-            voice_path = vault_voice.resolve_voice_path(vault, args.voice)
+            voice_path = vault_voice.resolve_voice_path(vault, args.voice, disabled=args.no_voice)
             if voice_path is None:
                 voice_check["detail"] = f"no voice note; the default path is {vault_voice.DEFAULT_VOICE}"
             else:
                 voice, _voice_hash = vault_voice.compiled_voice_for(
                     vault, voice_path, cache_dir=vault / STATE_DIR / "cache"
                 )
-                segment = vault_voice.prompt_segment(voice)
+                segment = vault_voice.prompt_prefix(voice, vault_voice.CONTEXT_OWNER)
+                unknown_types = sorted(set(voice.get("per_type", {})) - set(schema.get("types", {})))
                 voice_check = {
                     "ok": True,
                     "configured": True,
                     "path": str(voice_path),
                     "prompt_characters": len(segment),
+                    "compiler_version": vault_voice.COMPILED_VOICE_VERSION,
+                    "recognized_scopes": voice.get("recognized_scopes", []),
                     "types_with_style": sorted(voice.get("per_type", {})),
+                    "unknown_scopes": voice.get("unknown_scopes", []),
+                    "unknown_schema_types": unknown_types,
+                    "stages": {"draft": "owner", "split": "none", "verification": "none"},
                 }
+                if unknown_types:
+                    warnings.append("voice note has unknown schema note types: " + ", ".join(unknown_types))
         except UserError as error:
             voice_check = {"ok": False, "configured": True, "detail": str(error)}
             warnings.append(f"voice note could not be read: {error}")
@@ -1889,6 +1976,7 @@ def parse_args(argv):
     parser.add_argument("--vault")
     parser.add_argument("--schema", action=TrackingAction)
     parser.add_argument("--voice", action=TrackingAction, help="voice-and-style note (default: the vault's, when it has one)")
+    parser.add_argument("--no-voice", action="store_true", help="disable the vault voice policy for this run")
     parser.add_argument(
         "--no-exemplars",
         action="store_true",
@@ -1937,6 +2025,8 @@ def parse_args(argv):
     args.verify = not args.no_verify
     args.exemplars = not args.no_exemplars
     args.voice = args.voice or os.environ.get("VAULT_CAPTURE_VOICE") or None
+    if args.no_voice and args.voice and args.voice_provided:
+        raise UserError("--voice and --no-voice cannot be used together")
     return args
 
 

@@ -29,7 +29,8 @@ conversations.
    ```
 
    This reports whether the vault and inbox are writable, the schema note parses
-   and defines the vocabulary this skill writes, and both endpoints answer. The
+   and defines the vocabulary this skill writes, the optional voice note parses
+   and which stages select owner/source/no voice, and both endpoints answer. The
    `chat` check also reports whether that endpoint is actually non-thinking:
    cleanup is one call per chunk, so a thinking endpoint there wastes hundreds of
    hidden tokens on every chunk.
@@ -73,6 +74,7 @@ fingerprinted into a run, so a resumed run refuses to change them.
 | `--summary-style` | `callout` | A `> [!summary]` callout. Also `paragraph` and `heading`. |
 | `--speaker-policy` | `names` | Real names where the transcript justifies them, roles otherwise. Also `roles` and `generic`. See the reference doc. |
 | `--tiny-words` / `--tiny-summary` | `120` / `omit` | Under 120 words: light cleanup, no summary. |
+| `--voice` / `--no-voice` | vault policy / off | Select a policy note or explicitly disable it. |
 
 `--owner <name>` is only consulted by `--speaker-policy roles`, where it lets the
 recorder's own name through while other names stay generic.
@@ -94,6 +96,18 @@ recorder's own name through while other names stay generic.
   and the report then says plainly that nothing was reviewed.
 - Re-running is safe: a processed note has frontmatter, so it is skipped rather
   than cleaned twice.
+- Apply owner-authored policy only to a single-speaker `memo` or `journal`.
+  Never imitate the owner's prose in meetings, conversations, or therapy
+  sessions. Apply source-derived policy to lectures and confidently identified
+  podcasts, videos, webinars, and other external sources. Hold ambiguous
+  classification for review rather than guessing owner authorship.
+- Clean external sources as structured full content: remove filler and
+  redundancy, regroup related passages, and add headings while preserving every
+  substantive claim, example, qualification, and disagreement.
+- After an owner journal's cleaned text, add non-empty `## Observations`,
+  `## Interpretations`, `## Open questions`, and `## Connections`, then the raw
+  transcript. Reflection uses vault search first, qualifies outside knowledge,
+  and is excluded from transcript-fidelity comparisons.
 
 ## Reference
 
