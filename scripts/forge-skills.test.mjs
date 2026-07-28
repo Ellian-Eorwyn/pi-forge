@@ -3631,10 +3631,14 @@ test("extracted organize-folder and spreadsheet tools expose structured executio
 test("shared library Python tests pass", () => {
 	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_eml_parser.py")]);
 	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_forge_llm.py")]);
+	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_vault_schema.py")]);
+	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_schema_drift.py")]);
 });
 
 test("vault-organizer Python tests pass", () => {
 	run(python, [join(skillsRoot, "vault-organizer", "tests", "test_vault_organizer.py")]);
+	run(python, [join(skillsRoot, "vault-organizer", "tests", "test_attachments.py")]);
+	run(python, [join(skillsRoot, "vault-organizer", "tests", "test_drift.py")]);
 });
 
 test("vault-connections Python tests pass", () => {

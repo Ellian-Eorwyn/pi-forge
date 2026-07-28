@@ -40,6 +40,81 @@ Folder names are derived by code:
 The script refuses unregistered values, absolute paths, `..` traversal, unsafe
 labels, duplicate derived destinations, and destination collisions.
 
+## Schema Drift
+
+`validate_derived_paths` only catches two *declared* routes colliding with each
+other. Nothing else checks the compiled routes against the folders that exist,
+and `apply_move_operation`/`apply_rewrite_operation` create a destination on
+demand — so a route naming a folder that is not there silently creates a second
+folder beside the one the notes are in, and Johnny Decimal's one-number-one-place
+guarantee is lost with no error raised. `check_schema_drift` in
+`forge/lib/vault_schema.py` closes that seam. It is pure filesystem plus the
+compiled schema: no model, no embeddings, no network. It walks the vault with
+the exclusions `selected_notes` uses (`PROTECTED_DIRS`, dotfiles, symlinks,
+`.forge-workspace` trees), so a folder invisible to filing is invisible here.
+
+Finding kinds, in severity order:
+
+| kind | severity | Condition |
+| --- | --- | --- |
+| `number_collision` | high | A compiled route's number is held by a different folder under the same parent, or an undeclared folder shares a number with a declared one |
+| `label_moved` | high | A folder carries a compiled route's exact label at a different number |
+| `undeclared_with_notes` | medium | A folder no route names, holding `.md` files |
+| `undeclared_empty` | low | The same, holding none |
+| `declared_absent` | info | A compiled route with no folder — a reserved slot, created on first use |
+
+Two rules keep the output usable. **Substructure is never a finding**: any
+folder whose ancestor chain reaches a compiled route is legitimate detail below
+it (`99.05 Attachments/Images`), and only the topmost undeclared folder is
+reported, so a whole undeclared tree is one finding and not five. The exception
+is a folder carrying a Johnny Decimal number, which is claiming a slot rather
+than adding detail, and is reported even directly below a declared route.
+Without this ranking a real vault yields ~20 findings of which ~3 matter, and a
+checker nobody reads is how a live collision survives.
+
+Ids are derived from the finding's content, not its position, so an id copied
+out of a report cannot come to address something else before it is applied.
+
+Each `high` finding names the cheaper side to change: **count the notes under
+the existing folder and under the compiled route, and change whichever holds
+less**, because a folder rename moves notes and a schema row edit moves none.
+Fewer at the route means edit the schema; fewer on disk means rename the folder;
+a tie proposes the schema edit and says the other direction is equally cheap. A
+swap — where the wanted number already belongs to another row — has no
+single-cell schema fix at all, so the folders are the only side that can move.
+
+### `--fix-schema`
+
+`drift --fix-schema <id>,<id>` is the only code in this workflow that writes the
+schema note, and it is fenced accordingly:
+
+- Bare `drift` is always read-only. Only `--fix-schema` writes.
+- Explicit ids only. There is no `--all`, and an unknown id is refused with the
+  ids the vault actually reports.
+- Schema side only. It never renames, moves, or deletes a folder, and never adds
+  a row — registering a new domain is the user's edit to make, not a definition
+  for the tool to invent. Folder-side and manual findings are refused by name.
+- The note is copied to `<run-dir>/backup/` before anything is written.
+- The edit is surgical: the row is matched by its `Value` cell and only the
+  `Number` cell changes, preserving the row's `Definition` prose and the cell's
+  spacing and backtick style. Every other byte of the note is untouched.
+- The result is written to a temp file, read back, re-parsed through
+  `parse_schema_note` and `validate_derived_paths`, and re-checked for drift. If
+  it does not parse, or a new `high` finding appears that was not there before,
+  the temp file is discarded and nothing is written. Commit is `os.replace`.
+
+The compiled-schema cache is keyed by the note's SHA-256, so it invalidates
+itself after a write.
+
+`doctor` reports the same findings under `checks.drift` and a `high` finding
+makes it exit non-zero. `organize` runs the check before the run lock and before
+any classification, and refuses `--apply` while a `high` finding stands unless
+`--allow-schema-drift` is passed. Every finding at every severity goes into
+`plan.json` and the report's `## Schema Drift` section, but only `high` and
+`medium` become warnings — a run that warns about reserved slots every time
+trains the reader to skip the section the real collisions appear in. That flag is deliberately not tracked
+into resumed run state: an override granted for one apply must not persist.
+
 ## Frontmatter
 
 Existing YAML frontmatter is untrusted input. The script discards it and emits a
@@ -242,3 +317,32 @@ never overwrites existing files and does not delete backups automatically.
 After a successful apply the vault content index is refreshed. `.base` files
 are never modified; the report lists `.base` files that reference moved
 notes.
+
+## Attachment Links
+
+A move never rewrites an embed, so relative asset paths break whenever notes
+are reorganized. The `attachments` mode is the separate, deterministic repair:
+it resolves no model or embeddings service, and it classifies every markdown
+(`![alt](target)`) and wikilink (`![[target]]`) embed whose target carries an
+asset extension.
+
+Classification is by resolution, not similarity. A target that exists is
+`resolves`. Otherwise the basename is looked up across the vault: exactly one
+match is `repairable` and is rewritten to `![[basename]]`; several matches are
+`ambiguous` and are reported untouched, because choosing between them would be
+a guess; no match is `missing`.
+
+A `missing` embed is stripped. Non-empty alt text replaces the embed — for
+Word-pasted images the alt text carries the content. An embed that was the
+entire line, or the entire list item, takes that line with it rather than
+leaving empty scaffolding behind.
+
+Two invariants:
+
+- Text inside a code span or fenced block is never matched. Schema project
+  registries and Obsidian documentation both contain embed-shaped strings, and
+  rewriting either is corruption.
+- `attachment_report.json` and `attachment_report.md` are written before any
+  edit. Stripping removes a filename from the note permanently, so the report
+  is its only remaining record. Rewritten notes are copied to `backup/` under
+  the run directory, as with any other apply.

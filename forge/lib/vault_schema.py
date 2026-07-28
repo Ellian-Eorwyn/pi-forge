@@ -33,6 +33,12 @@ DEFAULT_SCHEMA = "99 Meta/99.02 Schemas/0.00 Vault Schema.md"
 SCHEMA_BASENAME = "0.00 Vault Schema.md"
 INBOX_DIR = "00 Inbox"
 PROTECTED_DIRS = {".obsidian", ".git", ".vault-organizer", ".vault-connections", "node_modules"}
+# A directory holding this file contains machine artifacts, not vault notes.
+# pi-forge writes it into each workflow category folder under Meta/Workflows so
+# that generated run directories are never classified, refiled, or embedded;
+# refiling a run's Markdown would break the run's own path references. Drop the
+# file into any other folder to exclude it the same way.
+WORKSPACE_MARKER = ".forge-workspace"
 RESERVED_WINDOWS_NAMES = {
     "con", "prn", "aux", "nul",
     "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
@@ -527,6 +533,494 @@ def validate_derived_paths(schema):
         seen[path] = value
 
 
+# --- schema drift -----------------------------------------------------------
+#
+# ``validate_derived_paths`` only catches two *declared* routes colliding with
+# each other. Nothing checks the compiled routes against the folders that
+# actually exist, and filing a note creates its destination on demand. So a
+# schema that says ``8.02 Organizations`` while the notes live in ``8.03
+# Organizations`` silently grows a second folder on the next classification, and
+# Johnny Decimal's one-number-one-place guarantee is gone with no error raised.
+
+DRIFT_SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2, "info": 3}
+# Accepts unpadded child numbers too, so a hand-made `9.2 Practices` is still
+# recognized as claiming a slot rather than passing as unnumbered detail.
+FOLDER_NUMBER_RE = re.compile(r"^(?P<number>\d{1,2}(?:\.\d{1,2})*)\s+(?P<label>.+)$")
+
+
+def split_folder_name(name):
+    """``"8.02 Organizations"`` -> ``("8.02", "Organizations")``; unnumbered -> ``(None, name)``."""
+    match = FOLDER_NUMBER_RE.match(name)
+    if not match:
+        return None, name
+    return match.group("number"), match.group("label")
+
+
+def route_origins(schema):
+    """Compiled route -> the registry row it came from, for drift reporting and fixes."""
+    # The inbox is a constant, not a registry row, but it is still a route the
+    # folders can drift from — so it carries the same fields the reporting reads.
+    origins = {
+        INBOX_DIR: {
+            "kind": "inbox",
+            "table": "Folder routing",
+            "match_column": "Value",
+            "value": INBOX_DIR,
+            "number": 0,
+            "label": split_folder_name(INBOX_DIR)[1],
+            "definition": "",
+        }
+    }
+    for value, domain in schema["domains"].items():
+        base = domain_folder(domain)
+        origins[base] = {
+            "kind": "domain",
+            "table": "Domains",
+            "match_column": "Value",
+            "value": value,
+            "number": domain["number"],
+            "label": domain["label"],
+            "definition": domain["definition"],
+        }
+        for subdomain_value, subdomain in schema["subdomains"].get(value, {}).items():
+            origins[f"{base}/{subdomain_folder(domain, subdomain)}"] = {
+                "kind": "subdomain",
+                "table": f"Subdomains/{value}",
+                "match_column": "Value",
+                "value": subdomain_value,
+                "domain": value,
+                "number": subdomain["number"],
+                "label": subdomain["label"],
+                "definition": subdomain["definition"],
+            }
+    for value, project in schema["projects"].items():
+        domain = schema["domains"][project["domain"]]
+        subdomain = schema["subdomains"][project["domain"]].get(project.get("subdomain", ""))
+        parts = [domain_folder(domain)]
+        if subdomain:
+            parts.append(subdomain_folder(domain, subdomain))
+        parts.append(project_folder(domain, subdomain, project))
+        origins[Path(*parts).as_posix()] = {
+            "kind": "project",
+            "table": "Project registry",
+            "match_column": "Approved value",
+            "value": value,
+            "domain": project["domain"],
+            "subdomain": project.get("subdomain", ""),
+            "number": project["number"],
+            "label": project_name(project["value"]),
+            "definition": project["definition"],
+        }
+    return origins
+
+
+def compiled_routes(schema):
+    """Every folder path the schema can compile to, vault-relative posix."""
+    return sorted(route_origins(schema))
+
+
+def existing_folders(vault):
+    """Vault-relative posix paths of every folder the organizer would consider a destination.
+
+    Uses the exclusions ``selected_notes`` uses, so a folder invisible to filing
+    is invisible here too.
+    """
+    vault = Path(vault).resolve()
+    folders = []
+    for directory, dirnames, _ in os.walk(vault, followlinks=False):
+        dirpath = Path(directory)
+        kept = []
+        for name in sorted(dirnames):
+            child = dirpath / name
+            if child.is_symlink() or name in PROTECTED_DIRS or name.startswith("."):
+                continue
+            if is_workspace_dir(child):
+                continue
+            kept.append(name)
+        dirnames[:] = kept
+        for name in kept:
+            folders.append((dirpath / name).relative_to(vault).as_posix())
+    return sorted(folders)
+
+
+def count_notes(path):
+    """Markdown notes beneath ``path``, skipping the trees filing also skips."""
+    if not path.is_dir():
+        return 0
+    total = 0
+    for directory, dirnames, filenames in os.walk(path, followlinks=False):
+        dirpath = Path(directory)
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if not (dirpath / name).is_symlink()
+            and name not in PROTECTED_DIRS
+            and not name.startswith(".")
+            and not is_workspace_dir(dirpath / name)
+        ]
+        total += sum(
+            1 for name in filenames if name.lower().endswith(".md") and not (dirpath / name).is_symlink()
+        )
+    return total
+
+
+def ancestor_paths(path):
+    """``"a/b/c"`` -> ``["a", "a/b"]``."""
+    parts = path.split("/")
+    return ["/".join(parts[:index]) for index in range(1, len(parts))]
+
+
+def drift_finding_id(kind, path, route):
+    """Content-derived so an id copied from a report cannot silently address a different finding."""
+    return sha256_text(f"{kind}|{path}|{route}")[:8]
+
+
+def leaf_number(number):
+    """``"8.03"`` -> ``3``; ``"98"`` -> ``98``. None when the folder carries no number."""
+    if not number:
+        return None
+    try:
+        return int(number.rsplit(".", 1)[-1])
+    except ValueError:
+        return None
+
+
+def sibling_numbers(schema, origin):
+    """Every number already taken in the registry table ``origin`` belongs to."""
+    if origin["kind"] == "domain":
+        return {entry["number"] for entry in schema["domains"].values()}
+    if origin["kind"] == "subdomain":
+        return {entry["number"] for entry in schema["subdomains"].get(origin["domain"], {}).values()}
+    if origin["kind"] == "project":
+        return {
+            entry["number"]
+            for entry in schema["projects"].values()
+            if entry["domain"] == origin["domain"] and entry.get("subdomain", "") == origin.get("subdomain", "")
+        }
+    return set()
+
+
+def schema_side_fix(schema, origin, target_number):
+    """The row edit that would make the schema agree with disk, or None if the registry cannot express it.
+
+    A swap — the wanted number already belongs to another row — has no
+    single-cell schema fix, so the folders are the only side that can move.
+    """
+    if origin["kind"] not in {"domain", "subdomain", "project"}:
+        return None
+    if target_number is None or not 1 <= target_number <= 99:
+        return None
+    if target_number == origin["number"]:
+        return None
+    if target_number in sibling_numbers(schema, origin) - {origin["number"]}:
+        return None
+    return {
+        "table": origin["table"],
+        "match_column": origin["match_column"],
+        "value": origin["value"],
+        "field": "Number",
+        "from": origin["number"],
+        "to": target_number,
+    }
+
+
+def cheapest_fix_side(existing_notes, route_notes, row):
+    """Change whichever side holds less content; a rename moves notes, a row edit moves none."""
+    if row is None:
+        return "folder", "the registry cannot express this as a single row edit"
+    if route_notes < existing_notes:
+        return "schema", f"the folder holds {existing_notes} note(s) and the declared route holds {route_notes}"
+    if existing_notes < route_notes:
+        return "folder", f"the declared route holds {route_notes} note(s) and the folder holds {existing_notes}"
+    if existing_notes == 0:
+        return "schema", "both sides are empty, so renaming the folder instead is equally cheap"
+    return "schema", f"both sides hold {existing_notes} note(s), so renaming the folder instead is equally cheap"
+
+
+def rendered_row(origin, number):
+    cells = [f"`{origin['value']}`", f"`{number}`"]
+    if origin["kind"] != "project":
+        cells.append(f"`{origin['label']}`")
+    cells.append(origin["definition"])
+    return "| " + " | ".join(cells) + " |"
+
+
+def drift_suggestion(side, reason, origin, row, folder, route):
+    if side == "schema":
+        return (
+            f"Change `{origin['value']}` in the {origin['table']} table from Number "
+            f"`{row['from']}` to `{row['to']}` so the schema follows the folder — {reason}. "
+            f"Resulting row: {rendered_row(origin, row['to'])}"
+        )
+    if side == "folder":
+        return f"Rename `{folder}` to `{route}` so the folder follows the schema — {reason}."
+    return (
+        f"Renumber `{origin['value']}` in the {origin['table']} table to a free number, or move "
+        f"`{folder}` — the schema already routes this number to `{origin['value']}`."
+    )
+
+
+def check_schema_drift(vault, schema):
+    """Findings comparing compiled routes against folders on disk.
+
+    Severity ranking is the point. A naive set difference over a real vault
+    reports twenty differences of which three matter, and a checker that lists
+    all twenty gets ignored — which is how a live collision survives unnoticed.
+    Anything below a compiled route is legitimate detail, never a finding.
+    """
+    vault = Path(vault).resolve()
+    origins = route_origins(schema)
+    routes = set(origins)
+    present = set(existing_folders(vault))
+
+    siblings = {}
+    for folder in sorted(present):
+        parent, _, name = folder.rpartition("/")
+        siblings.setdefault(parent, []).append((name, folder))
+
+    findings = []
+    paired = set()
+
+    def sibling_where(parent, predicate, skip_paired):
+        for name, folder in siblings.get(parent, []):
+            if folder in routes or (skip_paired and folder in paired):
+                continue
+            if predicate(name):
+                return folder
+        return None
+
+    for route in sorted(routes):
+        origin = origins[route]
+        parent, _, name = route.rpartition("/")
+        number, label = split_folder_name(name)
+        # The label may only be claimed once — two routes cannot both be "the
+        # folder this got renamed from". Occupancy of a number is a property of
+        # the disk, so it holds even for a folder already paired elsewhere.
+        namesake = sibling_where(
+            parent,
+            lambda other: split_folder_name(other)[1] == label and split_folder_name(other)[0] != number,
+            skip_paired=True,
+        )
+        # A route that exists already occupies its own number; a second folder
+        # sharing it is caught below as an undeclared twin.
+        occupant = (
+            None
+            if route in present
+            else sibling_where(
+                parent,
+                lambda other: number is not None and split_folder_name(other)[0] == number,
+                skip_paired=False,
+            )
+        )
+        if namesake is None and occupant is None:
+            if route in present:
+                continue
+            findings.append({
+                "id": drift_finding_id("declared_absent", route, route),
+                "severity": "info",
+                "kind": "declared_absent",
+                "path": route,
+                "route": route,
+                "note_count": 0,
+                "detail": "Declared by the schema and not yet created. Filing the first note here creates it.",
+                "suggestion": None,
+                "fix_side": None,
+                "schema_row": None,
+            })
+            continue
+        target = namesake if namesake is not None else occupant
+        paired.add(target)
+        existing_notes = count_notes(vault / target)
+        route_notes = count_notes(vault / route)
+        if namesake is None:
+            # The number is taken by something unrelated. Renaming it to this
+            # route's label would be a guess, so neither side is automatic.
+            row, side, reason = None, "manual", ""
+        else:
+            target_number, _ = split_folder_name(target.rpartition("/")[2])
+            row = schema_side_fix(schema, origin, leaf_number(target_number))
+            side, reason = cheapest_fix_side(existing_notes, route_notes, row)
+        if occupant is not None:
+            kind = "number_collision"
+            detail = (
+                f"The schema compiles `{origin['value']}` to `{route}`, but number `{number}` under "
+                f"`{parent or 'the vault root'}` already belongs to `{occupant}`"
+            )
+            detail += (
+                f", and the label `{label}` sits at `{target}`. Filing one note here creates a second "
+                f"folder numbered `{number}`."
+                if namesake is not None
+                else ". Filing one note here creates a second folder with that number."
+            )
+        else:
+            kind = "label_moved"
+            detail = (
+                f"The schema compiles `{origin['value']}` to `{route}`, but `{target}` holds that label "
+                f"and {existing_notes} note(s). "
+            )
+            detail += (
+                f"`{route}` already exists with {route_notes} note(s), so the split has happened and "
+                f"`{origin['value']}` notes now live in two places."
+                if route in present
+                else f"The next `{origin['value']}` classification files into `{route}` instead, "
+                f"splitting them across two folders."
+            )
+        findings.append({
+            "id": drift_finding_id(kind, target, route),
+            "severity": "high",
+            "kind": kind,
+            "path": target,
+            "route": route,
+            "note_count": existing_notes,
+            "route_note_count": route_notes,
+            "detail": detail,
+            "suggestion": drift_suggestion(side, reason, origin, row, target, route),
+            "fix_side": side,
+            "schema_row": row if side == "schema" else None,
+        })
+
+    present_routes = routes & present
+    reported = set()
+    for folder in sorted(present):
+        if folder in routes or folder in paired or folder in reported:
+            continue
+        parents = ancestor_paths(folder)
+        if any(parent in paired or parent in reported for parent in parents):
+            continue
+        parent, _, name = folder.rpartition("/")
+        number, _ = split_folder_name(name)
+        # Detail below a declared route is legitimate — `Attachments/Images` is
+        # not drift, and reporting it is what makes a checker get ignored. But a
+        # folder carrying a Johnny Decimal number is claiming a slot, and an
+        # undeclared slot beside declared ones is exactly how a vault splits.
+        if number is None and any(ancestor in routes for ancestor in parents):
+            continue
+        reported.add(folder)
+        twin = next(
+            (
+                route
+                for route in sorted(present_routes)
+                if number is not None
+                and route.rpartition("/")[0] == parent
+                and split_folder_name(route.rpartition("/")[2])[0] == number
+            ),
+            None,
+        )
+        count = count_notes(vault / folder)
+        if twin is not None:
+            findings.append({
+                "id": drift_finding_id("number_collision", folder, twin),
+                "severity": "high",
+                "kind": "number_collision",
+                "path": folder,
+                "route": twin,
+                "note_count": count,
+                "detail": (
+                    f"`{folder}` shares number `{number}` with the declared route `{twin}`. One number "
+                    f"names two places, so nothing can route by number alone."
+                ),
+                "suggestion": (
+                    f"Renumber or merge `{folder}`; the schema already routes `{number}` to `{twin}`. "
+                    f"No schema row can fix this without moving notes."
+                ),
+                "fix_side": "manual",
+                "schema_row": None,
+            })
+            continue
+        findings.append({
+            "id": drift_finding_id("undeclared_with_notes" if count else "undeclared_empty", folder, ""),
+            "severity": "medium" if count else "low",
+            "kind": "undeclared_with_notes" if count else "undeclared_empty",
+            "path": folder,
+            "route": None,
+            "note_count": count,
+            "detail": (
+                f"No compiled route names `{folder}` and it holds {count} note(s). A whole-vault run "
+                f"pulls them into scope and proposes refiling them out."
+                if count
+                else f"No compiled route names `{folder}` and it holds no notes."
+            ),
+            "suggestion": (
+                f"Register `{folder}` in the schema, or move its notes into a declared route."
+                if count
+                else f"Register `{folder}` in the schema, or remove it."
+            ),
+            "fix_side": "manual",
+            "schema_row": None,
+        })
+
+    return sorted(findings, key=lambda entry: (DRIFT_SEVERITY_ORDER[entry["severity"]], entry["path"]))
+
+
+def drift_counts(findings):
+    counts = {severity: 0 for severity in DRIFT_SEVERITY_ORDER}
+    for finding in findings:
+        counts[finding["severity"]] += 1
+    return counts
+
+
+def replace_schema_row_number(text, row):
+    """Rewrite one registry row's Number cell and nothing else.
+
+    Surgical by contract: the row is matched by its ``Value`` cell and every
+    other byte of the note — including the row's own Definition prose and the
+    cell's spacing and backtick style — survives unchanged.
+    """
+    lines = text.splitlines(keepends=True)
+    plain = [line.rstrip("\r\n") for line in lines]
+    if row["table"].startswith("Subdomains/"):
+        domain = row["table"].split("/", 1)[1]
+        outer_start, outer_end = section_bounds(plain, "Subdomains")
+        start = None
+        for index, level, title in iter_heading_lines(plain[outer_start + 1:outer_end]):
+            position = outer_start + 1 + index
+            if level == 3 and title == domain:
+                start = position
+            elif level == 3 and start is not None:
+                outer_end = position
+                break
+        if start is None:
+            raise UserError(f"schema has no Subdomains subsection for {domain}")
+        bounds = (start, outer_end)
+    else:
+        bounds = section_bounds(plain, row["table"])
+
+    positions = [index for index in range(bounds[0] + 1, bounds[1]) if plain[index].strip().startswith("|")]
+    if len(positions) < 2:
+        raise UserError(f"{row['table']}: no Markdown table to edit")
+    header = split_markdown_table_row(plain[positions[0]])
+    for column in (row["match_column"], row["field"]):
+        if column not in header:
+            raise UserError(f"{row['table']}: table has no {column} column")
+    match_index = header.index(row["match_column"])
+    field_index = header.index(row["field"])
+    matches = [
+        index
+        for index in positions[2:]
+        if not is_divider_row(split_markdown_table_row(plain[index]))
+        and normalize_project_value(split_markdown_table_row(plain[index])[match_index]) == row["value"]
+    ]
+    if not matches:
+        raise UserError(f"{row['table']}: no row with {row['match_column']} {row['value']}")
+    if len(matches) > 1:
+        raise UserError(f"{row['table']}: {row['value']} matches {len(matches)} rows")
+    position = matches[0]
+    parts = plain[position].split("|")
+    cell = parts[field_index + 1]
+    stripped = cell.strip()
+    if strip_schema_value(stripped) != str(row["from"]):
+        raise UserError(
+            f"{row['table']}: {row['value']} has {row['field']} {strip_schema_value(stripped)}, expected {row['from']}"
+        )
+    lead = cell[: len(cell) - len(cell.lstrip())]
+    trail = cell[len(cell.rstrip()):]
+    rendered = f"`{row['to']}`" if stripped.startswith("`") and stripped.endswith("`") else str(row["to"])
+    parts[field_index + 1] = f"{lead}{rendered}{trail}"
+    ending = lines[position][len(plain[position]):]
+    lines[position] = "|".join(parts) + ending
+    return "".join(lines), plain[position], "|".join(parts)
+
+
 def compiled_schema_for(vault, schema_path, cache_dir=None):
     """Parse the schema note, memoized in ``cache_dir`` keyed by its SHA-256.
 
@@ -573,6 +1067,8 @@ def resolve_schema_path(vault, raw_schema):
             continue
         if parts and parts[0] == INBOX_DIR:
             continue
+        if is_inside_workspace(vault, candidate.resolve()):
+            continue
         matches.append(candidate.resolve())
     if len(matches) == 1:
         return matches[0]
@@ -582,6 +1078,26 @@ def resolve_schema_path(vault, raw_schema):
         )
     listed = ", ".join(str(match) for match in sorted(matches))
     raise UserError(f"multiple schema notes found ({listed}); pass --schema")
+
+
+def is_workspace_dir(path):
+    """True when ``path`` is a marked pi-forge workspace, so its whole tree is skipped."""
+    try:
+        return (path / WORKSPACE_MARKER).is_file()
+    except OSError:
+        return False
+
+
+def is_inside_workspace(vault, path):
+    """True when any directory between ``vault`` and ``path`` is a marked workspace."""
+    vault = vault.resolve()
+    current = path.resolve().parent
+    while True:
+        if is_workspace_dir(current):
+            return True
+        if current == vault or current == current.parent:
+            return False
+        current = current.parent
 
 
 def relative_path(vault, path):
@@ -606,7 +1122,11 @@ def selected_notes(vault, schema_path, mode, limit):
         candidates = []
         for directory, dirnames, filenames in os.walk(root, followlinks=False):
             dirpath = Path(directory)
-            dirnames[:] = [name for name in sorted(dirnames) if not (dirpath / name).is_symlink()]
+            dirnames[:] = [
+                name
+                for name in sorted(dirnames)
+                if not (dirpath / name).is_symlink() and not is_workspace_dir(dirpath / name)
+            ]
             for filename in sorted(filenames):
                 path = dirpath / filename
                 if path.is_symlink() or path.suffix.lower() != ".md":
@@ -622,6 +1142,8 @@ def selected_notes(vault, schema_path, mode, limit):
             for name in sorted(dirnames):
                 child = dirpath / name
                 if child.is_symlink() or name in PROTECTED_DIRS or name.startswith("."):
+                    continue
+                if is_workspace_dir(child):
                     continue
                 kept.append(name)
             dirnames[:] = kept

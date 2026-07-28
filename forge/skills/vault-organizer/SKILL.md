@@ -75,6 +75,74 @@ section.
 
 9. Report the final structured counts and run directory.
 
+## Attachment links
+
+Moving notes leaves their relative image and PDF paths pointing at the old
+layout — nothing in a classification run rewrites an embed. The `attachments`
+mode audits and repairs those links. It is deterministic: no model, no
+embeddings, and it runs with every endpoint down.
+
+```bash
+python3 <skill-directory>/scripts/vault-organizer.py attachments --vault <vault>
+python3 <skill-directory>/scripts/vault-organizer.py attachments --vault <vault> --apply
+```
+
+Every asset embed is classified as one of:
+
+- `resolves` — the target exists; left untouched.
+- `repairable` — exactly one file of that name exists in the vault; rewritten to
+  a `![[basename]]` wikilink, which Obsidian resolves vault-wide and which
+  therefore survives the next reorganization.
+- `ambiguous` — several files share the name. Reported, never guessed.
+- `missing` — no such file anywhere. Stripped: an embed with alt text collapses
+  to that text, and one that was the whole line or list item takes the line
+  with it.
+
+Embed syntax inside a code span or fenced block is documentation, not a link,
+and is never matched. Run dry first and relay the counts; stripping is
+irreversible in the note, so the run directory's `attachment_report.json` and
+`attachment_report.md` record every embed *before* any edit, and every rewritten
+note is copied to `backup/` under the run directory. Report ambiguous and
+missing links to the user rather than presenting the run as a clean repair.
+
+## Schema drift
+
+Folder paths are compiled from the schema's `Number` and `Label` cells; nothing
+reads folder names off disk. Filing creates a missing destination rather than
+failing, so a schema saying `8.02 Organizations` while the notes live in `8.03
+Organizations` silently grows a second folder on the next classification. The
+`drift` mode checks for that, deterministically and with every endpoint down.
+
+```bash
+python3 <skill-directory>/scripts/vault-organizer.py drift --vault <vault>
+```
+
+Findings are ranked and the ranking is the point — a real vault shows ~20 raw
+differences of which ~3 matter. **high** (`number_collision`, `label_moved`)
+means a route and a folder disagree and filing will split notes across two
+folders. **medium** is an undeclared folder holding notes. **low** and **info**
+are empty or reserved slots, which are normal. Structure below a declared route
+(`99.05 Attachments/Images`) is never reported.
+
+`doctor` runs the same check and exits non-zero on a `high` finding; `organize`
+lists every finding in the report's `## Schema Drift` section and refuses
+`--apply` while a `high` one stands unless `--allow-schema-drift` is passed.
+
+Each `high` finding names the cheaper side to change — the side holding fewer
+notes, since renaming a folder moves notes and editing a row moves none.
+**Relay the findings and ask the user which direction they want. Never choose
+for them, and never pass an id they have not seen and named.**
+
+```bash
+python3 <skill-directory>/scripts/vault-organizer.py drift --vault <vault> --fix-schema <id>,<id>
+```
+
+`--fix-schema` changes only a `Number` cell in the named rows. It never renames,
+moves, or deletes a folder and never adds a row, so folder-side corrections and
+new registrations are reported for the user to make. The note is backed up, and
+an edit that fails to re-parse or introduces new high-severity drift is rolled
+back.
+
 ## De-duplication guarantees
 
 - Nothing is ever deleted. Duplicate losers move to
@@ -96,7 +164,12 @@ section.
   processed.
 - Never overwrite a destination collision.
 - Never modify the schema to make an invalid classification pass; relay the
-  report's Schema Suggestions to the user instead.
+  report's Schema Suggestions to the user instead. This is not the same thing as
+  `--fix-schema`, and the difference matters: a classification that will not fit
+  the schema is the model wanting the schema changed, and the answer is always
+  no. `--fix-schema` applies a drift correction the *user* named after seeing it
+  in a report, to make the schema agree with folders that already exist. Never
+  reach for it to make a note file somewhere.
 - Tell the user the Markdown schema note remains the source of truth.
 - Resuming with different options is refused by design; start a new run when
   the model, thresholds, limit, or schema changed.

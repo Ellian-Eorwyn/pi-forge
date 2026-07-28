@@ -341,9 +341,9 @@ class VaultOrganizerTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name).resolve()
         self.vault = self.root / "vault"
-        (self.vault / "99 System").mkdir(parents=True)
+        (self.vault / "99 Meta").mkdir(parents=True)
         (self.vault / "00 Inbox").mkdir()
-        (self.vault / "99 System" / "0.00 Vault Schema.md").write_text(SCHEMA, encoding="utf-8")
+        (self.vault / "99 Meta" / "0.00 Vault Schema.md").write_text(SCHEMA, encoding="utf-8")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -482,7 +482,7 @@ class VaultOrganizerTests(unittest.TestCase):
         (self.vault / "node_modules" / "c.md").write_text("C", encoding="utf-8")
         target = self.vault / "00 Inbox" / "a.md"
         os.symlink(target, self.vault / "link.md")
-        selected = [path.relative_to(self.vault).as_posix() for path in vault_organizer.selected_notes(self.vault, self.vault / "99 System" / "0.00 Vault Schema.md", "vault", None)]
+        selected = [path.relative_to(self.vault).as_posix() for path in vault_organizer.selected_notes(self.vault, self.vault / "99 Meta" / "0.00 Vault Schema.md", "vault", None)]
         self.assertEqual(selected, ["00 Inbox/a.md"])
 
     def test_dry_run_no_mutation_and_cache_reuse(self):
@@ -633,9 +633,9 @@ class VaultOrganizerV2Tests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name).resolve()
         self.vault = self.root / "vault"
-        (self.vault / "99 System").mkdir(parents=True)
+        (self.vault / "99 Meta").mkdir(parents=True)
         (self.vault / "00 Inbox").mkdir()
-        (self.vault / "99 System" / "0.00 Vault Schema.md").write_text(SCHEMA, encoding="utf-8")
+        (self.vault / "99 Meta" / "0.00 Vault Schema.md").write_text(SCHEMA, encoding="utf-8")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -710,7 +710,7 @@ class VaultOrganizerV2Tests(unittest.TestCase):
         self.assertNotIn("processed_by", record["metadata"])
 
     def test_provenance_is_dropped_loudly_when_the_schema_lacks_the_property(self):
-        (self.vault / "99 System" / "0.00 Vault Schema.md").write_text(
+        (self.vault / "99 Meta" / "0.00 Vault Schema.md").write_text(
             SCHEMA.replace("| `processed_by` | no | list | Automated workflows that transformed this note. |\n", ""),
             encoding="utf-8",
         )
@@ -844,30 +844,30 @@ class VaultOrganizerV2Tests(unittest.TestCase):
     def test_exact_dupes_quarantined_with_one_llm_call(self):
         body = "# Duplicate\n\nShared body content that is identical.\n"
         self.write_note("Sources/Dup.md", "---\ntype: old\ncreated: 2024\nextra: rich\n---\n" + body)
-        self.write_note("04 Sources/Dup.md", "---\ntype: old\n---\n" + body)
+        self.write_note("05 Sources/Dup.md", "---\ntype: old\n---\n" + body)
         with StubServer([ok_response()]) as server:
             payload = self.run_ok("vault", "--vault", str(self.vault), "--base-url", server.url, "--no-embeddings", "--apply")
         counts = payload["data"]["counts"]
         self.assertEqual(counts["duplicates_exact"], 1)
         self.assertEqual(counts["quarantined"], 1)
         self.assertEqual(len(server.requests), 1)
-        quarantined = self.vault / ".vault-organizer" / "duplicates" / "04 Sources" / "Dup.md"
+        quarantined = self.vault / ".vault-organizer" / "duplicates" / "05 Sources" / "Dup.md"
         self.assertTrue(quarantined.is_file())
         self.assertEqual(quarantined.read_text(encoding="utf-8"), "---\ntype: old\n---\n" + body)
-        self.assertFalse((self.vault / "04 Sources" / "Dup.md").exists())
+        self.assertFalse((self.vault / "05 Sources" / "Dup.md").exists())
         self.assertTrue((self.vault / "04 Technology" / "4.03 Obsidian" / "Dup.md").is_file())
         plan = json.loads((Path(payload["data"]["run_directory"]) / "plan.json").read_text(encoding="utf-8"))
         groups = plan["dedupe"]["groups"]
         self.assertEqual(len(groups), 1)
         self.assertEqual(groups[0]["winner"], "Sources/Dup.md")
-        self.assertEqual(groups[0]["losers"][0]["path"], "04 Sources/Dup.md")
+        self.assertEqual(groups[0]["losers"][0]["path"], "05 Sources/Dup.md")
 
     def test_near_dupe_auto_and_review_band(self):
         shared = [f"Shared research line number {index} with substantive content." for index in range(1, 13)]
         long_body = "\n".join(shared + ["Marker VECA1 anchor line.", "Additional provenance line one.", "Additional provenance line two."]) + "\n"
         short_body = "\n".join(shared + ["Marker VECA2 anchor line."]) + "\n"
         self.write_note("Research/Report.md", long_body)
-        self.write_note("04 Research/Report.md", short_body)
+        self.write_note("05 Research/Report.md", short_body)
         concept_a = "# Concept\n\n" + "\n".join(f"Idea exploration line {index} alpha." for index in range(1, 13)) + "\nMarker VECB1 anchor.\n"
         concept_b = "# Concept\n\n" + "\n".join(f"Concept sketch line {index} beta." for index in range(1, 13)) + "\nMarker VECB2 anchor.\n"
         self.write_note("Ideas/Concept A.md", concept_a)
@@ -888,7 +888,7 @@ class VaultOrganizerV2Tests(unittest.TestCase):
         counts = payload["data"]["counts"]
         self.assertEqual(counts["duplicates_near"], 1)
         self.assertEqual(counts["duplicate_review"], 1)
-        self.assertTrue((self.vault / ".vault-organizer" / "duplicates" / "04 Research" / "Report.md").is_file())
+        self.assertTrue((self.vault / ".vault-organizer" / "duplicates" / "05 Research" / "Report.md").is_file())
         self.assertTrue((self.vault / "04 Technology" / "4.03 Obsidian" / "Report.md").is_file())
         plan = json.loads((Path(payload["data"]["run_directory"]) / "plan.json").read_text(encoding="utf-8"))
         near_groups = [group for group in plan["dedupe"]["groups"] if group["kind"] == "near"]

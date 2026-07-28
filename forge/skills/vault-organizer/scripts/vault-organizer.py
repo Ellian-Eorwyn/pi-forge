@@ -43,13 +43,18 @@ from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
     RESERVED_WINDOWS_NAMES,
     SCHEMA_BASENAME,
     UserError,
+    check_schema_drift,
     compile_destination,
+    compiled_routes,
     compiled_schema_for,
     domain_folder,
+    drift_counts,
     first_nonempty_line,
     has_control_character,
     heading_index,
+    WORKSPACE_MARKER,
     is_divider_row,
+    is_workspace_dir,
     iter_heading_lines,
     normalize_body_for_hash,
     normalize_project_value,
@@ -67,6 +72,7 @@ from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
     property_shape,
     property_value_mode,
     relative_path,
+    replace_schema_row_number,
     require_number,
     require_safe_label,
     resolve_schema_path,
@@ -1180,7 +1186,10 @@ def scan_base_references(vault, records):
         dirpath = Path(directory)
         dirnames[:] = [
             name for name in sorted(dirnames)
-            if name not in PROTECTED_DIRS and not name.startswith(".") and not (dirpath / name).is_symlink()
+            if name not in PROTECTED_DIRS
+            and not name.startswith(".")
+            and not (dirpath / name).is_symlink()
+            and not is_workspace_dir(dirpath / name)
         ]
         for filename in sorted(filenames):
             if not filename.endswith(".base"):
@@ -1259,9 +1268,40 @@ def verification_report(verification, records):
     return lines
 
 
-def write_plan(run_dir, records, counts, dedupe, base_references, mode, dry_run, vault, schema_hash, warnings, verification=None):
+def drift_report_lines(findings):
+    """The `## Schema Drift` section: where the schema and the folders disagree."""
+    lines = ["## Schema Drift", ""]
+    if not findings:
+        lines.extend(["- None. Every compiled route matches a folder on disk.", ""])
+        return lines
+    counts = drift_counts(findings)
+    lines.append(
+        "- "
+        + ", ".join(f"{counts[severity]} {severity}" for severity in ("high", "medium", "low", "info"))
+        + ""
+    )
+    lines.append("")
+    for severity in ("high", "medium", "low", "info"):
+        group = [finding for finding in findings if finding["severity"] == severity]
+        if not group:
+            continue
+        lines.extend([f"### {severity.capitalize()}", ""])
+        for finding in group:
+            lines.append(f"- `{finding['id']}` **{finding['kind']}** — `{finding['path']}`")
+            lines.append(f"    - {finding['detail']}")
+            if finding.get("suggestion"):
+                lines.append(f"    - Fix ({finding['fix_side']}): {finding['suggestion']}")
+        lines.append("")
+    return lines
+
+
+def write_plan(
+    run_dir, records, counts, dedupe, base_references, mode, dry_run, vault, schema_hash, warnings,
+    verification=None, schema_drift=None,
+):
     plan_path = run_dir / "plan.json"
     report_path = run_dir / "report.md"
+    schema_drift = schema_drift or []
     data = {
         "mode": mode,
         "dry_run": dry_run,
@@ -1272,6 +1312,7 @@ def write_plan(run_dir, records, counts, dedupe, base_references, mode, dry_run,
         "dedupe": dedupe,
         "verification": verification,
         "base_references": base_references,
+        "schema_drift": schema_drift,
         "records": plan_for_json(records),
         "warnings": warnings,
     }
@@ -1342,8 +1383,10 @@ def write_plan(run_dir, records, counts, dedupe, base_references, mode, dry_run,
         dedupe.get("review_pairs", []),
         lambda pair: f"- `{pair['a']}` vs `{pair['b']}` (score {pair.get('score')}, containment {pair.get('containment')}): {pair.get('reason', '')}",
     )
+    report.append("")
+    report.extend(drift_report_lines(schema_drift))
     suggestions = collect_suggestions(records)
-    report.extend(["", "## Schema Suggestions", "", "Suggestions are advisory only; nothing is applied to the schema.", ""])
+    report.extend(["## Schema Suggestions", "", "Suggestions are advisory only; nothing is applied to the schema.", ""])
     append_report_listing(
         report,
         suggestions,
@@ -1359,7 +1402,7 @@ def write_plan(run_dir, records, counts, dedupe, base_references, mode, dry_run,
         "",
         "## Link Safety",
         "",
-        "Basename-style Obsidian wikilinks are generally independent of folders. Relative Markdown links containing explicit paths may be affected by moves. This version records moves but does not repair path-based links.",
+        "Basename-style Obsidian wikilinks are generally independent of folders. Relative Markdown links containing explicit paths may be affected by moves. This run records moves but does not rewrite embeds; run `attachments` mode afterwards to repair asset links that moves left dangling.",
         "",
         "## Warnings",
         "",
@@ -1550,6 +1593,26 @@ def organize(args):
         except ValueError as error:
             raise UserError(str(error)) from error
     warnings = []
+    # Before the lock and before any classification: a route naming a folder that
+    # does not exist makes filing create a second one, so nothing should be spent
+    # on a run that must not apply.
+    schema_drift = check_schema_drift(vault, schema)
+    # Only what the user must act on becomes a warning. Reserved slots are
+    # correct behavior, and a run that warns about them every time trains the
+    # reader to skip the section where the real collisions appear. Every
+    # finding, at every severity, is still in report.md and plan.json.
+    for finding in schema_drift:
+        if finding["severity"] in {"high", "medium"}:
+            warnings.append(
+                f"schema drift [{finding['severity']}] {finding['id']} {finding['path']}: {finding['detail']}"
+            )
+    blocking = [finding for finding in schema_drift if finding["severity"] == "high"]
+    if blocking and args.apply and not args.allow_schema_drift:
+        listed = "; ".join(f"{finding['id']} {finding['path']}" for finding in blocking)
+        raise UserError(
+            f"schema drift would file notes into a second folder ({listed}); fix it with "
+            f"`drift --vault {vault}`, or pass --allow-schema-drift to apply anyway"
+        )
     with run_state.run_lock(vault / ".vault-organizer"):
         if not resuming:
             run_dir = unique_run_directory(vault)
@@ -1568,12 +1631,15 @@ def organize(args):
             items = scan_data["items"]
             if resuming:
                 current_items, _ = scan_vault(vault, schema_path, args.mode, args.limit)
-                drift = run_state.input_drift(items, current_items)
-                for added in drift["added"]:
+                # Named for what it is: files moving under the run, not the
+                # schema-versus-disk drift checked above. `drift` alone would
+                # also shadow the mode function of that name.
+                input_drift = run_state.input_drift(items, current_items)
+                for added in input_drift["added"]:
                     warnings.append(f"input drift: {added['path']} appeared after the scan; run again to include it")
-                for removed in drift["removed"]:
+                for removed in input_drift["removed"]:
                     warnings.append(f"input drift: {removed['path']} disappeared after the scan")
-                for changed in drift["changed"]:
+                for changed in input_drift["changed"]:
                     warnings.append(f"input drift: {changed['after']['path']} changed after the scan; it will be refused at apply")
         else:
             items, _ = scan_vault(vault, schema_path, args.mode, args.limit)
@@ -1660,7 +1726,8 @@ def organize(args):
         else:
             final_phase = "planned"
         plan_path, report_path = write_plan(
-            run_dir, records, counts, dedupe, base_references, args.mode, not args.apply, vault, schema_hash, warnings, verification
+            run_dir, records, counts, dedupe, base_references, args.mode, not args.apply, vault, schema_hash, warnings,
+            verification, schema_drift,
         )
         run_state.update_run_state(
             run_dir,
@@ -1682,6 +1749,444 @@ def organize(args):
             "schema_hash": schema_hash,
             "run_directory": str(run_dir),
             "counts": counts,
+            "schema_drift": drift_counts(schema_drift),
+        },
+    )
+
+
+ASSET_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".avif",
+    ".pdf",
+    ".mp3", ".m4a", ".wav", ".ogg", ".flac",
+    ".mp4", ".mov", ".webm", ".mkv",
+}
+EXTERNAL_SCHEMES = ("http://", "https://", "mailto:", "data:", "tel:")
+MD_EMBED_RE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)]*)\)")
+WIKI_EMBED_RE = re.compile(r"!\[\[(?P<target>[^\]|#]+)(?P<rest>[^\]]*)\]\]")
+FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
+# A line left holding only list scaffolding after an embed is removed.
+STRUCTURAL_ONLY_RE = re.compile(r"\s*(?:[-*+]\s*(?:\[[ xX]\]\s*)?|\d+[.)]\s*)?$")
+
+
+def code_span_ranges(line):
+    """Character ranges covered by inline code spans, delimiters included.
+
+    Text inside backticks is documentation, not a link. The schema note alone
+    carries fifteen `"[[Project]]"` registry examples, and the Obsidian Bases
+    note documents `"[[link/to/attachment.jpg]]"`; rewriting either would be
+    corruption, so every match inside these ranges is skipped.
+    """
+    ranges = []
+    index = 0
+    length = len(line)
+    while index < length:
+        if line[index] != "`":
+            index += 1
+            continue
+        start = index
+        while index < length and line[index] == "`":
+            index += 1
+        fence = index - start
+        closing = line.find("`" * fence, index)
+        while closing != -1 and closing + fence < length and line[closing + fence] == "`":
+            closing = line.find("`" * fence, closing + fence)
+        if closing == -1:
+            break
+        ranges.append((start, closing + fence))
+        index = closing + fence
+    return ranges
+
+
+def inside_ranges(position, ranges):
+    return any(start <= position < end for start, end in ranges)
+
+
+def asset_index(vault):
+    """Basename -> vault-relative paths, for every asset file outside skipped trees."""
+    index = {}
+    for directory, dirnames, filenames in os.walk(vault, followlinks=False):
+        dirpath = Path(directory)
+        dirnames[:] = [
+            name for name in sorted(dirnames)
+            if name not in PROTECTED_DIRS
+            and not name.startswith(".")
+            and not (dirpath / name).is_symlink()
+            and not is_workspace_dir(dirpath / name)
+        ]
+        for filename in sorted(filenames):
+            path = dirpath / filename
+            if path.is_symlink() or path.suffix.lower() not in ASSET_EXTENSIONS:
+                continue
+            index.setdefault(filename, []).append(path.resolve().relative_to(vault).as_posix())
+    return index
+
+
+def normalize_target(raw):
+    """The path part of an embed target, percent-decoded, without a title suffix."""
+    text = raw.strip()
+    if text.startswith("<") and text.endswith(">"):
+        text = text[1:-1].strip()
+    for quote in ('"', "'"):
+        marker = f" {quote}"
+        if marker in text:
+            text = text.split(marker, 1)[0].strip()
+    return urllib.parse.unquote(text)
+
+
+def classify_embed(vault, note, target, assets, kind):
+    """`external`, `resolves`, `repairable`, `ambiguous`, or `missing`."""
+    if target.startswith(EXTERNAL_SCHEMES):
+        return "external", None
+    local = target[len("file://"):].lstrip("/") if target.startswith("file://") else target
+    if Path(local).suffix.lower() not in ASSET_EXTENSIONS:
+        return "external", None
+    matches = assets.get(Path(local).name, [])
+    if kind == "wiki":
+        # Obsidian resolves a wikilink by name across the whole vault, so any
+        # existing file of that name means the embed already works. Treating it
+        # as repairable would rewrite it to itself and report a healthy vault
+        # as broken on every run.
+        return ("resolves", None) if matches else ("missing", None)
+    if not target.startswith("file://") and ((note.parent / local).exists() or (vault / local).exists()):
+        return "resolves", None
+    if len(matches) == 1:
+        return "repairable", matches[0]
+    if len(matches) > 1:
+        return "ambiguous", None
+    return "missing", None
+
+
+def scan_note_embeds(vault, note, assets):
+    """Every asset embed in one note, with its line, span, and classification."""
+    text = note.read_text(encoding="utf-8", errors="strict")
+    findings = []
+    fenced = False
+    for number, line in enumerate(text.splitlines(), 1):
+        if FENCE_RE.match(line):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        spans = code_span_ranges(line)
+        for pattern, kind in ((WIKI_EMBED_RE, "wiki"), (MD_EMBED_RE, "md")):
+            for match in pattern.finditer(line):
+                if inside_ranges(match.start(), spans):
+                    continue
+                target = normalize_target(match.group("target"))
+                if not target:
+                    continue
+                alt = match.group("alt").strip() if kind == "md" else ""
+                classification, resolved = classify_embed(vault, note, target, assets, kind)
+                if classification == "external":
+                    continue
+                findings.append({
+                    "line": number,
+                    "start": match.start(),
+                    "end": match.end(),
+                    "kind": kind,
+                    "text": match.group(0),
+                    "target": target,
+                    "alt": alt,
+                    "classification": classification,
+                    "resolved": resolved,
+                })
+    return text, findings
+
+
+def repaired_note_text(text, findings):
+    """Apply repairs and strips, returning the new text and the actions taken."""
+    actionable = [f for f in findings if f["classification"] in {"repairable", "missing"}]
+    if not actionable:
+        return text, []
+    by_line = {}
+    for finding in actionable:
+        by_line.setdefault(finding["line"], []).append(finding)
+
+    ends_with_newline = text.endswith("\n")
+    lines = text.splitlines()
+    actions = []
+    dropped = set()
+    for number, group in by_line.items():
+        line = lines[number - 1]
+        stripped_any = False
+        # Right to left, so earlier spans keep their offsets.
+        for finding in sorted(group, key=lambda item: item["start"], reverse=True):
+            if finding["classification"] == "repairable":
+                replacement = f"![[{Path(finding['target']).name}]]"
+            else:
+                # Alt text becomes prose, so it needs the word boundaries the
+                # embed syntax used to provide. Word exports put several image
+                # embeds back to back, and "DATE" + "Draft Report" must not
+                # concatenate into "DATEDraft Report".
+                replacement = finding["alt"]
+                if replacement:
+                    preceding = line[finding["start"] - 1] if finding["start"] > 0 else ""
+                    following = line[finding["end"]] if finding["end"] < len(line) else ""
+                    if preceding and not preceding.isspace():
+                        replacement = f" {replacement}"
+                    if following and not following.isspace():
+                        replacement = f"{replacement} "
+                stripped_any = True
+            line = line[: finding["start"]] + replacement + line[finding["end"] :]
+            actions.append({
+                "line": number,
+                "action": "repair" if finding["classification"] == "repairable" else "strip",
+                "before": finding["text"],
+                "after": replacement,
+                "target": finding["target"],
+                "resolved": finding["resolved"],
+            })
+        collapsed = re.sub(r"[ \t]{2,}", " ", line).rstrip()
+        if stripped_any and STRUCTURAL_ONLY_RE.fullmatch(collapsed):
+            dropped.add(number)
+            actions.append({"line": number, "action": "drop_line", "before": lines[number - 1], "after": None})
+        else:
+            lines[number - 1] = collapsed
+    kept = [line for number, line in enumerate(lines, 1) if number not in dropped]
+    revised = "\n".join(kept)
+    if ends_with_newline and revised:
+        revised += "\n"
+    return revised, sorted(actions, key=lambda item: (item["line"], item["action"]))
+
+
+def render_attachment_report(rows, counts):
+    lines = [
+        "# Attachment link report",
+        "",
+        f"- Notes scanned: {counts['notes_scanned']}",
+        f"- Asset embeds found: {counts['embeds']}",
+        f"- Already resolving: {counts['resolves']}",
+        f"- Repairable: {counts['repairable']}",
+        f"- Ambiguous (left alone): {counts['ambiguous']}",
+        f"- Missing: {counts['missing']}",
+        "",
+        "Every embed below is recorded before any edit, so a stripped link's",
+        "filename stays recoverable from this file.",
+        "",
+    ]
+    for row in rows:
+        if not row["findings"]:
+            continue
+        lines.append(f"## {row['note']}")
+        lines.append("")
+        for finding in row["findings"]:
+            lines.append(f"- line {finding['line']} — **{finding['classification']}** — `{finding['text']}`")
+            if finding["resolved"]:
+                lines.append(f"    - resolves to `{finding['resolved']}`")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def attachments(args):
+    vault = Path(args.vault).expanduser().resolve()
+    if not vault.is_dir():
+        raise UserError(f"vault root does not exist: {vault}")
+    schema_path = resolve_schema_path(vault, args.schema)
+    assets = asset_index(vault)
+    notes = selected_notes(vault, schema_path, "vault", args.limit)
+
+    rows = []
+    counts = {"notes_scanned": 0, "embeds": 0, "resolves": 0, "repairable": 0, "ambiguous": 0, "missing": 0}
+    warnings = []
+    for note in notes:
+        counts["notes_scanned"] += 1
+        try:
+            text, findings = scan_note_embeds(vault, note, assets)
+        except (OSError, UnicodeDecodeError) as error:
+            warnings.append(f"unreadable note skipped: {relative_path(vault, note)} ({error})")
+            continue
+        for finding in findings:
+            counts["embeds"] += 1
+            counts[finding["classification"]] += 1
+        if findings:
+            rows.append({"note": relative_path(vault, note), "path": note, "text": text, "findings": findings})
+
+    run_dir = unique_run_directory(vault)
+    report_rows = [{"note": row["note"], "findings": row["findings"]} for row in rows]
+    # Written before any edit: stripping discards filenames, and this is their record.
+    (run_dir / "attachment_report.json").write_text(
+        json.dumps({"counts": counts, "notes": report_rows}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    (run_dir / "attachment_report.md").write_text(render_attachment_report(report_rows, counts), encoding="utf-8")
+
+    planned = []
+    for row in rows:
+        revised, actions = repaired_note_text(row["text"], row["findings"])
+        if not actions:
+            continue
+        planned.append({"note": row["note"], "path": row["path"], "revised": revised, "actions": actions})
+
+    applied = []
+    if args.apply:
+        for entry in planned:
+            source = entry["path"]
+            backup = run_dir / "backup" / entry["note"]
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, backup)
+            handle, temp_name = tempfile.mkstemp(prefix=f".{source.name}.", suffix=".tmp", dir=str(source.parent))
+            try:
+                with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                    stream.write(entry["revised"])
+                os.replace(temp_name, source)
+            except BaseException:
+                Path(temp_name).unlink(missing_ok=True)
+                raise
+            applied.append(entry["note"])
+
+    if counts["ambiguous"]:
+        warnings.append(f"{counts['ambiguous']} embed(s) match several files by name and were left untouched")
+    if counts["missing"] and not args.apply:
+        warnings.append(f"{counts['missing']} embed(s) target files that no longer exist and would be stripped")
+
+    return structured(
+        "ok",
+        artifacts=[str(run_dir / "attachment_report.md"), str(run_dir / "attachment_report.json")],
+        warnings=warnings,
+        data={
+            "vault": str(vault),
+            "runDirectory": str(run_dir),
+            "dryRun": not args.apply,
+            "counts": counts,
+            "notesChanged": len(planned),
+            "applied": applied,
+            "plan": [{"note": entry["note"], "actions": entry["actions"]} for entry in planned],
+        },
+    )
+
+
+def render_drift_report(vault, schema_path, schema, findings):
+    lines = [
+        "# Schema drift report",
+        "",
+        f"- Vault: `{vault}`",
+        f"- Schema: `{schema_path}`",
+        f"- Compiled routes: {len(compiled_routes(schema))}",
+        f"- Findings: {len(findings)}",
+        "",
+        "Every folder path is compiled from the schema's `Number` and `Label` cells;",
+        "nothing reads folder names off disk. Where the two disagree, filing a note",
+        "creates the missing folder rather than failing, so the notes split in two.",
+        "Structure *below* a declared route is legitimate detail and is never reported.",
+        "",
+    ]
+    lines.extend(drift_report_lines(findings))
+    lines.extend([
+        "## Fixing",
+        "",
+        "`--fix-schema <id>,<id>` applies schema-side fixes only, and only the ids you name.",
+        "It never renames, moves, or deletes a folder — folder-side corrections are yours to make.",
+        "",
+    ])
+    return "\n".join(lines) + "\n"
+
+
+def apply_schema_fixes(vault, schema_path, findings, requested, run_dir):
+    """Rewrite named registry rows, validating the result before it lands.
+
+    The first code in this workflow that writes the schema note, so the rails are
+    the point: named ids only, schema side only, backup first, and a temp file
+    that has to parse and re-check clean before it replaces anything.
+    """
+    by_id = {finding["id"]: finding for finding in findings}
+    selected = []
+    for identifier in requested:
+        finding = by_id.get(identifier)
+        if finding is None:
+            known = ", ".join(sorted(by_id)) or "none"
+            raise UserError(f"unknown finding id {identifier}; this vault currently reports: {known}")
+        if finding["fix_side"] != "schema" or not finding["schema_row"]:
+            raise UserError(
+                f"{identifier} ({finding['path']}) is a {finding['fix_side']}-side fix; --fix-schema only edits "
+                f"the schema note. Do this one yourself: {finding['suggestion']}"
+            )
+        selected.append(finding)
+
+    original = schema_path.read_text(encoding="utf-8")
+    backup = run_dir / "backup" / relative_path(vault, schema_path)
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(schema_path, backup)
+
+    revised = original
+    changes = []
+    for finding in selected:
+        revised, before_line, after_line = replace_schema_row_number(revised, finding["schema_row"])
+        changes.append({
+            "id": finding["id"],
+            "path": finding["path"],
+            "route": finding["route"],
+            "before": before_line,
+            "after": after_line,
+        })
+
+    before_high = {finding["id"] for finding in findings if finding["severity"] == "high"}
+    handle, temp_name = tempfile.mkstemp(prefix=f".{schema_path.name}.", suffix=".tmp", dir=str(schema_path.parent))
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(revised)
+            stream.flush()
+            os.fsync(stream.fileno())
+        # Validate what is actually on disk, not what we meant to write.
+        candidate = Path(temp_name).read_text(encoding="utf-8-sig")
+        try:
+            new_schema = parse_schema_note(candidate)
+            validate_derived_paths(new_schema)
+        except UserError as error:
+            raise UserError(f"fix rejected: the edited schema does not parse ({error}); nothing was written") from error
+        after = check_schema_drift(vault, new_schema)
+        introduced = [
+            finding for finding in after if finding["severity"] == "high" and finding["id"] not in before_high
+        ]
+        if introduced:
+            listed = "; ".join(f"{finding['id']} {finding['path']}" for finding in introduced)
+            raise UserError(f"fix rejected: it would introduce new high-severity drift ({listed}); nothing was written")
+        os.replace(temp_name, schema_path)
+    except BaseException:
+        Path(temp_name).unlink(missing_ok=True)
+        raise
+    return changes, after
+
+
+def drift(args):
+    vault = Path(args.vault).expanduser().resolve()
+    if not vault.is_dir():
+        raise UserError(f"vault root does not exist: {vault}")
+    schema_path = resolve_schema_path(vault, args.schema)
+    schema, _ = compiled_schema_for(vault, schema_path)
+    findings = check_schema_drift(vault, schema)
+
+    run_dir = unique_run_directory(vault)
+    # Written before any edit, as with attachments: the report is the record of
+    # what the schema said before the fix.
+    (run_dir / "drift_report.json").write_text(
+        json.dumps({"counts": drift_counts(findings), "findings": findings}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "drift_report.md").write_text(
+        render_drift_report(vault, schema_path, schema, findings), encoding="utf-8"
+    )
+
+    requested = [part.strip() for part in (args.fix_schema or "").split(",") if part.strip()]
+    changes = []
+    remaining = findings
+    if requested:
+        changes, remaining = apply_schema_fixes(vault, schema_path, findings, requested, run_dir)
+
+    warnings = []
+    for finding in remaining:
+        if finding["severity"] in {"high", "medium"}:
+            warnings.append(f"schema drift [{finding['severity']}] {finding['id']} {finding['path']}: {finding['detail']}")
+    return structured(
+        "ok",
+        artifacts=[str(run_dir / "drift_report.md"), str(run_dir / "drift_report.json")],
+        warnings=warnings,
+        data={
+            "vault": str(vault),
+            "schema": str(schema_path),
+            "runDirectory": str(run_dir),
+            "dryRun": not requested,
+            "counts": drift_counts(remaining),
+            "findings": remaining,
+            "applied": changes,
         },
     )
 
@@ -1759,6 +2264,19 @@ def doctor(args):
             schema_check = {"ok": False, "detail": str(error)}
     checks["schema"] = schema_check
     ok = ok and schema_check["ok"]
+    if schema_check["ok"]:
+        findings = check_schema_drift(vault, schema)
+        counts = drift_counts(findings)
+        checks["drift"] = {"ok": counts["high"] == 0, "counts": counts, "findings": findings}
+        for finding in findings:
+            if finding["severity"] in {"high", "medium"}:
+                warnings.append(
+                    f"schema drift [{finding['severity']}] {finding['id']} {finding['path']}: {finding['detail']}"
+                )
+        ok = ok and checks["drift"]["ok"]
+    else:
+        checks["drift"] = {"ok": False, "detail": "schema did not parse"}
+        ok = False
     # Classification is one call per note, so a backend that reasons before
     # answering costs hundreds of hidden tokens per note. Report that here
     # rather than letting a whole-vault run discover it slowly.
@@ -1800,10 +2318,18 @@ class TrackingAction(argparse.Action):
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(description="Classify, dedupe, and organize Obsidian vault notes.")
-    parser.add_argument("mode", choices=["inbox", "vault", "status", "doctor"])
+    parser.add_argument("mode", choices=["inbox", "vault", "attachments", "drift", "status", "doctor"])
     parser.add_argument("--vault")
     parser.add_argument("--schema", action=TrackingAction)
     parser.add_argument("--apply", action="store_true")
+    # Deliberately not a TrackingAction: an override granted for one apply must
+    # not be adopted into resumed run state and silently persist.
+    parser.add_argument(
+        "--allow-schema-drift",
+        action="store_true",
+        help="apply even though the schema and the folders on disk disagree",
+    )
+    parser.add_argument("--fix-schema", help="drift mode: comma-separated finding ids to correct in the schema note")
     parser.add_argument("--run", help="existing run directory to resume")
     parser.add_argument("--limit", type=int, action=TrackingAction)
     parser.add_argument("--base-url", action=TrackingAction)
@@ -1834,6 +2360,13 @@ def parse_args(argv):
         return args
     if not args.vault:
         raise UserError(f"{args.mode} requires --vault")
+    args.schema = args.schema or os.environ.get("VAULT_ORGANIZER_SCHEMA") or None
+    if args.fix_schema and args.mode != "drift":
+        raise UserError("--fix-schema belongs to drift mode")
+    if args.mode in {"attachments", "drift"}:
+        # Deterministic filesystem work: no classification, so no model or
+        # embeddings service is resolved and these run with every endpoint down.
+        return args
     # Skill-specific settings win, then the agent's configured chat service, then
     # the built-in non-thinking default.
     resolved = forge_llm.resolve_service(
@@ -1844,7 +2377,6 @@ def parse_args(argv):
     args.base_url = resolved["url"]
     args.model = resolved["model"]
     args.api_key = args.api_key or os.environ.get("VAULT_ORGANIZER_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
-    args.schema = args.schema or os.environ.get("VAULT_ORGANIZER_SCHEMA") or None
     args.embeddings_url = forge_embeddings.endpoint_url(args.embeddings_url)
     args.embeddings_model = forge_embeddings.model_name(args.embeddings_model)
     if args.near_dupe_auto is None:
@@ -1864,6 +2396,10 @@ def run(argv):
         result = status(args)
     elif args.mode == "doctor":
         result = doctor(args)
+    elif args.mode == "attachments":
+        result = attachments(args)
+    elif args.mode == "drift":
+        result = drift(args)
     else:
         result = organize(args)
     print_json(result)
