@@ -6055,3 +6055,112 @@ test("checkout installer invokes local installer without cloning by default", ()
 		assert.equal(existsSync(gitLog), false);
 	});
 });
+
+function referenceFixture(workspace, { skills, capabilities }) {
+	mkdirSync(join(workspace, "forge", "skills"), { recursive: true });
+	for (const skill of skills) {
+		mkdirSync(join(workspace, "forge", "skills", skill), { recursive: true });
+	}
+	writeFileSync(
+		join(workspace, "forge", "CAPABILITIES.md"),
+		`# pi-forge capabilities\n\n## Built-in capabilities\n\n${capabilities.join("\n")}\n\n## Other section\n\nUnrelated prose.\n`,
+	);
+	writeFileSync(
+		join(workspace, "PI_FORGE_SKILLS_REFERENCE.md"),
+		"# Pi-Forge Skills Reference\n\nHand-written preamble.\n\n## Built-in skills\n\n<!-- forge:skills-list start -->\n\nstale contents\n\n<!-- forge:skills-list end -->\n\nHand-written trailer.\n",
+	);
+	return join(workspace, "PI_FORGE_SKILLS_REFERENCE.md");
+}
+
+function runSync(workspace, extraArgs = [], expectedStatus = 0) {
+	const result = spawnSync("node", [join(repositoryRoot, "scripts", "sync-forge-reference.mjs"), ...extraArgs], {
+		cwd: repositoryRoot,
+		encoding: "utf8",
+		env: { ...environment, FORGE_REFERENCE_ROOT: workspace },
+	});
+	assert.equal(
+		result.status,
+		expectedStatus,
+		`sync-forge-reference exited ${result.status}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+	);
+	return result;
+}
+
+test("reference sync regenerates the skills block and preserves hand-written prose", () => {
+	withWorkspace((workspace) => {
+		const referencePath = referenceFixture(workspace, {
+			skills: ["alpha", "beta"],
+			capabilities: ["- `beta`: Second capability.", "- `alpha`: First capability."],
+		});
+
+		runSync(workspace);
+		const rendered = readFileSync(referencePath, "utf8");
+
+		// Sorted by name regardless of CAPABILITIES.md ordering.
+		assert.match(rendered, /- `alpha`: First capability\.\n- `beta`: Second capability\./);
+		assert.match(rendered, /contains 2 capability workflows/);
+		assert.doesNotMatch(rendered, /stale contents/);
+		assert.match(rendered, /Hand-written preamble\./);
+		assert.match(rendered, /Hand-written trailer\./);
+
+		// Regenerating is idempotent, so --check passes straight after.
+		runSync(workspace, ["--check"]);
+		assert.equal(readFileSync(referencePath, "utf8"), rendered);
+	});
+});
+
+test("reference sync joins wrapped descriptions and singularizes a lone workflow", () => {
+	withWorkspace((workspace) => {
+		const referencePath = referenceFixture(workspace, {
+			skills: ["alpha"],
+			capabilities: ["- `alpha`: A description that wraps", "  across two source lines."],
+		});
+
+		runSync(workspace);
+		const rendered = readFileSync(referencePath, "utf8");
+		assert.match(rendered, /- `alpha`: A description that wraps across two source lines\./);
+		assert.match(rendered, /contains 1 capability workflow,/);
+	});
+});
+
+test("reference sync --check fails when a description drifts", () => {
+	withWorkspace((workspace) => {
+		const capabilitiesPath = join(workspace, "forge", "CAPABILITIES.md");
+		referenceFixture(workspace, { skills: ["alpha"], capabilities: ["- `alpha`: Original description."] });
+		runSync(workspace);
+		runSync(workspace, ["--check"]);
+
+		writeFileSync(capabilitiesPath, readFileSync(capabilitiesPath, "utf8").replace("Original", "Rewritten"));
+		const failure = runSync(workspace, ["--check"], 1);
+		assert.match(failure.stderr, /PI_FORGE_SKILLS_REFERENCE\.md is stale/);
+
+		runSync(workspace);
+		runSync(workspace, ["--check"]);
+	});
+});
+
+test("reference sync refuses to run when CAPABILITIES.md and forge/skills disagree", () => {
+	withWorkspace((workspace) => {
+		referenceFixture(workspace, { skills: ["alpha", "beta"], capabilities: ["- `alpha`: Only one documented."] });
+		const missing = runSync(workspace, ["--check"], 1);
+		assert.match(missing.stderr, /missing an entry for `beta`/);
+	});
+
+	withWorkspace((workspace) => {
+		referenceFixture(workspace, {
+			skills: ["alpha"],
+			capabilities: ["- `alpha`: Real.", "- `ghost`: Not a directory."],
+		});
+		const orphan = runSync(workspace, ["--check"], 1);
+		assert.match(orphan.stderr, /lists `ghost`, but forge\/skills\/ghost\/ does not exist/);
+	});
+});
+
+test("reference sync fails loudly when the generated markers are missing", () => {
+	withWorkspace((workspace) => {
+		const referencePath = referenceFixture(workspace, { skills: ["alpha"], capabilities: ["- `alpha`: Real."] });
+		writeFileSync(referencePath, "# Reference\n\nNo markers here.\n");
+		const failure = runSync(workspace, [], 1);
+		assert.match(failure.stderr, /missing the <!-- forge:skills-list start -->/);
+	});
+});

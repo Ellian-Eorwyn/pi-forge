@@ -10,6 +10,8 @@ Use these sources of truth:
 - `forge/skills/<name>/SKILL.md`: workflow, judgment, routing, review, evidence, and output standards.
 - `forge/skills/<name>/manifest.json`: skill package boundary and real available scripts/tools.
 - `forge/SCRIPT_TOOL_CONTRACT.md`: preferred contract for extracted executable tools.
+- `forge/RUN_STATE_CONTRACT.md`: shared restart-safe run contract used by the
+  batch capabilities (resume, `status` drift reporting, and `refresh`).
 
 ## Architecture boundary
 
@@ -26,25 +28,44 @@ in `forge/SCRIPT_TOOL_CONTRACT.md`.
 
 ## Built-in skills
 
-The live skill inventory currently contains 14 capability workflows:
+<!-- forge:skills-list start -->
+
+The live skill inventory currently contains 21 capability workflows, listed
+here with the one-line descriptions maintained in `forge/CAPABILITIES.md`:
 
 - `coding`: Inspect repositories and ship small, reviewable code changes.
-- `document-ingest`: Normalize documents into structured text with provenance.
-- `file-conversion`: Convert files between common working formats.
+- `document-ingest`: Normalize documents and Gmail-style EML batches into structured text with source maps, exact-quote evidence, split chat/think verification, and a cited aggregate email digest.
+- `file-conversion`: Convert files, including deterministic EML-to-Markdown with preserved attachment manifests, between common working formats with per-file checkpoints.
 - `literature-extraction`: Extract structured evidence, claims, metadata, and citations from research documents.
 - `organize-folder`: Sort messy folders through a reviewable manifest before making changes.
 - `personal-admin`: Turn personal/admin documents into summaries, decisions, and action plans.
+- `project-extraction`: Run or continuously refresh live project repositories with truthful packet/source coverage, reviewed Inbox intake, serial model-assisted extraction and reconciliation, source-backed controls, focused views, explicitly labeled drafts, and CSV/Mermaid/HTML Gantt outputs while preserving conflicts and human status ownership.
 - `report-output`: Assemble polished deliverables from processed research or document outputs.
+- `reviewer-2`: Peer-review a scholarly article note as a separate review copy in `00 Inbox` - anchored critique callouts on research gaps, evidence, logic, theory, and structure, each carrying its fix and citations resolved against real `web-research` runs, plus a ranked meta review and revision plan; never modifies the article.
 - `site-builder`: Build static websites from structured content folders.
+- `skill-builder`: Design, scaffold, validate, and audit portable Agent Skills.
 - `spreadsheet-analysis`: Analyze, clean, validate, and enrich tabular datasets.
 - `transcript-cleanup`: Clean raw transcripts into readable, structured documents.
-- `transcription`: Transcribe audio/video, then correct and clean the transcript.
+- `transcription`: Transcribe audio/video with per-chunk checkpoints, then correct and clean the transcript.
+- `vault-capture`: Turn an owner-authored typed or spoken braindump into schema-valid notes in `00 Inbox`, applying the vault's scoped voice policy, adding vault-first journal reflection, marking output `capture_type: generated`, and keeping the braindump verbatim; for transcription exports use `vault-transcripts` instead.
+- `vault-connections`: Search an Obsidian vault by meaning, propose note links for per-id approval, validate completed literature/meta-literature/deep-research runs, preserve imported report bodies, turn deep research into source-policy `Synthesis` notes with quotes and provenance (`--notes`), and create evidence-backed wiki notes from vault-owned templates.
 - `vault-handoff`: Prepare completed artifacts for pi-vault or Obsidian review.
-- `web-collection`: Archive, organize, and preserve web sources.
-- `web-research`: Perform quick or deep web research with page reading, provenance, evidence, claims, and validation.
+- `vault-organizer`: Classify, de-duplicate, and organize Obsidian notes from a human-maintained vault schema note, with restart-safe resumable runs, a recoverable duplicate quarantine, asset-embed repair, and schema drift detection that blocks applying when the schema and the folders on disk disagree.
+- `vault-transcripts`: Classify, rename, clean, and summarize raw transcripts while distinguishing owner memos/journals, personal exchanges, external sources, and unknown material; apply scoped voice only where valid, add owner-journal reflection, and keep the original transcription verbatim.
+- `web-collection`: Archive, organize, and preserve web sources with per-URL checkpoints.
+- `web-research`: Perform resumable quick, deep, or academic web research with URL/provider/iteration checkpoints, direct-first acquisition, local-first scheduling, embedding-ranked source triage, browser fallback/discovery, provenance, evidence, claims, and validation.
 
-Regenerate the generated inventory after changing skill names, descriptions,
-bodies, or visibility:
+This block is generated. After adding, renaming, or re-describing a skill,
+update `forge/CAPABILITIES.md` and run:
+
+```bash
+npm run forge:sync-reference
+```
+
+<!-- forge:skills-list end -->
+
+Regenerate `FORGE_SKILLS.md`, the separate launch-context and token report,
+after changing skill names, descriptions, bodies, or visibility:
 
 ```bash
 npm run forge:skills-report
@@ -67,19 +88,40 @@ The current extension/tool surfaces outside skill-local scripts are:
 
 - `forge/extensions/pi-vault-client.ts`: provides `pi_vault_submit_artifact` for
   pending pi-vault proposal handoff.
-- `forge/extensions/web-research.ts`: provides `forge_deep_web_research` for
-  iterative web research with source provenance and validation artifacts.
+- `forge/extensions/web-research.ts`: provides `forge_web_search`,
+  `forge_web_read`, `forge_deep_web_research`, `forge_web_discover`, and
+  `forge_academic_web_research` for search, page extraction, iterative research
+  with source provenance and validation artifacts, endpoint discovery, and
+  scholarly metadata search.
 - `pi-forge-mcp`: exposes deterministic MCP tools `forge_transcribe` and
   `forge_convert_files`.
+
+The remaining extensions register session behavior rather than callable tools:
+
+- `forge/extensions/inference-scheduling.ts`: reserves an interactive slot
+  against the local inference queue so background work does not starve the
+  interactive session.
+- `forge/extensions/vault-context.ts`: detects an Obsidian vault working
+  directory and injects its coordinates once per session; registers `/vault`.
+- `forge/extensions/vault-workflow.ts`: drives the plan -> execute -> verify
+  loop by switching session model and active tools per phase; registers
+  `/plan`, `/execute`, `/verify`, and `/workflow`.
 
 ## Common pipelines
 
 - Web/document research: `web-collection` -> `document-ingest` -> `literature-extraction` -> `report-output`.
 - Quick lookup: `web-research research` -> final answer or downstream skill.
-- Deep web research: `web-research deep` -> claim/evidence register -> `report-output`.
+- Deep web research: `web-research deep` -> claim/evidence register -> `web-research validate` -> `report-output`.
+- Academic sourcing: `web-research academic` -> canonical works and RIS export -> `literature-extraction` or `report-output`.
 - Media processing: `transcription` -> `transcript-cleanup` -> `report-output` or `personal-admin`.
 - Folder cleanup: `organize-folder` scan/plan -> user review -> apply.
 - Static site output: processed source folder -> `site-builder`.
+- Voice notes into a vault: `vault-transcripts` -> `vault-organizer` inbox processing.
+- Braindump into a vault: `vault-capture` -> `vault-organizer` -> `vault-connections` link proposals.
+- Research into vault notes: `web-research deep` -> `vault-connections import-run --notes` -> `vault-organizer`.
+- Article peer review: `web-research deep` runs for the literature -> `reviewer-2` index/comment/render -> review copy in `00 Inbox` -> `vault-organizer`.
+- Project tracking: `project-extraction` run/refresh -> reviewed Inbox intake -> CSV/Mermaid/HTML Gantt outputs.
+- New skill packages: `skill-builder` scaffold -> validate -> `npm run check:forge-skill-manifests`.
 
 ## Local defaults
 
