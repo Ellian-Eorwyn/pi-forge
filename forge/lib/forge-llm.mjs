@@ -21,7 +21,7 @@
 
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { getForgeAgentDir, resolveConnectedServices, resolveThinkOrChat } from "./connected-services.mjs";
+import { getForgeAgentDir, resolveConnectedServices, resolveThinkOrChat, SLOT_CONTEXT_TOKENS } from "./connected-services.mjs";
 import { isTransientFailure } from "./run-state.mjs";
 
 // A thinking backend that was asked not to think can still emit a stray block.
@@ -40,11 +40,29 @@ export const LEASE_STALE_MS = 15_000;
 // for a one-word reply. Anything well past the visible content is reasoning.
 const HIDDEN_TOKEN_MARGIN = 32;
 const CHARACTERS_PER_TOKEN = 3.0;
+// Deliberately different from CHARACTERS_PER_TOKEN above. That one deflates the
+// visible-content estimate so hidden reasoning stands out; this one is the
+// density actually measured on this model and is used to decide whether a
+// prompt fits a slot. Must match forge_llm.PROMPT_CHARACTERS_PER_TOKEN.
+const PROMPT_CHARACTERS_PER_TOKEN = 3.42;
 
 export class ChatError extends Error {
 	constructor(message) {
 		super(message);
 		this.name = "ChatError";
+	}
+}
+
+/**
+ * A prompt could not fit the slot it would have run in.
+ *
+ * Extends ChatError so existing handlers keep working, while callers that know
+ * how to split their input can catch this specifically and do so.
+ */
+export class ContextBudgetError extends ChatError {
+	constructor(message) {
+		super(message);
+		this.name = "ContextBudgetError";
 	}
 }
 
@@ -60,6 +78,29 @@ export function hiddenTokenCount(generatedTokens, content) {
 	if (typeof generatedTokens !== "number" || Number.isNaN(generatedTokens)) return null;
 	const visible = String(content ?? "").length / CHARACTERS_PER_TOKEN;
 	return Math.max(0, Math.trunc(generatedTokens - visible));
+}
+
+/**
+ * Approximate the prompt size of a message list, in tokens.
+ *
+ * Character density is a run-to-run estimate, not a tokenizer, so this is only
+ * accurate enough to catch a prompt that cannot possibly fit.
+ */
+export function estimatePromptTokens(messages) {
+	let characters = 0;
+	for (const message of messages ?? []) {
+		const content = message?.content;
+		if (typeof content === "string") {
+			characters += content.length;
+		} else if (Array.isArray(content)) {
+			for (const part of content) {
+				if (typeof part?.text === "string") characters += part.text.length;
+			}
+		} else if (content !== undefined && content !== null) {
+			characters += String(content).length;
+		}
+	}
+	return Math.trunc(characters / PROMPT_CHARACTERS_PER_TOKEN);
 }
 
 /**
@@ -300,6 +341,20 @@ export async function call(service, messages, options = {}) {
 	if (maxTokens) request.max_tokens = maxTokens;
 	let useSlot = background && Boolean(scheduling.enabled);
 	if (useSlot) request.id_slot = scheduling.backgroundSlot;
+	// Refuse a prompt that cannot fit before uploading it and taking a lease.
+	// llama.cpp does reject it too, quickly and with the numbers
+	// ("exceeds the available context size (131072 tokens)"), but its advice —
+	// "try increasing it" — is wrong here: the context is fixed by the
+	// deployment, and the knob a skill actually has is how much it sends.
+	const estimatedPrompt = estimatePromptTokens(messages);
+	const reservedOutput = maxTokens || 0;
+	if (estimatedPrompt + reservedOutput > SLOT_CONTEXT_TOKENS) {
+		throw new ContextBudgetError(
+			`prompt is about ${estimatedPrompt} tokens and reserves ${reservedOutput} for output, ` +
+				`over the ${SLOT_CONTEXT_TOKENS}-token slot limit. Send less text per call ` +
+				`(lower the skill's packet or chunk size), or lower maxTokens.`,
+		);
+	}
 	const body = JSON.stringify(request);
 
 	const lease = useSlot ? await acquireBackgroundLease(scheduling) : null;

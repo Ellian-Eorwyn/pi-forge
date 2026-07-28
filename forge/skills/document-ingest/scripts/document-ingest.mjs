@@ -35,6 +35,9 @@ import {
 import { callJsonWithRetry, callTextWithRetry, resolveService, resolveThinkService } from "../../../lib/forge-llm.mjs";
 import { buildPackets, escalate, summarize, verifyPackets, VERDICT_FLAG } from "../../../lib/forge-verify.mjs";
 
+// The largest single prompt any forge skill sends: roughly 44k tokens, about a
+// third of a slot's 131,072. Raising it past ~440k characters would trip the
+// context guard in forge-llm rather than silently truncating.
 const DEFAULT_CHUNK_CHARACTERS = 150_000;
 const DEFAULT_GLMOCR_URL = "http://llms:5002/glmocr/parse";
 const DEFAULT_GLMOCR_TIMEOUT_MS = 300_000;

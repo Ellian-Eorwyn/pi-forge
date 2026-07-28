@@ -231,15 +231,17 @@ the difference between first-pass evidence and generated synthesis:
   can suggest conceptual links and tensions, but they never prove a connection
   or contradiction.
 - Meta packets must remain under the configured payload budget. The default
-  total model-call target is `128000` estimated tokens, with `32000` reserved
-  for instructions and output and therefore `96000` available to packet
-  material. The hard maximum is `256000`, using `ceil(characters / 4)`.
+  total model-call target is `98304` estimated tokens, with `32000` reserved
+  for instructions and output and therefore `66304` available to packet
+  material. The hard maximum is `131072`, using `ceil(characters / 4)`: the
+  backend runs two slots over a 262,144-token context, so one request gets half
+  the pool, and `forge_llm` refuses anything larger before sending it.
 - Level-one `evidence` packets cover every structured item. Level-one
   `prior-synthesis` packets cover every authored section, and relevant sections
   may also be repeated in evidence packets. When leaf memos do not fit the final
   authoring budget, `meta-next` recursively creates `reduction` packets until
   `authoring_context.md` fits.
-- Normal synthesis uses the same 128,000-token target and recursively reduces
+- Normal synthesis uses the same 98,304-token target and recursively reduces
   packet memos into higher levels when the corpus still exceeds the target.
 - Missing original source files are warnings, not fatal errors, when prior
   structured artifacts are intact. Quote verification and snippets degrade to

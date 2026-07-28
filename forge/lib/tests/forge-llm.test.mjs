@@ -8,7 +8,8 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const libraryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const { call, callJsonWithRetry, ChatError, extractJsonContent, hiddenTokenCount, parseJsonContent, PreemptedError, resolveService, resolveThinkService, serviceDoctor, activeInteractiveLeases, LEASE_STALE_MS } = await import(join(libraryRoot, "forge-llm.mjs"));
+const { call, callJsonWithRetry, ChatError, ContextBudgetError, estimatePromptTokens, extractJsonContent, hiddenTokenCount, parseJsonContent, PreemptedError, resolveService, resolveThinkService, serviceDoctor, activeInteractiveLeases, LEASE_STALE_MS } = await import(join(libraryRoot, "forge-llm.mjs"));
+const { SLOT_CONTEXT_TOKENS } = await import(join(libraryRoot, "connected-services.mjs"));
 const { buildPackets, escalate, summarize, verifyPackets, VerificationError, VERDICT_FLAG } = await import(join(libraryRoot, "forge-verify.mjs"));
 
 function withWorkspace(callback) {
@@ -69,6 +70,80 @@ test("a stray think block and code fence are stripped before parsing", () => {
 	assert.deepEqual(parseJsonContent('<think>x</think>{"a":1}'), { a: 1 });
 	// Prose around the payload is tolerated, as it is on the Python side.
 	assert.deepEqual(parseJsonContent('Here you go: [{"b":2}] hope that helps'), [{ b: 2 }]);
+});
+
+test("a prompt that cannot fit a slot is refused before the request is sent", async () => {
+	const stub = await startStub(() => ({ content: "{}" }));
+	try {
+		const oversized = "x".repeat(SLOT_CONTEXT_TOKENS * 4);
+		await assert.rejects(
+			() => call(service(stub.url), [{ role: "user", content: oversized }]),
+			(error) => {
+				assert.ok(error instanceof ContextBudgetError);
+				// Callers that only know about ChatError still catch it.
+				assert.ok(error instanceof ChatError);
+				assert.match(error.message, /slot limit/);
+				return true;
+			},
+		);
+		// Refused before a socket was opened, not after a long prefill.
+		assert.equal(stub.requests.length, 0);
+	} finally {
+		await stub.close();
+	}
+});
+
+test("output tokens count against the slot alongside the prompt", async () => {
+	const stub = await startStub(() => ({ content: "{}" }));
+	try {
+		// Comfortably under the ceiling on its own, over it once max_tokens is reserved.
+		const content = "x".repeat(Math.trunc(SLOT_CONTEXT_TOKENS * 3.42) - 1000);
+		await assert.rejects(() => call(service(stub.url), [{ role: "user", content }], { maxTokens: 4096 }), ContextBudgetError);
+		assert.equal(stub.requests.length, 0);
+		// The same prompt goes through when nothing is reserved for output.
+		const result = await call(service(stub.url), [{ role: "user", content }]);
+		assert.equal(result.content, "{}");
+	} finally {
+		await stub.close();
+	}
+});
+
+test("prompt estimation counts string and structured content", () => {
+	assert.equal(estimatePromptTokens([{ role: "user", content: "x".repeat(342) }]), 100);
+	assert.equal(estimatePromptTokens([{ role: "user", content: [{ type: "text", text: "x".repeat(342) }] }]), 100);
+	assert.equal(estimatePromptTokens([]), 0);
+});
+
+test("both runtimes agree on the slot budget and the density it is measured with", () => {
+	// A Python skill and a JavaScript one send work to the same slots. If these
+	// drift, one of them refuses prompts the other happily sends.
+	const python = process.env.PI_FORGE_TEST_PYTHON || "python3";
+	const script = `
+import sys, json
+sys.path.insert(0, ${JSON.stringify(libraryRoot)})
+import forge_llm
+print(json.dumps({
+    "slot": forge_llm.SLOT_CONTEXT_TOKENS,
+    "density": forge_llm.PROMPT_CHARACTERS_PER_TOKEN,
+    "estimate": forge_llm.estimate_prompt_tokens([{"role": "user", "content": "x" * 342}]),
+    "chatScheduled": forge_llm.DEFAULT_SERVICES["chat"]["scheduling"]["enabled"],
+}))
+`;
+	const output = JSON.parse(execFileSync(python, ["-c", script], { encoding: "utf8" }));
+	assert.equal(output.slot, SLOT_CONTEXT_TOKENS);
+	assert.equal(output.estimate, estimatePromptTokens([{ role: "user", content: "x".repeat(342) }]));
+	assert.equal(output.chatScheduled, true, "bulk work must pin its slot in both runtimes");
+});
+
+test("background bulk work pins the slot it was assigned", async () => {
+	const stub = await startStub(() => ({ content: "{}" }));
+	try {
+		const scheduled = { ...service(stub.url), scheduling: { enabled: true, interactiveSlot: 0, backgroundSlot: 1, idleGraceMs: 0 } };
+		await call(scheduled, [{ role: "user", content: "hi" }], { background: true });
+		assert.equal(stub.requests[0].id_slot, 1);
+	} finally {
+		await stub.close();
+	}
 });
 
 test("hidden tokens are what the visible content cannot account for", () => {

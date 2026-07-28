@@ -59,9 +59,12 @@ the interactive provider request begins.
 
 The external llama.cpp deployment needs at least 164k total effective context,
 prompt caching, nonzero host cache RAM, context checkpoints, and idle-slot
-caching. A 262,144-token deployment can keep the interactive context below
-128k while reserving roughly 36k prompt capacity for the worker. Stack-manager
-configuration is outside this skill and must be completed separately.
+caching. A 262,144-token deployment run with `--parallel 2` gives each slot
+131,072 tokens, which keeps the interactive context below 128k while reserving
+roughly 36k prompt capacity for the worker. Note that the ceiling on any one
+request is the slot, not the total: `--ctx-size` is divided evenly across
+slots. Stack-manager configuration is outside this skill and must be completed
+separately.
 
 Separate slots protect prompt caches; the lease prevents them from inferring
 concurrently against the single loaded model.

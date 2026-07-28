@@ -22,11 +22,15 @@ import run_state
 
 RUN_SCHEMA_VERSION = 1
 META_SCHEMA_VERSION = 2
-MAX_ALLOWED_META_CONTEXT = 256000
-DEFAULT_META_TARGET_CONTEXT = 128000
-DEFAULT_META_MAX_CONTEXT = 256000
+# Model calls run in one slot of a two-slot llama-server, so the hard ceiling is
+# forge_llm.SLOT_CONTEXT_TOKENS (131072), not the server's total context. The
+# targets sit a further 32768 below it, matching the interactive agent's soft
+# budget, so a packet plus its output still fits with room to spare.
+MAX_ALLOWED_META_CONTEXT = 131072
+DEFAULT_META_TARGET_CONTEXT = 98304
+DEFAULT_META_MAX_CONTEXT = 131072
 DEFAULT_META_RESERVED_CONTEXT = 32000
-DEFAULT_SYNTHESIS_TARGET_CONTEXT = 128000
+DEFAULT_SYNTHESIS_TARGET_CONTEXT = 98304
 RUN_STATE_WORKFLOW = "literature-extraction"
 META_RUN_STATE_WORKFLOW = "literature-extraction-meta"
 DEFAULT_META_BRIDGE_THRESHOLD = 0.78

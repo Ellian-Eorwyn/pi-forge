@@ -195,9 +195,10 @@ concepts.
      --output <new-meta-run-directory>
    ```
 
-   The default total model-call target is `128000` estimated tokens with
-   `32000` reserved for instructions and output, leaving a `96000` packet
-   payload. The hard maximum remains `256000`, using Pi's conservative
+   The default total model-call target is `98304` estimated tokens with
+   `32000` reserved for instructions and output, leaving a `66304` packet
+   payload. The hard maximum is `131072` — one slot of the two-slot backend,
+   which is what a single request can actually use — using Pi's conservative
    `ceil(characters / 4)` heuristic. The script uses prior structured evidence
    first and only reopens source text for targeted quote/snippet checks when the
    source files still exist.

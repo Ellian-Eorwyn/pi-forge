@@ -2,11 +2,19 @@
 
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { LEGACY_CHAT_SERVICE, seedConnectedServicesSettings } from "../lib/connected-services.mjs";
+import {
+	LEGACY_CHAT_SCHEDULING,
+	LEGACY_CHAT_SERVICE,
+	SLOT_CONTEXT_TOKENS,
+	seedConnectedServicesSettings,
+} from "../lib/connected-services.mjs";
 
 // Shared limits for the local code and chat variants. Kept here so every
 // install and `pi-forge-update` writes the same context and output budgets.
-const CONTEXT_WINDOW = 262144;
+// Both variants are served by one llama-server with two slots, so the window
+// is the per-slot size, not the pool: declaring the pool made compaction
+// trigger at 196608, well past the point where a request is refused.
+const CONTEXT_WINDOW = SLOT_CONTEXT_TOKENS;
 const MAX_OUTPUT_TOKENS = 32768;
 const COMPACTION_TRIGGER_RATIO = 0.75;
 const COMPACTION_RESERVE_TOKENS = CONTEXT_WINDOW - Math.floor(CONTEXT_WINDOW * COMPACTION_TRIGGER_RATIO);
@@ -86,6 +94,7 @@ settings.contextBudget = {
 	verbatimRecentTokens: CONTEXT_BUDGET_VERBATIM_RECENT_TOKENS,
 };
 migrateLegacyChatService(settings);
+migrateLegacyChatScheduling(settings);
 seedConnectedServicesSettings(settings);
 
 let models = {};
@@ -172,4 +181,25 @@ function migrateLegacyChatService(target) {
 	if (chat.baseUrl !== LEGACY_CHAT_SERVICE.baseUrl || chat.model !== LEGACY_CHAT_SERVICE.model) return;
 	delete chat.baseUrl;
 	delete chat.model;
+}
+
+/**
+ * Bulk work now pins the background slot on the chat endpoint too. Earlier
+ * installs seeded it off, because :8004 looked like a separate server and a
+ * slot number there looked meaningless; it is the same llama-server as :8008,
+ * so leaving it unpinned lets batch work land on slot 0 and evict the
+ * interactive session's prefix cache. Drop the block only when it is byte-equal
+ * to the old default, so a deliberate opt-out survives.
+ */
+function migrateLegacyChatScheduling(target) {
+	const services = target.connectedServices;
+	if (!services || typeof services !== "object" || Array.isArray(services)) return;
+	const chat = services.chat;
+	if (!chat || typeof chat !== "object" || Array.isArray(chat)) return;
+	const scheduling = chat.scheduling;
+	if (!scheduling || typeof scheduling !== "object" || Array.isArray(scheduling)) return;
+	const keys = Object.keys(LEGACY_CHAT_SCHEDULING);
+	if (Object.keys(scheduling).length !== keys.length) return;
+	if (keys.some((key) => scheduling[key] !== LEGACY_CHAT_SCHEDULING[key])) return;
+	delete chat.scheduling;
 }

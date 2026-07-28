@@ -3427,6 +3427,13 @@ def automatic_review(run_directory, chat, background=False):
 
 
 def automatic_relationship_review(run_directory, chat, background=False):
+    """Judge relationships across every control in the run, in one prompt.
+
+    Unlike verify_extracted_items this is deliberately unbatched — a relationship
+    is only visible when the whole set is in view — so the prompt grows with the
+    run. A run large enough to overflow a slot now raises ContextBudgetError from
+    forge_llm rather than being truncated into a partial answer.
+    """
     review_manifest = load_review_manifest(run_directory)
     results = current_review_results(run_directory, review_manifest)
     controls = [control for result in results.values() for control in result.get("controls", [])]

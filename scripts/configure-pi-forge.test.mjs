@@ -54,7 +54,10 @@ test("bulk chat work defaults to the non-thinking backend and think to the think
 		const { chat, think } = configure(agentDirectory).connectedServices;
 		assert.equal(chat.baseUrl, "http://llms:8004/v1/chat/completions");
 		assert.equal(chat.model, "chat");
-		assert.equal(chat.scheduling.enabled, false);
+		// :8004 and :8008 are two profiles in front of one llama-server, so bulk
+		// work has to pin its slot here too or it can evict slot 0.
+		assert.equal(chat.scheduling.enabled, true);
+		assert.equal(chat.scheduling.backgroundSlot, 1);
 		assert.equal(think.baseUrl, "http://llms:8008/v1/chat/completions");
 		assert.equal(think.model, "code");
 		assert.equal(think.enabled, true);
@@ -85,6 +88,39 @@ test("an install still on the pre-split chat default is migrated to the non-thin
 		// scheduling the user tuned.
 		assert.equal(chat.scheduling.backgroundSlot, 3);
 		assert.equal(think.baseUrl, "http://llms:8008/v1/chat/completions");
+	});
+});
+
+test("chat scheduling seeded off by an older install is turned on", () => {
+	const legacy = {
+		connectedServices: {
+			chat: {
+				enabled: true,
+				scheduling: { enabled: false, interactiveSlot: 0, backgroundSlot: 1, idleGraceMs: 2000, yieldMs: 1000, backgroundOutputTokens: 4096 },
+			},
+		},
+	};
+	withAgentDirectory(legacy, (agentDirectory) => {
+		const { chat } = configure(agentDirectory).connectedServices;
+		assert.equal(chat.scheduling.enabled, true);
+		assert.equal(chat.scheduling.backgroundSlot, 1);
+	});
+});
+
+test("a deliberate chat scheduling opt-out survives configuration", () => {
+	const tuned = {
+		connectedServices: {
+			chat: {
+				enabled: true,
+				// Byte-different from the old default, so it was chosen rather than seeded.
+				scheduling: { enabled: false, interactiveSlot: 0, backgroundSlot: 2, idleGraceMs: 2000, yieldMs: 1000, backgroundOutputTokens: 4096 },
+			},
+		},
+	};
+	withAgentDirectory(tuned, (agentDirectory) => {
+		const { chat } = configure(agentDirectory).connectedServices;
+		assert.equal(chat.scheduling.enabled, false);
+		assert.equal(chat.scheduling.backgroundSlot, 2);
 	});
 });
 

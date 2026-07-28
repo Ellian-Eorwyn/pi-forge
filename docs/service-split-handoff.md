@@ -33,6 +33,19 @@ call regardless of difficulty**, even to answer with one word, where :8004 spend
 Two inbox notes classified in 4.2s against :8004 versus 56.9s against :8008, with
 identical destinations.
 
+**"Served twice" means two proxy profiles, not two servers.** Both ports forward to
+one `llama-server` (`chat-backend-dense`, `127.0.0.1:8010`) and differ only in
+thinking on/off, temperature, and reasoning stream mode. Two consequences follow.
+Slot numbers are shared, so both services carry a scheduling block and both pin the
+background slot — leaving either unpinned lets bulk work land on slot 0 and evict
+the interactive session's prefix cache. And the context ceiling on any one request
+is a *slot*: the backend runs `--ctx-size 262144 --parallel 2`, llama.cpp divides
+that evenly, so **131,072 tokens** is the real limit, exported as
+`SLOT_CONTEXT_TOKENS` and enforced by a preflight check in `forge_llm.call`.
+Confirmed by oversending — the server returns `exceed_context_size_error` with
+`"n_ctx": 131072`. `/props` and `/slots` are disabled on this backend, so
+oversending is the only way to read the number back.
+
 That cost is invisible in the response body — llama.cpp strips the think block
 server-side and returns no `reasoning_content`. The only evidence is
 `timings.predicted_n` against the visible content length. If you ever need to prove

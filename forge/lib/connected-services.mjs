@@ -2,6 +2,14 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+// What one request can actually use. The deployment runs a single llama-server
+// (`chat-backend-dense`) with `--ctx-size 262144 --parallel 2`, and llama.cpp
+// divides the context evenly across slots, so a slot — not the pool — is the
+// real ceiling. Confirmed against the live stack 2026-07-28 by oversending: the
+// server answers HTTP 400 `exceed_context_size_error` with `"n_ctx": 131072`.
+// It rejects at tokenization, in a few seconds, without prefilling.
+export const SLOT_CONTEXT_TOKENS = 131072;
+
 export const DEFAULT_CONNECTED_SERVICES = Object.freeze({
 	searxng: Object.freeze({
 		enabled: true,
@@ -12,13 +20,14 @@ export const DEFAULT_CONNECTED_SERVICES = Object.freeze({
 		wsEndpoint: "ws://llms/playwright",
 	}),
 	// Bulk per-file work: the non-thinking configuration of the same weights.
-	// Batch skills spend no hidden reasoning tokens here.
+	// Batch skills spend no hidden reasoning tokens here. Scheduling is on
+	// because this endpoint is not a separate server — see the note on `think`.
 	chat: Object.freeze({
 		enabled: true,
 		baseUrl: "http://llms:8004/v1/chat/completions",
 		model: "chat",
 		scheduling: Object.freeze({
-			enabled: false,
+			enabled: true,
 			interactiveSlot: 0,
 			backgroundSlot: 1,
 			idleGraceMs: 2000,
@@ -27,9 +36,11 @@ export const DEFAULT_CONNECTED_SERVICES = Object.freeze({
 		}),
 	}),
 	// Judgment and verification: the thinking configuration, also the interactive
-	// agent's own server. Slot numbers are per-server, so this carries its own
-	// scheduling block — background verification pins backgroundSlot and leaves
-	// the interactive session's prefix cache on interactiveSlot untouched.
+	// agent's own server. `chat` and `think` are two request-shaping profiles in
+	// front of one llama-server, so both address the same slots and both carry a
+	// scheduling block: background work pins backgroundSlot and leaves the
+	// interactive session's prefix cache on interactiveSlot untouched. Leaving
+	// either service unpinned lets bulk work land on slot 0 and evict it.
 	think: Object.freeze({
 		enabled: true,
 		baseUrl: "http://llms:8008/v1/chat/completions",
@@ -56,6 +67,19 @@ export const DEFAULT_CONNECTED_SERVICES = Object.freeze({
 export const LEGACY_CHAT_SERVICE = Object.freeze({
 	baseUrl: "http://llms:8008/v1/chat/completions",
 	model: "code",
+});
+
+// Chat scheduling as earlier installs seeded it, when :8004 was believed to be
+// a server of its own and pinning a slot there looked pointless. A persisted
+// block byte-equal to this was written rather than chosen, so it can be
+// upgraded; anything else is a deliberate setting and stays.
+export const LEGACY_CHAT_SCHEDULING = Object.freeze({
+	enabled: false,
+	interactiveSlot: 0,
+	backgroundSlot: 1,
+	idleGraceMs: 2000,
+	yieldMs: 1000,
+	backgroundOutputTokens: 4096,
 });
 
 export function getForgeAgentDir(env = process.env) {

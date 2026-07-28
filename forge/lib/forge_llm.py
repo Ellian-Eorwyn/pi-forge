@@ -48,13 +48,20 @@ from pathlib import Path
 
 import run_state
 
+# Mirrors SLOT_CONTEXT_TOKENS in connected-services.mjs. One llama-server runs
+# with `--ctx-size 262144 --parallel 2` and llama.cpp splits the context evenly
+# across slots, so a single request may use half the pool. `chat` and `think`
+# are two profiles in front of that one server, not two servers, so they share
+# both the slots and this ceiling.
+SLOT_CONTEXT_TOKENS = 131072
+
 DEFAULT_SERVICES = {
     "chat": {
         "enabled": True,
         "url": "http://llms:8004/v1/chat/completions",
         "model": "chat",
         "scheduling": {
-            "enabled": False,
+            "enabled": True,
             "interactiveSlot": 0,
             "backgroundSlot": 1,
             "idleGraceMs": 2000,
@@ -96,6 +103,12 @@ LEASE_STALE_MS = 15000
 # for a one-word reply. Anything well past the visible content is reasoning.
 HIDDEN_TOKEN_MARGIN = 32
 CHARACTERS_PER_TOKEN = 3.0
+# Deliberately different from CHARACTERS_PER_TOKEN above. That one deflates the
+# visible-content estimate so hidden reasoning stands out; this one is the
+# density actually measured on this model — project-extraction calibrates
+# against observed promptTokens and converges near 3.42 — and is used to decide
+# whether a prompt fits a slot.
+PROMPT_CHARACTERS_PER_TOKEN = 3.42
 
 
 def hidden_token_count(generated_tokens, content):
@@ -106,8 +119,36 @@ def hidden_token_count(generated_tokens, content):
     return max(0, int(generated_tokens - visible))
 
 
+def estimate_prompt_tokens(messages):
+    """Approximate the prompt size of a message list, in tokens.
+
+    Character density is a run-to-run estimate, not a tokenizer, so this is only
+    accurate enough to catch a prompt that cannot possibly fit.
+    """
+    characters = 0
+    for message in messages or ():
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str):
+            characters += len(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    characters += len(part["text"])
+        elif content is not None:
+            characters += len(str(content))
+    return int(characters / PROMPT_CHARACTERS_PER_TOKEN)
+
+
 class ChatError(RuntimeError):
     """A chat endpoint could not be reached or returned an unusable response."""
+
+
+class ContextBudgetError(ChatError):
+    """A prompt could not fit the slot it would have run in.
+
+    Subclasses ChatError so existing handlers keep working, while callers that
+    know how to split their input can catch this specifically and do so.
+    """
 
 
 def forge_agent_directory(env=None):
@@ -384,6 +425,19 @@ def call(
     use_slot = background and scheduling.get("enabled")
     if use_slot:
         request["id_slot"] = scheduling["backgroundSlot"]
+    # Refuse a prompt that cannot fit before uploading it and taking a lease.
+    # llama.cpp does reject it too, quickly and with the numbers
+    # ("exceeds the available context size (131072 tokens)"), but its advice —
+    # "try increasing it" — is wrong here: the context is fixed by the
+    # deployment, and the knob a skill actually has is how much it sends.
+    estimated_prompt = estimate_prompt_tokens(messages)
+    reserved_output = max_tokens or 0
+    if estimated_prompt + reserved_output > SLOT_CONTEXT_TOKENS:
+        raise ContextBudgetError(
+            f"prompt is about {estimated_prompt} tokens and reserves {reserved_output} for output, "
+            f"over the {SLOT_CONTEXT_TOKENS}-token slot limit. Send less text per call "
+            f"(lower the skill's packet or chunk size), or lower max_tokens."
+        )
     body = json.dumps(request).encode("utf-8")
 
     lease = _acquire_background_lease(scheduling, env) if use_slot else None

@@ -201,8 +201,8 @@ If your command is slow, expensive, rate-limited, or should keep using a previou
 | `reasoning` | No | `false` | Supports extended thinking |
 | `thinkingLevelMap` | No | omitted | Maps pi thinking levels to provider values and marks unsupported levels (see below) |
 | `input` | No | `["text"]` | Input types: `["text"]` or `["text", "image"]` |
-| `contextWindow` | No | `128000` | Context window size in tokens |
-| `maxTokens` | No | `16384` | Maximum output tokens |
+| `contextWindow` | No | `262144` | Context window size in tokens. Forge's own providers set this explicitly (131072, one slot of the two-slot local backend); the fallback only applies to entries that omit it. |
+| `maxTokens` | No | `32768` | Maximum output tokens |
 | `cost` | No | all zeros | `{"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}` (per million tokens) |
 | `compat` | No | provider `compat` | Provider compatibility overrides. Merged with provider-level `compat` when both are set. |
 

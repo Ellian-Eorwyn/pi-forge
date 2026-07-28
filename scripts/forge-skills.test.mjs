@@ -5823,7 +5823,7 @@ test("profile configuration installs local service defaults without dropping use
 		assert.equal(settings.defaultProvider, "forge-local");
 		assert.equal(settings.defaultModel, "code");
 		assert.equal(settings.theme, "light");
-		assert.deepEqual(settings.compaction, { keepRecentTokens: 12345, enabled: true, reserveTokens: 65536 });
+		assert.deepEqual(settings.compaction, { keepRecentTokens: 12345, enabled: true, reserveTokens: 32768 });
 		assert.equal("taskModel" in settings, false);
 		assert.deepEqual(settings.contextBudget, {
 			verbatimRecentTokens: 20000,
@@ -5846,7 +5846,7 @@ test("profile configuration installs local service defaults without dropping use
 				baseUrl: "http://llms:8004/v1/chat/completions",
 				model: "chat",
 				scheduling: {
-					enabled: false,
+					enabled: true,
 					interactiveSlot: 0,
 					backgroundSlot: 1,
 					idleGraceMs: 2000,
@@ -5880,7 +5880,7 @@ test("profile configuration installs local service defaults without dropping use
 		assert.equal(models.providers["forge-local"].baseUrl, "http://llms:8008/v1");
 		const localModel = models.providers["forge-local"].models[0];
 		assert.equal(localModel.id, "code");
-		assert.equal(localModel.contextWindow, 262144);
+		assert.equal(localModel.contextWindow, 131072);
 		assert.equal(localModel.maxTokens, 32768);
 		assert.equal(models.providers["forge-local"].compat.supportsDeveloperRole, false);
 		assert.equal("forge-task-local" in models.providers, false);
@@ -5917,7 +5917,7 @@ test("profile configuration preserves connected service overrides", () => {
 				baseUrl: "http://llms:8004/v1/chat/completions",
 				model: "chat",
 				scheduling: {
-					enabled: false,
+					enabled: true,
 					interactiveSlot: 0,
 					backgroundSlot: 1,
 					idleGraceMs: 2000,
