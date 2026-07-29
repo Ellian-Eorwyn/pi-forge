@@ -18,6 +18,8 @@ import forge_embeddings
 import forge_llm
 import forge_verify
 import run_state
+import vault_profile
+import vault_voice
 from vault_classification import (  # noqa: F401  (re-exported for callers and tests)
     DEFAULT_BASE_URL,
     MAX_SUGGESTION_CHARS,
@@ -229,12 +231,16 @@ def save_cache(path, cache):
     path.write_text(json.dumps(cache, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def cache_key(title, body_hash, frontmatter_hash, schema_hash, model, base_url, think_prefill=True):
+def cache_key(title, body_hash, frontmatter_hash, schema_hash, model, base_url, think_prefill=True,
+              profile_hash="none"):
     payload = {
         "title": title,
         "body_hash": body_hash,
         "frontmatter_hash": frontmatter_hash,
         "schema_hash": schema_hash,
+        # Shapes the system prompt, so it has to shape the key. Without it,
+        # editing a context card leaves every note classified as it was.
+        "profile_hash": profile_hash,
         "prompt_version": PROMPT_VERSION,
         "model": model,
         "endpoint": base_url,
@@ -660,10 +666,53 @@ def carry_forward_provenance(validated, frontmatter_text, schema, warnings):
     return validated
 
 
+def load_profile(args, vault):
+    """Compile the personal-context layer for classification, or carry on without.
+
+    Never raises: a broken register costs the layer, not the run.
+    """
+    try:
+        profile_path = vault_profile.resolve_profile_path(
+            vault, getattr(args, "profile", None), disabled=getattr(args, "no_profile", False)
+        )
+    except UserError as error:
+        args.compiled_profile, args.profile_path, args.profile_hash = None, None, "none"
+        args.profile_warnings = [f"personal context note could not be read: {error}"]
+        return None, None, "none"
+    profile, profile_hash, warnings = vault_profile.compiled_profile_for(
+        vault, profile_path, cache_dir=vault / ".vault-organizer" / "cache"
+    )
+    args.compiled_profile = profile
+    args.profile_path = profile_path
+    args.profile_hash = profile_hash
+    args.profile_warnings = warnings
+    return profile_path, profile, profile_hash
+
+
+def classification_site():
+    """Classification decides where a note is filed, so it cannot yet know.
+
+    Empty routes mean every route-gated card is refused here -- deliberate, and
+    the reason no special-casing is needed to keep clinical history out of a
+    classifier that has not decided what it is looking at. What survives is the
+    unrestricted always-tier, which is exactly the how-I-file-things material
+    that makes routing better.
+    """
+    return vault_profile.profile_site(vault_voice.CONTEXT_OWNER, stage="classify")
+
+
+def classification_profile_prefix(args):
+    return vault_profile.profile_prefix(getattr(args, "compiled_profile", None), classification_site())
+
+
 def classify_note(args, schema, title, relative_source, frontmatter_text, body, schema_hash, cache, cache_path):
     body_hash = sha256_text(normalize_body_for_hash(body))
     frontmatter_hash = sha256_text(frontmatter_text or "")
-    key = cache_key(title, body_hash, frontmatter_hash, schema_hash, args.model, args.base_url, args.think_prefill)
+    profile_prefix = classification_profile_prefix(args)
+    key = cache_key(
+        title, body_hash, frontmatter_hash, schema_hash, args.model, args.base_url, args.think_prefill,
+        getattr(args, "profile_hash", "none"),
+    )
     if not args.force_reclassify and key in cache:
         cached = cache[key]
         validated, warnings, errors = validate_classification(cached["response"], schema)
@@ -672,14 +721,21 @@ def classify_note(args, schema, title, relative_source, frontmatter_text, body, 
             return validated, warnings, "cache", key
     excerpt, excerpted = excerpt_body(body)
     response = request_json_with_retry(
-        args, build_messages(schema, title, relative_source, frontmatter_text, excerpt, think_prefill=args.think_prefill)
+        args,
+        build_messages(
+            schema, title, relative_source, frontmatter_text, excerpt, think_prefill=args.think_prefill,
+            profile_prefix=profile_prefix,
+        ),
     )
     validated, warnings, errors = validate_classification(response, schema)
     if errors:
         repair = {"original_response": response, "validation_errors": errors}
         repaired = request_json_with_retry(
             args,
-            build_messages(schema, title, relative_source, frontmatter_text, excerpt, repair=repair, think_prefill=args.think_prefill),
+            build_messages(
+                schema, title, relative_source, frontmatter_text, excerpt, repair=repair,
+                think_prefill=args.think_prefill, profile_prefix=profile_prefix,
+            ),
         )
         validated, warnings, errors = validate_classification(repaired, schema)
         response = repaired
@@ -909,6 +965,7 @@ def verify_classifications(args, vault, schema, records, run_dir):
             excerpt,
             repair={"reviewer_objection": reason, "previous_metadata": by_path[rel].get("metadata", {})},
             think_prefill=False,
+            profile_prefix=classification_profile_prefix(args),
         )
         response = request_json_with_retry(args, messages, service=think)
         validated, _warnings, errors = validate_classification(response, schema)
@@ -1586,13 +1643,14 @@ def organize(args):
         adopt_stored_options(args, state)
     schema_path = resolve_schema_path(vault, args.schema)
     schema, schema_hash = compiled_schema_for(vault, schema_path)
+    load_profile(args, vault)
     configuration = run_configuration(args, vault, schema_hash)
     if resuming:
         try:
             run_state.assert_compatible_run(state, configuration)
         except ValueError as error:
             raise UserError(str(error)) from error
-    warnings = []
+    warnings = list(getattr(args, "profile_warnings", []) or [])
     # Before the lock and before any classification: a route naming a folder that
     # does not exist makes filing create a second one, so nothing should be spent
     # on a run that must not apply.
@@ -2264,6 +2322,33 @@ def doctor(args):
             schema_check = {"ok": False, "detail": str(error)}
     checks["schema"] = schema_check
     ok = ok and schema_check["ok"]
+
+    # Never fatal: classification runs without it if the register is broken.
+    profile_path, profile, profile_hash = load_profile(args, vault)
+    if profile_path is None:
+        checks["profile"] = {
+            "ok": True,
+            "configured": False,
+            "detail": (
+                "disabled with --no-profile"
+                if getattr(args, "no_profile", False)
+                else f"no personal context note; default is {vault_profile.DEFAULT_PROFILE}"
+            ),
+        }
+    else:
+        checks["profile"] = {
+            "ok": True,
+            "configured": profile is not None,
+            "path": str(profile_path),
+            "profile_hash": profile_hash,
+            "compiler_version": vault_profile.COMPILED_PROFILE_VERSION,
+            "cards": vault_profile.profile_digest(profile),
+            "reaches_classification": len(
+                vault_profile.select_cards(profile, "", classification_site(), tier=vault_profile.TIER_ALWAYS)
+            ),
+        }
+    warnings.extend(getattr(args, "profile_warnings", []) or [])
+
     if schema_check["ok"]:
         findings = check_schema_drift(vault, schema)
         counts = drift_counts(findings)
@@ -2347,6 +2432,8 @@ def parse_args(argv):
     parser.add_argument("--think-model")
     parser.add_argument("--think-prefill", action="store_true", help="prefill an empty think block (for thinking backends like :8008)")
     parser.add_argument("--force-reclassify", action="store_true")
+    parser.add_argument("--profile", action=TrackingAction, help="personal-context register note (default: the vault's, when present)")
+    parser.add_argument("--no-profile", action="store_true", help="disable personal context for this run")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
     for key in RESUMABLE_OPTION_FLAGS:

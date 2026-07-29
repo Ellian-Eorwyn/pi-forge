@@ -76,6 +76,7 @@ fingerprinted into a run, so a resumed run refuses to change them.
 | `--tiny-words` / `--tiny-summary` | `120` / `omit` | Under 120 words: light cleanup, no summary. |
 | `--voice` / `--no-voice` | vault policy / off | Select a policy note or explicitly disable it. |
 | `--lexicon` / `--no-lexicon` | vault note / off | Select a speakers-and-terms note or disable corrections and the roster. |
+| `--profile` / `--no-profile` | vault register / off | Select a personal-context register or disable the layer. |
 
 `--owner <name>` is only consulted by `--speaker-policy roles`, where it lets the
 recorder's own name through while other names stay generic.
@@ -139,3 +140,35 @@ invariants, the per-type cleanup style, the speaker rules, and what each
 deterministic check catches. Read it before changing a prompt in
 `scripts/vault-transcripts.py`; the cleanup prompt is a copy of that contract and
 the two have to agree.
+
+## Personal context
+
+`99 Meta/99.02 Schemas/0.03 Personal Context.md` is a register of small cards
+about the owner — people, history, reading, health, working preferences. Each row
+names a card note; only that note's `## Context` bullets ever enter a prompt.
+Cards are capped at 700 characters each, so they stay condensed by construction.
+
+Two gates decide whether a card may be injected, and they are asymmetric:
+
+| Column | Meaning |
+| --- | --- |
+| `Tier` | `always` (every prompt the card is allowed in), `when-relevant` (only when the material contains a literal trigger), `on-request` (never automatic). |
+| `Scope` | Whose material the card may sit beside: `universal`, `owner-authored`, `source-derived`. Blank means `owner-authored`. |
+| `Applies` | Blank means anywhere the scope allows. Naming routes means the card is refused everywhere the pipeline has not *positively established* one of them. |
+
+This skill asserts a route only for `journal` and `therapy` recordings, via
+`TYPE_TO_ROUTES`. A meeting, conversation, lecture, or memo asserts nothing, so
+every route-gated card is refused there with no per-card configuration — which is
+how clinical and life-history material stays out of a work meeting.
+
+The layer reaches the **summary** and **journal reflection** calls only. It is
+deliberately absent from cleanup and classification: cleanup runs behind
+`check_chunk`, which rejects a chunk containing words the source did not, so a
+card naming someone would invite the model to write that name and the gate would
+then discard the chunk. Classification is the call that *decides* the recording
+type and material role, so nothing is established yet.
+
+A missing, malformed, or unresolvable register never fails a run — it warns and
+the run proceeds without the layer. Report the profile warnings when `doctor` or
+a run surfaces them, and offer to add a card or a trigger when the model clearly
+lacked context it could have had.

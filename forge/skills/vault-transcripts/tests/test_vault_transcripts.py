@@ -1392,5 +1392,102 @@ def run_dir_of(result):
     return Path(result["data"]["run_directory"])
 
 
+PROFILE_CARD = {
+    "order": 0,
+    "name": "People in My Life",
+    "link": "[[People in My Life]]",
+    "tier": "when-relevant",
+    "scope": "owner-authored",
+    "routes": frozenset({"personal"}),
+    "triggers": ["Gillian"],
+    "note": "",
+    "facts": ["Gillian Eorwyn is my spouse."],
+}
+ALWAYS_CARD = {
+    **PROFILE_CARD,
+    "order": 1,
+    "name": "Core Identity",
+    "link": "[[Core Identity]]",
+    "tier": "always",
+    "scope": "universal",
+    "routes": frozenset(),
+    "triggers": [],
+    "facts": ["Sociologist of knowledge."],
+}
+PROFILE = {"cards": [PROFILE_CARD, ALWAYS_CARD]}
+
+
+class PersonalContextSiteTests(unittest.TestCase):
+    def site(self, recording_type, material_role, speakers=1):
+        return vault_transcripts.profile_site_for(
+            {"recording_type": recording_type, "material_role": material_role, "effective_speakers": speakers}
+        )
+
+    def test_therapy_is_owner_context_where_voice_is_none(self):
+        """The reason profile_site_for exists: voice asks whose style, this asks
+        whose life, and for therapy those answers differ."""
+        record = {"recording_type": "therapy", "material_role": "personal-exchange", "effective_speakers": 2}
+        self.assertEqual(vault_transcripts.voice_context_for(record), vault_transcripts.vault_voice.CONTEXT_NONE)
+        self.assertEqual(
+            vault_transcripts.profile_site_for(record)["context_mode"],
+            vault_transcripts.vault_voice.CONTEXT_OWNER,
+        )
+
+    def test_therapy_and_journal_are_the_only_types_asserting_a_route(self):
+        self.assertTrue(self.site("therapy", "personal-exchange", 2)["routes"])
+        self.assertTrue(self.site("journal", "owner-authored")["routes"])
+        for recording_type in ("meeting", "conversation", "lecture", "memo", "other"):
+            self.assertEqual(self.site(recording_type, "personal-exchange", 2)["routes"], frozenset())
+
+    def test_a_work_meeting_gets_no_route_gated_card(self):
+        site = self.site("meeting", "personal-exchange", 3)
+        selected = vault_transcripts.vault_profile.select_cards(PROFILE, "Gillian came up", site)
+        self.assertEqual([card["name"] for card in selected], ["Core Identity"])
+
+    def test_a_therapy_session_does_get_the_route_gated_card(self):
+        site = self.site("therapy", "personal-exchange", 2)
+        selected = vault_transcripts.vault_profile.select_cards(PROFILE, "Gillian came up", site)
+        self.assertIn("People in My Life", [card["name"] for card in selected])
+
+    def test_an_unknown_role_selects_nothing(self):
+        site = self.site("journal", "unknown")
+        self.assertEqual(vault_transcripts.vault_profile.select_cards(PROFILE, "Gillian", site), [])
+
+
+class CleanupFidelityTests(unittest.TestCase):
+    """Regression lock. cleanup runs behind check_chunk, which rejects a chunk
+    containing words the source did not. A card naming Gillian would invite the
+    model to write that name and the gate would then throw the chunk away, so
+    no profile-derived key may ever appear in this payload."""
+
+    def test_cleanup_payload_carries_no_personal_context(self):
+        record = {
+            "recording_type": "journal",
+            "material_role": "owner-authored",
+            "effective_speakers": 1,
+            "title": "A journal entry",
+        }
+        chunk = [{"speaker": None, "seconds": 0, "timestamp": "00:00", "text": "I talked with my wife today."}]
+        payload, _source = vault_transcripts.cleanup_payload(record, chunk, 1, 1, [], "", {}, True, False)
+        serialized = json.dumps(payload)
+        self.assertNotIn("personalContext", payload)
+        self.assertNotIn("Gillian", serialized)
+        self.assertNotIn("Sociologist", serialized)
+
+
+class SummarySystemTests(unittest.TestCase):
+    def test_the_always_tier_reaches_the_summary_system_prompt(self):
+        site = vault_transcripts.vault_profile.profile_site(
+            vault_transcripts.vault_voice.CONTEXT_OWNER, routes=["personal/journal"]
+        )
+        system = vault_transcripts.summary_system(None, vault_transcripts.vault_voice.CONTEXT_OWNER, PROFILE, site)
+        self.assertIn("Sociologist of knowledge.", system)
+        self.assertNotIn("Gillian", system)
+
+    def test_without_a_site_the_summary_system_prompt_is_unchanged(self):
+        system = vault_transcripts.summary_system(None, vault_transcripts.vault_voice.CONTEXT_NONE)
+        self.assertEqual(system, vault_transcripts.SUMMARY_SYSTEM)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -260,7 +260,14 @@ def _rules_for(voice, key, context_mode):
     return [rule for rule, scope in zip(rules, scopes) if _applies(scope, context_mode)]
 
 
-def _append_group(lines, used, title, rules, budget):
+def append_group(lines, used, title, rules, budget):
+    """Append a titled bullet group to ``lines``, stopping at ``budget`` characters.
+
+    Returns the running character count. Shared with the other vault-owned
+    policy compilers, which face the same problem: a prompt segment assembled
+    from a note the owner keeps extending has to stay inside a fixed budget,
+    and dropping whole trailing bullets reads better than truncating one.
+    """
     rendered = []
     group_cost = len(title) + 2
     for rule in rules:
@@ -284,8 +291,8 @@ def prompt_prefix(voice, context_mode=CONTEXT_OWNER, budget=DEFAULT_PREFIX_BUDGE
     )
     lines = [header]
     used = len(header)
-    used = _append_group(lines, used, "Never:", _rules_for(voice, "never", context_mode), budget)
-    used = _append_group(lines, used, "Voice:", _rules_for(voice, "global", context_mode), budget)
+    used = append_group(lines, used, "Never:", _rules_for(voice, "never", context_mode), budget)
+    used = append_group(lines, used, "Voice:", _rules_for(voice, "global", context_mode), budget)
     return "\n".join(lines) if len(lines) > 1 else ""
 
 
@@ -317,8 +324,8 @@ def compile_voice(voice, context_mode, note_type=None, material="", prefix_budge
     lines = []
     used = 0
     if per_type_rule:
-        used = _append_group(lines, used, f"For a `{note_type}` note:", [per_type_rule], context_budget)
-    _append_group(lines, used, "Relevant vocabulary:", vocabulary, context_budget)
+        used = append_group(lines, used, f"For a `{note_type}` note:", [per_type_rule], context_budget)
+    append_group(lines, used, "Relevant vocabulary:", vocabulary, context_budget)
     return {
         "prefix": prompt_prefix(voice, context_mode, prefix_budget),
         "context": "\n".join(lines).lstrip("\n"),
@@ -467,6 +474,7 @@ __all__ = [
     "DEFAULT_VOICE",
     "KNOWN_SCOPES",
     "VOICE_BASENAME",
+    "append_group",
     "compile_voice",
     "compiled_voice_for",
     "formatting_rules",

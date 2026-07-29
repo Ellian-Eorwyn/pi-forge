@@ -124,6 +124,17 @@ def _windows(tokens, max_tokens=MAX_WINDOW_TOKENS):
     return seen
 
 
+def folded_windows(text, max_tokens=MAX_WINDOW_TOKENS):
+    """``{folded key: original phrase}`` for every 1..n token run in ``text``.
+
+    The public form of the window builder, so other vault modules can test
+    whether a phrase occurs without caring how it was spaced, accented, or
+    cased. Exact membership only -- callers wanting fuzzy matching should reach
+    for :func:`similarity`, which has different failure costs.
+    """
+    return _windows(_tokens(text), max_tokens=max_tokens)
+
+
 # --------------------------------------------------------------------------
 # Dictionary entries and correction
 #

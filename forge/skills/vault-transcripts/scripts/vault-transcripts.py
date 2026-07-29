@@ -38,6 +38,7 @@ import forge_llm
 import forge_verify
 import run_state
 import vault_lexicon
+import vault_profile
 import vault_voice
 from vault_schema import (
     INBOX_DIR,
@@ -92,6 +93,20 @@ TYPE_TO_CAPTURE = {
     "therapy": "meeting",
     "lecture": "meeting",
     "other": "voice",
+}
+# Where a recording sits in the vault, for the personal-context gate. Only the
+# two types that are personal by definition assert a route; everything else
+# asserts nothing, which is what refuses every route-gated card in a work
+# meeting or a lecture without any per-card configuration. A recording is not
+# filed yet when this runs, so these are the only routes anyone can be sure of.
+TYPE_TO_ROUTES = {
+    "journal": ("personal", "personal/journal"),
+    "therapy": ("personal", "personal/therapy"),
+    "memo": (),
+    "conversation": (),
+    "meeting": (),
+    "lecture": (),
+    "other": (),
 }
 
 FILENAME_PATTERNS = ("date-type-topic", "date-topic", "date-time-topic")
@@ -1147,6 +1162,30 @@ def voice_context_for(record):
     return vault_voice.CONTEXT_NONE
 
 
+def profile_site_for(record):
+    """Where this recording sits, for the personal-context gate.
+
+    Deliberately not ``voice_context_for``. That one answers "whose writing
+    style should this follow", and for a two-voice recording the answer is
+    nobody, so it returns ``none`` for therapy and meetings. This asks whose
+    *life* the material is about, and for a therapy session that is
+    unambiguously the owner -- the recording the layer helps most. Sharing the
+    voice function would switch the profile off exactly there.
+    """
+    role = record.get("material_role")
+    if role == "external-source":
+        mode = vault_voice.CONTEXT_SOURCE
+    elif role in {"owner-authored", "personal-exchange"}:
+        mode = vault_voice.CONTEXT_OWNER
+    else:
+        mode = vault_voice.CONTEXT_NONE
+    return vault_profile.profile_site(
+        mode,
+        routes=TYPE_TO_ROUTES.get(record.get("recording_type"), ()),
+        stage="summary",
+    )
+
+
 def voice_note_type_for(record):
     if voice_context_for(record) == vault_voice.CONTEXT_SOURCE:
         return "source"
@@ -1556,7 +1595,11 @@ Rules:
   clinical interpretation.
 - Use the names in "speakers" when they carry information. When the speakers are
 unnamed, write about the subject matter instead of about "Speaker 1" — generic
-labels tell the reader nothing."""
+labels tell the reader nothing.
+- "personalContext" is standing background about the vault owner, given so you
+  can tell what a passing reference means. It is not part of the recording:
+  never state one of its facts as something the recording said, and never let it
+  supply an outcome or a feeling the transcript does not."""
 
 REFLECTION_SYSTEM = """You add a careful reflection after the owner's cleaned journal text.
 
@@ -1571,12 +1614,24 @@ Rules:
 - A connection from general knowledge must begin `Outside knowledge:` and remain explicitly qualified.
 - Do not manufacture a connection to fill a section. Empty arrays are correct.
 - Keep each item concise. Do not repeat the cleaned journal.
+- "personalContext" is standing background about the owner, given so a passing
+  reference can be read for what it is. Use it to understand the entry, not as
+  material to reflect on: it is not something the owner wrote today, so never
+  present one of its facts as an observation, and never let it turn a tentative
+  interpretation into a settled one.
 """
 
 
-def summary_system(voice, context_mode):
+def summary_system(voice, context_mode, profile=None, site=None):
+    parts = [SUMMARY_SYSTEM]
     prefix = vault_voice.prompt_prefix(voice, context_mode)
-    return f"{SUMMARY_SYSTEM}\n\n{prefix}" if prefix else SUMMARY_SYSTEM
+    if prefix:
+        parts.append(prefix)
+    if site is not None:
+        background = vault_profile.profile_prefix(profile, site)
+        if background:
+            parts.append(background)
+    return "\n\n".join(parts)
 
 
 def connections_script():
@@ -1648,10 +1703,22 @@ def reflect_journal(args, service, record, cleaned, candidates):
         "cleanedJournal": cleaned[:12000],
         "vaultCandidates": candidates,
     }
+    site = profile_site_for(record)
+    profile = getattr(args, "compiled_profile", None)
+    selected = [
+        card
+        for card in vault_profile.select_cards(profile, cleaned, site)
+        if card["tier"] != vault_profile.TIER_ALWAYS
+    ]
+    if selected:
+        payload["personalContext"] = vault_profile.profile_offers(selected)
     system = REFLECTION_SYSTEM
     prefix = vault_voice.prompt_prefix(getattr(args, "compiled_voice", None), vault_voice.CONTEXT_OWNER)
     if prefix:
         system += "\n\n" + prefix
+    background = vault_profile.profile_prefix(profile, site)
+    if background:
+        system += "\n\n" + background
     value, _call = forge_llm.call_json_with_retry(
         service,
         [
@@ -1757,6 +1824,7 @@ def summarize_items(args, vault, items, class_records, clean_results, run_dir, s
             "durationSeconds": item["stats"]["duration_seconds"],
         }
         context_mode = voice_context_for(record)
+        site = profile_site_for(record)
         compiled = vault_voice.compile_voice(
             getattr(args, "compiled_voice", None),
             context_mode,
@@ -1767,6 +1835,13 @@ def summarize_items(args, vault, items, class_records, clean_results, run_dir, s
             payload["styleForThisKind"] = compiled["per_type_rule"]
         if compiled["vocabulary"]:
             payload["relevantVocabulary"] = compiled["vocabulary"]
+        selected = [
+            card
+            for card in vault_profile.select_cards(getattr(args, "compiled_profile", None), body, site)
+            if card["tier"] != vault_profile.TIER_ALWAYS
+        ]
+        if selected:
+            payload["personalContext"] = vault_profile.profile_offers(selected)
         if cleaned["speaker_map"] and not cleaned["drop_labels"]:
             payload["speakers"] = sorted({value for value in cleaned["speaker_map"].values() if value})
         if cleaned["tiny"]:
@@ -1781,7 +1856,12 @@ def summarize_items(args, vault, items, class_records, clean_results, run_dir, s
         messages = [
             {
                 "role": "system",
-                "content": summary_system(getattr(args, "compiled_voice", None), context_mode),
+                "content": summary_system(
+                    getattr(args, "compiled_voice", None),
+                    context_mode,
+                    getattr(args, "compiled_profile", None),
+                    site,
+                ),
             },
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
@@ -3045,6 +3125,8 @@ def resolved_options(args):
         "no_voice": args.no_voice,
         "lexicon": args.lexicon,
         "no_lexicon": args.no_lexicon,
+        "profile": args.profile,
+        "no_profile": args.no_profile,
     }
 
 
@@ -3063,6 +3145,8 @@ RESUMABLE_OPTION_FLAGS = {
     "no_voice": "--no-voice",
     "lexicon": "--lexicon",
     "no_lexicon": "--no-lexicon",
+    "profile": "--profile",
+    "no_profile": "--no-profile",
 }
 
 
@@ -3084,7 +3168,8 @@ def adopt_stored_options(args, state):
     args.cache_prompt = stored.get("cache_prompt", args.cache_prompt)
 
 
-def run_configuration(args, vault, schema_hash, voice_path, voice_hash, lexicon_path, lexicon_hash):
+def run_configuration(args, vault, schema_hash, voice_path, voice_hash, lexicon_path, lexicon_hash,
+                      profile_path=None, profile_hash=None):
     return {
         "workflow": WORKFLOW,
         "command": "process",
@@ -3093,6 +3178,7 @@ def run_configuration(args, vault, schema_hash, voice_path, voice_hash, lexicon_
             "schema_hash": schema_hash,
             **vault_voice.voice_state(voice_path, voice_hash, "per-transcript"),
             **vault_lexicon.lexicon_state(lexicon_path, lexicon_hash, dictionary_path(args)),
+            **vault_profile.profile_state(profile_path, profile_hash, None),
         },
         "options": resolved_options(args),
     }
@@ -3126,13 +3212,20 @@ def process(args):
         dictionary_path=dictionary_path(args),
     )
     args.compiled_lexicon = lexicon
-    configuration = run_configuration(args, vault, schema_hash, voice_path, voice_hash, lexicon_path, lexicon_hash)
+    profile_path = vault_profile.resolve_profile_path(vault, args.profile, disabled=args.no_profile)
+    profile, profile_hash, profile_warnings = vault_profile.compiled_profile_for(
+        vault, profile_path, cache_dir=vault / STATE_DIR / "cache"
+    )
+    args.compiled_profile = profile
+    configuration = run_configuration(
+        args, vault, schema_hash, voice_path, voice_hash, lexicon_path, lexicon_hash, profile_path, profile_hash
+    )
     if resuming:
         try:
             run_state.assert_compatible_run(state, configuration)
         except ValueError as error:
             raise UserError(str(error)) from error
-    warnings = []
+    warnings = list(profile_warnings)
     with run_state.run_lock(vault / STATE_DIR):
         if not resuming:
             run_dir = unique_run_directory(vault)
@@ -3412,6 +3505,48 @@ def doctor(args):
             warnings.append(f"voice note could not be read: {error}")
     checks["voice"] = voice_check
     ok = ok and voice_check["ok"]
+
+    # Reported but never fatal: a broken register costs the layer, not the run.
+    profile_check = {
+        "ok": True,
+        "configured": False,
+        "stages": {
+            "summary and journal reflection": "owner",
+            "cleanup and classification": "never — both run behind a fabrication gate",
+        },
+    }
+    if checks["vault"]["ok"]:
+        try:
+            profile_path = vault_profile.resolve_profile_path(vault, args.profile, disabled=args.no_profile)
+            if profile_path is None:
+                profile_check["detail"] = (
+                    "disabled with --no-profile"
+                    if args.no_profile
+                    else f"no personal context note; default is {vault_profile.DEFAULT_PROFILE}"
+                )
+            else:
+                profile, profile_hash, profile_warnings = vault_profile.compiled_profile_for(
+                    vault, profile_path, cache_dir=vault / STATE_DIR / "cache"
+                )
+                profile_check = {
+                    **profile_check,
+                    "configured": profile is not None,
+                    "path": str(profile_path),
+                    "profile_hash": profile_hash,
+                    "compiler_version": vault_profile.COMPILED_PROFILE_VERSION,
+                    "cards": vault_profile.profile_digest(profile),
+                    "budgets": {
+                        "prefix": vault_profile.DEFAULT_PREFIX_BUDGET,
+                        "context": vault_profile.DEFAULT_CONTEXT_BUDGET,
+                        "per_card": vault_profile.MAX_CARD_CHARS,
+                    },
+                }
+                warnings.extend(profile_warnings)
+        except UserError as error:
+            profile_check = {**profile_check, "configured": True, "detail": str(error)}
+            warnings.append(f"personal context note could not be read: {error}")
+    checks["profile"] = profile_check
+
     lexicon_check = {"ok": True, "configured": False}
     if checks["vault"]["ok"]:
         try:
@@ -3500,6 +3635,8 @@ def parse_args(argv):
     parser.add_argument("--no-voice", action="store_true", help="disable the vault voice policy for this run")
     parser.add_argument("--lexicon", action=TrackingAction, help="speakers-and-terms note (default: the vault's, when present)")
     parser.add_argument("--no-lexicon", action="store_true", help="disable term correction and the speaker roster")
+    parser.add_argument("--profile", action=TrackingAction, help="personal-context register note (default: the vault's, when present)")
+    parser.add_argument("--no-profile", action="store_true", help="disable personal context for this run")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--run", help="existing run directory to resume")
     parser.add_argument("--limit", type=int, action=TrackingAction)
@@ -3544,6 +3681,7 @@ def parse_args(argv):
     args.api_key = args.api_key or os.environ.get("VAULT_TRANSCRIPTS_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
     args.schema = args.schema or os.environ.get("VAULT_TRANSCRIPTS_SCHEMA") or None
     args.voice = args.voice or os.environ.get("VAULT_TRANSCRIPTS_VOICE") or None
+    args.profile = args.profile or os.environ.get("VAULT_TRANSCRIPTS_PROFILE") or None
     if args.no_voice and args.voice and args.voice_provided:
         raise UserError("--voice and --no-voice cannot be used together")
     args.lexicon = args.lexicon or os.environ.get("VAULT_TRANSCRIPTS_LEXICON") or None

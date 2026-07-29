@@ -48,17 +48,19 @@ def compact_schema_for_prompt(schema):
     }
 
 
-def system_prompt(schema):
+def system_prompt(schema, profile_prefix=""):
     shape = {
         "metadata": {key: None for key in schema["property_order"]},
         "needs_review": False,
         "review_reason": None,
         "suggestions": [],
     }
-    sections = [
-        SYSTEM_INSTRUCTIONS,
-        "Schema:\n" + run_state.canonical_json(compact_schema_for_prompt(schema)),
-    ]
+    sections = [SYSTEM_INSTRUCTIONS]
+    # Ahead of the schema, so the schema JSON keeps a stable offset in the
+    # cached prefix whether or not a profile is configured.
+    if profile_prefix:
+        sections.append(profile_prefix)
+    sections.append("Schema:\n" + run_state.canonical_json(compact_schema_for_prompt(schema)))
     if schema.get("domain_rules"):
         sections.append("Domain decision rules:\n" + "\n".join(f"- {rule}" for rule in schema["domain_rules"]))
     if schema.get("project_rules"):
@@ -67,7 +69,8 @@ def system_prompt(schema):
     return "\n\n".join(sections)
 
 
-def build_messages(schema, title, current_path, frontmatter_text, body_excerpt, repair=None, think_prefill=True):
+def build_messages(schema, title, current_path, frontmatter_text, body_excerpt, repair=None, think_prefill=True,
+                   profile_prefix=""):
     payload = {
         "title": title,
         "current_relative_path": current_path,
@@ -77,7 +80,7 @@ def build_messages(schema, title, current_path, frontmatter_text, body_excerpt, 
     if repair:
         payload["repair"] = repair
     messages = [
-        {"role": "system", "content": system_prompt(schema)},
+        {"role": "system", "content": system_prompt(schema, profile_prefix)},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
     if think_prefill:

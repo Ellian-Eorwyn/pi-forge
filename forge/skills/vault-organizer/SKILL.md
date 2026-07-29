@@ -157,6 +157,23 @@ back.
   content index; a filed note always wins, and a richer inbox copy is held
   for review instead of quarantined.
 
+## Personal context
+
+`--profile` / `--no-profile` select or disable the personal-context register at
+`99 Meta/99.02 Schemas/0.03 Personal Context.md`.
+
+Classification is the call that *decides* a note's domain, so it establishes no
+route, and every route-gated card in the register is refused here by
+construction — no special-casing. What reaches the classifier is the unrestricted
+`always` tier, which is the how-I-name-and-file-things material that makes
+routing better. The gate produces the right answer on its own; do not add
+exceptions to widen it.
+
+`profile_hash` is part of `cache_key`, so editing a card re-classifies. A
+missing or malformed register warns and classification proceeds without it.
+
+See [../vault-transcripts/references/personal-context-format.md](../vault-transcripts/references/personal-context-format.md).
+
 ## Rules
 
 - Never manually edit the generated plan or frontmatter outside the script.

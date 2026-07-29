@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -1057,6 +1058,50 @@ class VaultOrganizerV2Tests(unittest.TestCase):
             for line in (Path(run_dir) / "apply-log.jsonl").read_text(encoding="utf-8").splitlines()
         ]
         self.assertEqual(len([row for row in log_rows if row["status"] == "ok"]), 1)
+
+
+class PersonalContextTests(unittest.TestCase):
+    def test_the_cache_key_changes_with_the_profile(self):
+        """Regression lock. The profile shapes the system prompt, so it has to
+        shape the key; otherwise editing a context card re-classifies nothing."""
+        base = dict(
+            title="A note", body_hash="b", frontmatter_hash="f", schema_hash="s",
+            model="chat", base_url="http://llms:8004/v1/chat/completions",
+        )
+        first = vault_organizer.cache_key(**base, profile_hash="aaa")
+        second = vault_organizer.cache_key(**base, profile_hash="bbb")
+        self.assertNotEqual(first, second)
+
+    def test_the_cache_key_defaults_to_no_profile(self):
+        base = dict(
+            title="A note", body_hash="b", frontmatter_hash="f", schema_hash="s",
+            model="chat", base_url="http://llms:8004/v1/chat/completions",
+        )
+        self.assertEqual(vault_organizer.cache_key(**base), vault_organizer.cache_key(**base, profile_hash="none"))
+
+    def test_classification_asserts_no_route_so_gated_cards_stay_out(self):
+        self.assertEqual(vault_organizer.classification_site()["routes"], frozenset())
+
+    def test_the_always_tier_reaches_the_classification_system_prompt(self):
+        profile = {
+            "cards": [
+                {
+                    "order": 0, "name": "Information Preferences", "link": "[[Information Preferences]]",
+                    "tier": "always", "scope": "universal", "routes": frozenset(),
+                    "triggers": [], "note": "", "facts": ["Filenames never use colons."],
+                },
+                {
+                    "order": 1, "name": "Mental Health", "link": "[[Mental Health]]",
+                    "tier": "when-relevant", "scope": "owner-authored",
+                    "routes": frozenset({"personal/therapy"}),
+                    "triggers": ["OCD"], "note": "", "facts": ["Clinical detail."],
+                },
+            ]
+        }
+        args = SimpleNamespace(compiled_profile=profile)
+        prefix = vault_organizer.classification_profile_prefix(args)
+        self.assertIn("Filenames never use colons.", prefix)
+        self.assertNotIn("Clinical detail.", prefix)
 
 
 if __name__ == "__main__":

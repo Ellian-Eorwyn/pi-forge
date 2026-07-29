@@ -129,6 +129,13 @@ Nothing is written without the user naming the proposal ids they approve.
   frontmatter with canonical schema-ordered metadata. They are proposed for
   `00 Inbox`; no source-run file is changed.
 - `--voice <path>` selects the policy note and `--no-voice` disables it.
+- `--profile <path>` selects the personal-context register and `--no-profile`
+  disables it. The always-tier reaches the byte-stable judgment system prompt;
+  cards triggered by a pair go in that pair's user message, gated by the union of
+  both notes' routes. It replaced a hardcoded paragraph of one owner's biography
+  in `CONNECTION_SYSTEM`, so judgments now improve with the register rather than
+  being wrong for everyone else. See
+  `../vault-transcripts/references/personal-context-format.md`.
   Source-derived policy applies only to generated wiki definitions and research
   synthesis. Search, link judgment, frontmatter-only edits, imported bodies,
   and deterministic provenance never receive owner-voice imitation.

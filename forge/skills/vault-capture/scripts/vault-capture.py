@@ -42,6 +42,7 @@ import forge_llm
 import forge_verify
 import run_state
 import vault_lexicon
+import vault_profile
 import vault_voice
 from vault_schema import (
     INBOX_DIR,
@@ -559,10 +560,29 @@ Return exactly one JSON object:
 The title names the subject and stays under 60 characters. Refine the working title if the braindump justifies it; keep it if it is already right."""
 
 
-def draft_system_prompt(voice_segment=""):
-    """Byte-stable within a run: the fidelity contract, then the vault's voice."""
+def capture_site():
+    """Drafting cannot know where a note will be filed -- that is the organizer's
+    later decision -- so no route-gated card reaches it. Only the unrestricted
+    always-tier survives, which is the presentation material drafting wants."""
+    return vault_profile.profile_site(vault_voice.CONTEXT_OWNER, stage="draft")
+
+
+def draft_system_prompt(voice_segment="", profile=None):
+    """Byte-stable within a run: the fidelity contract, the voice, the background.
+
+    Background goes here and *only* here. It must never reach ``draft_payload``:
+    ``check_draft`` treats a name absent from the braindump as a hard problem,
+    so a card naming someone would invite the model to write that name and the
+    gate would then throw the note away.
+    """
     system = DRAFT_SYSTEM.format(fidelity=DRAFT_FIDELITY)
-    return f"{system}\n\n{voice_segment}" if voice_segment else system
+    parts = [system]
+    if voice_segment:
+        parts.append(voice_segment)
+    background = vault_profile.profile_prefix(profile, capture_site())
+    if background:
+        parts.append(background)
+    return "\n\n".join(parts)
 
 
 def draft_payload(
@@ -1619,6 +1639,8 @@ RESUMABLE_OPTION_FLAGS = {
     "schema": "--schema",
     "voice": "--voice",
     "no_voice": "--no-voice",
+    "profile": "--profile",
+    "no_profile": "--no-profile",
 }
 
 
@@ -1663,7 +1685,12 @@ def capture(args):
         cache_dir=vault / STATE_DIR / "cache",
         dictionary_path=vault_lexicon.default_dictionary_path(),
     )
-    warnings = []
+    profile_path = vault_profile.resolve_profile_path(vault, args.profile, disabled=args.no_profile)
+    profile, profile_hash, profile_warnings = vault_profile.compiled_profile_for(
+        vault, profile_path, cache_dir=vault / STATE_DIR / "cache"
+    )
+    args.compiled_profile = profile
+    warnings = list(profile_warnings)
 
     with run_state.run_lock(vault / STATE_DIR):
         if resuming:
@@ -1680,6 +1707,7 @@ def capture(args):
                 # remaining notes to different rules than the ones it started
                 # with, so it is part of what makes a run compatible.
                 **vault_voice.voice_state(voice_path, voice_hash, vault_voice.CONTEXT_OWNER),
+                **vault_profile.profile_state(profile_path, profile_hash, capture_site()),
                 "sources": [{"source": item["source"], "sha256": item["sha256"]} for item in items],
             },
             "options": resolved_options(args),
@@ -1765,7 +1793,10 @@ def capture(args):
         # One voice segment per run, not per note: the per-type row would change
         # the system prompt between calls and throw away the prefix cache. Type
         # guidance rides in the user message with everything else that varies.
-        system = draft_system_prompt(vault_voice.prompt_prefix(voice, vault_voice.CONTEXT_OWNER))
+        system = draft_system_prompt(
+            vault_voice.prompt_prefix(voice, vault_voice.CONTEXT_OWNER),
+            getattr(args, "compiled_profile", None),
+        )
         warnings.extend(draft_items(args, service, system, planned, run_dir))
 
         grouped = {}
@@ -1943,6 +1974,27 @@ def doctor(args):
             warnings.append(f"voice note could not be read: {error}")
     checks["voice"] = voice_check
     ok = ok and voice_check["ok"]
+
+    # Never fatal, and never in the draft payload: see draft_system_prompt.
+    try:
+        profile_path = vault_profile.resolve_profile_path(vault, args.profile, disabled=args.no_profile)
+        profile, profile_hash, profile_warnings = vault_profile.compiled_profile_for(
+            vault, profile_path, cache_dir=vault / STATE_DIR / "cache"
+        )
+        checks["profile"] = {
+            "ok": True,
+            "configured": profile is not None,
+            "path": str(profile_path) if profile_path else None,
+            "profile_hash": profile_hash,
+            "compiler_version": vault_profile.COMPILED_PROFILE_VERSION,
+            "cards": vault_profile.profile_digest(profile),
+            "stages": {"draft system prompt": "owner", "draft payload": "never — fidelity gate"},
+        }
+        warnings.extend(profile_warnings)
+    except UserError as error:
+        checks["profile"] = {"ok": True, "configured": True, "detail": str(error)}
+        warnings.append(f"personal context note could not be read: {error}")
+
     checks["exemplars"] = {
         "ok": True,
         "enabled": args.exemplars,
@@ -2001,6 +2053,8 @@ def parse_args(argv):
     parser.add_argument("--schema", action=TrackingAction)
     parser.add_argument("--voice", action=TrackingAction, help="voice-and-style note (default: the vault's, when it has one)")
     parser.add_argument("--no-voice", action="store_true", help="disable the vault voice policy for this run")
+    parser.add_argument("--profile", action=TrackingAction, help="personal-context register note (default: the vault's, when it has one)")
+    parser.add_argument("--no-profile", action="store_true", help="disable personal context for this run")
     parser.add_argument(
         "--no-exemplars",
         action="store_true",

@@ -89,6 +89,8 @@ independently, and one bad input never blocks the others.
 | `--force` | off | Synthesize from input that looks like a transcript export. |
 | `--voice` | the vault's | The voice-and-style note. |
 | `--no-voice` | off | Disable the voice policy for this run. |
+| `--profile` | the vault's | The personal-context register. Reaches the draft system prompt only — never the draft payload, which is fidelity-gated. |
+| `--no-profile` | off | Disable personal context for this run. |
 | `--no-exemplars` | off | Draft without showing the model the user's own notes. |
 
 These are fingerprinted into a run, so a resumed run refuses to change them.

@@ -1015,5 +1015,47 @@ class VerificationTests(CaptureFixture):
         self.assertIn("not the same as approval", report)
 
 
+PROFILE = {
+    "cards": [
+        {
+            "order": 0, "name": "Core Identity", "link": "[[Core Identity]]",
+            "tier": "always", "scope": "universal", "routes": frozenset(),
+            "triggers": [], "note": "", "facts": ["Sociologist of knowledge."],
+        },
+        {
+            "order": 1, "name": "People in My Life", "link": "[[People in My Life]]",
+            "tier": "when-relevant", "scope": "owner-authored", "routes": frozenset({"personal"}),
+            "triggers": ["Gillian"], "note": "", "facts": ["Gillian Eorwyn is my spouse."],
+        },
+    ]
+}
+
+
+class PersonalContextTests(unittest.TestCase):
+    def test_the_always_tier_reaches_the_draft_system_prompt(self):
+        system = vault_capture.draft_system_prompt("", PROFILE)
+        self.assertIn("Sociologist of knowledge.", system)
+
+    def test_drafting_knows_no_route_so_gated_cards_stay_out(self):
+        system = vault_capture.draft_system_prompt("", PROFILE)
+        self.assertNotIn("Gillian", system)
+
+    def test_the_draft_payload_carries_no_personal_context(self):
+        """Regression lock. check_draft makes a name absent from the braindump a
+        hard problem, so a card naming someone would make the gate discard the
+        note. Nothing profile-derived may enter this payload."""
+        payload = vault_capture.draft_payload(
+            {"id": "i-001", "text": "Wrote about the thing today."},
+            {"kind": "note", "title": "A note", "gist": "Something", "covers": ["the thing"]},
+        )
+        serialized = json.dumps(payload)
+        self.assertNotIn("personalContext", payload)
+        self.assertNotIn("Gillian", serialized)
+        self.assertNotIn("Sociologist", serialized)
+
+    def test_without_a_profile_the_system_prompt_is_unchanged(self):
+        self.assertEqual(vault_capture.draft_system_prompt(), vault_capture.draft_system_prompt("", None))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

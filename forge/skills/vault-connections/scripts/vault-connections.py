@@ -32,6 +32,7 @@ import forge_embeddings
 import forge_llm
 import forge_verify
 import run_state
+import vault_profile
 import vault_voice
 from vault_classification import (
     DEFAULT_BASE_URL,
@@ -726,10 +727,10 @@ CONNECTION_SYSTEM = (
     f"kind must be one of: {', '.join(CONNECTION_KINDS)}.\n"
     f"reason must be a single clause under {MAX_REASON_CHARS} characters naming the shared idea.\n"
     "\n"
-    "The vault owner applies abstract ideas — philosophical, religious, epistemic — across\n"
-    "unrelated areas of life. The most valuable connections are the ones that carry a concept\n"
-    "from one domain into another: a Buddhist idea informing research methods, an epistemology\n"
-    "reading explaining a work problem. Rate those 'strong'.\n"
+    "The most valuable connections carry a concept from one area of a person's life into\n"
+    "another — an idea from their reading explaining a problem in their work. Rate those\n"
+    "'strong'. Whatever background you are given about the vault owner is what tells you\n"
+    "which cross-domain moves are theirs; without it, judge the shared idea on its merits.\n"
     "\n"
     "Set connect=false when the notes merely share vocabulary, a date, a file format, or\n"
     "boilerplate; when one note is an empty stub; or when the overlap is too generic to be\n"
@@ -773,6 +774,52 @@ def load_voice(args, vault):
     return voice_path, voice, voice_hash
 
 
+def load_profile(args, vault):
+    """Compile the personal-context layer, or carry on without it.
+
+    Unlike the voice policy, a broken register never fails the run: the
+    warnings go to the report and every stage behaves as it did before.
+    """
+    profile_path = vault_profile.resolve_profile_path(
+        vault,
+        getattr(args, "profile", None),
+        disabled=getattr(args, "no_profile", False),
+    )
+    profile, profile_hash, warnings = vault_profile.compiled_profile_for(vault, profile_path, cache_dir=cache_dir(vault))
+    args.compiled_profile = profile
+    args.profile_path = profile_path
+    args.profile_hash = profile_hash
+    args.profile_warnings = warnings
+    return profile_path, profile, profile_hash
+
+
+def judge_site(*entries):
+    """Where a judgment sits: the owner's own notes, filed where the index says.
+
+    Both notes are the owner's and the output is a short reason written into
+    the owner's own vault, so the mode is ``owner`` even though the voice
+    policy treats this stage as source-derived — that axis is about a note's
+    provenance, which is a different question. Routes are the union, so a
+    therapy-gated card enters only when a therapy note is actually in the pair.
+    """
+    routes = []
+    for entry in entries:
+        domain = (entry or {}).get("domain")
+        subdomain = (entry or {}).get("subdomain")
+        if domain:
+            routes.append(f"{domain}/{subdomain}" if subdomain else domain)
+    return vault_profile.profile_site(vault_voice.CONTEXT_OWNER, routes=routes, stage="judge")
+
+
+def connection_system(args):
+    """The judgment system prompt, byte-stable for a run so the cache holds."""
+    prefix = vault_profile.profile_prefix(
+        getattr(args, "compiled_profile", None),
+        vault_profile.profile_site(vault_voice.CONTEXT_OWNER, stage="judge"),
+    )
+    return f"{CONNECTION_SYSTEM}\n\n{prefix}" if prefix else CONNECTION_SYSTEM
+
+
 def source_system(args, base):
     prefix = vault_voice.prompt_prefix(getattr(args, "compiled_voice", None), vault_voice.CONTEXT_SOURCE)
     return f"{base}\n\n{prefix}" if prefix else base
@@ -800,11 +847,22 @@ def note_brief(entry, body):
 def judge_pair(args, vault, left, right):
     left_body = normalize_body_for_hash(split_frontmatter((vault / left["path"]).read_bytes())["body"])
     right_body = normalize_body_for_hash(split_frontmatter((vault / right["path"]).read_bytes())["body"])
+    user = f"NOTE A\n{note_brief(left, left_body)}\n\nNOTE B\n{note_brief(right, right_body)}"
+    # Per-pair cards go in the user message: they vary with the pair, and the
+    # system message has to stay byte-identical for the server-side prefix cache.
+    cards = vault_profile.select_cards(
+        getattr(args, "compiled_profile", None),
+        f"{left['title']}\n{left_body}\n{right['title']}\n{right_body}",
+        judge_site(left, right),
+    )
+    context = [card for card in cards if card["tier"] != vault_profile.TIER_ALWAYS]
+    if context:
+        user += "\n\nABOUT THE VAULT OWNER\n" + json.dumps(vault_profile.profile_offers(context), ensure_ascii=False)
     messages = with_prefill(
         args,
         [
-            {"role": "system", "content": CONNECTION_SYSTEM},
-            {"role": "user", "content": f"NOTE A\n{note_brief(left, left_body)}\n\nNOTE B\n{note_brief(right, right_body)}"},
+            {"role": "system", "content": connection_system(args)},
+            {"role": "user", "content": user},
         ],
     )
     return validate_judgment(request_with_retry(args, messages))
@@ -2319,6 +2377,7 @@ def command_search(args):
 def command_propose(args):
     vault = resolve_vault(args)
     schema_path, schema, schema_hash = load_schema(args, vault)
+    profile_path, _profile, profile_hash = load_profile(args, vault)
     entries, store, embedding_info, warnings = ensure_index(args, vault, schema_path)
     if embedding_info.get("reason"):
         raise UserError(f"propose needs embeddings: {embedding_info['reason']}")
@@ -2358,7 +2417,13 @@ def command_propose(args):
         run_state.create_run_state(
             WORKFLOW,
             "propose",
-            {"vault": str(vault), "schemaHash": schema_hash},
+            {
+                "vault": str(vault),
+                "schemaHash": schema_hash,
+                **vault_profile.profile_state(
+                    profile_path, profile_hash, vault_profile.profile_site(vault_voice.CONTEXT_OWNER, stage="judge")
+                ),
+            },
             resolved_options(args),
             items=[{"key": pair_key(row["left"], row["right"]), "status": "pending"} for row in selected],
             phase="judging",
@@ -3069,6 +3134,39 @@ def command_doctor(args):
     checks["voice"] = voice_check
     ok = ok and voice_check["ok"]
 
+    # The profile never fails a run, so it never fails doctor either: a broken
+    # register reports itself as a warning and the run judges without it.
+    profile_check = {"ok": True, "configured": False, "stages": {"link judgment": "owner"}}
+    try:
+        profile_path, profile, profile_hash = load_profile(args, vault)
+        if profile_path is None:
+            profile_check["detail"] = (
+                "disabled with --no-profile"
+                if getattr(args, "no_profile", False)
+                else f"no personal context note; default is {vault_profile.DEFAULT_PROFILE}"
+            )
+        else:
+            digest = vault_profile.profile_digest(profile)
+            profile_check = {
+                "ok": True,
+                "configured": profile is not None,
+                "path": str(profile_path),
+                "profile_hash": profile_hash,
+                "compiler_version": vault_profile.COMPILED_PROFILE_VERSION,
+                "cards": digest,
+                "budgets": {
+                    "prefix": vault_profile.DEFAULT_PREFIX_BUDGET,
+                    "context": vault_profile.DEFAULT_CONTEXT_BUDGET,
+                    "per_card": vault_profile.MAX_CARD_CHARS,
+                },
+                "stages": {"link judgment": "owner"},
+            }
+        warnings.extend(getattr(args, "profile_warnings", []) or [])
+    except UserError as error:
+        profile_check = {"ok": True, "configured": True, "detail": str(error)}
+        warnings.append(f"personal context note could not be read: {error}")
+    checks["profile"] = profile_check
+
     # One call per candidate pair, so hidden reasoning is charged per pair.
     chat_probe = forge_llm.service_doctor(
         chat_service(args), expect_non_thinking=not args.think_prefill, timeout=min(args.request_timeout, 60)
@@ -3134,6 +3232,8 @@ def parse_args(argv):
     parser.add_argument("--schema")
     parser.add_argument("--voice", help="voice-and-style note (default: the vault's, when present)")
     parser.add_argument("--no-voice", action="store_true", help="disable the vault voice policy for this run")
+    parser.add_argument("--profile", help="personal-context register note (default: the vault's, when present)")
+    parser.add_argument("--no-profile", action="store_true", help="disable personal context for this run")
     parser.add_argument("--run", help="run directory (apply, status)")
     parser.add_argument("--accept", help="comma-separated proposal ids to apply")
     parser.add_argument("--reject", help="comma-separated proposal ids to record as rejected")
@@ -3217,6 +3317,9 @@ def parse_args(argv):
     args.voice = args.voice or os.environ.get("VAULT_CONNECTIONS_VOICE") or None
     if args.no_voice and args.voice and "--voice" in argv:
         raise UserError("--voice and --no-voice cannot be used together")
+    args.profile = args.profile or os.environ.get("VAULT_CONNECTIONS_PROFILE") or None
+    if args.no_profile and args.profile and "--profile" in argv:
+        raise UserError("--profile and --no-profile cannot be used together")
     args.embeddings_url = forge_embeddings.endpoint_url(args.embeddings_url)
     args.embeddings_model = forge_embeddings.model_name(args.embeddings_model)
     args.cache_prompt = not args.no_cache_prompt

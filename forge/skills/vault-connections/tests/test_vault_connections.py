@@ -1542,5 +1542,51 @@ class VaultConnectionsTest(unittest.TestCase):
         self.assertEqual(StubHandler.chat_requests[-1]["model"], "settings-resolved-model")
 
 
+
+
+class PersonalContextTests(unittest.TestCase):
+    """The profile layer replaced a hardcoded biography in CONNECTION_SYSTEM."""
+
+    def test_the_judgment_prompt_names_no_particular_person(self):
+        """Regression lock. This prompt ships in a skill other people run, so it
+        must not carry one vault owner's biography."""
+        for token in ("Buddhist", "Ellie", "philosophical, religious, epistemic"):
+            self.assertNotIn(token, vault_connections.CONNECTION_SYSTEM)
+
+    def test_without_a_profile_the_system_prompt_is_unchanged(self):
+        args = SimpleNamespace(compiled_profile=None)
+        self.assertEqual(vault_connections.connection_system(args), vault_connections.CONNECTION_SYSTEM)
+
+    def test_the_always_tier_reaches_the_system_prompt(self):
+        profile = {
+            "cards": [
+                {
+                    "order": 0,
+                    "name": "Core Identity",
+                    "link": "[[Core Identity]]",
+                    "tier": "always",
+                    "scope": "universal",
+                    "routes": frozenset(),
+                    "triggers": [],
+                    "note": "",
+                    "facts": ["Sociologist of knowledge."],
+                }
+            ]
+        }
+        system = vault_connections.connection_system(SimpleNamespace(compiled_profile=profile))
+        self.assertIn("Sociologist of knowledge.", system)
+        self.assertTrue(system.startswith(vault_connections.CONNECTION_SYSTEM))
+
+    def test_the_judge_site_unions_both_notes_routes(self):
+        site = vault_connections.judge_site(
+            {"domain": "personal", "subdomain": "therapy"},
+            {"domain": "work", "subdomain": None},
+        )
+        self.assertEqual(site["routes"], frozenset({"personal", "personal/therapy", "work"}))
+
+    def test_a_note_with_no_domain_contributes_no_route(self):
+        self.assertEqual(vault_connections.judge_site({"domain": None}, {})["routes"], frozenset())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
