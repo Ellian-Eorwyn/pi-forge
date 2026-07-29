@@ -54,6 +54,7 @@ from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
     first_nonempty_line,
     has_control_character,
     heading_index,
+    human_owned_properties,
     WORKSPACE_MARKER,
     is_divider_row,
     is_workspace_dir,
@@ -71,6 +72,7 @@ from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
     path_is_inside,
     project_folder,
     project_name,
+    property_human_owned,
     property_shape,
     property_value_mode,
     relative_path,
@@ -629,7 +631,7 @@ def plan_dedupe(args, vault, items, index_entries, warnings, schema_label="<sche
 
 
 def carry_forward_provenance(validated, frontmatter_text, schema, warnings):
-    """Restore machine-provenance properties the classifier does not own.
+    """Restore properties the classifier does not own.
 
     Filing replaces a note's frontmatter wholesale from a model response, so a
     ``capture_type: generated`` or ``processed_by`` mark written by another
@@ -638,12 +640,49 @@ def carry_forward_provenance(validated, frontmatter_text, schema, warnings):
     being machine-made because a later pass read it as prose. Both keys are
     taken from the note's previous frontmatter, and the classifier's own value
     for ``processed_by`` is discarded: scripts are its only writers.
+
+    Properties the schema marks human-owned are restored the same way and for
+    the same reason. The classifier is never shown them, so filing would drop
+    every one on the first pass; the note's previous frontmatter is their only
+    source. Values are re-checked here because they bypass
+    ``validate_classification`` entirely, and an unchecked control character
+    would fail the whole run inside ``yaml_scalar``.
     """
     metadata = validated.get("metadata")
     if not isinstance(metadata, dict):
         return validated
     metadata.pop("processed_by", None)
     previous = parse_frontmatter(frontmatter_text or "")
+
+    for key in human_owned_properties(schema):
+        metadata.pop(key, None)
+        value = previous.get(key)
+        if value is None:
+            continue
+        prop = schema["properties"][key]
+        wikilink_required = prop["value_mode"] in {"wikilink", "registered_wikilink"}
+        if prop["shape"] == "list":
+            items = value if isinstance(value, list) else [value]
+            clean = [
+                item
+                for item in items
+                if isinstance(item, str)
+                and item
+                and not has_control_character(item)
+                and (not wikilink_required or valid_wikilink(item))
+            ]
+            if clean:
+                metadata[key] = clean
+            elif items:
+                warnings.append(f"previous {key} dropped: no valid values")
+        elif isinstance(value, list):
+            warnings.append(f"previous {key} dropped: schema defines it as a scalar")
+        elif not isinstance(value, str) or not value or has_control_character(value):
+            warnings.append(f"previous {key} dropped: not a usable scalar")
+        elif wikilink_required and not valid_wikilink(value):
+            warnings.append(f"previous {key} dropped: not a wikilink")
+        else:
+            metadata[key] = value
 
     if previous.get("capture_type") == "generated" and metadata.get("capture_type") != "generated":
         if "generated" in schema["capture_types"]:

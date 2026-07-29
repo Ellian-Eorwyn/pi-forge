@@ -5,7 +5,13 @@ import re
 
 import forge_llm
 import run_state
-from vault_schema import UserError, has_control_character, normalize_project_value, valid_wikilink
+from vault_schema import (
+    UserError,
+    has_control_character,
+    human_owned_properties,
+    normalize_project_value,
+    valid_wikilink,
+)
 
 
 DEFAULT_BASE_URL = "http://llms:8004/v1/chat/completions"
@@ -34,10 +40,21 @@ SYSTEM_INSTRUCTIONS = (
 )
 
 
+def classifier_property_order(schema):
+    """The approved properties the classifier is responsible for.
+
+    Human-owned properties are withheld: a property in the prompt is a property
+    the model fills in, and these record facts only the author knows.
+    """
+    withheld = set(human_owned_properties(schema))
+    return [key for key in schema["property_order"] if key not in withheld]
+
+
 def compact_schema_for_prompt(schema):
+    order = classifier_property_order(schema)
     return {
-        "properties": schema["properties"],
-        "property_order": schema["property_order"],
+        "properties": {key: schema["properties"][key] for key in order},
+        "property_order": order,
         "types": schema["types"],
         "statuses": schema["statuses"],
         "domains": schema["domains"],
@@ -50,7 +67,7 @@ def compact_schema_for_prompt(schema):
 
 def system_prompt(schema, profile_prefix=""):
     shape = {
-        "metadata": {key: None for key in schema["property_order"]},
+        "metadata": {key: None for key in classifier_property_order(schema)},
         "needs_review": False,
         "review_reason": None,
         "suggestions": [],
@@ -194,6 +211,14 @@ def validate_classification(response, schema):
     extra_keys = sorted(set(metadata) - set(schema["property_order"]))
     if extra_keys:
         errors.append(f"metadata contains unapproved keys: {', '.join(extra_keys)}")
+    # A human-owned key here is most likely the model echoing the advisory
+    # frontmatter it was shown. Dropping it costs nothing, where erroring would
+    # spend a repair round-trip and could strand the note in review over a value
+    # that is discarded either way. carry_forward_provenance restores the real one.
+    withheld = [key for key in human_owned_properties(schema) if key in metadata]
+    if withheld:
+        metadata = {key: value for key, value in metadata.items() if key not in set(withheld)}
+        warnings.append(f"ignored classifier values for human-owned properties: {', '.join(sorted(withheld))}")
     normalized, normalize_warnings = normalize_metadata(metadata, schema)
     warnings.extend(normalize_warnings)
     for key in ("type", "status", "domain"):

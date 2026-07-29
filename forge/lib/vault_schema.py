@@ -56,7 +56,7 @@ REQUIRED_SECTIONS = [
     "Legacy normalization map",
     "Folder routing",
 ]
-COMPILED_SCHEMA_VERSION = 2
+COMPILED_SCHEMA_VERSION = 3
 FRONTMATTER_KEY_RE = re.compile(r"^([a-z][a-z0-9_]*):(.*)$")
 LIST_ITEM_RE = re.compile(r"^(\s*)-\s+(.*)$")
 
@@ -236,6 +236,24 @@ def property_value_mode(shape_text):
     return "free"
 
 
+def property_human_owned(shape_text):
+    """Whether a property records a human judgment the classifier must not make.
+
+    Filing replaces a note's frontmatter wholesale from a model response, and
+    the response shape is built from every approved property, so a property the
+    model cannot know is a property the model will invent. ``date`` is the note's
+    own subject date and ``cover`` is a chosen image; neither is derivable from
+    the note's text the way ``type`` or ``domain`` are. Marking them in the
+    schema keeps them out of the prompt and carries them across filing instead.
+    """
+    return "human-owned" in shape_text.strip().lower()
+
+
+def human_owned_properties(schema):
+    """Approved property names the classifier neither sees nor sets."""
+    return [key for key in schema["property_order"] if schema["properties"][key].get("human_owned")]
+
+
 def pad2(number):
     return str(number).zfill(2)
 
@@ -398,11 +416,17 @@ def parse_schema_note(text):
             "required": row["Required"].strip().lower(),
             "shape": property_shape(row["Shape"]),
             "value_mode": property_value_mode(row["Shape"]),
+            "human_owned": property_human_owned(row["Shape"]),
             "definition": row["Definition"].strip(),
         }
     for required in ("type", "status", "domain"):
         if required not in properties:
             raise UserError(f"Approved properties: missing required core property {required}")
+    for name, prop in properties.items():
+        # Nothing would ever satisfy the requirement: the classifier is not shown
+        # human-owned properties, so it cannot supply one for a note that lacks it.
+        if prop["human_owned"] and prop["required"] != "no":
+            raise UserError(f"Approved properties: human-owned property {name} must be Required: no")
 
     types = parse_bullet_registry(lines, "Note types")
     statuses = parse_bullet_registry(lines, "Status values")

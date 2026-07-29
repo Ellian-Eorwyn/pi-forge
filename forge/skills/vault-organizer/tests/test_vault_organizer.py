@@ -52,6 +52,8 @@ capture_type: manual
 | `source_kind` | conditional | controlled scalar | Source kind. |
 | `capture_type` | no | controlled scalar | Capture type. |
 | `processed_by` | no | list | Automated workflows that transformed this note. |
+| `date` | no | scalar, human-owned | Subject date. |
+| `cover` | no | scalar, human-owned | Cover image. |
 
 ### Property constraints
 
@@ -1102,6 +1104,126 @@ class PersonalContextTests(unittest.TestCase):
         prefix = vault_organizer.classification_profile_prefix(args)
         self.assertIn("Filenames never use colons.", prefix)
         self.assertNotIn("Clinical detail.", prefix)
+
+
+class HumanOwnedPropertyTests(unittest.TestCase):
+    """Properties the author owns and the classifier must never touch.
+
+    Filing rebuilds frontmatter from a model response, so a property the model
+    is shown is a property the model fills in, and a property it is not shown is
+    one that vanishes. Human-owned properties have to be absent from the prompt
+    and restored from the note in the same change, or one of those two failures
+    happens on the first run.
+    """
+
+    def schema(self, text=SCHEMA):
+        return vault_organizer.parse_schema_note(text)
+
+    def test_schema_marks_human_owned_properties(self):
+        schema = self.schema()
+        self.assertTrue(schema["properties"]["date"]["human_owned"])
+        self.assertTrue(schema["properties"]["cover"]["human_owned"])
+        self.assertFalse(schema["properties"]["type"]["human_owned"])
+        self.assertEqual(vault_organizer.human_owned_properties(schema), ["date", "cover"])
+
+    def test_human_owned_shape_still_parses_normally(self):
+        schema = self.schema()
+        self.assertEqual(schema["properties"]["date"]["shape"], "scalar")
+        self.assertEqual(schema["properties"]["date"]["value_mode"], "free")
+        self.assertTrue(vault_organizer.property_human_owned("quoted wikilink, human-owned"))
+        self.assertEqual(vault_organizer.property_value_mode("quoted wikilink, human-owned"), "wikilink")
+
+    def test_required_human_owned_property_is_rejected(self):
+        text = SCHEMA.replace(
+            "| `date` | no | scalar, human-owned | Subject date. |",
+            "| `date` | yes | scalar, human-owned | Subject date. |",
+        )
+        with self.assertRaises(vault_organizer.UserError) as caught:
+            vault_organizer.parse_schema_note(text)
+        self.assertIn("must be Required: no", str(caught.exception))
+
+    def test_classifier_prompt_never_offers_human_owned_properties(self):
+        """Asserted against the structured payloads, not a substring search of
+        the prompt: real schemas say things like "coverage" and "Dated records",
+        so a substring check would pass or fail on vocabulary rather than on
+        whether the model was actually offered the property."""
+        schema = self.schema()
+        compact = vault_organizer.compact_schema_for_prompt(schema)
+        self.assertNotIn("date", compact["property_order"])
+        self.assertNotIn("cover", compact["properties"])
+        self.assertIn("type", compact["property_order"])
+        prompt = vault_organizer.system_prompt(schema)
+        shape = json.loads(prompt.split("Required response shape:\n")[1])
+        self.assertNotIn("date", shape["metadata"])
+        self.assertNotIn("cover", shape["metadata"])
+        self.assertIn("type", shape["metadata"])
+
+    def test_classifier_values_for_human_owned_properties_are_dropped(self):
+        schema = self.schema()
+        response = ok_response(metadata={
+            "type": "note",
+            "status": "active",
+            "domain": "personal",
+            "date": "sometime in 2024",
+            "cover": "[[invented.png]]",
+        })
+        validated, warnings, errors = vault_organizer.validate_classification(response, schema)
+        self.assertEqual(errors, [])
+        self.assertNotIn("date", validated["metadata"])
+        self.assertNotIn("cover", validated["metadata"])
+        self.assertTrue(any("human-owned" in warning for warning in warnings))
+
+    def test_carry_forward_restores_human_owned_properties(self):
+        schema = self.schema()
+        validated = {"metadata": {"type": "note", "status": "active", "domain": "personal"}}
+        warnings = []
+        vault_organizer.carry_forward_provenance(
+            validated, 'date: 2026-01-15\ncover: "[[banner.png]]"\n', schema, warnings
+        )
+        self.assertEqual(validated["metadata"]["date"], "2026-01-15")
+        self.assertEqual(validated["metadata"]["cover"], "[[banner.png]]")
+
+    def test_carry_forward_prefers_the_note_over_the_classifier(self):
+        schema = self.schema()
+        validated = {"metadata": {"type": "note", "status": "active", "domain": "personal", "date": "2099-12-31"}}
+        vault_organizer.carry_forward_provenance(validated, "date: 2026-01-15\n", schema, [])
+        self.assertEqual(validated["metadata"]["date"], "2026-01-15")
+
+    def test_carry_forward_drops_a_list_where_the_schema_wants_a_scalar(self):
+        schema = self.schema()
+        validated = {"metadata": {"type": "note", "status": "active", "domain": "personal"}}
+        warnings = []
+        vault_organizer.carry_forward_provenance(validated, "date:\n  - 2026-01-15\n  - 2026-02-01\n", schema, warnings)
+        self.assertNotIn("date", validated["metadata"])
+        self.assertTrue(any("scalar" in warning for warning in warnings))
+
+    def test_carry_forward_leaves_absent_properties_absent(self):
+        schema = self.schema()
+        validated = {"metadata": {"type": "note", "status": "active", "domain": "personal"}}
+        vault_organizer.carry_forward_provenance(validated, "type: note\n", schema, [])
+        self.assertNotIn("date", validated["metadata"])
+        self.assertNotIn("cover", validated["metadata"])
+
+    def test_serialized_frontmatter_is_readable_by_obsidian(self):
+        """A bare date so Obsidian types it as a Date, a quoted cover so the
+        wikilink survives YAML."""
+        schema = self.schema()
+        text = vault_organizer.serialize_frontmatter(
+            {"type": "note", "status": "active", "domain": "personal",
+             "date": "2026-01-15", "cover": "[[banner.png]]"},
+            schema,
+        )
+        self.assertIn("\ndate: 2026-01-15\n", text)
+        self.assertIn('\ncover: "[[banner.png]]"\n', text)
+
+    def test_a_url_cover_survives_serialization(self):
+        schema = self.schema()
+        text = vault_organizer.serialize_frontmatter(
+            {"type": "note", "status": "active", "domain": "personal",
+             "cover": "https://example.com/a.png"},
+            schema,
+        )
+        self.assertIn('\ncover: "https://example.com/a.png"\n', text)
 
 
 if __name__ == "__main__":
