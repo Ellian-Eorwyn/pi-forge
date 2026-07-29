@@ -30,13 +30,14 @@ in `forge/SCRIPT_TOOL_CONTRACT.md`.
 
 <!-- forge:skills-list start -->
 
-The live skill inventory currently contains 21 capability workflows, listed
+The live skill inventory currently contains 22 capability workflows, listed
 here with the one-line descriptions maintained in `forge/CAPABILITIES.md`:
 
 - `coding`: Inspect repositories and ship small, reviewable code changes.
 - `document-ingest`: Normalize documents and Gmail-style EML batches into structured text with source maps, exact-quote evidence, split chat/think verification, and a cited aggregate email digest.
 - `file-conversion`: Convert files, including deterministic EML-to-Markdown with preserved attachment manifests, between common working formats with per-file checkpoints.
 - `literature-extraction`: Extract structured evidence, claims, metadata, and citations from research documents.
+- `literature-library`: Turn a citation file or academic run into a library of actual documents - bibliographic `Author - Date - Title` filenames, open-access-first PDF acquisition with conservative per-publisher rate limits, credential-free institutional deferral, and clean Markdown conversion.
 - `organize-folder`: Sort messy folders through a reviewable manifest before making changes.
 - `personal-admin`: Turn personal/admin documents into summaries, decisions, and action plans.
 - `project-extraction`: Run or continuously refresh live project repositories with truthful packet/source coverage, reviewed Inbox intake, serial model-assisted extraction and reconciliation, source-backed controls, focused views, explicitly labeled drafts, and CSV/Mermaid/HTML Gantt outputs while preserving conflicts and human status ownership.

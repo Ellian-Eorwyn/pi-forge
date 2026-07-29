@@ -1,0 +1,31 @@
+{
+	"name": "literature-library",
+	"type": "pi-forge-skill",
+	"version": "0.1.0",
+	"description": "Acquire, name, and convert the documents behind a citation list.",
+	"skill_file": "SKILL.md",
+	"scripts_dir": "scripts",
+	"schemas_dir": "schemas",
+	"references_dir": "references",
+	"run_state_contract": "../../RUN_STATE_CONTRACT.md",
+	"restart_safe": true,
+	"tools": [
+		{
+			"name": "literature_library",
+			"description": "Parse a citation file, derive bibliographic filenames, and manage a resumable acquisition run.",
+			"command": "python3 scripts/literature-library.py",
+			"destructive": false
+		},
+		{
+			"name": "acquire_pdf",
+			"description": "Fetch a bounded batch of PDF candidates with per-host rate limiting and a refusal circuit breaker.",
+			"command": "node scripts/acquire_pdf.mjs",
+			"destructive": false
+		}
+	],
+	"safety": {
+		"destructive_by_default": false,
+		"requires_review_for_filesystem_changes": true,
+		"preserve_provenance_when_applicable": true
+	}
+}

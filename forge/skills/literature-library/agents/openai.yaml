@@ -1,0 +1,4 @@
+interface:
+  display_name: "Literature Library"
+  short_description: "Turn a citation file into a library of PDFs and clean Markdown"
+  default_prompt: "Use $literature-library to acquire the PDFs for these citations and convert them to Markdown."

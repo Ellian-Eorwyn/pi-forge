@@ -4,8 +4,8 @@
 
 ## Launch Context Summary
 
-- Available skills: 21
-- Model-visible skills at launch: 21
+- Available skills: 22
+- Model-visible skills at launch: 22
 - Tools offered at launch: 13
 
 | Launch context block | Tokens |
@@ -13,11 +13,11 @@
 | Base system prompt (intro, tools list, guidelines, connected services) | 390 |
 | Tool JSON schemas (13 tools) | 2760 |
 | Managed instructions (`AGENTS.md` with its `<project_context>` wrapper) | 1274 |
-| Skills menu (metadata for all model-visible skills) | 2968 |
-| **Total launch context (always processed)** | **7391** |
-| Maximum if every `SKILL.md` body is also loaded at once | 49963 |
+| Skills menu (metadata for all model-visible skills) | 3117 |
+| **Total launch context (always processed)** | **7540** |
+| Maximum if every `SKILL.md` body is also loaded at once | 52626 |
 
-Of that total, the forge profile itself owns 4241 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
+Of that total, the forge profile itself owns 4390 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
 
 Of the skills menu above, the shared wrapper (instructions and XML envelope, independent of skill count) is ~92 tokens; the rest scales with the number of skills.
 
@@ -55,6 +55,7 @@ Sorted by launch cost. `Prompt lines` counts a tool's `promptSnippet` and `promp
 | [`document-ingest`](forge/skills/document-ingest/SKILL.md) | Normalize documents and email with provenance | 127 | 3645 | 3746 | Model-visible |
 | [`file-conversion`](forge/skills/file-conversion/SKILL.md) | Convert files and EML with originals preserved | 142 | 1401 | 1517 | Model-visible |
 | [`literature-extraction`](forge/skills/literature-extraction/SKILL.md) | Extract structured evidence from research documents | 142 | 3480 | 3594 | Model-visible |
+| [`literature-library`](forge/skills/literature-library/SKILL.md) | Turn a citation file into a library of PDFs and clean Markdown | 150 | 2391 | 2514 | Model-visible |
 | [`organize-folder`](forge/skills/organize-folder/SKILL.md) | Sort a messy folder via a reviewable manifest | 132 | 1790 | 1895 | Model-visible |
 | [`personal-admin`](forge/skills/personal-admin/SKILL.md) | Summarize personal documents into action plans | 143 | 1259 | 1376 | Model-visible |
 | [`project-extraction`](forge/skills/project-extraction/SKILL.md) | Search and refresh live project controls | 146 | 2436 | 2555 | Model-visible |
