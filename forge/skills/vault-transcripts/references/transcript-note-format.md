@@ -157,6 +157,11 @@ These outrank every style rule below.
   to categorize a note, there should be like a maybe in the system"* becomes
   *"I would also like a 'failed categorization' folder for notes it can't
   confidently categorize."* Two possible readings means keep the longer wording.
+- Condensing means dropping words, never swapping them. A word the speaker used
+  is not replaced with a synonym the editor prefers — not "focus" for what they
+  called paying attention to, not "desire" for "want". Every content word in the
+  output should be one they said. This is what keeps the result sounding like
+  them, and it is also what the added-words check measures.
 - Keep hedges that qualify a claim. "I think", "maybe", and "I don't know" mean
   something when they mark how sure the speaker is; the same words as pure
   delivery are filler.

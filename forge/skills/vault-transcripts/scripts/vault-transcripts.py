@@ -796,7 +796,12 @@ def scan_processed(vault, schema_path, limit=None):
     through the link left by ``split``.
     """
     items = []
-    for path in selected_notes(vault, schema_path, "vault", limit):
+    # The limit counts transcript notes, not files walked: a vault-wide walk
+    # reaches a thousand notes that are not transcripts before it reaches one
+    # that is, so limiting the walk would return a trial run of nothing.
+    for path in selected_notes(vault, schema_path, "vault", None):
+        if limit is not None and sum(1 for entry in items if entry["is_transcript"]) >= limit:
+            break
         rel = relative_path(vault, path)
         if rel == INBOX_DIR or rel.startswith(f"{INBOX_DIR}/"):
             continue
@@ -1325,6 +1330,12 @@ Fidelity rules, which outrank every style rule below:
   there should be like a maybe in the system" becomes "I would also like a
   'failed categorization' folder for notes it can't confidently categorize."
   When two readings are possible, keep the longer wording.
+- Condensing means dropping words, never swapping them. Do not replace a word
+  the speaker used with a synonym you prefer: not "focus" for what they called
+  paying attention to, not "desire" for "want", not "utilize" for "use". Every
+  content word in your output should be one they said. This is what keeps the
+  cleaned text sounding like them, and a chunk that reads better in someone
+  else's vocabulary has failed.
 - Preserve the speaker's intent, uncertainty, and nuance. A hedge that qualifies
   a claim is content and stays: "I think", "maybe", "I don't know" mean
   something when they mark how sure the speaker is. A hedge that is pure
