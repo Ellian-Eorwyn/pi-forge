@@ -168,6 +168,16 @@ frontmatter" in the report); anything incomplete or invalid still goes to the
 model. **Relay the dry-run counts and get explicit approval before `--apply`**,
 as with any whole-vault run.
 
+Add `--only-sources` when the sources tree is the whole point of the run. A
+whole-vault run files *everything*, which includes dissolving the hand-made
+folder trees people keep below a declared route — those are invisible to drift
+checking precisely because they are legitimate structure the schema does not
+describe, and refiling them is rarely what someone asking to "move my sources"
+had in mind. With the flag, only notes their own frontmatter calls sources are
+considered; every other note is left exactly where it is, and with
+`--reuse-frontmatter` the whole migration runs without a single model call.
+**Ask before assuming the wider run is wanted.**
+
 ## De-duplication guarantees
 
 - Nothing is ever deleted. Duplicate losers move to

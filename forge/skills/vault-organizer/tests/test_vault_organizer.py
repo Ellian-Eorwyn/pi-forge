@@ -1391,6 +1391,47 @@ class SourcesTreeTests(unittest.TestCase):
         )
         self.assertEqual(validated["metadata"]["type"], "note")
 
+    def test_only_sources_leaves_every_other_note_alone(self):
+        # Turning on the sources tree is a migration for sources. A whole-vault
+        # run would also refile hand-made folder trees that sit below a declared
+        # route -- legitimate structure the schema does not describe.
+        handmade = self.vault / "04 Technology" / "4.03 Obsidian" / "Utopia" / "Primary Sources"
+        handmade.mkdir(parents=True)
+        (handmade / "Field Notes.md").write_text(
+            "---\ntype: note\nstatus: active\ndomain: technology\n---\n\nHand-filed.\n", encoding="utf-8"
+        )
+        source = self.vault / "04 Technology" / "4.03 Obsidian" / "A Manual.md"
+        source.write_text(
+            "---\ntype: source\nstatus: active\ndomain: technology\nsubdomain: obsidian\n"
+            "source_kind: manual\n---\n\n# A Manual\n\nBody.\n",
+            encoding="utf-8",
+        )
+        with StubServer([]) as server:
+            result = run_script(
+                "vault", "--vault", str(self.vault), "--base-url", server.url,
+                "--only-sources", "--reuse-frontmatter", "--apply",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertEqual(server.requests, [])
+        self.assertTrue((handmade / "Field Notes.md").is_file())
+        self.assertFalse(source.exists())
+        self.assertTrue(
+            (self.vault / "10 Sources" / "10.07 Manual" / "Technology" / "Obsidian" / "A Manual.md").is_file(),
+            sorted(path.as_posix() for path in self.vault.rglob("*.md")),
+        )
+
+    def test_only_sources_counts_only_sources_as_selected(self):
+        (self.vault / "00 Inbox" / "Loose.md").write_text(
+            "---\ntype: note\nstatus: active\ndomain: technology\n---\n\nBody.\n", encoding="utf-8"
+        )
+        with StubServer([]) as server:
+            result = run_script(
+                "vault", "--vault", str(self.vault), "--base-url", server.url,
+                "--only-sources", "--reuse-frontmatter",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout)["data"]["counts"]["selected"], 0)
+
     def test_the_classifier_is_never_shown_a_folder_number(self):
         compact = vault_organizer.compact_schema_for_prompt(self.schema())
         self.assertEqual(compact["source_kinds"]["book"], "Book.")
