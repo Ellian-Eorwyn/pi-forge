@@ -744,7 +744,7 @@ class PublishTests(unittest.TestCase):
     def test_publish_moves_and_journals_the_operation(self):
         staged, digest = self._stage()
         destination = self.output / "pdf" / "Author - 2020 - Title.pdf"
-        outcome, problem = literature_library.publish_pdf(self.output, "item-1", staged, destination, digest)
+        outcome, problem = literature_library.publish_file(self.output, "item-1", staged, destination, digest)
         self.assertEqual((outcome, problem), ("published", None))
         self.assertTrue(destination.is_file())
         self.assertFalse(staged.exists())
@@ -754,16 +754,16 @@ class PublishTests(unittest.TestCase):
     def test_republishing_identical_content_is_idempotent(self):
         staged, digest = self._stage()
         destination = self.output / "pdf" / "Author - 2020 - Title.pdf"
-        literature_library.publish_pdf(self.output, "item-1", staged, destination, digest)
+        literature_library.publish_file(self.output, "item-1", staged, destination, digest)
         again, digest_again = self._stage()
-        outcome, _ = literature_library.publish_pdf(self.output, "item-1", again, destination, digest_again)
+        outcome, _ = literature_library.publish_file(self.output, "item-1", again, destination, digest_again)
         self.assertEqual(outcome, "already-published")
 
     def test_a_mismatched_destination_is_blocked_and_never_overwritten(self):
         destination = self.output / "pdf" / "Author - 2020 - Title.pdf"
         destination.write_bytes(b"%PDF-1.4 someone else's file")
         staged, digest = self._stage()
-        outcome, problem = literature_library.publish_pdf(self.output, "item-1", staged, destination, digest)
+        outcome, problem = literature_library.publish_file(self.output, "item-1", staged, destination, digest)
         self.assertEqual(outcome, "blocked")
         self.assertIn("different content", problem)
         self.assertEqual(destination.read_bytes(), b"%PDF-1.4 someone else's file")
@@ -806,6 +806,230 @@ class PublishTests(unittest.TestCase):
         path.write_bytes(PDF_BODY)
         usable, _ = literature_library.verify_pdf(path)
         self.assertTrue(usable)
+
+
+def _text_pdf(path, pages=2, line="Epistemic injustice is a wrong done to someone in their capacity as a knower. "):
+    """A born-digital PDF with enough real text to route away from OCR."""
+    import fitz
+
+    document = fitz.open()
+    for _ in range(pages):
+        page = document.new_page()
+        for row in range(30):
+            page.insert_text((56, 72 + row * 18), line, fontsize=11)
+    document.save(path)
+    document.close()
+
+
+def _image_only_pdf(path, source):
+    """A rasterized PDF: real pages, zero extractable text. The OCR case."""
+    import fitz
+
+    original = fitz.open(source)
+    scanned = fitz.open()
+    for index in range(original.page_count):
+        pixmap = original[index].get_pixmap(dpi=110)
+        page = scanned.new_page(width=pixmap.width * 0.75, height=pixmap.height * 0.75)
+        page.insert_image(page.rect, pixmap=pixmap)
+    scanned.save(path)
+    scanned.close()
+    original.close()
+
+
+class ProbeTests(unittest.TestCase):
+    def setUp(self):
+        self._directory = tempfile.TemporaryDirectory()
+        self.root = Path(self._directory.name)
+
+    def tearDown(self):
+        self._directory.cleanup()
+
+    def test_born_digital_pdf_does_not_escalate_to_ocr(self):
+        path = self.root / "digital.pdf"
+        _text_pdf(path)
+        probe = literature_library.probe_pdf(path)
+        self.assertFalse(probe["needsOcr"])
+        self.assertGreater(probe["alnumPerPage"], literature_library.MIN_ALNUM_CHARS_PER_PAGE)
+        self.assertEqual(probe["emptyRatio"], 0.0)
+
+    def test_image_only_pdf_escalates_to_ocr(self):
+        digital = self.root / "digital.pdf"
+        _text_pdf(digital)
+        scanned = self.root / "scanned.pdf"
+        _image_only_pdf(scanned, digital)
+        probe = literature_library.probe_pdf(scanned)
+        self.assertTrue(probe["needsOcr"])
+        self.assertIn("extractable text", probe["reason"])
+
+    def test_unreadable_file_is_an_ocr_candidate_rather_than_a_crash(self):
+        path = self.root / "broken.pdf"
+        path.write_bytes(b"%PDF-1.4 truncated and invalid")
+        probe = literature_library.probe_pdf(path)
+        self.assertTrue(probe["needsOcr"])
+
+
+class CoversheetTests(unittest.TestCase):
+    def test_repository_coversheet_is_detected(self):
+        body = "\n".join(
+            [
+                "# Title",
+                "",
+                "University of Bristol - Bristol Research Portal",
+                "Version: Peer reviewed version",
+                "Link to published version (if available): 10.1000/x",
+                "Terms of Use for the portal are available online",
+                "",
+                "Do ill people suffer epistemic injustice?",
+            ]
+        )
+        detected = literature_library.detect_coversheet(body)
+        self.assertIsNotNone(detected)
+        self.assertGreaterEqual(len(detected["markers"]), 3)
+
+    def test_ordinary_article_text_is_not_flagged(self):
+        body = "# Title\n\nIn this paper we argue that ill persons can experience epistemic injustice.\n"
+        self.assertIsNone(literature_library.detect_coversheet(body))
+
+    def test_detection_never_removes_text(self):
+        # Flagging is the whole contract: a false positive must not be able to
+        # delete the opening of an article.
+        row = {"titleFull": "Real Title", "stem": "A - 2020 - Real Title", "authors": []}
+        body = "# A---2020---Real-Title\n\nRepository\nVersion of record\nTerms of use\n\nActual first sentence."
+        detected = literature_library.detect_coversheet(body)
+        document = literature_library._markdown_document(row, body, "file-conversion-structural", {}, [], detected)
+        self.assertIn("Actual first sentence.", document)
+        self.assertIn("Repository", document)
+        self.assertIn("left in place, not removed", document)
+
+
+class MarkdownDocumentTests(unittest.TestCase):
+    ROW = {
+        "titleFull": "Epistemic injustice in healthcare: a philosophial analysis",
+        "stem": "Carel - 2014 - Epistemic injustice in healthcare a philosophial analysis",
+        "authors": [{"family": "Carel", "given": "H.", "name": "Carel, H."}],
+        "publicationYear": 2014,
+        "venueName": "Medicine, Health Care and Philosophy",
+        "identifiers": {"doi": "10.1007/s11019-014-9560-2"},
+        "accessClass": "open-access",
+        "pdfSha256": "abc123",
+    }
+
+    def _build(self, body, warnings=(), coversheet=None):
+        return literature_library._markdown_document(
+            self.ROW, body, "file-conversion-structural", {"pages": 32}, list(warnings), coversheet
+        )
+
+    def test_the_mangled_heading_is_replaced_with_the_real_title(self):
+        document = self._build("# Carel---2014---Epistemic-injustice-in-healthcare\n\nBody text.\n")
+        self.assertNotIn("Carel---2014---", document)
+        self.assertIn("# Epistemic injustice in healthcare: a philosophial analysis", document)
+        self.assertIn("Body text.", document)
+
+    def test_frontmatter_carries_the_bibliographic_record(self):
+        document = self._build("# x\n\nBody.\n")
+        self.assertIn('doi: "10.1007/s11019-014-9560-2"', document)
+        self.assertIn('venue: "Medicine, Health Care and Philosophy"', document)
+        self.assertIn('pdf_sha256: "abc123"', document)
+
+    def test_numeric_fields_are_not_quoted(self):
+        document = self._build("# x\n\nBody.\n")
+        self.assertIn("year: 2014", document)
+        self.assertIn("pdf_pages: 32", document)
+
+    def test_a_title_with_a_colon_survives_yaml(self):
+        document = self._build("# x\n\nBody.\n")
+        header = document.split("---")[1]
+        self.assertIn('title: "Epistemic injustice in healthcare: a philosophial analysis"', header)
+
+    def test_conversion_warnings_become_needs_review_entries(self):
+        document = self._build("# x\n\nBody.\n", warnings=["Tables are not reconstructed."])
+        self.assertIn("needs_review:", document)
+        self.assertIn("Tables are not reconstructed.", document)
+
+    def test_a_body_without_a_heading_is_left_intact(self):
+        document = self._build("First line of the article.\n\nSecond paragraph.\n")
+        self.assertIn("First line of the article.", document)
+
+
+class ConvertCommandTests(unittest.TestCase):
+    def setUp(self):
+        self._directory = tempfile.TemporaryDirectory()
+        self.run = Path(self._directory.name) / "run"
+        (self.run / "pdf").mkdir(parents=True)
+        self.pdf_name = "Author - 2020 - A born digital article.pdf"
+        _text_pdf(self.run / "pdf" / self.pdf_name)
+        digest = hashlib.sha256((self.run / "pdf" / self.pdf_name).read_bytes()).hexdigest()
+
+        state = literature_library.run_state.create_run_state(
+            workflow="literature-library",
+            command="parse",
+            input_config=[{"path": "fixture.ris", "sha256": "0" * 64}],
+            options={},
+            items=[{"id": "item-1", "stem": "Author - 2020 - A born digital article", "disposition": "acquired", "attempts": 1, "accessClass": "open-access", "doi": None}],
+        )
+        literature_library.run_state.initialize_run_state(self.run, state)
+        literature_library.run_state.atomic_write_json(
+            self.run / "library_config.json", {"workflow": "literature-library", "sourceLabel": "fixture", "contactEmail": "a@b.c", "input": {"path": "fixture.ris", "sha256": "0" * 64}}
+        )
+        literature_library.run_state.append_jsonl_fsync(
+            self.run / "library_index.jsonl",
+            {
+                "id": "item-1",
+                "stem": "Author - 2020 - A born digital article",
+                "pdfFilename": self.pdf_name,
+                "markdownFilename": "Author - 2020 - A born digital article.md",
+                "titleFull": "A born digital article",
+                "authors": [{"family": "Author", "given": "A.", "name": "Author, A."}],
+                "publicationYear": 2020,
+                "identifiers": {"doi": "10.1000/fixture"},
+                "pdfSha256": digest,
+                "disposition": "acquired",
+            },
+        )
+
+    def tearDown(self):
+        self._directory.cleanup()
+
+    def _run(self, *arguments):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), *arguments],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin", "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+
+    def test_convert_publishes_markdown_under_the_bibliographic_name(self):
+        completed = self._run("convert", str(self.run))
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["converted"], 1)
+        self.assertEqual(payload["viaStructural"], 1)
+        self.assertEqual(payload["viaOcr"], 0)
+        published = self.run / "markdown" / "Author - 2020 - A born digital article.md"
+        self.assertTrue(published.is_file())
+        text = published.read_text(encoding="utf-8")
+        self.assertIn("# A born digital article", text)
+        self.assertIn('doi: "10.1000/fixture"', text)
+
+    def test_convert_is_idempotent(self):
+        self._run("convert", str(self.run))
+        payload = json.loads(self._run("convert", str(self.run)).stdout)
+        self.assertEqual(payload["converted"], 0)
+
+    def test_markdown_is_published_through_the_hash_bound_journal(self):
+        self._run("convert", str(self.run))
+        rows = [json.loads(line) for line in (self.run / "publish_ops.jsonl").read_text().splitlines()]
+        markdown_ops = [row for row in rows if row["opId"].endswith(":md")]
+        self.assertEqual(sorted(row["status"] for row in markdown_ops), ["completed", "planned"])
+
+    def test_validate_catches_a_tampered_markdown_file(self):
+        self._run("convert", str(self.run))
+        published = self.run / "markdown" / "Author - 2020 - A born digital article.md"
+        published.write_text("replaced", encoding="utf-8")
+        payload = json.loads(self._run("validate", str(self.run), "--json", "--read-only").stdout)
+        self.assertFalse(payload["valid"])
+        self.assertTrue(any("no longer matches the hash" in error for error in payload["errors"]))
 
 
 class EgressDetectionTests(unittest.TestCase):

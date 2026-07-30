@@ -327,14 +327,17 @@ def verify_pdf(path):
     return True, f"{pages} page(s)"
 
 
-def publish_pdf(output, item_id, staged, destination, staged_sha):
-    """Move a verified download into place under a hash-bound journal entry.
+def publish_file(output, item_id, staged, destination, staged_sha, kind="pdf"):
+    """Move a verified artifact into place under a hash-bound journal entry.
 
     The operation is recorded before the move and confirmed after, so a restart
     can tell a completed publish from an interrupted one by hashing the
     destination. A destination whose hash does not match is never overwritten.
+
+    `kind` separates the PDF and Markdown operations for one record, so replaying
+    one never looks like the other.
     """
-    op_id = f"{item_id}:pdf"
+    op_id = f"{item_id}:{kind}"
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         if sha256_file(destination) == staged_sha:
@@ -649,7 +652,7 @@ def _record_chunk(output, state, by_id, rows, pdf_directory, results):
             staged.unlink(missing_ok=True)
             continue
 
-        outcome, problem = publish_pdf(
+        outcome, problem = publish_file(
             output, acquired["id"], staged, pdf_directory / row.get("pdfFilename", f"{acquired['id']}.pdf"), acquired["sha256"]
         )
         if outcome == "blocked":
@@ -671,6 +674,347 @@ def _record_chunk(output, state, by_id, rows, pdf_directory, results):
     # atomically once the chunk's rows are all settled.
     _write_index(output, [by_id.get(row["id"], row) if row.get("id") else row for row in rows])
     return published
+
+
+MARKDOWN_DIR = "markdown"
+CONVERSION_DIR = "conversion"
+OCR_DIR = "ocr"
+
+FILE_CONVERSION_TOOL = Path(__file__).resolve().parents[1].parent / "file-conversion" / "scripts" / "file-conversion.py"
+DOCUMENT_INGEST_TOOL = Path(__file__).resolve().parents[1].parent / "document-ingest" / "scripts" / "document-ingest.mjs"
+
+# Escalation thresholds. Measured against a real 21-document humanities corpus
+# where the sparsest born-digital article still carried ~1450 alphanumeric
+# characters per page, so 200 is far below anything that extracts cleanly and
+# will not pull a readable PDF into an unnecessary OCR pass.
+MIN_ALNUM_CHARS_PER_PAGE = 200
+MAX_EMPTY_PAGE_RATIO = 0.25
+
+# Institutional repositories staple a coversheet onto author-accepted
+# manuscripts. It is not part of the article, and downstream evidence extraction
+# would otherwise quote a university's terms of use as if it were the author.
+COVERSHEET_MARKERS = (
+    "research portal",
+    "repository",
+    "eprints",
+    "author accepted manuscript",
+    "version of record",
+    "link to published version",
+    "terms of use",
+    "citing this paper",
+    "downloaded from",
+    "this is the peer reviewed version",
+    "general rights",
+)
+
+
+def probe_pdf(path):
+    """Measure a PDF's extractable text to choose a conversion route.
+
+    Routes on measurement rather than on another skill's warning text, so a
+    change to file-conversion's wording cannot silently reroute every document.
+    """
+    try:
+        import fitz
+    except ImportError:
+        return {"pages": None, "alnumPerPage": None, "emptyRatio": None, "needsOcr": False, "reason": "PyMuPDF unavailable"}
+    try:
+        with fitz.open(path) as document:
+            if document.is_encrypted:
+                return {"pages": None, "alnumPerPage": 0, "emptyRatio": 1.0, "needsOcr": True, "reason": "encrypted"}
+            pages = document.page_count
+            texts = [page.get_text().strip() for page in document]
+    except Exception as error:  # noqa: BLE001 - an unopenable PDF is an OCR candidate
+        return {"pages": None, "alnumPerPage": 0, "emptyRatio": 1.0, "needsOcr": True, "reason": f"unreadable: {error}"}
+
+    if pages < 1:
+        return {"pages": 0, "alnumPerPage": 0, "emptyRatio": 1.0, "needsOcr": True, "reason": "no pages"}
+    alnum = sum(sum(character.isalnum() for character in text) for text in texts)
+    empty = sum(1 for text in texts if len(text) < 20)
+    per_page = alnum / pages
+    empty_ratio = empty / pages
+    reasons = []
+    if per_page < MIN_ALNUM_CHARS_PER_PAGE:
+        reasons.append(f"only {per_page:.0f} alphanumeric characters per page")
+    if empty_ratio > MAX_EMPTY_PAGE_RATIO:
+        reasons.append(f"{empty_ratio:.0%} of pages have no extractable text")
+    return {
+        "pages": pages,
+        "alnumPerPage": round(per_page, 1),
+        "emptyRatio": round(empty_ratio, 3),
+        "needsOcr": bool(reasons),
+        "reason": "; ".join(reasons) or "text extracts cleanly",
+    }
+
+
+def detect_coversheet(body):
+    """Report how many leading lines look like a repository coversheet.
+
+    Detection only. The text is never removed: a false positive would delete the
+    opening of an article, and the caller can see exactly what was flagged.
+    """
+    lines = body.split("\n")
+    window = min(len(lines), 60)
+    hits = []
+    for index in range(window):
+        lowered = lines[index].lower()
+        for marker in COVERSHEET_MARKERS:
+            if marker in lowered:
+                hits.append((index, marker))
+                break
+    if len(hits) < 3:
+        return None
+    return {"lastMarkerLine": hits[-1][0] + 1, "markers": sorted({marker for _, marker in hits})}
+
+
+def _conversion_warnings(conversion_directory):
+    """Map source filename to the warnings file-conversion recorded for it."""
+    warnings_path = Path(conversion_directory) / "warnings.md"
+    if not warnings_path.is_file():
+        return {}
+    grouped = {}
+    current = None
+    for line in warnings_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("## "):
+            current = line[3:].split(" -> ")[0].strip()
+            grouped[current] = []
+        elif line.startswith("- ") and current:
+            grouped[current].append(line[2:].strip())
+    return grouped
+
+
+def _yaml_scalar(value):
+    # Integers stay unquoted so a vault reads them as numbers rather than as
+    # text that happens to look like a year.
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    text = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{text}"'
+
+
+def _markdown_document(row, body, method, probe, warnings, coversheet):
+    """Assemble the published Markdown: real metadata, real title, real body.
+
+    file-conversion names its output with `safe_stem`, which turns
+    `Author - Year - Title` into `Author---Year---Title` and uses it as the H1.
+    That is fine for a conversion run and wrong for a library, so the heading is
+    replaced with the work's actual title here.
+    """
+    authors = [author.get("name") or " ".join(filter(None, (author.get("given"), author.get("family")))) for author in row.get("authors") or []]
+    identifiers = row.get("identifiers") or {}
+    front = [
+        "---",
+        f"title: {_yaml_scalar(row.get('titleFull') or row.get('stem'))}",
+    ]
+    if authors:
+        front.append("authors:")
+        front += [f"  - {_yaml_scalar(name)}" for name in authors]
+    for key, value in (
+        ("year", row.get("publicationYear")),
+        ("publication_date", row.get("publicationDate")),
+        ("venue", row.get("venueName")),
+        ("publisher", row.get("publisher")),
+        ("doi", identifiers.get("doi")),
+        ("source_url", row.get("sourceUrl")),
+        ("access_class", row.get("accessClass")),
+        ("acquisition_stage", row.get("stageReached")),
+        ("oa_status", row.get("oaStatus")),
+        ("pdf_sha256", row.get("pdfSha256")),
+        ("pdf_pages", probe.get("pages")),
+        ("markdown_method", method),
+    ):
+        if value not in (None, ""):
+            front.append(f"{key}: {_yaml_scalar(value)}")
+    review = list(warnings)
+    if coversheet:
+        review.append(
+            f"A repository coversheet appears to occupy the first {coversheet['lastMarkerLine']} lines "
+            f"({', '.join(coversheet['markers'])}); it was left in place, not removed."
+        )
+    if review:
+        front.append("needs_review:")
+        front += [f"  - {_yaml_scalar(entry)}" for entry in review]
+    front.append("---")
+
+    # Drop file-conversion's synthesized H1 so the real title is the only one.
+    lines = body.split("\n")
+    start = 0
+    while start < len(lines) and not lines[start].strip():
+        start += 1
+    if start < len(lines) and lines[start].startswith("# "):
+        start += 1
+        while start < len(lines) and not lines[start].strip():
+            start += 1
+    cleaned = "\n".join(lines[start:]).strip()
+
+    heading = row.get("titleFull") or row.get("stem")
+    return "\n".join(front) + f"\n\n# {heading}\n\n{cleaned}\n"
+
+
+def _run_child(command, label):
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    if completed.returncode != 0:
+        raise UserError(f"{label} failed: {(completed.stderr or completed.stdout).strip()[:400]}")
+    return completed
+
+
+def command_convert(args):
+    """Convert every acquired PDF to Markdown and publish it beside its source."""
+    output = Path(args.run_directory).expanduser()
+    state = run_state.load_run_state(output, WORKFLOW)
+
+    blocked, reconcile_warnings = reconcile_publish_ops(output)
+    if blocked:
+        emit({"status": "blocked", "blockedOperations": blocked})
+        sys.exit(1)
+
+    rows, index_warnings = run_state.read_jsonl_recover_tail(output / INDEX_FILE)
+    by_id = {row["id"]: row for row in rows if row.get("id")}
+    pdf_directory = output / PDF_DIR
+
+    pending = [
+        item
+        for item in state["items"]
+        if item["disposition"] == "acquired" and (args.refresh_all or not by_id.get(item["id"], {}).get("markdownSha256"))
+    ]
+    if not pending:
+        emit({"status": "complete", "runDirectory": str(output), "converted": 0, "nextAction": "import"})
+        return
+
+    structural = []
+    ocr = []
+    for item in pending:
+        row = by_id.get(item["id"], {})
+        source = pdf_directory / row.get("pdfFilename", "")
+        if not source.is_file():
+            continue
+        probe = probe_pdf(source)
+        row["textProbe"] = probe
+        (ocr if probe["needsOcr"] else structural).append((item, row, source, probe))
+
+    progress(f"{len(structural)} document(s) via file-conversion, {len(ocr)} via document-ingest OCR")
+    produced = {}
+
+    if structural:
+        conversion_directory = output / CONVERSION_DIR
+        _run_child(
+            [
+                sys.executable,
+                str(FILE_CONVERSION_TOOL),
+                "convert",
+                *[str(source) for _, _, source, _ in structural],
+                "--to",
+                "md",
+                "--output",
+                str(conversion_directory),
+            ],
+            "file-conversion",
+        )
+        child_state = json.loads((conversion_directory / "run_state.json").read_text(encoding="utf-8"))
+        warnings_by_source = _conversion_warnings(conversion_directory)
+        for child_item in child_state["items"]:
+            if not child_item.get("outputPath"):
+                continue
+            produced[Path(child_item["path"]).name] = {
+                "path": conversion_directory / child_item["outputPath"],
+                "method": "file-conversion-structural",
+                "warnings": warnings_by_source.get(Path(child_item["path"]).name, []),
+                "childStatus": child_item.get("status"),
+                "child": str(conversion_directory),
+            }
+
+    for _, _, source, _ in ocr:
+        target = output / OCR_DIR / source.stem
+        # `--ocr-backend local` is mandatory: document-ingest otherwise tries a
+        # remote OCR service first, which would ship the document off this machine.
+        _run_child(
+            [
+                "node",
+                str(DOCUMENT_INGEST_TOOL),
+                "prepare",
+                str(source),
+                "--output",
+                str(target),
+                "--ocr",
+                "auto",
+                "--ocr-backend",
+                "local",
+            ],
+            "document-ingest",
+        )
+        found = sorted(target.rglob("document.md"))
+        if found:
+            produced[source.name] = {
+                "path": found[0],
+                "method": "document-ingest-ocr",
+                "warnings": ["Text was recovered by OCR and is not guaranteed verbatim."],
+                "childStatus": "ocr",
+                "child": str(target),
+            }
+
+    converted = 0
+    flagged = 0
+    markdown_directory = output / MARKDOWN_DIR
+    for item, row, source, probe in structural + ocr:
+        result = produced.get(source.name)
+        if not result or not Path(result["path"]).is_file():
+            row["markdownStatus"] = "failed"
+            row["reason"] = "conversion produced no Markdown"
+            continue
+
+        body = Path(result["path"]).read_text(encoding="utf-8")
+        coversheet = detect_coversheet(body)
+        document = _markdown_document(row, body, result["method"], probe, result["warnings"], coversheet)
+
+        staged = output / STAGE_DIR / f"{item['id']}.md"
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_text(document, encoding="utf-8")
+        digest = sha256_file(staged)
+        outcome, problem = publish_file(
+            output, item["id"], staged, markdown_directory / row.get("markdownFilename", f"{item['id']}.md"), digest, kind="md"
+        )
+        if outcome == "blocked":
+            row["markdownStatus"] = "blocked"
+            row["reason"] = problem
+            continue
+
+        row["markdownStatus"] = "converted"
+        row["markdownSha256"] = digest
+        row["markdownMethod"] = result["method"]
+        row["markdownChildRun"] = result["child"]
+        row["conversionWarnings"] = result["warnings"]
+        row["coversheetSuspected"] = coversheet
+        item["disposition"] = "converted"
+        converted += 1
+        if coversheet or result["warnings"]:
+            flagged += 1
+
+    _write_index(output, [by_id.get(row["id"], row) if row.get("id") else row for row in rows])
+    run_state.update_run_state(
+        output,
+        lambda current, snapshot=state: {
+            **current,
+            "items": snapshot["items"],
+            "phase": "converted",
+            "children": {**current.get("children", {}), "conversion": str(output / CONVERSION_DIR)},
+            "nextAction": "import",
+        },
+        event={"type": "conversion_recorded", "converted": converted},
+    )
+    emit(
+        {
+            "status": "complete",
+            "runDirectory": str(output),
+            "converted": converted,
+            "viaStructural": len(structural),
+            "viaOcr": len(ocr),
+            "flaggedForReview": flagged,
+            "coversheetsDetected": sum(1 for row in rows if row.get("coversheetSuspected")),
+            "markdownDirectory": str(markdown_directory),
+            "warnings": index_warnings + reconcile_warnings,
+            "nextAction": "import",
+        }
+    )
 
 
 RETRYABLE_DISPOSITIONS = frozenset({"manual", "not-found", "no-candidate", "blocked", "deferred-institutional"})
@@ -842,13 +1186,18 @@ def command_validate(args):
     # A published PDF is evidence, and everything downstream cites it by hash.
     # Verify the files still match the journal rather than trusting the state file.
     for row in rows:
-        if row.get("disposition") != "acquired" or not row.get("pdfSha256"):
-            continue
-        published = output / PDF_DIR / row["pdfFilename"]
-        if not published.is_file():
-            errors.append(f"{row['pdfFilename']} is recorded as acquired but is missing from {PDF_DIR}/")
-        elif sha256_file(published) != row["pdfSha256"]:
-            errors.append(f"{row['pdfFilename']} no longer matches the hash recorded when it was published")
+        if row.get("pdfSha256"):
+            published = output / PDF_DIR / row["pdfFilename"]
+            if not published.is_file():
+                errors.append(f"{row['pdfFilename']} is recorded as acquired but is missing from {PDF_DIR}/")
+            elif sha256_file(published) != row["pdfSha256"]:
+                errors.append(f"{row['pdfFilename']} no longer matches the hash recorded when it was published")
+        if row.get("markdownSha256"):
+            document = output / MARKDOWN_DIR / row["markdownFilename"]
+            if not document.is_file():
+                errors.append(f"{row['markdownFilename']} is recorded as converted but is missing from {MARKDOWN_DIR}/")
+            elif sha256_file(document) != row["markdownSha256"]:
+                errors.append(f"{row['markdownFilename']} no longer matches the hash recorded when it was published")
 
     counts, pending = _summarize(state)
     deferred = counts.get("deferred-institutional", 0)
@@ -939,6 +1288,15 @@ def parser():
         help="Requeue records previously deferred for lack of an institutional connection.",
     )
     acquire.set_defaults(handler=command_acquire)
+
+    convert = subparsers.add_parser("convert", help="Convert acquired PDFs to Markdown with bibliographic frontmatter.")
+    convert.add_argument("run_directory")
+    convert.add_argument(
+        "--refresh-all",
+        action="store_true",
+        help="Reconvert documents that already have published Markdown.",
+    )
+    convert.set_defaults(handler=command_convert)
 
     retry = subparsers.add_parser("retry", help="Requeue terminal failures for another acquisition attempt.")
     retry.add_argument("run_directory")

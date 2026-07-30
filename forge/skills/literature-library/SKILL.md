@@ -38,6 +38,7 @@ Outside a vault, use `forge-output/literature-library/<source-stem>/`.
 - `acquire … --allow-browser`: after the direct paths fail, retry **open-access** records through the browser service.
 - `acquire … --institutional`: also attempt closed-access records, but only if this machine egresses from the institution's network.
 - `acquire … --batch-size 50 --batch-pause 30 --chunk-size 8 --host-delay-ms 3000`: pacing. Batches carry the pause; chunks bound how much an interrupted run repeats.
+- `convert <run-directory>`: convert every acquired PDF to Markdown with bibliographic frontmatter, escalating scanned documents to OCR. Add `--refresh-all` to reconvert.
 - `retry <run-directory> [--item <id> | --disposition <d> | --all-failed]`: requeue terminal failures.
 - `detect-egress --json`: report whether this machine currently egresses from the institution.
 - `status <run-directory> --json`: durable progress, dispositions, and input drift.
@@ -48,6 +49,7 @@ Outside a vault, use `forge-output/literature-library/<source-stem>/`.
 | Disposition | Meaning |
 | --- | --- |
 | `acquired` | a verified PDF is published under `pdf/` |
+| `converted` | Markdown is published under `markdown/` beside the PDF |
 | `deferred-institutional` | closed access and this machine is not on the institution's network; resumable |
 | `manual` | reachable but refused or unparseable; queued in `manual_queue.md` |
 | `not-found` | every candidate returned 404 |
@@ -95,7 +97,13 @@ everything it could from here.
    philosophy reading list is not reachable without institutional access, and
    telling the user that up front is more useful than a progress bar.
 
-5. Gate the run before handing it to `vault-connections import-run`:
+5. Convert the acquired PDFs to Markdown:
+
+   ```bash
+   python3 <skill-directory>/scripts/literature-library.py convert <run-directory>
+   ```
+
+6. Gate the run before handing it to `vault-connections import-run`:
 
    ```bash
    python3 <skill-directory>/scripts/literature-library.py validate <run-directory> --json --read-only
@@ -145,6 +153,37 @@ that refuse a plain HTTP client for open-access content -- Wiley, Sage, Taylor &
 Francis, ACM, Cambridge, PhilPapers -- run commercial bot management that also
 fingerprints headless Chromium, so a stock browser does not satisfy it either.
 The fix for those is institutional access, not a cleverer fetch.
+
+## Conversion
+
+Routing is by measurement, not by another skill's warning text: each PDF is
+probed with PyMuPDF, and anything under 200 alphanumeric characters per page or
+with more than a quarter of its pages empty escalates from `file-conversion`'s
+structural path to `document-ingest` OCR. On a real 21-document humanities corpus
+the sparsest born-digital article still carried ~1450 characters per page, so the
+threshold has real clearance.
+
+**`--ocr-backend local` is mandatory** when invoking `document-ingest`. It
+otherwise tries a remote OCR service first, which would ship the user's documents
+off their machine.
+
+Published Markdown gets YAML frontmatter carrying the bibliographic record, the
+source URL, the PDF hash, and which method produced it. Two things are corrected
+on the way out:
+
+- `file-conversion` names its output with `safe_stem`, which turns
+  `Author - Year - Title` into `Author---Year---Title` and uses that as the H1.
+  The real title replaces it.
+- Every warning from the child run becomes a `needs_review` entry. OCR output is
+  always marked "not guaranteed verbatim" — never present it as exact text.
+
+**Repository coversheets are detected, not removed.** Green open-access PDFs from
+institutional repositories often begin with a page of portal boilerplate, terms
+of use, and citation guidance, which downstream evidence extraction would
+otherwise quote as if the author wrote it. 4 of 21 documents in the reference
+corpus had one. The span is reported in `needs_review` and left in place: a false
+positive that stripped text would delete the opening of an article, and that
+trade is not worth making silently.
 
 ## Why This Is Slow On Purpose
 
