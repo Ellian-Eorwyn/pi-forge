@@ -21,7 +21,7 @@
 		"check:forge-reference": "node scripts/sync-forge-reference.mjs --check",
 		"check:forge-skill-manifests": "node scripts/check-forge-skills.mjs",
 		"check:forge-package": "node scripts/check-forge-package.mjs",
-		"test:forge-skills": "node --test forge/lib/tests/forge-llm.test.mjs && node --test scripts/configure-pi-forge.test.mjs && node --test scripts/forge-skills.test.mjs",
+		"test:forge-skills": "node --test forge/lib/tests/forge-llm.test.mjs && node --test forge/lib/tests/moshi-hook.test.mjs && node --test scripts/configure-pi-forge.test.mjs && node --test scripts/forge-skills.test.mjs",
 		"test:forge-mcp": "node --test scripts/pi-forge-mcp.test.mjs",
 		"test:vault-client": "tsx --test scripts/pi-vault-client.test.ts",
 		"test:vault-workflow": "tsx --test scripts/vault-workflow.test.ts",

@@ -55,6 +55,7 @@ const required = [
 	"bin/pi-forge-mcp.mjs",
 	"bin/pi-forge-update.mjs",
 	"lib/connected-services.mjs",
+	"lib/moshi-hook.mjs",
 	"lib/run-state.mjs",
 	"lib/run_state.py",
 	"scripts/configure-pi-forge.mjs",

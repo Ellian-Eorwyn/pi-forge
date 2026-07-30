@@ -133,10 +133,16 @@ Use these only when you need a non-default layout, local smoke test, or developm
 | `PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL` | `https://github.com/earendil-works/pi/archive/refs/heads/main.tar.gz` |
 | `FORGE_SEARXNG_URL` | one-launch override for `connectedServices.searxng.baseUrl` |
 | `FORGE_PLAYWRIGHT_WS_ENDPOINT` | one-launch override for `connectedServices.playwright.wsEndpoint` |
+| `PI_FORGE_SKIP_MOSHI_HOOK` | unset; set to skip the optional Moshi hook step during install and update |
+| `PI_FORGE_MOSHI_HOOK_BIN` | unset; resolved from `PATH` then `~/.local/bin/moshi-hook` |
 
 `PI_FORGE_PACKAGE_SPEC` and `PI_FORGE_PI_PACKAGE_SPEC` can point at `file:<packed-tarball>` for local release and migration smoke tests. Set `PI_FORGE_PACKAGE_SPEC=@ellian-eorwyn/pi-forge@latest` or `PI_FORGE_PI_PACKAGE_SPEC=@earendil-works/pi-coding-agent@latest` only if you intentionally want to install published npm packages. `PI_FORGE_SOURCE_ARCHIVE_URL` overrides the GitHub source archive used for default pi-forge installs and updates. `PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL` overrides the upstream Pi archive used for default runtime package installs and updates. Checkout-linked development installs are still available with `./install.sh --dev-link`; that mode links launchers and package resources to the checkout instead of the npm app.
 
 Persistent local backend settings live in `~/.pi-forge/agent/settings.json` under `connectedServices`. The installed defaults are SearXNG at `http://llms/searxng` and Playwright rendered browsing at `ws://llms/playwright`.
+
+### Optional Moshi hooks
+
+`moshi-hook` resolves its `pi` target from `PI_CODING_AGENT_DIR`, so a standard `moshi-hook install` covers `~/.pi` and leaves this distribution's `~/.pi-forge/agent` uncovered. Install and `pi-forge-update` close that gap themselves: when `moshi-hook` is present on the host they have it generate `~/.pi-forge/agent/extensions/moshi-hooks.ts`, which pi-forge then discovers like any other agent-directory extension. The generated hook is always the daemon's own current version — nothing is vendored here. The daemon is restarted (`systemctl --user restart moshi-hook.service`) only when the hook actually changed, so a no-op update cannot drop a live session's bridge; elsewhere the step prints a one-line restart reminder. Hosts without `moshi-hook` install exactly as before and print nothing.
 
 ---
 

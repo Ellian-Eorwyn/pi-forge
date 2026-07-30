@@ -8,6 +8,7 @@ import {
 	SLOT_CONTEXT_TOKENS,
 	seedConnectedServicesSettings,
 } from "../lib/connected-services.mjs";
+import { ensureMoshiHook, formatMoshiHookNotice } from "../lib/moshi-hook.mjs";
 
 // Shared limits for the local code and chat variants. Kept here so every
 // install and `pi-forge-update` writes the same context and output budgets.
@@ -164,6 +165,17 @@ writeFileSync(modelsPath, `${JSON.stringify(models, undefined, "\t")}\n`, { mode
 writeFileSync(installedAgentsPath, profileInstructions, { mode: 0o600 });
 chmodSync(installedAgentsPath, 0o600);
 writeFileSync(profilePathMarker, `${profileDirectory}\n`, { mode: 0o600 });
+
+// Optional host integration, so it runs after the managed configuration is
+// written and can never leave that half-done. Moshi is absent on most machines;
+// there the whole step is silent.
+try {
+	const notice = formatMoshiHookNotice(ensureMoshiHook({ agentDir: agentDirectory }));
+	for (const line of notice.out) process.stdout.write(`${line}\n`);
+	for (const line of notice.err) process.stderr.write(`${line}\n`);
+} catch (error) {
+	process.stderr.write(`Moshi hook: ${error.message}\n`);
+}
 
 /**
  * Bulk skills moved from the thinking backend to its non-thinking sibling.

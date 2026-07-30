@@ -12,7 +12,10 @@ function configure(agentDirectory) {
 	const result = spawnSync(
 		process.execPath,
 		[join(repositoryRoot, "scripts", "configure-pi-forge.mjs"), agentDirectory, join(repositoryRoot, "forge")],
-		{ encoding: "utf8" },
+		// These tests cover settings and models seeding. Left enabled, the optional
+		// Moshi step would invoke the host's real moshi-hook binary and restart its
+		// daemon as a side effect of running the suite.
+		{ encoding: "utf8", env: { ...process.env, PI_FORGE_SKIP_MOSHI_HOOK: "1" } },
 	);
 	assert.equal(result.status, 0, result.stderr);
 	return JSON.parse(readFileSync(join(agentDirectory, "settings.json"), "utf8"));
