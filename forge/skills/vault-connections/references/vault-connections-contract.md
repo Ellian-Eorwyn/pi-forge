@@ -277,10 +277,22 @@ Its body must contain each placeholder exactly as a replaceable token:
 {{provenance}}
 ```
 
-Additional prose is allowed, but unknown placeholders are refused. Generated
-entity frontmatter is always produced from the schema, never copied from the
-template. `doctor` reports readiness without making missing templates a
-non-import failure. Pi-Forge never creates or edits these vault-owned files.
+Additional prose is allowed. Generated entity frontmatter is always produced from
+the schema, never copied from the template. `doctor` reports readiness without
+making missing templates a non-import failure.
+
+The templates are shared with `vault-wiki`, whose note shape needs per-kind
+placeholders — `{{key_works}}`, `{{key_points}}`, `{{origin}}` — on top of the
+five above. So a placeholder declared by any installed kind spec is accepted
+here, and a placeholder this path does not fill is stripped together with the
+heading it would have left empty. A template carrying only the five fields
+renders byte-for-byte as it always did. When no kind specs are installed, an
+unrecognized placeholder is still refused.
+
+Pi-Forge never creates or edits these vault-owned files as a side effect. The
+single writer is `vault-wiki template-install`, run deliberately by the vault
+owner; it is a no-op on an identical file and refuses to overwrite a modified one
+without `--force`.
 
 Proposal generation writes only under `.vault-connections/runs`. The source
 run's structured inputs and selected artifacts, the schema, every selected

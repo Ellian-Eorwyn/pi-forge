@@ -1,0 +1,173 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-07-29",
+  "comment": "Which sources a wiki expansion is allowed to lean on, in preference order. This is editorial policy — who to trust — and is deliberately separate from web-research's domain-strategies.json, which is about how to fetch a given host. A source is reached by site-restricted search, never by guessing a URL slug: SEP entry slugs are topic-based rather than name-based, so there is no /entries/latour/ to guess and a guessed URL that 404s looks identical to a real one that was never checked. Lower 'authority' is tried first. 'kinds' and 'topics' accept '*' to match everything.",
+  "topics": [
+    "philosophy",
+    "ethics",
+    "epistemology",
+    "metaphysics",
+    "phenomenology",
+    "logic",
+    "feminism",
+    "gender-studies",
+    "buddhism",
+    "religion",
+    "sociology",
+    "anthropology",
+    "science-technology-studies",
+    "psychology",
+    "biomedical",
+    "computing",
+    "mathematics",
+    "history",
+    "literature",
+    "art",
+    "music",
+    "geography",
+    "politics",
+    "economics",
+    "general"
+  ],
+  "sources": [
+    {
+      "id": "sep",
+      "label": "Stanford Encyclopedia of Philosophy",
+      "site": "plato.stanford.edu",
+      "authority": 1,
+      "kinds": ["concept", "term", "practice", "figure", "work"],
+      "topics": [
+        "philosophy",
+        "ethics",
+        "epistemology",
+        "metaphysics",
+        "phenomenology",
+        "logic",
+        "buddhism",
+        "feminism",
+        "gender-studies",
+        "science-technology-studies",
+        "politics"
+      ],
+      "notes": "Peer-reviewed and stable. The strongest source available for anything in the philosophy cluster."
+    },
+    {
+      "id": "iep",
+      "label": "Internet Encyclopedia of Philosophy",
+      "site": "iep.utm.edu",
+      "authority": 2,
+      "kinds": ["concept", "term", "practice", "figure", "work"],
+      "topics": [
+        "philosophy",
+        "ethics",
+        "epistemology",
+        "metaphysics",
+        "phenomenology",
+        "logic",
+        "feminism",
+        "gender-studies"
+      ],
+      "notes": "Peer-reviewed. Often covers a figure the SEP has no standalone entry for."
+    },
+    {
+      "id": "plato-buddhism",
+      "label": "Stanford Encyclopedia of Philosophy (Buddhist philosophy)",
+      "site": "plato.stanford.edu",
+      "authority": 2,
+      "kinds": ["concept", "term", "practice"],
+      "topics": ["buddhism", "religion"],
+      "notes": "Separate entry so a Sanskrit or Pali term is searched with its tradition named."
+    },
+    {
+      "id": "philpapers",
+      "label": "PhilPapers",
+      "site": "philpapers.org",
+      "authority": 3,
+      "kinds": ["work", "figure"],
+      "topics": ["philosophy", "ethics", "epistemology", "metaphysics", "phenomenology", "logic"],
+      "notes": "Best for pinning a work to an author and year. Metadata rather than full text."
+    },
+    {
+      "id": "britannica",
+      "label": "Encyclopaedia Britannica",
+      "site": "britannica.com",
+      "authority": 4,
+      "kinds": ["*"],
+      "topics": [
+        "history",
+        "geography",
+        "religion",
+        "literature",
+        "art",
+        "music",
+        "politics",
+        "economics",
+        "general"
+      ],
+      "notes": "Edited and citable. Preferred over Wikipedia for places, events, and historical figures."
+    },
+    {
+      "id": "plato-stanford-sci",
+      "label": "Stanford Encyclopedia of Philosophy (science)",
+      "site": "plato.stanford.edu",
+      "authority": 3,
+      "kinds": ["concept", "term"],
+      "topics": ["science-technology-studies", "mathematics", "computing"],
+      "notes": "Covers philosophy of science and mathematics terms that general encyclopedias treat only technically."
+    },
+    {
+      "id": "pubmed",
+      "label": "PubMed",
+      "site": "pubmed.ncbi.nlm.nih.gov",
+      "authority": 2,
+      "kinds": ["concept", "term"],
+      "topics": ["biomedical", "psychology"],
+      "notes": "Use the abstract only. A wiki definition should not rest on a single primary study."
+    },
+    {
+      "id": "mesh",
+      "label": "MeSH",
+      "site": "ncbi.nlm.nih.gov",
+      "authority": 3,
+      "kinds": ["term"],
+      "topics": ["biomedical"],
+      "notes": "Controlled biomedical vocabulary — well suited to a glossary-shaped term note."
+    },
+    {
+      "id": "apa-dictionary",
+      "label": "APA Dictionary of Psychology",
+      "site": "dictionary.apa.org",
+      "authority": 2,
+      "kinds": ["concept", "term"],
+      "topics": ["psychology"],
+      "notes": "Authoritative short definitions."
+    },
+    {
+      "id": "mathworld",
+      "label": "Wolfram MathWorld",
+      "site": "mathworld.wolfram.com",
+      "authority": 2,
+      "kinds": ["concept", "term"],
+      "topics": ["mathematics"],
+      "notes": null
+    },
+    {
+      "id": "oxford-reference",
+      "label": "Oxford Reference",
+      "site": "oxfordreference.com",
+      "authority": 4,
+      "kinds": ["term", "concept"],
+      "topics": ["*"],
+      "notes": "Often paywalled past the definition line; treat a short extract as metadata-level evidence."
+    },
+    {
+      "id": "wikipedia",
+      "label": "Wikipedia",
+      "site": "en.wikipedia.org",
+      "authority": 9,
+      "kinds": ["*"],
+      "topics": ["*"],
+      "notes": "The universal fallback and usually the only source with dates for a contemporary figure. Ranked last on purpose: it is the source most likely to be right and least likely to be citable, so prefer anything above it when both resolve."
+    }
+  ]
+}

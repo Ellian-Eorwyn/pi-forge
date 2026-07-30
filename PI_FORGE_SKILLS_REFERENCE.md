@@ -30,7 +30,7 @@ in `forge/SCRIPT_TOOL_CONTRACT.md`.
 
 <!-- forge:skills-list start -->
 
-The live skill inventory currently contains 22 capability workflows, listed
+The live skill inventory currently contains 23 capability workflows, listed
 here with the one-line descriptions maintained in `forge/CAPABILITIES.md`:
 
 - `coding`: Inspect repositories and ship small, reviewable code changes.
@@ -53,6 +53,7 @@ here with the one-line descriptions maintained in `forge/CAPABILITIES.md`:
 - `vault-handoff`: Prepare completed artifacts for pi-vault or Obsidian review.
 - `vault-organizer`: Classify, de-duplicate, and organize Obsidian notes from a human-maintained vault schema note, with restart-safe resumable runs, a recoverable duplicate quarantine, asset-embed repair, and schema drift detection that blocks applying when the schema and the folders on disk disagree.
 - `vault-transcripts`: Classify, rename, clean, and summarize raw transcripts while distinguishing owner memos/journals, personal exchanges, external sources, and unknown material; apply scoped voice only where valid, add owner-journal reflection, and keep the original transcription verbatim.
+- `vault-wiki`: Install the seven vault-owned wiki entry templates, and expand thin wiki entity notes into cited reference cards from canonical sources (Stanford Encyclopedia of Philosophy, Wikipedia, and per-topic equivalents), rewriting only the sections the kind spec declares managed — owner-authored `Notes`, frontmatter, and every unclaimed heading are preserved byte-for-byte and enforced by a post-merge comparison — with batch approval, per-id approval for anything the reviewer flagged, and a per-run revert.
 - `web-collection`: Archive, organize, and preserve web sources with per-URL checkpoints.
 - `web-research`: Perform resumable quick, deep, or academic web research with URL/provider/iteration checkpoints, direct-first acquisition, local-first scheduling, embedding-ranked source triage, browser fallback/discovery, provenance, evidence, claims, and validation.
 

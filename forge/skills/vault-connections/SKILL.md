@@ -142,8 +142,10 @@ Nothing is written without the user naming the proposal ids they approve.
 - Generated critique, when a workflow actually produces it, belongs under a
   separate `## Critique`; it is never blended into source description.
 - Imported wiki notes use vault-owned templates from the schema-compiled
-  `meta/templates` route. Pi-Forge documents the required template shape but
-  never creates or edits those templates.
+  `meta/templates` route. The templates `vault-wiki` installs are richer than the
+  five fields this skill fills, so any placeholder left unfilled here is dropped
+  along with the heading it would have emptied — an imported note never carries a
+  literal `{{key_works}}` or an empty `## Key Works`.
 - A note with no frontmatter, or with an unclosed frontmatter block, is refused
   and reported — never given frontmatter. Run `vault-organizer` on those first.
 - Both notes in an approved pair are linked to each other.
@@ -165,9 +167,11 @@ Nothing is written without the user naming the proposal ids they approve.
 - Never hand-edit `related`, proposals, or the decisions ledger outside the script.
 - Never apply a proposal the user has not named. "Apply the strong ones" is not an
   approval — list them and get the ids.
-- Never create a missing `Wiki Concept.md`, `Wiki Practice.md`, `Wiki Place.md`,
-  `Wiki Event.md`, `Wiki Term.md`, `Wiki Work.md`, or `Wiki Figure.md` template.
-  Report the exact schema-compiled path and let the vault owner create it.
+- Never create or edit a wiki template as a side effect of any command here. The
+  only writer is `vault-wiki template-install`, which the vault owner runs
+  deliberately and which refuses to overwrite a template they have modified
+  unless `--force` is passed. From this skill, report the exact schema-compiled
+  path and say that command installs it.
 - Never claim a refused or skipped note was updated; the `warnings` array says
   what was skipped and why.
 - Never add a `wiki` domain, subdomain, or note type to the schema note yourself.

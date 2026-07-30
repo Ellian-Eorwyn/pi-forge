@@ -1,0 +1,31 @@
+{
+	"name": "vault-wiki",
+	"type": "pi-forge-skill",
+	"version": "0.1.0",
+	"description": "Per-kind templates for wiki entity notes, and research-backed expansion of thin notes into cited reference cards from canonical sources.",
+	"skill_file": "SKILL.md",
+	"scripts_dir": "scripts",
+	"references_dir": "references",
+	"restart_safe": true,
+	"tools": [
+		{
+			"name": "vault_wiki",
+			"description": "Install the seven vault-owned wiki templates, and expand wiki entity notes by drafting from canonical sources on the chat service, reviewing in batches on the thinking service, and rewriting only the sections the kind spec declares managed; every write is backed up, journaled, and revertible, and runs are inspectable with review/status/doctor.",
+			"command": "python3 scripts/vault-wiki.py",
+			"destructive": true
+		}
+	],
+	"safety": {
+		"destructive_by_default": false,
+		"requires_review_for_filesystem_changes": true,
+		"preserve_provenance_when_applicable": true,
+		"never_deletes_notes": true,
+		"never_creates_moves_or_renames_notes": true,
+		"never_modifies_note_frontmatter": true,
+		"modifies_existing_note_bodies": "managed sections only, enforced by a byte-comparison of everything else",
+		"never_writes_owner_authored_sections": true,
+		"backs_up_before_every_write": true,
+		"revertible_by_run": true,
+		"refuses_uncited_proposals_at_apply": true
+	}
+}

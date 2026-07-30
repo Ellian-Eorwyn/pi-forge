@@ -34,6 +34,7 @@ import forge_verify
 import run_state
 import vault_profile
 import vault_voice
+import vault_wiki
 from vault_classification import (
     DEFAULT_BASE_URL,
     build_messages as classification_messages,
@@ -47,7 +48,6 @@ from vault_schema import (
     LIST_ITEM_RE,
     RESERVED_WINDOWS_NAMES,
     UserError,
-    compile_destination,
     compiled_schema_for,
     link_basename,
     normalize_body_for_hash,
@@ -114,36 +114,15 @@ ENTITY_BATCH_MAX_CHARS = 30000
 
 STRENGTHS = ("strong", "moderate", "weak")
 CONNECTION_KINDS = ("same-topic", "generalization", "application", "contrast", "shared-entity")
-WIKI_DOMAIN = "wiki"
-WIKI_KIND_SUBDOMAIN = {
-    "concept": "concepts",
-    "practice": "practices",
-    "place": "places",
-    "event": "events",
-    "term": "terms",
-    "work": "works",
-    "figure": "figures",
-}
-WIKI_KIND_TYPE = {
-    "concept": "concept",
-    "practice": "concept",
-    "place": "place",
-    "event": "event",
-    "term": "concept",
-    "work": "work",
-    "figure": "person",
-}
-WIKI_TEMPLATE_NAMES = {
-    "concept": "Wiki Concept.md",
-    "practice": "Wiki Practice.md",
-    "place": "Wiki Place.md",
-    "event": "Wiki Event.md",
-    "term": "Wiki Term.md",
-    "work": "Wiki Work.md",
-    "figure": "Wiki Figure.md",
-}
-WIKI_TEMPLATE_FIELDS = ("title", "summary", "evidence", "sources", "provenance")
-DEFAULT_WIKI_KINDS = ("concept", "term")
+# The wiki vocabulary, template contract, and routing live in `vault_wiki`, which
+# `vault-wiki` shares. Re-bound here as module attributes so this script reads the
+# same as before and there is exactly one definition of each.
+WIKI_DOMAIN = vault_wiki.WIKI_DOMAIN
+WIKI_KIND_SUBDOMAIN = vault_wiki.WIKI_KIND_SUBDOMAIN
+WIKI_KIND_TYPE = vault_wiki.WIKI_KIND_TYPE
+WIKI_TEMPLATE_NAMES = vault_wiki.WIKI_TEMPLATE_NAMES
+WIKI_TEMPLATE_FIELDS = vault_wiki.WIKI_TEMPLATE_FIELDS
+DEFAULT_WIKI_KINDS = vault_wiki.DEFAULT_WIKI_KINDS
 IMPORT_DEFAULT_ARTIFACTS = {
     "literature": ("literature_summary.md", "key_terms.md"),
     "meta-literature": ("meta_synthesis.md", "concept_register.md"),
@@ -1081,22 +1060,8 @@ def stub_note_text(schema, title, kind, summary, mentions):
     return serialize_frontmatter(metadata, schema) + "\n".join(lines) + "\n"
 
 
-def wiki_destination(schema, kind, title):
-    subdomain = WIKI_KIND_SUBDOMAIN[kind]
-    if WIKI_DOMAIN not in schema["domains"]:
-        raise UserError(f"the schema note has no '{WIKI_DOMAIN}' domain; add it before running wiki")
-    if subdomain not in schema["subdomains"].get(WIKI_DOMAIN, {}):
-        raise UserError(f"the schema note has no '{WIKI_DOMAIN}/{subdomain}' subdomain; add it before running wiki")
-    folder = compile_destination(schema, {"domain": WIKI_DOMAIN, "subdomain": subdomain})
-    return (folder / f"{title}.md").as_posix()
-
-
-def wiki_notes(schema, entries):
-    """Notes already filed in the wiki domain."""
-    if WIKI_DOMAIN not in schema["domains"]:
-        return {}
-    prefix = compile_destination(schema, {"domain": WIKI_DOMAIN}).as_posix() + "/"
-    return {rel: entry for rel, entry in entries.items() if rel.startswith(prefix) or entry.get("domain") == WIKI_DOMAIN}
+wiki_destination = vault_wiki.wiki_destination
+wiki_notes = vault_wiki.wiki_notes
 
 
 # --------------------------------------------------------------------------- #
@@ -1187,62 +1152,45 @@ def invoke_upstream_validator(run_directory, run_type):
     return validation
 
 
-def template_folder(schema):
-    if "meta" not in schema["domains"] or "templates" not in schema["subdomains"].get("meta", {}):
-        raise UserError("the schema does not define the required meta/templates route")
-    return compile_destination(schema, {"domain": "meta", "subdomain": "templates"})
+template_folder = vault_wiki.template_folder
+require_wiki_templates = vault_wiki.require_wiki_templates
 
 
 def inspect_wiki_template(vault, schema, kind):
-    relative = template_folder(schema) / WIKI_TEMPLATE_NAMES[kind]
-    path = vault / relative
-    result = {"kind": kind, "path": relative.as_posix(), "ok": False, "errors": []}
-    if not path.is_file():
-        result["errors"].append(f"missing template: {path}")
-        return result
-    if path.is_symlink() or not path_is_inside(vault, path.resolve()):
-        result["errors"].append(f"template must be a vault-owned regular file: {path}")
-        return result
-    split = split_frontmatter(path.read_bytes())
-    if not split["had_frontmatter"] or split["malformed"]:
-        result["errors"].append(f"template has invalid frontmatter: {path}")
-        return result
-    metadata = parse_frontmatter(split["frontmatter_text"])
-    required = {
-        "type": "template",
-        "status": "active",
-        "domain": "meta",
-        "subdomain": "templates",
-        "capture_type": "manual",
-    }
-    for key, value in required.items():
-        if metadata.get(key) != value:
-            result["errors"].append(f"{path} requires {key}: {value}")
-    body = split["body"]
-    for field in WIKI_TEMPLATE_FIELDS:
-        if f"{{{{{field}}}}}" not in body:
-            result["errors"].append(f"{path} is missing {{{{{field}}}}}")
-    unknown = sorted(set(re.findall(r"\{\{([^{}\r\n]+)\}\}", body)) - set(WIKI_TEMPLATE_FIELDS))
-    if unknown:
-        result["errors"].append(f"{path} has unknown placeholders: {', '.join(unknown)}")
-    result["ok"] = not result["errors"]
-    result["sha256"] = sha256_file(path)
-    result["body"] = body
-    return result
+    """Validate a template against the five fields this skill renders.
+
+    `vault-wiki` installs richer templates that also carry per-kind placeholders,
+    so it inspects with its own field set. Here the five stay required and
+    anything the shipped templates add is tolerated: an import must keep working
+    against a template written for a fuller note shape.
+    """
+    return vault_wiki.inspect_wiki_template(
+        vault,
+        schema,
+        kind,
+        required_fields=WIKI_TEMPLATE_FIELDS,
+        known_fields=_known_template_fields(),
+    )
 
 
-def require_wiki_templates(vault, schema, kinds):
-    templates = {}
-    errors = []
-    for kind in kinds:
-        result = inspect_wiki_template(vault, schema, kind)
-        if result["ok"]:
-            templates[kind] = result
-        else:
-            errors.extend(result["errors"])
-    if errors:
-        raise UserError("wiki template readiness failed: " + "; ".join(errors))
-    return templates
+def _known_template_fields():
+    """Every placeholder any installed kind spec declares, or None.
+
+    None restores the original behaviour of refusing anything beyond the five
+    fields, which is right when `vault-wiki` is absent and no richer vocabulary
+    exists to honour.
+    """
+    specs_path = Path(__file__).resolve().parents[2] / "vault-wiki" / "references" / "wiki-kinds.json"
+    if not specs_path.is_file():
+        return None
+    try:
+        specs = vault_wiki.load_kind_specs(specs_path)
+    except UserError:
+        return None
+    fields = set(WIKI_TEMPLATE_FIELDS)
+    for spec in specs.values():
+        fields.update(spec["placeholders"])
+    return sorted(fields)
 
 
 def existing_basenames(vault, schema_path):
@@ -1582,6 +1530,10 @@ def render_wiki_entity(schema, template, candidate, records, source_run, source_
     body = template["body"]
     for key, value in replacements.items():
         body = body.replace(f"{{{{{key}}}}}", value)
+    # A template written for the fuller `vault-wiki` note shape carries per-kind
+    # placeholders this path knows nothing about. Left in place they would ship as
+    # literal `{{key_works}}` text, so drop them and the headings they empty.
+    body = vault_wiki.strip_unfilled(body)
     metadata = {
         "type": WIKI_KIND_TYPE[candidate["kind"]],
         "status": "active",

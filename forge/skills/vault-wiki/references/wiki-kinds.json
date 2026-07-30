@@ -1,0 +1,427 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-07-29",
+  "comment": "Per-kind section specification for wiki entity notes. This file decides which headings a generator owns; the paired template in references/templates decides what a note looks like. doctor checks the two agree. 'guidance' is sent to the drafting model verbatim, so it is prompt text as much as configuration. Length budgets are first guesses and expected to be retuned once real runs land.",
+  "kinds": {
+    "concept": {
+      "max_managed_chars": 1600,
+      "lead_guidance": "One or two sentences defining the idea. Say what it claims, not why it matters. No hedging, no 'refers to'.",
+      "sections": [
+        {
+          "id": "_lead",
+          "placeholder": "summary",
+          "fill": "lead",
+          "max_chars": 320,
+          "guidance": "The definition. One or two sentences."
+        },
+        {
+          "id": "key_points",
+          "heading": "Key Points",
+          "aliases": ["Key Ideas", "In Brief", "Overview"],
+          "placeholder": "key_points",
+          "fill": "bullets",
+          "max_bullets": 5,
+          "max_chars": 160,
+          "guidance": "Three to five bullets: the moves the concept makes, what it argues against, where it does work. One claim per bullet, no bullet repeating the lead."
+        },
+        {
+          "id": "origin",
+          "heading": "Origin",
+          "aliases": ["History", "Provenance of the Term"],
+          "placeholder": "origin",
+          "fill": "prose",
+          "max_chars": 220,
+          "optional": true,
+          "guidance": "One line: who introduced it, in what work, and when. Omit entirely rather than guessing a date."
+        },
+        {
+          "id": "key_thinkers",
+          "heading": "Key Thinkers",
+          "aliases": ["Thinkers", "Key Figures"],
+          "placeholder": "key_thinkers",
+          "fill": "bullets",
+          "max_bullets": 6,
+          "max_chars": 90,
+          "guidance": "Names only, optionally with a three-word gloss. People who developed or contested the concept, not everyone who cited it."
+        },
+        {
+          "id": "distinctions",
+          "heading": "Distinctions",
+          "aliases": ["Use Carefully", "Disambiguation", "Common Confusions"],
+          "placeholder": "distinctions",
+          "fill": "bullets",
+          "max_bullets": 3,
+          "max_chars": 200,
+          "optional": true,
+          "guidance": "Where the concept is routinely misread, and what it is confused with. Include only a confusion the sources actually flag."
+        },
+        {
+          "id": "sources",
+          "heading": "Sources",
+          "placeholder": "sources",
+          "fill": "links",
+          "guidance": "Deterministic. Rendered from the archived sources, never written by the model."
+        },
+        {
+          "id": "notes",
+          "heading": "Notes",
+          "owner": true,
+          "guidance": "Owner-authored. Never written or read by the pipeline."
+        },
+        {
+          "id": "_footnotes",
+          "placeholder": "footnotes",
+          "fill": "footnotes",
+          "guidance": "Deterministic. Rendered from the citations the draft actually used."
+        }
+      ]
+    },
+    "term": {
+      "max_managed_chars": 1000,
+      "lead_guidance": "One sentence that lets a reader use the term correctly. This is a glossary entry, not an essay.",
+      "sections": [
+        {
+          "id": "_lead",
+          "placeholder": "summary",
+          "fill": "lead",
+          "max_chars": 240,
+          "guidance": "The definition, in one sentence. Expand an acronym on first use."
+        },
+        {
+          "id": "usage",
+          "heading": "Usage",
+          "aliases": ["In Practice", "How It Is Used"],
+          "placeholder": "usage",
+          "fill": "prose",
+          "max_chars": 320,
+          "guidance": "One or two lines on where the term is used and by whom, including any field-specific narrowing of its meaning."
+        },
+        {
+          "id": "origin",
+          "heading": "Origin",
+          "aliases": ["History", "Etymology"],
+          "placeholder": "origin",
+          "fill": "prose",
+          "max_chars": 220,
+          "optional": true,
+          "guidance": "One line: where the term comes from. Omit rather than guessing."
+        },
+        {
+          "id": "sources",
+          "heading": "Sources",
+          "placeholder": "sources",
+          "fill": "links",
+          "guidance": "Deterministic."
+        },
+        {
+          "id": "notes",
+          "heading": "Notes",
+          "owner": true,
+          "guidance": "Owner-authored."
+        },
+        {
+          "id": "_footnotes",
+          "placeholder": "footnotes",
+          "fill": "footnotes",
+          "guidance": "Deterministic."
+        }
+      ]
+    },
+    "practice": {
+      "max_managed_chars": 2000,
+      "lead_guidance": "One or two sentences naming the practice and what doing it consists of.",
+      "sections": [
+        {
+          "id": "_lead",
+          "placeholder": "summary",
+          "fill": "lead",
+          "max_chars": 320,
+          "guidance": "What the practice is and what performing it involves."
+        },
+        {
+          "id": "how_it_works",
+          "heading": "How It Works",
+          "aliases": ["Method", "Practice", "Steps"],
+          "placeholder": "how_it_works",
+          "fill": "bullets",
+          "max_bullets": 5,
+          "max_chars": 180,
+          "guidance": "Three to five bullets describing the method as a practitioner would recognize it. Describe the technique, do not instruct the reader."
+        },
+        {
+          "id": "origin",
+          "heading": "Origin",
+          "aliases": ["History", "Tradition"],
+          "placeholder": "origin",
+          "fill": "prose",
+          "max_chars": 240,
+          "optional": true,
+          "guidance": "One line: the tradition or lineage it comes from, and roughly when."
+        },
+        {
+          "id": "key_thinkers",
+          "heading": "Key Thinkers",
+          "aliases": ["Thinkers", "Key Teachers", "Key Figures"],
+          "placeholder": "key_thinkers",
+          "fill": "bullets",
+          "max_bullets": 6,
+          "max_chars": 90,
+          "guidance": "People who codified or transmitted the practice."
+        },
+        {
+          "id": "sources",
+          "heading": "Sources",
+          "placeholder": "sources",
+          "fill": "links",
+          "guidance": "Deterministic."
+        },
+        {
+          "id": "notes",
+          "heading": "Notes",
+          "owner": true,
+          "guidance": "Owner-authored."
+        },
+        {
+          "id": "_footnotes",
+          "placeholder": "footnotes",
+          "fill": "footnotes",
+          "guidance": "Deterministic."
+        }
+      ]
+    },
+    "figure": {
+      "max_managed_chars": 2000,
+      "lead_guidance": "One or two sentences: field, dates in parentheses, and the one thing they are known for. This is the single most useful line on the card and it is what every figure note currently lacks.",
+      "sections": [
+        {
+          "id": "_lead",
+          "placeholder": "summary",
+          "fill": "lead",
+          "max_chars": 400,
+          "guidance": "Who they are: nationality or field, lifespan in parentheses when the sources give it, and what they are known for. Never invent a date; omit the parenthetical instead. For a living person, claim nothing the archived sources do not state."
+        },
+        {
+          "id": "key_ideas",
+          "heading": "Key Ideas",
+          "aliases": ["Contributions", "Key Contributions"],
+          "placeholder": "key_ideas",
+          "fill": "bullets",
+          "max_bullets": 5,
+          "max_chars": 170,
+          "guidance": "Three to five bullets, each naming one idea and saying what it claims. Wikilink a concept only when that note already exists."
+        },
+        {
+          "id": "key_works",
+          "heading": "Key Works",
+          "aliases": ["Key Texts", "Major Works", "Selected Works"],
+          "placeholder": "key_works",
+          "fill": "bullets",
+          "max_bullets": 5,
+          "max_chars": 120,
+          "guidance": "Format each as *Title* (year). Two to five entries, the works they are actually read for. Omit a year you cannot source."
+        },
+        {
+          "id": "position",
+          "heading": "Position",
+          "aliases": ["Tradition", "Approach", "Intellectual Position"],
+          "placeholder": "position",
+          "fill": "prose",
+          "max_chars": 320,
+          "optional": true,
+          "guidance": "One or two lines: the tradition they work in and what they argue against. Omit unless the sources make it clear."
+        },
+        {
+          "id": "associated_concepts",
+          "heading": "Associated Concepts",
+          "aliases": ["Concepts"],
+          "placeholder": "associated_concepts",
+          "fill": "links",
+          "guidance": "Deterministic. Rendered from the note's own related property, never written by the model."
+        },
+        {
+          "id": "colleague_thinkers",
+          "heading": "Colleague Thinkers",
+          "aliases": ["Colleagues", "Interlocutors"],
+          "placeholder": "colleague_thinkers",
+          "fill": "links",
+          "guidance": "Deterministic. Rendered from the note's own related property, never written by the model."
+        },
+        {
+          "id": "sources",
+          "heading": "Sources",
+          "placeholder": "sources",
+          "fill": "links",
+          "guidance": "Deterministic."
+        },
+        {
+          "id": "notes",
+          "heading": "Notes",
+          "owner": true,
+          "guidance": "Owner-authored."
+        },
+        {
+          "id": "_footnotes",
+          "placeholder": "footnotes",
+          "fill": "footnotes",
+          "guidance": "Deterministic."
+        }
+      ]
+    },
+    "work": {
+      "max_managed_chars": 2000,
+      "lead_guidance": "One or two sentences: author, year, form, and the work's central claim or premise.",
+      "sections": [
+        {
+          "id": "_lead",
+          "placeholder": "summary",
+          "fill": "lead",
+          "max_chars": 320,
+          "guidance": "Author, year, and form, then the one-line thesis or premise. Omit a year you cannot source."
+        },
+        {
+          "id": "overview",
+          "heading": "Overview",
+          "aliases": ["Argument", "Contents", "Synopsis"],
+          "placeholder": "overview",
+          "fill": "bullets",
+          "max_bullets": 5,
+          "max_chars": 180,
+          "guidance": "Three to five bullets tracing what the work does, in its own order. Works for an argument, a narrative, or a track list alike."
+        },
+        {
+          "id": "key_concepts",
+          "heading": "Key Concepts",
+          "aliases": ["Concepts", "Key Terms"],
+          "placeholder": "key_concepts",
+          "fill": "bullets",
+          "max_bullets": 5,
+          "max_chars": 140,
+          "guidance": "Ideas this work is the standard citation for. Wikilink a concept only when that note already exists."
+        },
+        {
+          "id": "sources",
+          "heading": "Sources",
+          "placeholder": "sources",
+          "fill": "links",
+          "guidance": "Deterministic."
+        },
+        {
+          "id": "notes",
+          "heading": "Notes",
+          "owner": true,
+          "guidance": "Owner-authored."
+        },
+        {
+          "id": "_footnotes",
+          "placeholder": "footnotes",
+          "fill": "footnotes",
+          "guidance": "Deterministic."
+        }
+      ]
+    },
+    "place": {
+      "max_managed_chars": 1600,
+      "lead_guidance": "One or two sentences: what and where it is.",
+      "sections": [
+        {
+          "id": "_lead",
+          "placeholder": "summary",
+          "fill": "lead",
+          "max_chars": 300,
+          "guidance": "What the place is and where. Name the containing region so the note is locatable without a map."
+        },
+        {
+          "id": "significance",
+          "heading": "Significance",
+          "aliases": ["Why It Matters", "Importance"],
+          "placeholder": "significance",
+          "fill": "bullets",
+          "max_bullets": 4,
+          "max_chars": 170,
+          "guidance": "Two to four bullets on why the place recurs as a subject — historical, cultural, or personal."
+        },
+        {
+          "id": "context",
+          "heading": "Context",
+          "aliases": ["Geography", "Setting"],
+          "placeholder": "context",
+          "fill": "prose",
+          "max_chars": 320,
+          "optional": true,
+          "guidance": "One line of orienting detail: region, period, scale."
+        },
+        {
+          "id": "sources",
+          "heading": "Sources",
+          "placeholder": "sources",
+          "fill": "links",
+          "guidance": "Deterministic."
+        },
+        {
+          "id": "notes",
+          "heading": "Notes",
+          "owner": true,
+          "guidance": "Owner-authored."
+        },
+        {
+          "id": "_footnotes",
+          "placeholder": "footnotes",
+          "fill": "footnotes",
+          "guidance": "Deterministic."
+        }
+      ]
+    },
+    "event": {
+      "max_managed_chars": 1600,
+      "lead_guidance": "One or two sentences: what happened, when, and where.",
+      "sections": [
+        {
+          "id": "_lead",
+          "placeholder": "summary",
+          "fill": "lead",
+          "max_chars": 300,
+          "guidance": "What happened, with the date and place. Omit a date you cannot source rather than approximating it."
+        },
+        {
+          "id": "what_happened",
+          "heading": "What Happened",
+          "aliases": ["Account", "Sequence", "Details"],
+          "placeholder": "what_happened",
+          "fill": "bullets",
+          "max_bullets": 5,
+          "max_chars": 180,
+          "guidance": "Three to five bullets in chronological order. Facts, not interpretation."
+        },
+        {
+          "id": "significance",
+          "heading": "Significance",
+          "aliases": ["Why It Matters", "Aftermath", "Consequences"],
+          "placeholder": "significance",
+          "fill": "prose",
+          "max_chars": 300,
+          "optional": true,
+          "guidance": "One or two lines on what changed as a result."
+        },
+        {
+          "id": "sources",
+          "heading": "Sources",
+          "placeholder": "sources",
+          "fill": "links",
+          "guidance": "Deterministic."
+        },
+        {
+          "id": "notes",
+          "heading": "Notes",
+          "owner": true,
+          "guidance": "Owner-authored."
+        },
+        {
+          "id": "_footnotes",
+          "placeholder": "footnotes",
+          "fill": "footnotes",
+          "guidance": "Deterministic."
+        }
+      ]
+    }
+  }
+}
