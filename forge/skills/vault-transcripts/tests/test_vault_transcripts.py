@@ -643,6 +643,19 @@ class CheckTests(unittest.TestCase):
         )
         self.assertEqual(vt.added_words(source, cleaned, []), [])
 
+    def test_a_name_spelled_properly_is_not_an_invented_word(self):
+        # Live failure on the Buddhism lectures: the tokenizer cut at the first
+        # accented letter, so "Śāntideva" reached the check as "ntidevas" and
+        # "sūtras" as "tras" — fragments with no root in the source, which read
+        # as fabrication when the cleanup had simply spelled the name right.
+        source = "we read aryadeva and the sutras of santideva and the sastras"
+        cleaned = "We read Āryadeva and the sūtras of Śāntideva, and the śāstras."
+        self.assertEqual(vt.added_words(source, cleaned, []), [])
+
+    def test_folding_leaves_ordinary_words_alone(self):
+        self.assertEqual(vt.content_words("The gasket needs replacing"), ["the", "gasket", "needs", "replacing"])
+        self.assertEqual(vt.fold_diacritics("café Gödel naïve"), "cafe Godel naive")
+
     def test_added_words_still_catches_a_fabricated_sentence(self):
         source = "okay so I need to order the replacement gasket for the espresso machine"
         invented = vt.added_words(source, "The speaker described several unrelated household chores.", [])

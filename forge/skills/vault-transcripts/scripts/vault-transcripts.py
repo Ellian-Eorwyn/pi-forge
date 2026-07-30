@@ -30,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from collections import Counter
 from pathlib import Path
 
@@ -1498,10 +1499,25 @@ def cleanup_payload(
     return payload, payload["chunk"]
 
 
+def fold_diacritics(text):
+    """``Śāntideva`` -> ``santideva``, ``sūtras`` -> ``sutras``.
+
+    Every comparison in this file runs on ASCII word tokens, and a transcriber
+    that writes "Shantideva" is describing the same person as a cleanup that
+    writes "Śāntideva". Folding the marks away is what lets the two compare
+    equal; without it the tokenizer cut at the first accented letter and handed
+    back ``ntidevas``, a fragment with no root in the source, which then read as
+    a fabricated word.
+    """
+    decomposed = unicodedata.normalize("NFKD", str(text))
+    return "".join(character for character in decomposed if not unicodedata.combining(character))
+
+
 def content_words(text):
     """Comparable words. Apostrophes are dropped so ``members'`` and ``members``
-    are the same token on both sides of a comparison."""
-    return WORD_RE.findall(str(text).casefold().replace("'", "").replace("’", ""))
+    are the same token on both sides of a comparison, and diacritics are folded
+    so a name survives being spelled properly."""
+    return WORD_RE.findall(fold_diacritics(text).casefold().replace("'", "").replace("’", ""))
 
 
 def strip_structure(markdown):
