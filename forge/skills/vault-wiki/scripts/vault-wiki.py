@@ -31,9 +31,14 @@ import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
@@ -312,6 +317,140 @@ def run_web_research(command, arguments, output_dir, timeout=WEB_TIMEOUT):
         return None
 
 
+USER_AGENT = "pi-forge-vault-wiki/1 (+https://github.com/pi-forge)"
+HTTP_TIMEOUT = 30
+INDEX_MAX_AGE_SECONDS = 7 * 24 * 3600
+ANCHOR_RE = re.compile(r"<a\s[^>]*href=\"([^\"#?]+)\"[^>]*>(.*?)</a>", re.S | re.I)
+TAG_RE = re.compile(r"<[^>]+>")
+
+
+CA_BUNDLE_CANDIDATES = (
+    "/etc/ssl/cert.pem",
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/usr/local/etc/openssl/cert.pem",
+)
+_TLS_CONTEXT = None
+_HTTP_FAILURES = []
+
+
+def tls_context():
+    """A verifying TLS context, working around Python builds with no CA bundle.
+
+    A macOS framework Python points OpenSSL at an `etc/openssl/cert.pem` that
+    does not exist, so every HTTPS call fails verification while `curl` on the
+    same machine succeeds. Certificate verification is never disabled to get
+    around it — an unverified fetch is exactly what a citation must not rest on.
+    Instead the first usable bundle wins: an operator-set SSL_CERT_FILE, then a
+    system bundle, then certifi if it happens to be installed.
+    """
+    global _TLS_CONTEXT
+    if _TLS_CONTEXT is not None:
+        return _TLS_CONTEXT
+    candidates = []
+    for variable in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+        if os.environ.get(variable):
+            candidates.append(os.environ[variable])
+    candidates.extend(CA_BUNDLE_CANDIDATES)
+    for path in candidates:
+        if path and os.path.isfile(path):
+            try:
+                _TLS_CONTEXT = ssl.create_default_context(cafile=path)
+                return _TLS_CONTEXT
+            except (OSError, ssl.SSLError):
+                continue
+    try:
+        import certifi
+
+        _TLS_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        _TLS_CONTEXT = ssl.create_default_context()
+    return _TLS_CONTEXT
+
+
+def http_get(url, params=None):
+    """One GET, returning text, or None on any failure.
+
+    Forgiving by design: a resolver that cannot reach its source falls through to
+    the next source rather than failing the run. But the reason is recorded — a
+    silently swallowed TLS error is indistinguishable from "this subject has no
+    source", which is the most misleading thing this pipeline could report.
+    """
+    target = url if not params else f"{url}?{urllib.parse.urlencode(params)}"
+    request = urllib.request.Request(target, headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"})
+    try:
+        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT, context=tls_context()) as response:
+            return response.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as error:
+        _HTTP_FAILURES.append(f"{urllib.parse.urlsplit(target).netloc}: {type(error).__name__} {error}")
+        return None
+
+
+def http_failures():
+    """Distinct outbound-request failures seen so far, newest last."""
+    seen = {}
+    for message in _HTTP_FAILURES:
+        seen[message] = None
+    return list(seen)
+
+
+def http_json(url, params=None):
+    raw = http_get(url, params)
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
+def cached_text(cache_dir, key, loader, max_age=INDEX_MAX_AGE_SECONDS):
+    """Read a cached document, fetching it once when absent or stale."""
+    path = cache_dir / "index" / f"{sha256_text(key)[:16]}.txt"
+    if path.is_file() and (time.time() - path.stat().st_mtime) < max_age:
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError:
+            pass
+    fetched = loader()
+    if fetched is None:
+        # A stale copy beats nothing: an index that is a week old still resolves
+        # every entry that existed a week ago.
+        return path.read_text(encoding="utf-8") if path.is_file() else None
+    run_state.atomic_write_text(path, fetched)
+    return fetched
+
+
+def anchor_pairs(html, href_pattern, base):
+    """(title, absolute url) for every anchor whose href matches."""
+    pattern = re.compile(href_pattern, re.I)
+    pairs = []
+    for href, label in ANCHOR_RE.findall(html or ""):
+        if not pattern.search(href):
+            continue
+        text = re.sub(r"\s+", " ", TAG_RE.sub("", label)).strip()
+        if text:
+            pairs.append((text, urllib.parse.urljoin(base, href)))
+    return pairs
+
+
+def best_candidate(title, candidates):
+    """The candidate whose own title names the subject best.
+
+    Matching on the index's title rather than on a fetched page means an
+    off-target hit costs nothing — it is rejected before anything is downloaded.
+    Scored rather than first-wins, because a 2,511-entry index is alphabetical,
+    not relevance-ordered: taking the first acceptable match handed a note about
+    the two truths doctrine the SEP's entry on `truth`.
+    """
+    best = None
+    for entry_title, url in candidates:
+        score = title_match_score(subject_key(title), entry_title)
+        if score > 0 and (best is None or score > best[0]):
+            best = (score, {"url": url, "title": entry_title, "relevance": "about"})
+    return best[1] if best else None
+
+
 def web_cache_dir(vault):
     """Where fetched pages live, shared across runs.
 
@@ -323,12 +462,80 @@ def web_cache_dir(vault):
     return vault / STATE_DIR / "cache" / "web"
 
 
+def resolve_via_mediawiki(title, entry):
+    """Ask a MediaWiki site's own search for the article."""
+    api = (entry.get("resolve") or {}).get("api")
+    if not api:
+        return None
+    payload = http_json(api, {"action": "opensearch", "search": subject_key(title), "limit": 6, "format": "json"})
+    if not isinstance(payload, list) or len(payload) < 4:
+        return None
+    titles, urls = payload[1], payload[3]
+    if not isinstance(titles, list) or not isinstance(urls, list):
+        return None
+    return best_candidate(title, list(zip(titles, urls)))
+
+
+def resolve_via_index(cache_dir, title, entry):
+    """Match against a source's own table of contents.
+
+    Strictly better than searching for the site: the SEP publishes all 2,511 of
+    its entries on one page, so one cached fetch resolves every lookup offline —
+    and it finds entries a site-restricted web search misses outright, including
+    `entries/madhyamaka/` and `entries/twotruths-india/`.
+    """
+    config = entry.get("resolve") or {}
+    url = config.get("url")
+    if not url:
+        return None
+    html = cached_text(cache_dir, url, lambda: http_get(url))
+    if not html:
+        return None
+    return best_candidate(title, anchor_pairs(html, config.get("hrefPattern") or "", url))
+
+
+def resolve_via_wordpress(title, entry):
+    """Ask a WordPress site's REST search for the entry."""
+    api = (entry.get("resolve") or {}).get("api")
+    if not api:
+        return None
+    payload = http_json(api, {"search": subject_key(title), "per_page": 6})
+    if not isinstance(payload, list):
+        return None
+    candidates = [
+        (str(hit.get("title") or ""), str(hit.get("url") or ""))
+        for hit in payload
+        if isinstance(hit, dict) and hit.get("url")
+    ]
+    return best_candidate(title, candidates)
+
+
 def resolve_source_url(cache_dir, title, entry, extra_terms=""):
-    """Find a source's page for a title by site-restricted search.
+    """Find a source's page for a subject, preferring the source's own lookup.
 
     Never guesses a URL. SEP entry slugs are topic-based rather than name-based,
     so there is no ``/entries/latour/`` to construct, and a guessed URL that 404s
     is indistinguishable from a real one that was never checked.
+
+    Each source declares how it is queried. A native lookup — the site's own API
+    or published index — is preferred over general web search for two reasons.
+    It is unaffected when the search engines behind SearXNG rate-limit or CAPTCHA
+    the instance, which silently empties an entire run. And it is more accurate:
+    the site's own index knows its entry titles, so a wrong hit is rejected
+    before anything is downloaded.
+    """
+    method = (entry.get("resolve") or {}).get("method", "search")
+    if method == "mediawiki":
+        return resolve_via_mediawiki(title, entry)
+    if method == "index":
+        return resolve_via_index(cache_dir, title, entry)
+    if method == "wordpress":
+        return resolve_via_wordpress(title, entry)
+    return resolve_via_search(cache_dir, title, entry, extra_terms)
+
+
+def resolve_via_search(cache_dir, title, entry, extra_terms=""):
+    """Site-restricted general web search — the fallback for sources with no API.
 
     The bare title is tried before the disambiguator, because adding topic words
     makes the query *worse*: web-research picks its engines from the query text,
@@ -381,22 +588,35 @@ def significant_tokens(text):
     return [token for token in re.findall(r"[\w']+", normalized(text)) if token not in TITLE_STOPWORDS]
 
 
-def titles_name_the_same_thing(subject, page_title):
-    """Whether a page title names the subject, allowing for reworded headings.
+def title_match_score(subject, page_title):
+    """How well a page title names the subject, from 0 to 1.
 
     Substring matching alone is too strict for real encyclopedia titles: the SEP
-    entry on the Buddhist two truths is called "The Theory of Two Truths in
-    India", which contains neither "Two Truths Doctrine" nor is contained by it.
-    Requiring two thirds of the subject's significant words keeps that entry while
-    still rejecting "God and Other Ultimates" for "God Trick" (one word of two)
-    and "Feminist Ethics" for "Alison Jaggar" (none).
+    calls its Buddhist two-truths entry "The Theory of Two Truths in India", which
+    neither contains "Two Truths Doctrine" nor is contained by it. Word overlap
+    keeps that entry while still rejecting "God and Other Ultimates" for "God
+    Trick" (one word of two) and "Feminist Ethics" for "Alison Jaggar" (none).
+
+    There is deliberately no "the page title is a substring of the subject" rule.
+    It reads as generous and is actively wrong: it matched the SEP's entry on
+    *truth* to a note about the two truths doctrine, because "truth" is a
+    substring of "two truths doctrine".
     """
+    key = normalized(subject)
+    page = normalized(page_title or "")
+    if not key or not page:
+        return 0.0
+    if key in page:
+        # An exact naming beats any partial overlap, and the shorter the
+        # surrounding title the more squarely the page is about the subject.
+        return 1.0 if key == page else 0.9
     subject_tokens = significant_tokens(subject)
     if len(subject_tokens) < 2:
-        return False
+        return 0.0
     page_tokens = set(significant_tokens(page_title))
     shared = sum(1 for token in subject_tokens if token in page_tokens)
-    return shared / len(subject_tokens) >= TITLE_OVERLAP
+    ratio = shared / len(subject_tokens)
+    return ratio if ratio >= TITLE_OVERLAP else 0.0
 
 
 def source_relevance(title, page_title, text=""):
@@ -420,8 +640,7 @@ def source_relevance(title, page_title, text=""):
     key = subject_key(title)
     if not key:
         return None
-    page = normalized(page_title or "")
-    if page and (key in page or page in normalized(title) or titles_name_the_same_thing(key, page)):
+    if title_match_score(key, page_title) > 0:
         return "about"
     if text and normalized(text).count(key) >= MIN_COVERAGE_MENTIONS:
         return "covers"
@@ -442,12 +661,16 @@ def fetch_source(cache_dir, url):
 def acquire_sources(args, run_dir, cache_dir, item, plan, policy, existing, rejected=None):
     """Archive up to --sources-per-note canonical sources for one note."""
     records = []
+    # Several policy entries can point at the same site — three of them are the
+    # SEP — so the same page resolves more than once and would be cited twice.
+    claimed = set()
     for entry in sources_for(policy, item["kind"], plan.get("topic") or "general"):
         if len(records) >= args.sources_per_note:
             break
         located = resolve_source_url(cache_dir, item["title"], entry, plan.get("disambiguator") or "")
-        if not located:
+        if not located or located["url"] in claimed:
             continue
+        claimed.add(located["url"])
         if located["url"] in existing:
             cached = existing[located["url"]]
             if source_relevance(item["title"], cached["title"], archived_text(run_dir, cached)):
@@ -458,6 +681,12 @@ def acquire_sources(args, run_dir, cache_dir, item, plan, policy, existing, reje
             continue
         page_title = reading.get("title") or located.get("title") or ""
         text = reading["text"]
+        # Judged on the page that actually arrived, never on the title the
+        # resolver promised. A resolver hit can be a redirect to somewhere else
+        # entirely: Wikipedia's "Situated knowledge" redirects to "Knowledge", and
+        # trusting the index title drafted a note about situated knowledge from
+        # the general article on knowledge. If the target genuinely discusses the
+        # subject this still passes, as `covers`.
         relevance = source_relevance(item["title"], page_title, text)
         if relevance is None:
             if rejected is not None:
@@ -530,8 +759,12 @@ def draft_system(spec, voice_segment=""):
         "",
         "Cite with footnote markers. Put [^1] at the end of a sentence carrying a",
         "load-bearing or contestable claim, and only there; a card peppered with markers",
-        "is unreadable. Every marker you use must appear in your citations list, and",
-        "every citation must name one of the source ids you were given.",
+        "is unreadable. Always mark the opening definition at minimum. Every marker you",
+        "use must appear in your citations list, and every citation must name one of the",
+        "source ids you were given.",
+        "",
+        "One citation entry per source you actually cite — not one per sentence. Two",
+        "entries naming the same source with the same locator are the same citation.",
         "",
         "Sections to write:",
     ]
@@ -983,6 +1216,35 @@ def check_draft(draft, item, spec, sources, source_texts, original_body, index, 
     return problems
 
 
+def collapse_duplicate_citations(draft):
+    """Merge citations that point at the same place under one label.
+
+    A model handed two sources routinely emits several labels for the same one, so
+    a note ends up with `[^1]` and `[^2]` rendering identical footnotes. To a
+    reader that looks like a defect. Labels are only merged when both the source
+    and the locator match, so `§2` and `§4` of one entry stay distinct.
+    """
+    canonical = {}
+    remap = {}
+    for citation in draft["citations"]:
+        key = (citation["sourceId"], citation["locator"])
+        if key in canonical:
+            remap[citation["label"]] = canonical[key]
+        else:
+            canonical[key] = citation["label"]
+    if not remap:
+        return {}
+    draft["citations"] = [c for c in draft["citations"] if c["label"] not in remap]
+    for identifier, text in list(draft["sections"].items()):
+        draft["sections"][identifier] = re.sub(
+            r"\[\^([^\]\s]+)\]",
+            lambda match: f"[^{remap.get(match.group(1), match.group(1))}]",
+            text,
+        )
+    dedupe_footnote_markers(draft["sections"])
+    return remap
+
+
 def prune_unused_citations(draft):
     """Drop citation entries the prose never references.
 
@@ -1219,6 +1481,9 @@ def expand_body(args, run_dir, vault, schema, specs, templates, policy, voice, i
                     detail = f" (discarded {len(off_topic)} page(s) not about the subject, e.g. “{off_topic[0]['pageTitle']}”)"
                 warnings.append(f"{item['title']}: no canonical source resolved; held back{detail}")
 
+    for failure in http_failures()[:4]:
+        warnings.append(f"source lookup could not reach a host — {failure}")
+
     phase(run_dir, "drafting")
     draft_journal = run_dir / "drafts.jsonl"
     drafts = {row["id"]: row for row in read_journal(draft_journal)}
@@ -1266,9 +1531,18 @@ def expand_body(args, run_dir, vault, schema, specs, templates, policy, voice, i
         dropped = drop_unresolved_links(draft["sections"], item, index)
         if dropped:
             warnings.append(f"{item['title']}: unlinked {len(dropped)} target(s) with no note: {', '.join(sorted(set(dropped))[:4])}")
+        collapse_duplicate_citations(draft)
         unused = prune_unused_citations(draft)
         if unused:
             warnings.append(f"{item['title']}: dropped {len(unused)} declared citation(s) the prose never used")
+        if sources and not draft["citations"]:
+            # The note is still attributed by `## Sources`, so this is not worth
+            # discarding a good draft over — but it must be said rather than
+            # shipped quietly as though per-claim citation had happened.
+            warnings.append(
+                f"{item['title']}: no inline citation — the draft placed no footnote markers, "
+                "so only the Sources list attributes it"
+            )
         problems = check_draft(draft, item, spec, sources, texts, body, index, args.no_web)
         filled = build_filled(draft, item, spec, body, sources, index)
         merged = None
@@ -1728,6 +2002,28 @@ def command_doctor(args):
                 thin += 1
         counts[kind] = {"notes": len(notes), "incomplete": thin}
     data["wiki"] = counts
+
+    # Every native resolver depends on outbound HTTPS from this interpreter, which
+    # fails on a Python with no CA bundle even where curl succeeds. Probing one
+    # source of each method makes that a diagnosis rather than a run full of
+    # "no source resolved".
+    probes = {}
+    for source_id, label in (("wikipedia", "mediawiki"), ("sep", "index"), ("iep", "wordpress")):
+        entry = next((item for item in policy["sources"] if item["id"] == source_id), None)
+        if entry is None:
+            continue
+        resolved = resolve_source_url(web_cache_dir(vault), "Madhyamaka", entry)
+        probes[label] = resolved["url"] if resolved else None
+    data["resolvers"] = probes
+    if not any(probes.values()):
+        warnings.append("no native source resolver reached its site; expansion will find nothing")
+    for failure in http_failures()[:4]:
+        warnings.append(f"outbound request failed — {failure}")
+        if "CERTIFICATE_VERIFY_FAILED" in failure:
+            warnings.append(
+                "this Python cannot verify TLS: no CA bundle was found. Set SSL_CERT_FILE to a "
+                "bundle (on macOS, /etc/ssl/cert.pem) or install certifi"
+            )
 
     script = web_research_script()
     data["webResearch"] = {"script": str(script) if script else None}

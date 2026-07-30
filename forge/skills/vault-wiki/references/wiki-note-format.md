@@ -126,16 +126,52 @@ would reject every draft on its first date. Such a run is marked uncited and
 trust — and is separate from `web-research`'s `domain-strategies.json`, which is
 about how to fetch a given host.
 
-A source is reached by site-restricted search, never by guessing a URL. SEP entry
-slugs are topic-based rather than name-based, so there is no `/entries/latour/` to
-construct, and a guessed URL that 404s is indistinguishable from a real one that
-was never checked.
+A URL is never guessed. SEP entry slugs are topic-based rather than name-based, so
+there is no `/entries/latour/` to construct, and a guessed URL that 404s is
+indistinguishable from a real one that was never checked.
 
-Two findings from real runs shape how the search runs:
+Each source declares how it is looked up, and a **native lookup is preferred over
+general web search**:
 
-- **The bare title is queried before any disambiguator.** Adding topic words makes
-  the query worse, because `web-research` picks its search engines from the query
-  text: `Sheila Jasanoff science and technology studies scholar site:en.wikipedia.org`
+| `resolve.method` | How | Used by |
+| --- | --- | --- |
+| `mediawiki` | the site's own opensearch API | Wikipedia |
+| `index` | a published table of contents, fetched once and cached for a week | SEP |
+| `wordpress` | the site's WordPress REST search | IEP |
+| `search` | site-restricted general web search | Britannica, PubMed, the rest |
+
+Native lookup is not a micro-optimization. General web search goes through
+SearXNG, whose upstream engines rate-limit and CAPTCHA the instance — and a
+throttled SearXNG answers **HTTP 200 with zero results**, which is
+indistinguishable from "this subject has no source" and silently empties an entire
+run. Native lookup is also simply better: the SEP publishes all 2,511 of its
+entries on one page, so one cached fetch resolves every lookup offline, and it
+finds entries a site-restricted search misses outright — `entries/madhyamaka/` and
+`entries/twotruths-india/` both came back empty from web search.
+
+Findings from real runs that shape the rest:
+
+- **Always judge the page that arrived, never the title the resolver promised.**
+  A resolver hit can be a redirect elsewhere: Wikipedia's "Situated knowledge"
+  redirects to "Knowledge", and trusting the index title drafted a note about
+  situated knowledge from the general article on knowledge. Re-checking the
+  fetched page correctly downgraded it to `covers`.
+- **Score candidates, don't take the first acceptable one.** A 2,511-entry index
+  is alphabetical, not relevance-ordered.
+- **There is no "page title is a substring of the subject" rule.** It reads as
+  generous and is actively wrong: it matched the SEP's entry on *truth* to a note
+  about the two truths doctrine, because "truth" is a substring of "two truths
+  doctrine".
+- **Outbound HTTPS needs a CA bundle chosen explicitly.** A macOS framework Python
+  points OpenSSL at an `etc/openssl/cert.pem` that does not exist, so every
+  request fails verification while `curl` on the same machine succeeds — and a
+  swallowed TLS error looks exactly like "no source found". `tls_context()` walks
+  `SSL_CERT_FILE`, then system bundles, then certifi. Verification is never
+  disabled: an unverified fetch is precisely what a citation must not rest on.
+- **The bare title is queried before any disambiguator** on the `search` path.
+  Adding topic words makes the query worse, because `web-research` picks its
+  search engines from the query text:
+  `Sheila Jasanoff science and technology studies scholar site:en.wikipedia.org`
   routes to arXiv and returns telescope papers, while the bare name returns her
   article first.
 - **A page must bear on the subject, not merely mention it.** Searching the SEP
@@ -186,6 +222,16 @@ response otherwise loses the note silently.
 An unreferenced citation entry is pruned rather than treated as fatal: it supports
 no claim, so dropping it is lossless. A marker with no entry stays fatal, because
 that is a claim pointing at nothing.
+
+Citations naming the same source *and* the same locator are collapsed under one
+label. A model handed two sources emitted ten entries for one of them, which
+rendered `[^1]` and `[^2]` as identical footnotes — to a reader that looks like a
+defect. Differing locators (`§2` versus `§4`) stay distinct.
+
+A draft that has sources but places no markers at all is still proposed, because
+`## Sources` attributes it and discarding a good note over missing punctuation is
+worse — but it is reported, so per-claim citation is never assumed to have happened
+when it did not.
 
 ## Calibration constants
 

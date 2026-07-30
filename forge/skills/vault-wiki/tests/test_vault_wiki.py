@@ -426,6 +426,95 @@ class SectionCoercionTests(unittest.TestCase):
         self.assertEqual(skill.coerce_section(42), "")
 
 
+class TitleMatchTests(unittest.TestCase):
+    """Every case is a real page a resolver actually returned."""
+
+    def test_an_exact_name_scores_highest(self):
+        self.assertEqual(skill.title_match_score("madhyamaka", "Madhyamaka"), 1.0)
+
+    def test_a_name_inside_a_longer_title_still_scores(self):
+        self.assertGreater(skill.title_match_score("bruno latour", "Bruno Latour - Wikipedia"), 0.5)
+
+    def test_a_reworded_entry_title_scores_on_word_overlap(self):
+        self.assertGreaterEqual(
+            skill.title_match_score("two truths doctrine", "The Theory of Two Truths in India"), skill.TITLE_OVERLAP
+        )
+        self.assertGreaterEqual(
+            skill.title_match_score("two truths doctrine", "two truths in India, theory of"), skill.TITLE_OVERLAP
+        )
+
+    def test_a_short_title_inside_the_subject_does_not_match(self):
+        # The SEP entry on `truth` is not the entry on the two truths doctrine,
+        # even though "truth" is a substring of "two truths doctrine".
+        self.assertEqual(skill.title_match_score("two truths doctrine", "truth"), 0.0)
+
+    def test_weak_overlap_does_not_match(self):
+        self.assertEqual(skill.title_match_score("god trick", "God and Other Ultimates"), 0.0)
+        self.assertEqual(skill.title_match_score("alison jaggar", "Feminist Ethics"), 0.0)
+
+    def test_best_candidate_picks_the_strongest_not_the_first(self):
+        # An alphabetical index offers `truth` long before `two truths in India`.
+        candidates = [("truth", "u/truth"), ("two truths in India, theory of", "u/twotruths")]
+        best = skill.best_candidate("Two Truths Doctrine, Saṃvṛti and Paramārtha", candidates)
+        self.assertEqual(best["url"], "u/twotruths")
+
+    def test_best_candidate_returns_none_when_nothing_matches(self):
+        self.assertIsNone(skill.best_candidate("God Trick", [("God and Other Ultimates", "u/god")]))
+
+    def test_anchor_pairs_extracts_titles_and_absolute_urls(self):
+        html = '<a href="entries/madhyamaka/">Madhyamaka</a><a href="about.html">About</a>'
+        pairs = skill.anchor_pairs(html, "^entries/", "https://plato.stanford.edu/contents.html")
+        self.assertEqual(pairs, [("Madhyamaka", "https://plato.stanford.edu/entries/madhyamaka/")])
+
+    def test_anchor_pairs_strips_nested_markup(self):
+        html = '<a href="entries/x/"><em>Two</em> Truths</a>'
+        self.assertEqual(skill.anchor_pairs(html, "^entries/", "https://plato.stanford.edu/")[0][0], "Two Truths")
+
+
+class TlsContextTests(unittest.TestCase):
+    def test_a_verifying_context_is_built(self):
+        context = skill.tls_context()
+        # Verification is never disabled to work around a missing CA bundle.
+        self.assertTrue(context.check_hostname)
+        self.assertNotEqual(context.verify_mode, 0)
+
+
+class CitationCollapseTests(unittest.TestCase):
+    def test_labels_for_the_same_source_and_locator_merge(self):
+        draft = {
+            "sections": {"_lead": "A.[^1]", "origin": "B.[^2]"},
+            "citations": [
+                {"label": "1", "sourceId": "s-1", "locator": ""},
+                {"label": "2", "sourceId": "s-1", "locator": ""},
+            ],
+        }
+        skill.collapse_duplicate_citations(draft)
+        self.assertEqual([c["label"] for c in draft["citations"]], ["1"])
+        self.assertEqual(draft["sections"]["origin"], "B.[^1]")
+
+    def test_different_locators_stay_distinct(self):
+        draft = {
+            "sections": {"_lead": "A.[^1]", "origin": "B.[^2]"},
+            "citations": [
+                {"label": "1", "sourceId": "s-1", "locator": "§2"},
+                {"label": "2", "sourceId": "s-1", "locator": "§4"},
+            ],
+        }
+        skill.collapse_duplicate_citations(draft)
+        self.assertEqual([c["label"] for c in draft["citations"]], ["1", "2"])
+
+    def test_different_sources_stay_distinct(self):
+        draft = {
+            "sections": {"_lead": "A.[^1]", "origin": "B.[^2]"},
+            "citations": [
+                {"label": "1", "sourceId": "s-1", "locator": ""},
+                {"label": "2", "sourceId": "s-2", "locator": ""},
+            ],
+        }
+        skill.collapse_duplicate_citations(draft)
+        self.assertEqual([c["label"] for c in draft["citations"]], ["1", "2"])
+
+
 class CitationPruningTests(unittest.TestCase):
     def test_an_unreferenced_citation_is_dropped(self):
         draft = {

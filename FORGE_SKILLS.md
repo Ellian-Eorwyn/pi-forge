@@ -15,7 +15,7 @@
 | Managed instructions (`AGENTS.md` with its `<project_context>` wrapper) | 1274 |
 | Skills menu (metadata for all model-visible skills) | 3260 |
 | **Total launch context (always processed)** | **7683** |
-| Maximum if every `SKILL.md` body is also loaded at once | 55212 |
+| Maximum if every `SKILL.md` body is also loaded at once | 55362 |
 
 Of that total, the forge profile itself owns 4533 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
 
@@ -71,7 +71,7 @@ Sorted by launch cost. `Prompt lines` counts a tool's `promptSnippet` and `promp
 | [`vault-handoff`](forge/skills/vault-handoff/SKILL.md) | Send completed text artifacts to pi-vault review | 63 | 325 | 363 | Model-visible |
 | [`vault-organizer`](forge/skills/vault-organizer/SKILL.md) | Organize an Obsidian vault or vault inbox from a human-maintained schema note - classify Mark... | 150 | 2388 | 2512 | Model-visible |
 | [`vault-transcripts`](forge/skills/vault-transcripts/SKILL.md) | Process raw voice-note and meeting transcripts sitting in an Obsidian vault inbox - give each... | 152 | 2496 | 2620 | Model-visible |
-| [`vault-wiki`](forge/skills/vault-wiki/SKILL.md) | Install the seven wiki entry templates and expand wiki entity notes into complete, cited refe... | 143 | 1961 | 2080 | Model-visible |
+| [`vault-wiki`](forge/skills/vault-wiki/SKILL.md) | Install the seven wiki entry templates and expand wiki entity notes into complete, cited refe... | 143 | 2111 | 2230 | Model-visible |
 | [`web-collection`](forge/skills/web-collection/SKILL.md) | Archive and organize web sources | 138 | 2017 | 2129 | Model-visible |
 | [`web-research`](forge/skills/web-research/SKILL.md) | Quick web search and page reading for information lookup. | 146 | 3942 | 4063 | Model-visible |
 

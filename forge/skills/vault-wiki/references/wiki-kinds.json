@@ -4,20 +4,24 @@
   "comment": "Per-kind section specification for wiki entity notes. This file decides which headings a generator owns; the paired template in references/templates decides what a note looks like. doctor checks the two agree. 'guidance' is sent to the drafting model verbatim, so it is prompt text as much as configuration. Length budgets are first guesses and expected to be retuned once real runs land.",
   "kinds": {
     "concept": {
-      "max_managed_chars": 1600,
+      "max_managed_chars": 2000,
       "lead_guidance": "One or two sentences defining the idea. Say what it claims, not why it matters. No hedging, no 'refers to'.",
       "sections": [
         {
           "id": "_lead",
           "placeholder": "summary",
           "fill": "lead",
-          "max_chars": 320,
+          "max_chars": 400,
           "guidance": "The definition. One or two sentences."
         },
         {
           "id": "key_points",
           "heading": "Key Points",
-          "aliases": ["Key Ideas", "In Brief", "Overview"],
+          "aliases": [
+            "Key Ideas",
+            "In Brief",
+            "Overview"
+          ],
           "placeholder": "key_points",
           "fill": "bullets",
           "max_bullets": 5,
@@ -27,7 +31,10 @@
         {
           "id": "origin",
           "heading": "Origin",
-          "aliases": ["History", "Provenance of the Term"],
+          "aliases": [
+            "History",
+            "Provenance of the Term"
+          ],
           "placeholder": "origin",
           "fill": "prose",
           "max_chars": 220,
@@ -37,7 +44,10 @@
         {
           "id": "key_thinkers",
           "heading": "Key Thinkers",
-          "aliases": ["Thinkers", "Key Figures"],
+          "aliases": [
+            "Thinkers",
+            "Key Figures"
+          ],
           "placeholder": "key_thinkers",
           "fill": "bullets",
           "max_bullets": 6,
@@ -47,7 +57,11 @@
         {
           "id": "distinctions",
           "heading": "Distinctions",
-          "aliases": ["Use Carefully", "Disambiguation", "Common Confusions"],
+          "aliases": [
+            "Use Carefully",
+            "Disambiguation",
+            "Common Confusions"
+          ],
           "placeholder": "distinctions",
           "fill": "bullets",
           "max_bullets": 3,
@@ -90,7 +104,10 @@
         {
           "id": "usage",
           "heading": "Usage",
-          "aliases": ["In Practice", "How It Is Used"],
+          "aliases": [
+            "In Practice",
+            "How It Is Used"
+          ],
           "placeholder": "usage",
           "fill": "prose",
           "max_chars": 320,
@@ -99,7 +116,10 @@
         {
           "id": "origin",
           "heading": "Origin",
-          "aliases": ["History", "Etymology"],
+          "aliases": [
+            "History",
+            "Etymology"
+          ],
           "placeholder": "origin",
           "fill": "prose",
           "max_chars": 220,
@@ -135,13 +155,17 @@
           "id": "_lead",
           "placeholder": "summary",
           "fill": "lead",
-          "max_chars": 320,
+          "max_chars": 400,
           "guidance": "What the practice is and what performing it involves."
         },
         {
           "id": "how_it_works",
           "heading": "How It Works",
-          "aliases": ["Method", "Practice", "Steps"],
+          "aliases": [
+            "Method",
+            "Practice",
+            "Steps"
+          ],
           "placeholder": "how_it_works",
           "fill": "bullets",
           "max_bullets": 5,
@@ -151,7 +175,10 @@
         {
           "id": "origin",
           "heading": "Origin",
-          "aliases": ["History", "Tradition"],
+          "aliases": [
+            "History",
+            "Tradition"
+          ],
           "placeholder": "origin",
           "fill": "prose",
           "max_chars": 240,
@@ -161,7 +188,11 @@
         {
           "id": "key_thinkers",
           "heading": "Key Thinkers",
-          "aliases": ["Thinkers", "Key Teachers", "Key Figures"],
+          "aliases": [
+            "Thinkers",
+            "Key Teachers",
+            "Key Figures"
+          ],
           "placeholder": "key_thinkers",
           "fill": "bullets",
           "max_bullets": 6,
@@ -203,7 +234,10 @@
         {
           "id": "key_ideas",
           "heading": "Key Ideas",
-          "aliases": ["Contributions", "Key Contributions"],
+          "aliases": [
+            "Contributions",
+            "Key Contributions"
+          ],
           "placeholder": "key_ideas",
           "fill": "bullets",
           "max_bullets": 5,
@@ -213,7 +247,11 @@
         {
           "id": "key_works",
           "heading": "Key Works",
-          "aliases": ["Key Texts", "Major Works", "Selected Works"],
+          "aliases": [
+            "Key Texts",
+            "Major Works",
+            "Selected Works"
+          ],
           "placeholder": "key_works",
           "fill": "bullets",
           "max_bullets": 5,
@@ -223,7 +261,11 @@
         {
           "id": "position",
           "heading": "Position",
-          "aliases": ["Tradition", "Approach", "Intellectual Position"],
+          "aliases": [
+            "Tradition",
+            "Approach",
+            "Intellectual Position"
+          ],
           "placeholder": "position",
           "fill": "prose",
           "max_chars": 320,
@@ -233,7 +275,9 @@
         {
           "id": "associated_concepts",
           "heading": "Associated Concepts",
-          "aliases": ["Concepts"],
+          "aliases": [
+            "Concepts"
+          ],
           "placeholder": "associated_concepts",
           "fill": "links",
           "guidance": "Deterministic. Rendered from the note's own related property, never written by the model."
@@ -241,7 +285,10 @@
         {
           "id": "colleague_thinkers",
           "heading": "Colleague Thinkers",
-          "aliases": ["Colleagues", "Interlocutors"],
+          "aliases": [
+            "Colleagues",
+            "Interlocutors"
+          ],
           "placeholder": "colleague_thinkers",
           "fill": "links",
           "guidance": "Deterministic. Rendered from the note's own related property, never written by the model."
@@ -281,7 +328,11 @@
         {
           "id": "overview",
           "heading": "Overview",
-          "aliases": ["Argument", "Contents", "Synopsis"],
+          "aliases": [
+            "Argument",
+            "Contents",
+            "Synopsis"
+          ],
           "placeholder": "overview",
           "fill": "bullets",
           "max_bullets": 5,
@@ -291,7 +342,10 @@
         {
           "id": "key_concepts",
           "heading": "Key Concepts",
-          "aliases": ["Concepts", "Key Terms"],
+          "aliases": [
+            "Concepts",
+            "Key Terms"
+          ],
           "placeholder": "key_concepts",
           "fill": "bullets",
           "max_bullets": 5,
@@ -320,7 +374,7 @@
       ]
     },
     "place": {
-      "max_managed_chars": 1600,
+      "max_managed_chars": 2000,
       "lead_guidance": "One or two sentences: what and where it is.",
       "sections": [
         {
@@ -333,7 +387,10 @@
         {
           "id": "significance",
           "heading": "Significance",
-          "aliases": ["Why It Matters", "Importance"],
+          "aliases": [
+            "Why It Matters",
+            "Importance"
+          ],
           "placeholder": "significance",
           "fill": "bullets",
           "max_bullets": 4,
@@ -343,7 +400,10 @@
         {
           "id": "context",
           "heading": "Context",
-          "aliases": ["Geography", "Setting"],
+          "aliases": [
+            "Geography",
+            "Setting"
+          ],
           "placeholder": "context",
           "fill": "prose",
           "max_chars": 320,
@@ -372,7 +432,7 @@
       ]
     },
     "event": {
-      "max_managed_chars": 1600,
+      "max_managed_chars": 2000,
       "lead_guidance": "One or two sentences: what happened, when, and where.",
       "sections": [
         {
@@ -385,7 +445,11 @@
         {
           "id": "what_happened",
           "heading": "What Happened",
-          "aliases": ["Account", "Sequence", "Details"],
+          "aliases": [
+            "Account",
+            "Sequence",
+            "Details"
+          ],
           "placeholder": "what_happened",
           "fill": "bullets",
           "max_bullets": 5,
@@ -395,7 +459,11 @@
         {
           "id": "significance",
           "heading": "Significance",
-          "aliases": ["Why It Matters", "Aftermath", "Consequences"],
+          "aliases": [
+            "Why It Matters",
+            "Aftermath",
+            "Consequences"
+          ],
           "placeholder": "significance",
           "fill": "prose",
           "max_chars": 300,

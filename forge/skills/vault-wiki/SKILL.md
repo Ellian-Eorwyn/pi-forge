@@ -30,8 +30,15 @@ links them. That skill still never touches a body.
 
    This verifies the schema parses, that every shipped template agrees with its
    kind spec, which templates are installed, how many notes of each kind are
-   incomplete, and whether both endpoints are reachable. It warns if the `chat`
-   endpoint is actually reasoning, which makes bulk drafting far slower.
+   incomplete, whether each source resolver reaches its site, and whether both
+   endpoints are reachable. It warns if the `chat` endpoint is actually reasoning,
+   which makes bulk drafting far slower.
+
+   Two `doctor` warnings are worth acting on before a long run rather than after:
+   a **TLS failure** (this Python cannot find a CA bundle — set `SSL_CERT_FILE`,
+   on macOS to `/etc/ssl/cert.pem`), and a **throttled search backend** (SearXNG
+   answering HTTP 200 with zero results because its upstream engines have
+   rate-limited it). Either one turns a whole run into "no source resolved".
 3. Install the templates if `doctor` says they are missing or stale:
 
    ```bash
@@ -97,12 +104,13 @@ links them. That skill still never touches a body.
   and why rather than only reporting successes.
 - **A flagged note is the reviewer's doubt, not a verdict.** It is still
   proposed, with the objection attached, and it is the user's call.
-- **Not every note gets a source.** Site-restricted search finds a page on the
-  site, not necessarily a page about the subject, so a page that neither names the
-  subject in its title nor discusses it repeatedly is discarded. A coined phrase
-  like "God Trick" may end up with nothing, which is reported as held back rather
-  than drafted uncited. That is the correct outcome, not a failure to explain
-  away.
+- **Not every note gets a source.** A page that neither names the subject in its
+  title nor discusses it repeatedly is discarded, so a coined phrase like "God
+  Trick" — which no encyclopedia has an entry on — ends up held back rather than
+  drafted uncited. That is the correct outcome, not a failure to explain away.
+- **Sources are looked up through their own APIs and indexes** where they have
+  them (Wikipedia, SEP, IEP), and only fall back to general web search otherwise.
+  So a rate-limited search backend degrades coverage rather than emptying the run.
 - **`weakSources` means every source only *covers* the subject** — a broader
   encyclopedia entry that discusses it rather than an entry about it. Still
   citeable and still included in `--accept-batch`, since the reviewer sees the

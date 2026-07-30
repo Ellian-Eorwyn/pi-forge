@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "updatedAt": "2026-07-29",
-  "comment": "Which sources a wiki expansion is allowed to lean on, in preference order. This is editorial policy — who to trust — and is deliberately separate from web-research's domain-strategies.json, which is about how to fetch a given host. A source is reached by site-restricted search, never by guessing a URL slug: SEP entry slugs are topic-based rather than name-based, so there is no /entries/latour/ to guess and a guessed URL that 404s looks identical to a real one that was never checked. Lower 'authority' is tried first. 'kinds' and 'topics' accept '*' to match everything.",
+  "comment": "Which sources a wiki expansion may lean on, in preference order. This is editorial policy — who to trust — and is deliberately separate from web-research's domain-strategies.json, which is about how to fetch a given host. Each source declares how it is looked up via 'resolve': 'mediawiki' asks a MediaWiki site's own opensearch API, 'index' matches against a published table of contents fetched once and cached, 'wordpress' asks a WordPress REST search, and 'search' falls back to site-restricted general web search. A native lookup is preferred because it keeps working when the engines behind SearXNG rate-limit the instance — which returns HTTP 200 with zero results and so reads as 'this subject has no source' — and because a site's own index knows its entry titles, so a wrong hit is rejected before anything is downloaded. A URL is never guessed: SEP entry slugs are topic-based rather than name-based, so there is no /entries/latour/ to construct. Lower 'authority' is tried first. 'kinds' and 'topics' accept '*' to match everything.",
   "topics": [
     "philosophy",
     "ethics",
@@ -35,7 +35,13 @@
       "label": "Stanford Encyclopedia of Philosophy",
       "site": "plato.stanford.edu",
       "authority": 1,
-      "kinds": ["concept", "term", "practice", "figure", "work"],
+      "kinds": [
+        "concept",
+        "term",
+        "practice",
+        "figure",
+        "work"
+      ],
       "topics": [
         "philosophy",
         "ethics",
@@ -49,14 +55,25 @@
         "science-technology-studies",
         "politics"
       ],
-      "notes": "Peer-reviewed and stable. The strongest source available for anything in the philosophy cluster."
+      "notes": "Peer-reviewed and stable. The strongest source available for anything in the philosophy cluster.",
+      "resolve": {
+        "method": "index",
+        "url": "https://plato.stanford.edu/contents.html",
+        "hrefPattern": "^entries/"
+      }
     },
     {
       "id": "iep",
       "label": "Internet Encyclopedia of Philosophy",
       "site": "iep.utm.edu",
       "authority": 2,
-      "kinds": ["concept", "term", "practice", "figure", "work"],
+      "kinds": [
+        "concept",
+        "term",
+        "practice",
+        "figure",
+        "work"
+      ],
       "topics": [
         "philosophy",
         "ethics",
@@ -67,32 +84,63 @@
         "feminism",
         "gender-studies"
       ],
-      "notes": "Peer-reviewed. Often covers a figure the SEP has no standalone entry for."
+      "notes": "Peer-reviewed. Often covers a figure the SEP has no standalone entry for.",
+      "resolve": {
+        "method": "wordpress",
+        "api": "https://iep.utm.edu/wp-json/wp/v2/search"
+      }
     },
     {
       "id": "plato-buddhism",
       "label": "Stanford Encyclopedia of Philosophy (Buddhist philosophy)",
       "site": "plato.stanford.edu",
       "authority": 2,
-      "kinds": ["concept", "term", "practice"],
-      "topics": ["buddhism", "religion"],
-      "notes": "Separate entry so a Sanskrit or Pali term is searched with its tradition named."
+      "kinds": [
+        "concept",
+        "term",
+        "practice"
+      ],
+      "topics": [
+        "buddhism",
+        "religion"
+      ],
+      "notes": "Separate entry so a Sanskrit or Pali term is searched with its tradition named.",
+      "resolve": {
+        "method": "index",
+        "url": "https://plato.stanford.edu/contents.html",
+        "hrefPattern": "^entries/"
+      }
     },
     {
       "id": "philpapers",
       "label": "PhilPapers",
       "site": "philpapers.org",
       "authority": 3,
-      "kinds": ["work", "figure"],
-      "topics": ["philosophy", "ethics", "epistemology", "metaphysics", "phenomenology", "logic"],
-      "notes": "Best for pinning a work to an author and year. Metadata rather than full text."
+      "kinds": [
+        "work",
+        "figure"
+      ],
+      "topics": [
+        "philosophy",
+        "ethics",
+        "epistemology",
+        "metaphysics",
+        "phenomenology",
+        "logic"
+      ],
+      "notes": "Best for pinning a work to an author and year. Metadata rather than full text.",
+      "resolve": {
+        "method": "search"
+      }
     },
     {
       "id": "britannica",
       "label": "Encyclopaedia Britannica",
       "site": "britannica.com",
       "authority": 4,
-      "kinds": ["*"],
+      "kinds": [
+        "*"
+      ],
       "topics": [
         "history",
         "geography",
@@ -104,70 +152,133 @@
         "economics",
         "general"
       ],
-      "notes": "Edited and citable. Preferred over Wikipedia for places, events, and historical figures."
+      "notes": "Edited and citable. Preferred over Wikipedia for places, events, and historical figures.",
+      "resolve": {
+        "method": "search"
+      }
     },
     {
       "id": "plato-stanford-sci",
       "label": "Stanford Encyclopedia of Philosophy (science)",
       "site": "plato.stanford.edu",
       "authority": 3,
-      "kinds": ["concept", "term"],
-      "topics": ["science-technology-studies", "mathematics", "computing"],
-      "notes": "Covers philosophy of science and mathematics terms that general encyclopedias treat only technically."
+      "kinds": [
+        "concept",
+        "term"
+      ],
+      "topics": [
+        "science-technology-studies",
+        "mathematics",
+        "computing"
+      ],
+      "notes": "Covers philosophy of science and mathematics terms that general encyclopedias treat only technically.",
+      "resolve": {
+        "method": "index",
+        "url": "https://plato.stanford.edu/contents.html",
+        "hrefPattern": "^entries/"
+      }
     },
     {
       "id": "pubmed",
       "label": "PubMed",
       "site": "pubmed.ncbi.nlm.nih.gov",
       "authority": 2,
-      "kinds": ["concept", "term"],
-      "topics": ["biomedical", "psychology"],
-      "notes": "Use the abstract only. A wiki definition should not rest on a single primary study."
+      "kinds": [
+        "concept",
+        "term"
+      ],
+      "topics": [
+        "biomedical",
+        "psychology"
+      ],
+      "notes": "Use the abstract only. A wiki definition should not rest on a single primary study.",
+      "resolve": {
+        "method": "search"
+      }
     },
     {
       "id": "mesh",
       "label": "MeSH",
       "site": "ncbi.nlm.nih.gov",
       "authority": 3,
-      "kinds": ["term"],
-      "topics": ["biomedical"],
-      "notes": "Controlled biomedical vocabulary — well suited to a glossary-shaped term note."
+      "kinds": [
+        "term"
+      ],
+      "topics": [
+        "biomedical"
+      ],
+      "notes": "Controlled biomedical vocabulary — well suited to a glossary-shaped term note.",
+      "resolve": {
+        "method": "search"
+      }
     },
     {
       "id": "apa-dictionary",
       "label": "APA Dictionary of Psychology",
       "site": "dictionary.apa.org",
       "authority": 2,
-      "kinds": ["concept", "term"],
-      "topics": ["psychology"],
-      "notes": "Authoritative short definitions."
+      "kinds": [
+        "concept",
+        "term"
+      ],
+      "topics": [
+        "psychology"
+      ],
+      "notes": "Authoritative short definitions.",
+      "resolve": {
+        "method": "search"
+      }
     },
     {
       "id": "mathworld",
       "label": "Wolfram MathWorld",
       "site": "mathworld.wolfram.com",
       "authority": 2,
-      "kinds": ["concept", "term"],
-      "topics": ["mathematics"],
-      "notes": null
+      "kinds": [
+        "concept",
+        "term"
+      ],
+      "topics": [
+        "mathematics"
+      ],
+      "notes": null,
+      "resolve": {
+        "method": "search"
+      }
     },
     {
       "id": "oxford-reference",
       "label": "Oxford Reference",
       "site": "oxfordreference.com",
       "authority": 4,
-      "kinds": ["term", "concept"],
-      "topics": ["*"],
-      "notes": "Often paywalled past the definition line; treat a short extract as metadata-level evidence."
+      "kinds": [
+        "term",
+        "concept"
+      ],
+      "topics": [
+        "*"
+      ],
+      "notes": "Often paywalled past the definition line; treat a short extract as metadata-level evidence.",
+      "resolve": {
+        "method": "search"
+      }
     },
     {
       "id": "wikipedia",
       "label": "Wikipedia",
       "site": "en.wikipedia.org",
       "authority": 9,
-      "kinds": ["*"],
-      "topics": ["*"],
-      "notes": "The universal fallback and usually the only source with dates for a contemporary figure. Ranked last on purpose: it is the source most likely to be right and least likely to be citable, so prefer anything above it when both resolve."
+      "kinds": [
+        "*"
+      ],
+      "topics": [
+        "*"
+      ],
+      "notes": "The universal fallback and usually the only source with dates for a contemporary figure. Ranked last on purpose: it is the source most likely to be right and least likely to be citable, so prefer anything above it when both resolve.",
+      "resolve": {
+        "method": "mediawiki",
+        "api": "https://en.wikipedia.org/w/api.php"
+      }
     }
   ]
 }
