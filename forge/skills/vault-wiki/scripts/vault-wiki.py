@@ -1127,9 +1127,37 @@ def link_sections_for(item, spec, body, index):
     return filled
 
 
+LEAD_CALLOUT_RE = re.compile(r"^>\s*\[!abstract\][-+]?\s*$", re.IGNORECASE)
+
+
+def unwrap_lead_callout(text):
+    """The lead's prose, whether or not it arrives already in its callout."""
+    lines = str(text).splitlines()
+    if not lines or not LEAD_CALLOUT_RE.match(lines[0]):
+        return str(text)
+    return "\n".join(re.sub(r"^>\s?", "", line) for line in lines[1:]).strip()
+
+
+def render_lead_callout(text):
+    """The opening definition as an `[!abstract]` callout.
+
+    A wiki note is skimmed before it is read, and the lead is the sentence that
+    decides whether to keep reading. Idempotent, because the lead is rewritten on
+    every expansion and a callout wrapped twice would nest.
+    """
+    prose = unwrap_lead_callout(text).strip()
+    if not prose:
+        return prose
+    return "> [!abstract]\n" + "\n".join(f"> {line}" if line else ">" for line in prose.split("\n"))
+
+
 def build_filled(draft, item, spec, body, sources, index):
     filled = dict(draft["sections"])
     filled.update(link_sections_for(item, spec, body, index))
+    if filled.get(vault_wiki.LEAD_SECTION):
+        # After the budget checks, which measure the prose the model wrote
+        # rather than the quoting this adds.
+        filled[vault_wiki.LEAD_SECTION] = render_lead_callout(filled[vault_wiki.LEAD_SECTION])
     if sources:
         filled["sources"] = render_sources_section(sources)
         footnotes = render_footnotes(draft["citations"], sources)
@@ -1441,7 +1469,9 @@ def expand_body(args, run_dir, vault, schema, specs, templates, policy, voice, i
         bodies[item["id"]] = split["body"]
         parsed = vault_wiki.parse_sections(split["body"])
         _title, lead = vault_wiki.split_preamble(parsed["blocks"][0]["content"])
-        item["leadPreview"] = "".join(lead).strip()[:400]
+        # Unwrapped: what the model is shown and asked to improve is the lead's
+        # prose, not the quoting the renderer will put back around it.
+        item["leadPreview"] = unwrap_lead_callout("".join(lead).strip())[:400]
         item["bodyPreview"] = split["body"][:1200]
 
     chat = forge_llm.resolve_service("chat", base_url=args.base_url, model=args.model)

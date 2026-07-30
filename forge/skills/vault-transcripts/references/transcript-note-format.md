@@ -1,11 +1,18 @@
 # Transcript Note Format
 
 The contract for what `vault-transcripts` writes into a vault note, and how the
-cleaned transcript is allowed to differ from the raw one. Part A restates the
-fidelity invariants from `../../transcript-cleanup/references/faithful-cleanup.md`,
-which remains their source. Parts A, B, and C are also embedded verbatim in
-`CLEANUP_SYSTEM` in `scripts/vault-transcripts.py`; if you change one, change
-both.
+cleaned transcript is allowed to differ from the raw one. Parts A, B, and C are
+embedded verbatim in `CLEANUP_SYSTEM` in `scripts/vault-transcripts.py`; if you
+change one, change both.
+
+Part A used to restate the invariants from
+`../../transcript-cleanup/references/faithful-cleanup.md`. It no longer does. A
+transcript kept in a vault is read as a note rather than consulted as a record —
+the record is the recording, which now sits in its own note beside this one — so
+this skill converts speech into written prose, and the standalone
+`transcript-cleanup` skill keeps the more conservative contract that file
+describes. The two are intentionally different, and that file is unaffected by
+changes here.
 
 ## Note layout
 
@@ -24,12 +31,19 @@ processed_by:
 > [!summary]
 > One paragraph on what this recording was and what mattered in it.
 
+> [!reflection]- Observations
+> - <owner memo or journal only, non-empty sections only — see Part B2 for
+>   which sections each type gets>
+
+> [!reflection]- Open questions
+> - ...
+
+> [!connections]- Connections
+> - [[A vault note]] — why it relates
+
 <handwritten preamble, if the export had any, verbatim>
 
 <cleaned transcript — headings ## or deeper>
-
-<owner memo or journal reflection only, non-empty sections only — see Part B2 for
-which sections each type gets>
 
 # Transcript
 
@@ -62,6 +76,15 @@ Rules the script enforces, not suggestions:
 
 - The generated section contains exactly one level-one heading, `# Transcript`.
   Everything the cleanup writes is `##` or deeper.
+- Everything the pipeline generates is a callout, and it all sits above the
+  speaker's words: the summary open, every reflection and connections section
+  collapsed. A reader can tell at a glance which prose is the speaker's and
+  which is the machine's, which a `##` heading could not do — as headings the
+  reflection sections were indistinguishable from ones the cleanup wrote. The
+  handwritten preamble stays down with the cleaned text, because it is the
+  owner's writing and not apparatus. `forge/skills/vault-transcripts/references/loom-notes.css`
+  styles these callout types; a vault without it still reads correctly, since
+  folding is Markdown rather than CSS.
 - Whichever note holds the recording holds all of it, byte for byte, including
   its handwritten preamble and any trailing text. The cleanup is a convenience;
   the transcription is the record.
@@ -113,34 +136,52 @@ to other vault skills. The descriptive filename and the summary-first body are
 what classification actually reads, so this costs nothing today — but it is the
 reason to think twice before adding a second `#` heading.
 
-## Part A — fidelity invariants (every recording type)
+## Part A — the register (every recording type)
 
 These outrank every style rule below.
 
 ```text
-- Change as little wording as possible while making the transcript clean and readable.
-- Preserve the speaker's intent, uncertainty, and nuance.
+- The register is spoken-to-written: what the speaker would have written had they
+  typed this instead of saying it. Reshape the delivery, never the content.
+- Stay inside the speaker's own words and their own voice.
 - Do not summarize. Output the full cleaned transcript.
 ```
 
-- Keep hedges. "I think", "maybe", and "I don't know" are content, not noise.
+- Remove filler and verbal scaffolding — "like", "um", "you know", "kind of",
+  "sort of", "I mean", "basically", "essentially", "literally", "actually",
+  "obviously", "honestly" — along with false starts, restarted sentences,
+  repeated phrases, and self-echoes that carry no meaning.
+- Condense a circumlocution into the plain statement it was reaching for, but
+  only when the meaning is unambiguous and only in the speaker's own words. The
+  calibration example: *"I would also like it to have, essentially, if it fails
+  to categorize a note, there should be like a maybe in the system"* becomes
+  *"I would also like a 'failed categorization' folder for notes it can't
+  confidently categorize."* Two possible readings means keep the longer wording.
+- Keep hedges that qualify a claim. "I think", "maybe", and "I don't know" mean
+  something when they mark how sure the speaker is; the same words as pure
+  delivery are filler.
 - Never add facts, names, dates, conclusions, or certainty absent from the source.
-- Never drop substance. Every point made must survive.
-- Removing filler, false starts, stutters, and verbal scaffolding is the job. So
-  is fixing transcription punctuation and casing.
+- Never drop substance, and never delete a whole utterance or exchange. Small
+  talk survives, in its short readable form.
+- Fixing transcription punctuation and casing is part of the job.
 - Leave garbled or uncertain passages visible rather than repairing them by
   guessing. Keep `[unclear]`-style markers.
-- Timestamps are dropped from the cleaned text; they remain in the raw section.
+- Timestamps are dropped from the cleaned text; they remain in the recording.
 - Tables only when the speaker is genuinely listing tabular data — never as
   decoration.
+
+**Therapy is the exception** and keeps the older, stricter contract: pure filler
+and false starts come out, nothing is condensed, and hesitation and repetition
+that carries weight stays. What a session is *for* is partly in how something was
+said, and that is not delivery to be reshaped.
 
 ## Part B — style by recording type
 
 | Type | Cleaned output |
 | --- | --- |
-| `memo` | Flowing first-person paragraphs. `##` headings only when the memo clearly moves between several distinct topics. No speaker labels. |
-| `journal` | Chronological paragraphs, minimal intervention. Voice, emotion, and self-correction preserved; only obvious filler removed. |
-| `conversation` | Dialogue as `**Name:** what they said` paragraphs, one per turn. |
+| `memo` | Readable first-person prose — the note the speaker would have typed. `##` headings only when the memo clearly moves between several distinct topics. No speaker labels. |
+| `journal` | Chronological first-person paragraphs in the writer's own register. Voice, emotion, and meaningful self-correction preserved; the filler and false starts a written entry would never have contained removed. |
+| `conversation` | Dialogue as `**Name:** what they said` paragraphs, one per turn, each turn in readable written form. |
 | `therapy` | As `conversation`, at the highest fidelity of all. Hesitation and repetition that carries weight is kept. No clinical language, interpretation, or diagnosis that was not spoken. |
 | `meeting` | `##` heading per topic. Closing `## Decisions` and `## Action Items` bullets **only** when the recording contains explicit decisions or assignments; `Unassigned` and `Not stated` rather than an inferred owner or deadline. |
 | `lecture` | `##` and `###` headings following the material, the lecturer's own examples kept, audience questions as dialogue. |
@@ -158,12 +199,12 @@ contracts and never imitate the owner's prose. Unknown material receives no
 voice rules and stays reviewable.
 
 For an owner journal, written text receives mechanical correction only. Spoken
-text receives a light fidelity edit: filler, false starts, and accidental
-repetition may be removed while emphasis, meaningful self-correction,
-uncertainty, wording, and sequence remain.
+text receives the spoken-to-written edit: filler, false starts, accidental
+repetition, and unambiguous circumlocution are removed while emphasis,
+meaningful self-correction, uncertainty, and sequence remain.
 
-A note under the tiny threshold gets punctuation, casing, and one short
-paragraph. No headings, no lists, no restructuring.
+A note under the tiny threshold gets punctuation, casing, filler removal, and one
+short paragraph. No headings, no lists, no restructuring.
 
 ## Part C — speakers
 
@@ -248,14 +289,18 @@ Not part of the cleanup contract above: the reflection is a separate model call,
 mirrored by `JOURNAL_REFLECTION_SYSTEM`, `MEMO_REFLECTION_SYSTEM`, and the shared
 `REFLECTION_SOURCE_RULES` in `scripts/vault-transcripts.py`.
 
-An owner memo and an owner journal each receive a generated reflection after the
-cleaned authorial section. No other recording type does. Empty sections are
-omitted, and a short recording legitimately gets one section or none at all.
+An owner memo and an owner journal each receive a generated reflection, rendered
+as collapsed callouts above the cleaned authorial section. No other recording
+type does. Empty sections are omitted, and a short recording legitimately gets
+one section or none at all.
 
 | Type | Sections, in order |
 | --- | --- |
-| `journal` | `## Observations`, `## Interpretations`, `## Open questions`, `## Connections` |
-| `memo` | `## Context`, `## Open questions`, `## Next steps`, `## Connections` |
+| `journal` | `Observations`, `Interpretations`, `Open questions`, `Connections` |
+| `memo` | `Context`, `Open questions`, `Next steps`, `Connections` |
+
+Each becomes `> [!reflection]- <Section>`, except `Connections`, which becomes
+`> [!connections]- Connections`.
 
 The journal set is introspective; the memo set is not. A memo is a working note —
 a task, an idea, a plan, a thought caught before it was lost — so `Context` names
@@ -281,7 +326,10 @@ Where a connection may come from, in both sets:
   raising instead would cost the note its summary *and* its reflection over a
   single oversold line, and the exclusion is recorded either way.
 
-The reflection is not part of transcript fidelity measurement.
+The reflection is not part of transcript fidelity measurement. It is stripped
+out of the passage the fidelity reviewer sees, along with the summary — both are
+callouts, and cleanup never writes one — so a summary paraphrasing an utterance
+can never answer for a cleanup that dropped it.
 
 ## What the checks enforce before a model ever reviews the result
 
@@ -293,7 +341,7 @@ original name and body, and puts it in the run's review queue.
 | --- | --- |
 | Added words, on prose lines only | Invention. A word was either spoken or it was not; heading text is exempt because the editor authors structure. |
 | Rare-word retention | A dropped passage. Long infrequent words are content; filler is short and common. |
-| Cleaned/source length ratio | A cleanup that summarized instead of cleaning, or padded. |
+| Cleaned/source length ratio, `0.4`–`1.1` (`0.3` floor under the tiny threshold) | A cleanup that summarized instead of cleaning, or padded. The floor allows for a register that legitimately compresses. |
 | Sampled utterance containment | Passages that vanished, located by sliding window rather than by re-reading the whole file. |
 | Exactly one `# ` heading, and it is `# Transcript` | A cleanup that wrote a document title. |
 | Raw section byte-identical to the source body | Any drift in the thing that must not drift. |

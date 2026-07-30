@@ -50,6 +50,12 @@ links them. That skill still never touches a body.
    template the owner has modified** unless `--force` is passed. Until the
    templates exist, `vault-connections import-run` also fails closed for wiki
    kinds, so this unblocks both skills.
+
+   A vault whose templates predate the `[!abstract]` lead callout will see that
+   refusal on every one of the seven. That is the check working, not a fault:
+   relay it, and reinstall with `--force` once the user agrees. Notes that
+   already exist keep their plain-prose leads until their next `expand`, which
+   rewrites the lead and wraps it.
 4. **Start small.** A first pass on a kind should be ten notes, not all of them:
 
    ```bash

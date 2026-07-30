@@ -1,0 +1,79 @@
+/* Loom — note callouts
+ *
+ * Vault-wide styling for the callouts the pipelines write into ordinary notes:
+ *
+ *   > [!summary]                     open summary at the top of a transcript note
+ *   > [!abstract]                    wiki lead, and the MOC front-door convention
+ *   > [!reflection]- Observations    collapsed generated-reflection section
+ *   > [!connections]- Connections    collapsed connections section
+ *
+ * Unscoped, unlike loom-dashboard.css: these appear in every kind of note, and
+ * the point of them is that generated material looks generated wherever it is.
+ * Folding is Markdown — the `-` after the type — not CSS, so a vault without
+ * this snippet still reads correctly; it just reads plainer.
+ *
+ * Everything derives from theme variables, so the active theme and light/dark
+ * carry through, and the snippet syncs to mobile with the vault. Companion
+ * accent language to loom-dashboard.css. Toggle off in Appearance to get stock
+ * callout rendering back.
+ */
+
+/* ---------------------------------------------------------------------------
+   Identity
+   Obsidian reads --callout-color as an RGB triple and --callout-icon as a
+   lucide icon name. `summary`, `abstract`, and `tldr` are one built-in family,
+   but `data-callout` carries whichever word was actually written, so all three
+   are named to keep the accent uniform.
+   --------------------------------------------------------------------------- */
+
+.callout[data-callout="summary"],
+.callout[data-callout="abstract"],
+.callout[data-callout="tldr"] {
+  --callout-color: var(--color-cyan-rgb);
+  --callout-icon: lucide-align-left;
+}
+
+.callout[data-callout="reflection"] {
+  --callout-color: var(--color-purple-rgb);
+  --callout-icon: lucide-sparkles;
+}
+
+.callout[data-callout="connections"] {
+  --callout-color: var(--color-green-rgb);
+  --callout-icon: lucide-link;
+}
+
+/* ---------------------------------------------------------------------------
+   Quiet apparatus
+   A tinted edge is enough to say "a machine wrote this". Anything louder
+   competes with the words the note is actually about.
+   --------------------------------------------------------------------------- */
+
+.callout[data-callout="summary"],
+.callout[data-callout="abstract"],
+.callout[data-callout="tldr"],
+.callout[data-callout="reflection"],
+.callout[data-callout="connections"] {
+  border: 1px solid
+    color-mix(in srgb, rgb(var(--callout-color)) 24%, var(--background-modifier-border));
+  border-radius: 8px;
+  background: color-mix(in srgb, rgb(var(--callout-color)) 6%, var(--background-secondary));
+}
+
+.callout[data-callout="reflection"] > .callout-title .callout-title-inner,
+.callout[data-callout="connections"] > .callout-title .callout-title-inner {
+  font-weight: 600;
+  font-size: var(--font-ui-medium);
+}
+
+/* A folded section is a one-line offer to read more; it should not shout. */
+
+.callout.is-collapsed[data-callout="reflection"],
+.callout.is-collapsed[data-callout="connections"] {
+  opacity: 0.92;
+}
+
+.callout[data-callout="reflection"] .callout-content ul,
+.callout[data-callout="connections"] .callout-content ul {
+  margin-block: 0.3rem;
+}

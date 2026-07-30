@@ -8,7 +8,8 @@ capture_type: manual
 
 # {{title}}
 
-{{summary}}
+> [!abstract]
+> {{summary}}
 
 ## What Happened
 

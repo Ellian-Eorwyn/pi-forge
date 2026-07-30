@@ -563,6 +563,46 @@ class LinkSectionTests(unittest.TestCase):
         self.assertNotIn("[[Karen Barad]]", filled["associated_concepts"])
 
 
+class LeadCalloutTests(unittest.TestCase):
+    """The opening definition renders as an `[!abstract]` callout.
+
+    A wiki note is skimmed before it is read, and the lead is the sentence that
+    decides whether to keep reading.
+    """
+
+    def test_the_lead_is_wrapped_in_an_abstract_callout(self):
+        rendered = skill.render_lead_callout("Agnotology is the study of produced ignorance.")
+        self.assertEqual(rendered, "> [!abstract]\n> Agnotology is the study of produced ignorance.")
+
+    def test_wrapping_is_idempotent(self):
+        # The lead is rewritten on every expansion, so a second pass must not nest.
+        once = skill.render_lead_callout("A definition.")
+        self.assertEqual(skill.render_lead_callout(once), once)
+
+    def test_a_multi_line_lead_keeps_every_line_quoted(self):
+        rendered = skill.render_lead_callout("First line.\nSecond line.")
+        self.assertEqual(rendered, "> [!abstract]\n> First line.\n> Second line.")
+
+    def test_an_empty_lead_stays_empty(self):
+        self.assertEqual(skill.render_lead_callout("   "), "")
+
+    def test_unwrapping_recovers_the_prose(self):
+        self.assertEqual(skill.unwrap_lead_callout("> [!abstract]\n> A definition."), "A definition.")
+        self.assertEqual(skill.unwrap_lead_callout("A plain lead."), "A plain lead.")
+
+    def test_build_filled_wraps_the_lead_and_leaves_other_sections_alone(self):
+        draft = {"sections": {"_lead": "A definition.", "key_points": "- One point."}, "citations": []}
+        item = {"relatedLinks": [], "title": "Something"}
+        filled = skill.build_filled(draft, item, SPECS["concept"], "# Something\n", [], {})
+        self.assertEqual(filled["_lead"], "> [!abstract]\n> A definition.")
+        self.assertEqual(filled["key_points"], "- One point.")
+
+    def test_every_shipped_template_leads_with_the_callout(self):
+        for name in vw.WIKI_TEMPLATE_NAMES.values():
+            path = Path(skill.__file__).resolve().parents[1] / "references" / "templates" / name
+            self.assertIn("> [!abstract]\n> {{summary}}", path.read_text(encoding="utf-8"), name)
+
+
 class ApplyRevertTests(unittest.TestCase):
     def setUp(self):
         self.vault = make_vault()

@@ -342,6 +342,19 @@ class StubServer:
         return counted
 
 
+def classify_response(recording_type, title="Espresso Machine Repairs"):
+    return {
+        "recording_type": recording_type,
+        "title": title,
+        "speakers": {},
+        "effective_speakers": 1,
+        "spoken_date": None,
+        "evidence": None,
+        "needs_review": False,
+        "review_reason": None,
+    }
+
+
 def run_script(*args, environment=None):
     # Point the agent directory at nothing so endpoint resolution cannot pick up
     # the settings of whoever is running the tests.
@@ -349,7 +362,7 @@ def run_script(*args, environment=None):
     env = {**base, "PYTHONDONTWRITEBYTECODE": "1"}
     env.setdefault("PI_FORGE_AGENT_DIR", "/nonexistent-agent-directory")
     arguments = list(args)
-    if arguments and arguments[0] == "process" and not {"--no-verify", "--think-url"} & set(arguments):
+    if arguments and arguments[0] in {"process", "reprocess"} and not {"--no-verify", "--think-url"} & set(arguments):
         arguments.append("--no-verify")
     return subprocess.run([sys.executable, str(SCRIPT), *arguments], capture_output=True, text=True, env=env)
 
@@ -761,8 +774,9 @@ class NoteBuildingTests(unittest.TestCase):
         self.assertNotIn("[!summary]", head)
         self.assertNotIn("\n\n\n", head)
 
-    def test_journal_reflection_sits_before_the_raw_transcript(self):
-        reflection = "## Observations\n\n- The owner described a difficult week."
+    def test_journal_reflection_sits_above_the_cleaned_text(self):
+        # Generated material together at the top; the speaker's own words below.
+        reflection = "> [!reflection]- Observations\n> - The owner described a difficult week."
         note, head = vt.build_note(
             self.schema,
             vt.frontmatter_metadata(self.schema, "journal"),
@@ -773,12 +787,13 @@ class NoteBuildingTests(unittest.TestCase):
             "raw journal\n",
             reflection=reflection,
         )
-        self.assertLess(note.index("Cleaned authorial text."), note.index("## Observations"))
-        self.assertLess(note.index("## Observations"), note.index("# Transcript"))
+        self.assertLess(note.index("[!summary]"), note.index("[!reflection]- Observations"))
+        self.assertLess(note.index("[!reflection]- Observations"), note.index("Cleaned authorial text."))
+        self.assertLess(note.index("Cleaned authorial text."), note.index("# Transcript"))
         self.assertIn(reflection, head)
 
-    def test_memo_reflection_sits_before_the_raw_transcript(self):
-        reflection = "## Context\n\n- Continues the espresso repair thread."
+    def test_memo_reflection_sits_above_the_cleaned_text(self):
+        reflection = "> [!reflection]- Context\n> - Continues the espresso repair thread."
         note, _head = vt.build_note(
             self.schema,
             vt.frontmatter_metadata(self.schema, "memo"),
@@ -789,8 +804,39 @@ class NoteBuildingTests(unittest.TestCase):
             "raw memo\n",
             reflection=reflection,
         )
-        self.assertLess(note.index("Cleaned memo text."), note.index("## Context"))
-        self.assertLess(note.index("## Context"), note.index("# Transcript"))
+        self.assertLess(note.index("[!reflection]- Context"), note.index("Cleaned memo text."))
+        self.assertLess(note.index("Cleaned memo text."), note.index("# Transcript"))
+
+    def test_the_preamble_stays_next_to_the_cleaned_text(self):
+        # The preamble is the owner's writing, not apparatus: it belongs with
+        # their words, below everything the pipeline made.
+        note, _head = vt.build_note(
+            self.schema,
+            vt.frontmatter_metadata(self.schema, "memo"),
+            "A short summary.",
+            "callout",
+            "1. call the shop\n",
+            "Cleaned memo text.",
+            "raw memo\n",
+            reflection="> [!reflection]- Context\n> - Continues the thread.",
+        )
+        self.assertLess(note.index("[!reflection]- Context"), note.index("1. call the shop"))
+        self.assertLess(note.index("1. call the shop"), note.index("Cleaned memo text."))
+
+    def test_the_summary_callout_stays_open(self):
+        # Every other generated section folds; the summary is the one worth
+        # reading without a click.
+        _note, head = vt.build_note(
+            self.schema,
+            vt.frontmatter_metadata(self.schema, "memo"),
+            "A short summary.",
+            "callout",
+            "",
+            "Cleaned memo text.",
+            "raw memo\n",
+        )
+        self.assertIn("> [!summary]\n> A short summary.", head)
+        self.assertNotIn("[!summary]-", head)
 
     def check(self, body, cleaned, summary="A summary of the recording."):
         parsed = vt.parse_transcript(body)
@@ -815,6 +861,27 @@ class NoteBuildingTests(unittest.TestCase):
         body = transcript(SOLO_BLOCKS * 4)
         problems, _measurements = self.check(body, "The speaker mentioned the espresso machine.")
         self.assertTrue(any("outside" in problem for problem in problems))
+
+    def test_the_ratio_floor_admits_a_condensed_cleanup(self):
+        # The register compresses. A cleanup at roughly half the spoken length is
+        # the register working, not a cleanup that summarized.
+        body = transcript(SOLO_BLOCKS * 4)
+        words = " ".join(entry["text"] for entry in vt.parse_transcript(body)["blocks"]).split()
+        condensed = " ".join(words[: int(len(words) * 0.45)])
+        problems, measurements = self.check(body, condensed)
+        self.assertGreater(measurements["cleaned_ratio"], vt.CLEANED_RATIO_MIN)
+        self.assertFalse([problem for problem in problems if "outside" in problem], problems)
+
+    def test_discourse_fillers_are_not_distinctive_content(self):
+        # Deleting these is the register's job, so losing them must not read as
+        # losing the substance.
+        rare = vt.rare_words(
+            "I basically think the gasket essentially needs replacing, literally, "
+            "and definitely the portafilter too, probably."
+        )
+        for filler in ("basically", "essentially", "literally", "definitely", "probably"):
+            self.assertNotIn(filler, rare)
+        self.assertIn("portafilter", rare)
 
     def test_a_dropped_passage_is_caught(self):
         blocks = vt.parse_transcript(transcript(SOLO_BLOCKS))["blocks"]
@@ -1600,6 +1667,21 @@ class CleanupFidelityTests(unittest.TestCase):
         self.assertNotIn("Gillian", serialized)
         self.assertNotIn("Sociologist", serialized)
 
+    def test_the_fidelity_source_excludes_the_generated_callouts(self):
+        # The reviewer compares an utterance against the cleanup. A summary that
+        # paraphrases the same utterance must not be able to answer for a
+        # cleanup that dropped it.
+        head = (
+            "> [!summary]\n> The speaker discussed the espresso gasket at length.\n\n"
+            "> [!reflection]- Context\n> - Continues the repair thread.\n\n"
+            "The gasket needs replacing.\n"
+        )
+        self.assertEqual(vt.strip_callout_lines(head).strip(), "The gasket needs replacing.")
+
+    def test_stripping_callouts_leaves_ordinary_prose_alone(self):
+        text = "A paragraph.\n\n## A heading\n\n- a bullet\n"
+        self.assertEqual(vt.strip_callout_lines(text), text.rstrip("\n"))
+
 
 class SummarySystemTests(unittest.TestCase):
     def test_the_always_tier_reaches_the_summary_system_prompt(self):
@@ -1637,17 +1719,30 @@ class ReflectionTests(unittest.TestCase):
         )
         self.assertEqual(dropped, [])
         self.assertEqual(
-            [line for line in markdown.splitlines() if line.startswith("## ")],
-            ["## Context", "## Next steps", "## Connections"],
+            [line for line in markdown.splitlines() if line.startswith("> [!")],
+            [
+                "> [!reflection]- Context",
+                "> [!reflection]- Next steps",
+                "> [!connections]- Connections",
+            ],
         )
         self.assertNotIn("Open questions", markdown)
+
+    def test_sections_render_as_collapsed_callouts(self):
+        markdown, _dropped = self.render(
+            {"context": ["Continues the repair thread."], "connections": ["[[Espresso machine]] has it."]}
+        )
+        self.assertIn("> [!reflection]- Context\n> - Continues the repair thread.", markdown)
+        self.assertIn("> [!connections]- Connections\n> - [[Espresso machine]] has it.", markdown)
+        # Never a heading: as one it was indistinguishable from the cleanup's own.
+        self.assertNotIn("##", markdown)
 
     def test_a_journal_keeps_its_own_section_set(self):
         markdown, _dropped = self.render(
             {"observations": ["The owner described a hard week."], "context": ["ignored"]}, "journal"
         )
-        self.assertIn("## Observations", markdown)
-        self.assertNotIn("## Context", markdown)
+        self.assertIn("[!reflection]- Observations", markdown)
+        self.assertNotIn("Context", markdown)
 
     def test_a_cited_outside_connection_survives(self):
         markdown, dropped = self.render(
@@ -1684,7 +1779,7 @@ class ReflectionTests(unittest.TestCase):
                 "connections": ["Remembered fact.", "[[Espresso machine]] has the model number."],
             }
         )
-        self.assertIn("## Context", markdown)
+        self.assertIn("[!reflection]- Context", markdown)
         self.assertIn("[[Espresso machine]] has the model number.", markdown)
         self.assertNotIn("Remembered fact.", markdown)
         self.assertEqual(len(dropped), 1)
@@ -1916,6 +2011,260 @@ class SplitTests(unittest.TestCase):
         completed = run_script("split", "--vault", str(self.vault))
         self.assertEqual(completed.returncode, 2)
         self.assertIn("source", json.loads(completed.stdout)["errors"][0]["message"])
+
+
+class ReconcileTests(unittest.TestCase):
+    """Re-exports of recordings the vault already has.
+
+    Matching is on the recording's text, never the filename: the export names
+    drift, and two files a byte apart are still the same recording.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.vault = Path(self.tmp.name).resolve() / "vault"
+        (self.vault / "99 Meta" / "99.02 Schemas").mkdir(parents=True)
+        (self.vault / "00 Inbox").mkdir()
+        (self.vault / "99 Meta" / "99.02 Schemas" / "0.00 Vault Schema.md").write_text(
+            SOURCES_SCHEMA, encoding="utf-8"
+        )
+        self.body = transcript(SOLO_BLOCKS)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def filed(self, recording=None):
+        path = self.vault / "01 Personal" / "1.01 Journal" / "2026-07-24 - Memo - Espresso Machine Repairs.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"---\ntype: note\nstatus: active\ndomain: personal\n---\n\n> [!summary]\n> A summary.\n\n"
+            f"Cleaned.\n\n# Transcript\n\n{recording or self.body}",
+            encoding="utf-8",
+        )
+        return path
+
+    def export(self, name="20260724 131748-9788991C.md", body=None):
+        path = self.vault / "00 Inbox" / name
+        path.write_text(body or self.body, encoding="utf-8")
+        return path
+
+    def reconcile(self, *extra):
+        completed = run_script("reconcile", "--vault", str(self.vault), *extra)
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        return json.loads(completed.stdout)
+
+    def test_a_re_export_of_a_filed_recording_is_quarantined(self):
+        self.filed()
+        export = self.export()
+        result = self.reconcile("--apply")
+        self.assertEqual(result["data"]["counts"]["matched"], 1)
+        self.assertEqual(result["data"]["counts"]["quarantined"], 1)
+        self.assertFalse(export.exists())
+        quarantined = self.vault / ".vault-transcripts" / "duplicates" / export.name
+        self.assertEqual(quarantined.read_text(encoding="utf-8"), self.body)
+
+    def test_a_recording_differing_only_in_whitespace_still_matches(self):
+        # The re-exports in the real inbox differ from their filed twins by a
+        # byte or two of trailing whitespace.
+        self.filed()
+        self.export(body=self.body + "\n\n")
+        result = self.reconcile("--apply")
+        self.assertEqual(result["data"]["counts"]["matched"], 1)
+
+    def test_a_recording_the_vault_does_not_have_is_left_alone(self):
+        self.filed()
+        export = self.export(name="20260801 090000-AAAA1111.md", body=transcript(TINY_BLOCKS))
+        result = self.reconcile("--apply")
+        self.assertEqual(result["data"]["counts"]["matched"], 0)
+        self.assertEqual(result["data"]["counts"]["unmatched"], 1)
+        self.assertTrue(export.is_file())
+
+    def test_it_matches_through_a_split_notes_link(self):
+        recording = self.vault / "10 Sources" / "10.03 Transcript" / "A Talk - Transcript.md"
+        recording.parent.mkdir(parents=True, exist_ok=True)
+        recording.write_text(f"---\ntype: source\nsource_kind: transcript\n---\n\n{self.body}", encoding="utf-8")
+        self.filed(recording="[[A Talk - Transcript]]\n")
+        self.export()
+        result = self.reconcile("--apply")
+        self.assertEqual(result["data"]["counts"]["matched"], 1)
+
+    def test_a_dry_run_moves_nothing(self):
+        self.filed()
+        export = self.export()
+        result = self.reconcile()
+        self.assertEqual(result["data"]["counts"]["matched"], 1)
+        self.assertEqual(result["data"]["counts"]["quarantined"], 0)
+        self.assertTrue(export.is_file())
+
+    def test_a_processed_inbox_note_is_not_a_candidate(self):
+        self.filed()
+        processed = self.vault / "00 Inbox" / "2026-07-24 - Memo - Something.md"
+        processed.write_text(f"---\ntype: note\n---\n\nCleaned.\n\n# Transcript\n\n{self.body}", encoding="utf-8")
+        result = self.reconcile("--apply")
+        self.assertEqual(result["data"]["counts"]["matched"], 0)
+        self.assertTrue(processed.is_file())
+
+
+class ReprocessTests(unittest.TestCase):
+    """Regenerating the head of a note the pipeline already wrote.
+
+    The recording did not change; what was made of it did. So the invariants are
+    about what must survive untouched: the name every wikilink points at, the
+    frontmatter the organizer wrote, and the recording section itself.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.vault = Path(self.tmp.name).resolve() / "vault"
+        (self.vault / "99 Meta" / "99.02 Schemas").mkdir(parents=True)
+        (self.vault / "00 Inbox").mkdir()
+        (self.vault / "99 Meta" / "99.02 Schemas" / "0.00 Vault Schema.md").write_text(
+            SOURCES_SCHEMA, encoding="utf-8"
+        )
+        self.body = transcript(SOLO_BLOCKS)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    # Frontmatter the organizer would have written: far more than this skill
+    # knows how to produce, and all of it has to survive.
+    FILED = (
+        "type: note\nstatus: active\ndomain: personal\nsubdomain: journal\n"
+        'parent: "[[A Hub]]"\ncapture_type: voice\n'
+    )
+
+    def filed(self, name="2026-07-24 - Memo - Espresso Machine Repairs.md", frontmatter=None, tail=None):
+        path = self.vault / "01 Personal" / "1.01 Journal" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"---\n{frontmatter or self.FILED}---\n\n> [!summary]\n> An older summary.\n\n"
+            f"Older cleaned prose.\n\n# Transcript\n\n{tail if tail is not None else self.body}",
+            encoding="utf-8",
+        )
+        return path
+
+    def reprocess(self, url, *extra):
+        completed = run_script("reprocess", "--vault", str(self.vault), "--base-url", url, "--model", "chat", *extra)
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        return json.loads(completed.stdout)
+
+    def test_the_head_is_regenerated_and_the_recording_is_untouched(self):
+        note = self.filed()
+        with StubServer() as server:
+            result = self.reprocess(server.url, "--apply")
+        self.assertEqual(result["data"]["counts"]["reprocessed"], 1)
+        text = note.read_text(encoding="utf-8")
+        self.assertNotIn("Older cleaned prose.", text)
+        self.assertNotIn("An older summary.", text)
+        self.assertTrue(text.endswith(f"# Transcript\n\n{self.body}"), text[-120:])
+
+    def test_frontmatter_survives_byte_for_byte(self):
+        # The organizer's classification lives here. Rebuilding it from this
+        # skill's three keys would throw domain, subdomain, and parent away.
+        note = self.filed()
+        with StubServer() as server:
+            self.reprocess(server.url, "--apply")
+        self.assertTrue(note.read_text(encoding="utf-8").startswith(f"---\n{self.FILED}---\n\n"))
+
+    def test_the_note_is_never_renamed(self):
+        note = self.filed()
+        with StubServer() as server:
+            self.reprocess(server.url, "--apply")
+        self.assertTrue(note.is_file())
+        self.assertEqual(
+            [path.name for path in (self.vault / "01 Personal" / "1.01 Journal").glob("*.md")],
+            ["2026-07-24 - Memo - Espresso Machine Repairs.md"],
+        )
+
+    def test_a_therapy_note_is_excluded_by_its_name(self):
+        self.filed(name="2026-07-24 - Therapy - Facing Family Dynamics.md")
+        with StubServer() as server:
+            result = self.reprocess(server.url, "--apply")
+            self.assertEqual(server.requests, [])
+        self.assertEqual(result["data"]["counts"]["reprocessed"], 0)
+        self.assertEqual(result["data"]["counts"]["skipped"], 1)
+        self.assertTrue(any("therapy" in warning for warning in result["warnings"]), result["warnings"])
+
+    def test_a_classified_therapy_disagreement_holds_the_note(self):
+        # The filename wins for exclusion, but a therapy reading is a stop.
+        self.filed()
+        scripted = {"classify": [classify_response("therapy")]}
+        with StubServer(scripted=scripted) as server:
+            result = self.reprocess(server.url, "--apply")
+        self.assertEqual(result["data"]["counts"]["reprocessed"], 0)
+        self.assertTrue(any("held" in warning for warning in result["warnings"]), result["warnings"])
+
+    def test_a_type_disagreement_keeps_the_name_and_warns(self):
+        self.filed()
+        scripted = {"classify": [classify_response("lecture")]}
+        with StubServer(scripted=scripted) as server:
+            result = self.reprocess(server.url, "--apply")
+        self.assertEqual(result["data"]["counts"]["reprocessed"], 1)
+        self.assertTrue(
+            any("kept the name's reading" in warning for warning in result["warnings"]), result["warnings"]
+        )
+
+    def test_a_split_note_is_read_through_its_link(self):
+        recording = self.vault / "10 Sources" / "10.03 Transcript" / "A Talk - Transcript.md"
+        recording.parent.mkdir(parents=True, exist_ok=True)
+        recording.write_text(f"---\ntype: source\nsource_kind: transcript\n---\n\n{self.body}", encoding="utf-8")
+        note = self.filed(name="A Talk.md", tail="[[A Talk - Transcript]]\n")
+        with StubServer() as server:
+            result = self.reprocess(server.url, "--apply")
+        self.assertEqual(result["data"]["counts"]["reprocessed"], 1)
+        text = note.read_text(encoding="utf-8")
+        self.assertTrue(text.endswith("# Transcript\n\n[[A Talk - Transcript]]\n"), text[-80:])
+        # The recording's own note is not touched by reprocessing.
+        self.assertTrue(recording.read_text(encoding="utf-8").endswith(self.body))
+
+    def test_the_inbox_is_left_to_process(self):
+        (self.vault / "00 Inbox" / "20260724 131748-9788991C.md").write_text(self.body, encoding="utf-8")
+        processed = self.vault / "00 Inbox" / "2026-07-24 - Memo - Something.md"
+        processed.write_text(f"---\ntype: note\n---\n\nCleaned.\n\n# Transcript\n\n{self.body}", encoding="utf-8")
+        with StubServer() as server:
+            result = self.reprocess(server.url, "--apply")
+            self.assertEqual(server.requests, [])
+        self.assertEqual(result["data"]["counts"]["selected"], 0)
+
+    def test_a_dry_run_changes_nothing(self):
+        note = self.filed()
+        before = note.read_text(encoding="utf-8")
+        with StubServer() as server:
+            result = self.reprocess(server.url)
+        self.assertEqual(result["data"]["counts"]["reprocessed"], 1)
+        self.assertEqual(result["data"]["counts"]["applied"], 0)
+        self.assertEqual(note.read_text(encoding="utf-8"), before)
+
+    def test_the_original_is_backed_up_and_the_report_shows_both_summaries(self):
+        note = self.filed()
+        before = note.read_text(encoding="utf-8")
+        with StubServer() as server:
+            result = self.reprocess(server.url, "--apply")
+        run_dir = Path(result["data"]["run_directory"])
+        backup = run_dir / "backup" / "01 Personal/1.01 Journal/2026-07-24 - Memo - Espresso Machine Repairs.md"
+        self.assertEqual(backup.read_text(encoding="utf-8"), before)
+        report = (run_dir / "reprocess-report.md").read_text(encoding="utf-8")
+        self.assertIn("Summaries, Before And After", report)
+        self.assertIn("An older summary.", report)
+
+    def test_rerunning_is_last_run_wins(self):
+        note = self.filed()
+        with StubServer() as server:
+            self.reprocess(server.url, "--apply")
+        first = note.read_text(encoding="utf-8")
+        with StubServer() as server:
+            result = self.reprocess(server.url, "--apply")
+        self.assertEqual(result["data"]["counts"]["reprocessed"], 1)
+        self.assertEqual(note.read_text(encoding="utf-8"), first)
+
+    def test_a_note_without_a_marker_is_not_selected(self):
+        path = self.vault / "01 Personal" / "Plain.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("---\ntype: note\nstatus: active\ndomain: personal\n---\n\nJust prose.\n", encoding="utf-8")
+        with StubServer() as server:
+            result = self.reprocess(server.url, "--apply")
+            self.assertEqual(server.requests, [])
+        self.assertEqual(result["data"]["counts"]["selected"], 0)
 
 
 if __name__ == "__main__":

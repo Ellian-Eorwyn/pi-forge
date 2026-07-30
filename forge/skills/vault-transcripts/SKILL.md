@@ -65,6 +65,50 @@ conversations.
 6. Offer to run `vault-organizer inbox` next, which files the cleaned notes —
    both halves of each pair, the note and its recording.
 
+## Re-exports of recordings the vault already has
+
+A transcription app re-exports: the same recording arrives in the inbox again,
+sometimes a byte or two different, long after the note made from it was filed.
+Processing those a second time grows a near-twin of every note the vault already
+had. `reconcile` finds them by comparing the recording's text — never the
+filename, which drifts — against every recording already in the vault.
+
+```bash
+python3 <skill-directory>/scripts/vault-transcripts.py reconcile --vault <vault>
+```
+
+A match moves to the recoverable quarantine at `.vault-transcripts/duplicates/`,
+byte-intact and journaled. Anything that does not match stays exactly where it is
+and is listed for the user: it may be a genuinely new recording, or it may be an
+edited one worth looking at. Deterministic and offline, dry-run by default;
+relay both lists and **get approval before `--apply`**.
+
+## Reprocessing notes the pipeline already wrote
+
+The recording never changes; what the pipeline made of it does. When the cleanup
+register or the note layout changes, `reprocess` regenerates the summary,
+reflection, and cleaned text of every filed transcript note from its recording.
+
+```bash
+python3 <skill-directory>/scripts/vault-transcripts.py reprocess --vault <vault>
+```
+
+It selects filed notes with frontmatter and a `# Transcript` marker, reading the
+recording inline or through the link `split` left. **The inbox is left alone** —
+those notes are `process`'s input. **Therapy recordings are excluded** by their
+filename label, and a note the classifier reads as therapy while its name says
+otherwise is held rather than reprocessed: the exclusion is allowed to be
+over-cautious and never the reverse.
+
+Three things survive untouched, and none of them are the pipeline's to decide:
+the note's **name**, which every wikilink in the vault points at; its
+**frontmatter**, byte for byte, because that is the organizer's classification;
+and the **recording section**, reattached exactly as found.
+
+Read `reprocess-report.md` — it shows each summary before and after, which is the
+thing worth judging — then **get approval and rerun with `--apply --run
+<run-directory>`**. Every rewritten note is backed up first.
+
 ## Splitting notes processed before the pair existed
 
 Processing writes two notes: the note made from the recording, and the recording
@@ -138,6 +182,13 @@ note — either lands where the next run will find it.
   journaled to `renames.jsonl`.
 - The original transcription is always preserved verbatim under `# Transcript`.
   If a check cannot prove that, the note is held rather than written.
+- The register is spoken-to-written: filler, false starts, repeated phrases, and
+  unambiguous circumlocutions come out, and the speaker's voice, meaning, and
+  meaningful hedges stay. **Therapy is the exception** and keeps the older,
+  stricter contract — nothing condensed, weighted hesitation preserved.
+- Everything the pipeline generates is a callout, above the speaker's words: the
+  summary open, reflections and connections collapsed. `references/loom-notes.css`
+  styles them; without it notes still read correctly.
 - Notes held for review keep their original name and body. Relay them to the
   user; do not resolve them by rerunning with different options.
 - Never touch a pair that shares a recording id but differs in content. One is
