@@ -1318,8 +1318,9 @@ Return exactly one JSON object and nothing else:
 
 Fidelity rules, which outrank every style rule below:
 - The register is spoken-to-written: what the speaker would have written had they
-  typed this instead of saying it. Reshape the delivery, never the content, and
-  stay inside their own words and their own voice.
+  typed this instead of saying it. Reshape the delivery, never the content. You
+  are editing with a delete key, not a thesaurus: every content word in your
+  answer must be one they said.
 - Remove filler and verbal scaffolding: "like", "um", "you know", "kind of",
   "sort of", "I mean", "basically", "essentially", "literally", "actually",
   "obviously", "honestly", along with false starts, restarted sentences,
@@ -1623,15 +1624,23 @@ def clean_one_chunk(args, service, payload, source, speaker_map, drop_labels, ti
     )
     if not problems:
         return cleaned, summary
-    # The usual cause of a failed gate is drifting into describing what the
-    # speaker said instead of cleaning how they said it, so name that.
+    # A retry that only says "unusable" gets the same answer back; naming the
+    # violation is what changes it. Under the spoken-to-written register the
+    # violation is almost always the same one -- reaching for a better word than
+    # the speaker's -- so when that is what failed, say so in those terms.
     repair = messages + [
         {
             "role": "user",
-            "content": f"That response was unusable: {problems[0]}. Return corrected JSON only, "
-            "staying inside the speaker's own words and their own voice. Clean and condense how "
-            "they said it; do not restate, describe, or explain what they said, and do not drop "
-            "any point they made.",
+            "content": f"That response was unusable: {problems[0]}. Return corrected JSON only. "
+            + (
+                "Those words are yours, not the speaker's. Put their wording back: condense by "
+                "dropping words, never by replacing one with a word you prefer. Every content "
+                "word in your answer must be one they said."
+                if problems[0].startswith("these words are not in the chunk")
+                else "Stay inside the speaker's own words and their own voice. Clean and condense "
+                "how they said it; do not restate, describe, or explain what they said, and do "
+                "not drop any point they made."
+            ),
         }
     ]
     cleaned, summary, retry_problems = clean_chunk_once(
@@ -2429,6 +2438,9 @@ def build_raw_note(schema, metadata, raw_body):
     return serialize_frontmatter(metadata, schema) + "\n" + raw_body
 
 
+TRANSCRIPT_MARKER = "\n\n# Transcript\n\n"
+
+
 def assemble_head(summary, style, preamble, cleaned, reflection=None):
     """The generated section of a note, ending at the ``# Transcript`` marker.
 
@@ -2446,7 +2458,7 @@ def assemble_head(summary, style, preamble, cleaned, reflection=None):
     if preamble.strip():
         sections.append(preamble.strip())
     sections.append(cleaned.strip())
-    return "\n\n".join(sections) + "\n\n# Transcript\n\n"
+    return "\n\n".join(sections) + TRANSCRIPT_MARKER
 
 
 def build_note(schema, metadata, summary, style, preamble, cleaned, raw_body, reflection=None, raw_stem=None):
@@ -4119,11 +4131,13 @@ def assemble_reprocessed(args, vault, schema, items, class_records, clean_result
                 summary_row.get("reflection"),
             )
             # The blank line after the frontmatter is part of the body, so it is
-            # re-added here exactly as `build_note` does. `assemble_head` ends
-            # with the marker and the captured tail starts with it, so the join
-            # drops the duplicate and the section comes back as it was.
+            # re-added here exactly as `build_note` does. The head's own marker
+            # comes off by removing the suffix it is known to end with -- never
+            # by searching for the words, which would cut at the first time the
+            # speaker happened to say them -- and the captured tail supplies it.
+            assert head.endswith(TRANSCRIPT_MARKER)
             note_text = (
-                item["frontmatter_prefix"] + "\n" + head[: head.index("# Transcript")] + item["tail"]
+                item["frontmatter_prefix"] + "\n" + head[: -len(TRANSCRIPT_MARKER)] + "\n\n" + item["tail"]
             )
             problems, measurements = check_note(
                 {**item, "raw_body": raw_body},

@@ -823,6 +823,22 @@ class NoteBuildingTests(unittest.TestCase):
         self.assertLess(note.index("[!reflection]- Context"), note.index("1. call the shop"))
         self.assertLess(note.index("1. call the shop"), note.index("Cleaned memo text."))
 
+    def test_the_head_ends_with_exactly_one_marker(self):
+        head = vt.assemble_head("A summary.", "callout", "", "Cleaned text.", None)
+        self.assertTrue(head.endswith(vt.TRANSCRIPT_MARKER))
+        self.assertEqual(head.count("# Transcript"), 1)
+
+    def test_stripping_the_marker_does_not_cut_at_a_spoken_one(self):
+        # Reprocessing removes the head's marker and reattaches the note's own
+        # transcript section. Searching for the words would cut the note the
+        # first time the speaker happened to say them; stripping the known
+        # suffix cannot.
+        spoken = "I told them to write # Transcript at the top, and then we moved on."
+        head = vt.assemble_head("A summary.", "callout", "", spoken, None)
+        without_marker = head[: -len(vt.TRANSCRIPT_MARKER)]
+        self.assertIn("and then we moved on.", without_marker)
+        self.assertIn("# Transcript at the top", without_marker)
+
     def test_the_summary_callout_stays_open(self):
         # Every other generated section folds; the summary is the one worth
         # reading without a click.

@@ -143,7 +143,8 @@ These outrank every style rule below.
 ```text
 - The register is spoken-to-written: what the speaker would have written had they
   typed this instead of saying it. Reshape the delivery, never the content.
-- Stay inside the speaker's own words and their own voice.
+- Edit with a delete key, not a thesaurus: every content word in the output must
+  be one the speaker said.
 - Do not summarize. Output the full cleaned transcript.
 ```
 
