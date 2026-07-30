@@ -56,7 +56,12 @@ REQUIRED_SECTIONS = [
     "Legacy normalization map",
     "Folder routing",
 ]
-COMPILED_SCHEMA_VERSION = 3
+COMPILED_SCHEMA_VERSION = 4
+# Declaring a "Sources root" section turns on the sources tree. It is optional so
+# that a vault filing sources by domain keeps working untouched, and so the two
+# forms cannot be half-adopted: with a root declared the Source kinds registry
+# must carry numbers and labels, and without one it stays a plain bullet list.
+SOURCES_ROOT_SECTION = "Sources root"
 FRONTMATTER_KEY_RE = re.compile(r"^([a-z][a-z0-9_]*):(.*)$")
 LIST_ITEM_RE = re.compile(r"^(\s*)-\s+(.*)$")
 
@@ -199,6 +204,78 @@ def parse_bullet_registry(lines, heading):
     if not values:
         raise UserError(f"{heading}: controlled vocabulary is empty")
     return values
+
+
+def has_section(lines, heading, level=2):
+    try:
+        heading_index(lines, heading, level)
+    except UserError:
+        return False
+    return True
+
+
+def parse_sources_root(lines):
+    """The one-row registry declaring the sources tree, or None when absent.
+
+    Its number is reserved the way ``0`` is reserved for the inbox: no domain may
+    use it. Keeping the root in the schema rather than in code keeps the rule
+    that complete folder strings are derived outputs, never hand-written values.
+    """
+    if not has_section(lines, SOURCES_ROOT_SECTION):
+        return None
+    rows = table_after(lines, SOURCES_ROOT_SECTION, ["Number", "Label", "Definition"])
+    if len(rows) > 1:
+        raise UserError(f"{SOURCES_ROOT_SECTION}: expected one row, found {len(rows)}")
+    row = rows[0]
+    return {
+        "number": require_number(row["Number"], SOURCES_ROOT_SECTION),
+        "label": require_safe_label(row["Label"], SOURCES_ROOT_SECTION),
+        "definition": row["Definition"].strip(),
+    }
+
+
+def parse_source_kinds(lines, sources_root):
+    """Source kinds as ``{value: {value, number, label, definition}}``.
+
+    Both forms compile to the same shape so membership tests and prompt building
+    do not care which is in use; ``number`` is None for the bullet form, which is
+    what leaves routing off. A declared root with bullet kinds fails closed: half
+    the kinds would have nowhere to file.
+    """
+    start, end = section_bounds(lines, "Source kinds")
+    tabular = any(line.strip().startswith("|") for line in lines[start + 1:end])
+    if not tabular:
+        if sources_root is not None:
+            raise UserError(
+                f"Source kinds: a declared {SOURCES_ROOT_SECTION} requires a table with Value, "
+                f"Number, Label, and Definition columns, not a bullet list"
+            )
+        registry = parse_bullet_registry(lines, "Source kinds")
+        return {
+            value: {"value": value, "number": None, "label": None, "definition": definition}
+            for value, definition in registry.items()
+        }
+    rows = table_after(lines, "Source kinds", ["Value", "Number", "Label", "Definition"])
+    kinds = {}
+    numbers = {}
+    for row in rows:
+        value = strip_schema_value(row["Value"])
+        if not value:
+            raise UserError("Source kinds: empty value")
+        number = require_number(row["Number"], f"Source kinds {value}")
+        label = require_safe_label(row["Label"], f"Source kinds {value}")
+        if value in kinds:
+            raise UserError(f"Source kinds: duplicate value {value}")
+        if number in numbers:
+            raise UserError(f"Source kinds: duplicate number {number}")
+        numbers[number] = value
+        kinds[value] = {
+            "value": value,
+            "number": number,
+            "label": label,
+            "definition": row["Definition"].strip(),
+        }
+    return kinds
 
 
 def parse_assignment(value):
@@ -377,7 +454,69 @@ def project_folder(domain, subdomain, project):
     return f"{domain['number']}.{pad2(project['number'])} {name}"
 
 
+def sources_root_folder(root):
+    return domain_folder(root)
+
+
+def source_kind_folder(root, kind):
+    return subdomain_folder(root, kind)
+
+
+def sources_routing_enabled(schema):
+    """Whether ``type: source`` notes file by kind instead of by domain."""
+    return bool(schema.get("sources_root"))
+
+
+def source_kind_routes(schema):
+    """``{source kind value: vault-relative folder}`` for the sources tree, or {} when off."""
+    root = schema.get("sources_root")
+    if not root:
+        return {}
+    base = sources_root_folder(root)
+    return {
+        value: f"{base}/{source_kind_folder(root, kind)}"
+        for value, kind in schema.get("source_kinds", {}).items()
+        if isinstance(kind, dict) and kind.get("number")
+    }
+
+
+def routes_as_source(schema, metadata):
+    """Whether this note's metadata selects the sources tree rather than a domain folder."""
+    if metadata.get("type") != "source" or not sources_routing_enabled(schema):
+        return False
+    kind = schema.get("source_kinds", {}).get(metadata.get("source_kind") or "")
+    return isinstance(kind, dict) and bool(kind.get("number"))
+
+
+def sources_destination(schema, metadata):
+    """``10 Sources/10.01 Book/Academic/Dissertation`` — kind first, domain as detail.
+
+    A source is looked for by what it is before it is looked for by what it is
+    about, so ``source_kind`` picks the numbered folder and ``domain`` and
+    ``subdomain`` follow as plain labels. Those tails are unnumbered on purpose:
+    drift checking treats anything unnumbered below a declared route as detail,
+    so the tree can grow a folder per domain without every one of them needing a
+    registry row. ``project`` is deliberately not read — a source belongs to its
+    kind whichever projects happen to cite it.
+    """
+    root = schema["sources_root"]
+    kind = schema["source_kinds"][metadata["source_kind"]]
+    parts = [sources_root_folder(root), source_kind_folder(root, kind)]
+    domain = schema["domains"].get(metadata.get("domain") or "")
+    if domain:
+        parts.append(domain["label"])
+        subdomain = schema["subdomains"].get(domain["value"], {}).get(metadata.get("subdomain") or "")
+        if subdomain:
+            parts.append(subdomain["label"])
+    for part in parts:
+        if part in {"", ".", ".."} or "/" in part or "\\" in part:
+            raise UserError(f"unsafe derived path component: {part}")
+    return Path(*parts)
+
+
 def compile_destination(schema, metadata):
+    if routes_as_source(schema, metadata):
+        return sources_destination(schema, metadata)
     domain = schema["domains"][metadata["domain"]]
     parts = [domain_folder(domain)]
     subdomain = None
@@ -430,7 +569,8 @@ def parse_schema_note(text):
 
     types = parse_bullet_registry(lines, "Note types")
     statuses = parse_bullet_registry(lines, "Status values")
-    source_kinds = parse_bullet_registry(lines, "Source kinds")
+    sources_root = parse_sources_root(lines)
+    source_kinds = parse_source_kinds(lines, sources_root)
     capture_types = parse_bullet_registry(lines, "Capture types")
 
     domains = {}
@@ -443,6 +583,10 @@ def parse_schema_note(text):
             raise UserError(f"Domains: duplicate value {value}")
         if number == 0 or number in domain_numbers:
             raise UserError(f"Domains: duplicate or reserved number {number}")
+        if sources_root and number == sources_root["number"]:
+            raise UserError(
+                f"Domains {value}: number {number} is reserved for the {SOURCES_ROOT_SECTION}"
+            )
         domain_numbers[number] = value
         domains[value] = {"value": value, "number": number, "label": label, "definition": row["Definition"].strip()}
     if not domains:
@@ -522,6 +666,7 @@ def parse_schema_note(text):
         "domains": domains,
         "subdomains": subdomains,
         "projects": projects,
+        "sources_root": sources_root,
         "source_kinds": source_kinds,
         "capture_types": capture_types,
         "legacy": legacy,
@@ -534,6 +679,14 @@ def parse_schema_note(text):
 
 def validate_derived_paths(schema):
     seen = {}
+    root = schema.get("sources_root")
+    if root:
+        seen[Path(sources_root_folder(root)).as_posix().lower()] = SOURCES_ROOT_SECTION
+        for value, path in source_kind_routes(schema).items():
+            key = Path(path).as_posix().lower()
+            if key in seen:
+                raise UserError(f"duplicate derived path for source kind {value}: {key}")
+            seen[key] = f"source_kind/{value}"
     for value, domain in schema["domains"].items():
         path = Path(domain_folder(domain)).as_posix().lower()
         if path in seen:
@@ -595,6 +748,28 @@ def route_origins(schema):
             "definition": "",
         }
     }
+    root = schema.get("sources_root")
+    if root:
+        origins[sources_root_folder(root)] = {
+            "kind": "sources_root",
+            "table": SOURCES_ROOT_SECTION,
+            "match_column": "Label",
+            "value": root["label"],
+            "number": root["number"],
+            "label": root["label"],
+            "definition": root["definition"],
+        }
+        for value, path in source_kind_routes(schema).items():
+            kind = schema["source_kinds"][value]
+            origins[path] = {
+                "kind": "source_kind",
+                "table": "Source kinds",
+                "match_column": "Value",
+                "value": value,
+                "number": kind["number"],
+                "label": kind["label"],
+                "definition": kind["definition"],
+            }
     for value, domain in schema["domains"].items():
         base = domain_folder(domain)
         origins[base] = {
@@ -721,6 +896,12 @@ def sibling_numbers(schema, origin):
             for entry in schema["projects"].values()
             if entry["domain"] == origin["domain"] and entry.get("subdomain", "") == origin.get("subdomain", "")
         }
+    if origin["kind"] == "source_kind":
+        return {
+            entry["number"]
+            for entry in schema.get("source_kinds", {}).values()
+            if isinstance(entry, dict) and entry.get("number")
+        }
     return set()
 
 
@@ -730,7 +911,9 @@ def schema_side_fix(schema, origin, target_number):
     A swap — the wanted number already belongs to another row — has no
     single-cell schema fix, so the folders are the only side that can move.
     """
-    if origin["kind"] not in {"domain", "subdomain", "project"}:
+    # The sources root has no sibling table to renumber within, so like the
+    # inbox it is only ever fixed by hand.
+    if origin["kind"] not in {"domain", "subdomain", "project", "source_kind"}:
         return None
     if target_number is None or not 1 <= target_number <= 99:
         return None

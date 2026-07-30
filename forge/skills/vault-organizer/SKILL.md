@@ -1,6 +1,6 @@
 ---
 name: vault-organizer
-description: Organize an Obsidian vault or vault inbox from a human-maintained schema note - classify Markdown notes, file them into schema folders, normalize frontmatter, and find duplicates. Use to process the inbox, file loose notes, de-duplicate, or check the vault against its schema. Dry-runs by default and needs explicit approval before applying. Run vault-transcripts first on raw voice notes; use vault-connections for meaning-based search and linking.
+description: Organize an Obsidian vault or vault inbox from a human-maintained schema note - classify Markdown notes, file them into schema folders (including a per-kind sources tree when the schema declares one), normalize frontmatter, and find duplicates. Use to process the inbox, file loose notes, de-duplicate, or check the vault against its schema. Dry-runs by default and needs explicit approval before applying. Run vault-transcripts first on raw voice notes; use vault-connections for meaning-based search and linking.
 ---
 
 # Vault Organizer
@@ -142,6 +142,31 @@ moves, or deletes a folder and never adds a row, so folder-side corrections and
 new registrations are reported for the user to make. The note is backed up, and
 an edit that fails to re-parse or introduces new high-severity drift is rolled
 back.
+
+## The sources tree
+
+When the schema note declares a **Sources root** section, `type: source` notes
+are filed by `source_kind` under one tree — `10 Sources/10.01 Book/Academic/
+Dissertation` — instead of by domain. The numbered kind folders are declared
+routes and are drift-checked like any other; the `<Domain>/<Subdomain>` tail is
+unnumbered and is never reported. Without the section, sources file by domain
+exactly as before. See `references/vault-schema-contract.md` for the
+derivations and the `type`/`source_kind` pinning that comes with them.
+
+Adding the section to a vault that has been filing by domain is a migration:
+every source note has to move. Because a schema edit changes the hash the
+classification cache is keyed by, the cheap and deterministic way to do it is
+to re-file from the frontmatter the notes already carry.
+
+```bash
+python3 <skill-directory>/scripts/vault-organizer.py vault --vault <vault> --reuse-frontmatter
+```
+
+Notes whose frontmatter already validates are filed without a model call
+(`classification_source: frontmatter`, counted as "Reused from existing
+frontmatter" in the report); anything incomplete or invalid still goes to the
+model. **Relay the dry-run counts and get explicit approval before `--apply`**,
+as with any whole-vault run.
 
 ## De-duplication guarantees
 

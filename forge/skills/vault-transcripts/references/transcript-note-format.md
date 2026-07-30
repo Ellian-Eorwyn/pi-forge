@@ -9,6 +9,9 @@ both.
 
 ## Note layout
 
+Processing one recording writes **two** notes: the note made from it, and the
+recording itself under its own name.
+
 ```markdown
 ---
 type: meeting
@@ -30,23 +33,58 @@ which sections each type gets>
 
 # Transcript
 
+[[<this note's name> - Transcript]]
+```
+
+and beside it, `<this note's name> - Transcript.md`:
+
+```markdown
+---
+type: source
+status: complete
+parent: "[[<the note above>]]"
+source_kind: transcript
+capture_type: voice
+---
+
 <the original transcription, byte for byte>
 ```
+
+Why two: a note about a recording is read at the length of what it says, not the
+length of what was said, and the recording is a source in its own right — with
+`type: source` and `source_kind: transcript` it files into the vault's sources
+tree with every other source rather than riding along inside a note about it. A
+vault whose schema note defines no `source` type or no `transcript` source kind
+cannot describe the second note, so it keeps getting the single combined note
+with the recording inline; every rule below holds for both shapes.
 
 Rules the script enforces, not suggestions:
 
 - The generated section contains exactly one level-one heading, `# Transcript`.
   Everything the cleanup writes is `##` or deeper.
-- Everything after `# Transcript` is the source body unchanged, including its
-  handwritten preamble and any trailing text. The cleanup is a convenience; the
-  transcription is the record.
+- Whichever note holds the recording holds all of it, byte for byte, including
+  its handwritten preamble and any trailing text. The cleanup is a convenience;
+  the transcription is the record.
+- The transcript section of a processed note is exactly one wikilink and nothing
+  else. That is what makes the pointer unambiguous on the way back in.
 - The marker is also read on the way *in*. A note that already carries it has
-  been through this pipeline before, so processing starts from what follows it.
-  Normally frontmatter makes such a note skip entirely, but the two can come
+  been through this pipeline before, so processing starts from what follows it —
+  following the link when the section is one, exactly one level deep, since a
+  recording that happens to contain a marker is a recording and not another
+  pointer. A link resolving to nothing reads as no recording, which skips the
+  note rather than processing a stub as if somebody had said it.
+  Normally frontmatter makes a processed note skip entirely, but the two can come
   apart — strip the frontmatter off a processed note and the marker remains — and
   without this the leftover marker parses as handwritten preamble, gets copied
   into the generated section, and holds every note in the run for a level-one
   heading the cleanup never wrote.
+- The recording's note carries no `processed_by`: nothing processed it, which is
+  the whole point of it. `parent` is its only tie back to the note made from it,
+  and `vault-organizer` carries `parent`, `type`, and `source_kind` forward when
+  it files, since filing replaces frontmatter wholesale.
+- `status: complete` on the recording. A verbatim record is finished the moment
+  it is written; there is no later pass that revises it. A vault whose schema
+  lacks that status gets `raw`.
 - Frontmatter carries only `type`, `status: raw`, `capture_type`, and
   `processed_by`, all validated against the vault's schema note.
   `vault-organizer` replaces this block when it files the note and reads the

@@ -3634,6 +3634,7 @@ test("shared library Python tests pass", () => {
 	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_forge_verify.py")]);
 	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_vault_schema.py")]);
 	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_schema_drift.py")]);
+	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_vault_sources.py")]);
 	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_vault_lexicon.py")]);
 	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_vault_voice.py")]);
 	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_vault_profile.py")]);

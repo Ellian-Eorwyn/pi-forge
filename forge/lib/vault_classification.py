@@ -59,7 +59,13 @@ def compact_schema_for_prompt(schema):
         "domains": schema["domains"],
         "subdomains": schema["subdomains"],
         "projects": schema["projects"],
-        "source_kinds": schema["source_kinds"],
+        # Definitions only. A source kind may also carry the number and label its
+        # folder is compiled from, and folder numbers are exactly what the model
+        # is told never to return; showing them invites it to try.
+        "source_kinds": {
+            value: (entry.get("definition", "") if isinstance(entry, dict) else entry)
+            for value, entry in schema["source_kinds"].items()
+        },
         "capture_types": schema["capture_types"],
     }
 

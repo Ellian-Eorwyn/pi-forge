@@ -43,21 +43,36 @@ import vault_reflection
 import vault_voice
 from vault_schema import (
     INBOX_DIR,
+    PROTECTED_DIRS,
     RESERVED_WINDOWS_NAMES,
     UserError,
+    compile_destination,
     compiled_schema_for,
+    is_workspace_dir,
+    link_basename,
+    parse_frontmatter,
     path_is_inside,
     relative_path,
     resolve_schema_path,
     safe_title,
+    selected_notes,
     serialize_frontmatter,
     sha256_bytes,
     sha256_text,
     split_frontmatter,
+    valid_wikilink,
+    wikilink_target,
 )
 
 WORKFLOW = "vault-transcripts"
-PROMPT_VERSION = "vault-transcripts-v3"
+PROMPT_VERSION = "vault-transcripts-v4"
+# What a processed note keeps where the recording used to be, and what the
+# recording's own note is called: "<processed name> - Transcript".
+RAW_NOTE_SUFFIX = " - Transcript"
+RAW_SOURCE_KIND = "transcript"
+# A verbatim record is finished the moment it is written -- there is no later
+# pass that revises it, so filing it as still-in-progress would be a lie.
+RAW_STATUS = "complete"
 STATE_DIR = ".vault-transcripts"
 QUARANTINE_SUBDIR = "duplicates"
 RUN_STATE_BATCH = 25
@@ -359,6 +374,30 @@ def format_filename(pattern, date, time_hhmm, recording_type, title, include_tim
     return (f"{prefix} {title}" if prefix else title) + ".md"
 
 
+def recording_date(record, item):
+    """The date the new name carries.
+
+    The filename wins a disagreement: the spoken date is whatever the speaker
+    said out loud, and people misremember what day it is more often than an
+    export stamp is wrong.
+    """
+    if record["spoken_date"] and item["date"] and record["spoken_date"] != item["date"]:
+        return item["date"]
+    return record["spoken_date"] or item["date"]
+
+
+def assign_raw_name(vault, directory, stem, taken_casefold):
+    """A free name for the recording's own note, beside the note made from it."""
+    suffix = 1
+    while True:
+        candidate = stem if suffix == 1 else f"{stem} ({suffix})"
+        rel = (Path(directory) / f"{candidate}.md").as_posix()
+        if rel.casefold() not in taken_casefold and not (vault / rel).exists():
+            taken_casefold.add(rel.casefold())
+            return rel
+        suffix += 1
+
+
 def assign_unique_name(vault, directory, args, date, time_hhmm, recording_type, title, taken_casefold, source_rel):
     """Pick a free filename, preferring the configured pattern.
 
@@ -402,24 +441,81 @@ def timestamp_seconds(text):
     return parts[0] * 60 + parts[1]
 
 
-def transcript_source(body):
-    """The recording itself, with any generated head this note already carries.
+def transcript_link_target(section):
+    """The single wikilink a split note keeps under its marker, or None.
+
+    Only a section that is *nothing but* one link is a pointer. A recording whose
+    first line happens to mention ``[[Somebody]]`` is still a recording.
+    """
+    text = section.strip()
+    if not text or "\n" in text:
+        return None
+    match = re.fullmatch(r"!?\[\[([^\]\r\n]+)\]\]", text)
+    return link_basename(wikilink_target(f"[[{match.group(1)}]]")) if match else None
+
+
+def find_note_by_basename(vault, basename):
+    """The note a wikilink resolves to, searched the way Obsidian resolves one."""
+    if not basename:
+        return None
+    inbox = vault / INBOX_DIR / f"{basename}.md"
+    if inbox.is_file():
+        return inbox
+    for directory, dirnames, filenames in os.walk(vault, followlinks=False):
+        dirpath = Path(directory)
+        dirnames[:] = [
+            name
+            for name in sorted(dirnames)
+            if not (dirpath / name).is_symlink()
+            and name not in PROTECTED_DIRS
+            and not name.startswith(".")
+            and not is_workspace_dir(dirpath / name)
+        ]
+        candidate = dirpath / f"{basename}.md"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def transcript_source(body, vault=None):
+    """The recording itself, wherever this note keeps it.
 
     A body holding the ``# Transcript`` marker has been through this pipeline
-    before: everything after the marker is the original recording, everything
-    before it was written by a previous run. Normally such a note also has
-    frontmatter and ``is_transcript`` skips it, but the two can come apart --
-    strip the frontmatter off a processed note and the marker is still sitting
-    there, which is how 32 notes in one real inbox arrived.
+    before: everything after the marker is the recording, everything before it
+    was written by a previous run. Normally such a note also has frontmatter and
+    ``is_transcript`` skips it, but the two can come apart -- strip the
+    frontmatter off a processed note and the marker is still sitting there,
+    which is how 32 notes in one real inbox arrived.
 
-    Re-processing has to start from the recording. Left alone, the leftover
-    marker is not part of any timestamped block, so ``parse_transcript`` reads it
-    as handwritten preamble, ``build_note`` copies it into the generated head and
+    Since the split, the marker section holds a link to the recording rather than
+    the recording itself, so following it is how a processed note is re-read. The
+    link is followed exactly one level: a recording that happens to contain a
+    marker is a recording, not another pointer. A link that resolves to nothing
+    returns empty, which reads downstream as "no timestamped blocks" and skips
+    the note rather than processing a stub as if it were speech.
+
+    Re-processing has to start from the recording. Left alone, a leftover marker
+    is not part of any timestamped block, so ``parse_transcript`` reads it as
+    handwritten preamble, ``build_note`` copies it into the generated head and
     then adds the real marker after it, and every note in the run is held for a
     level-one heading it never wrote.
     """
     match = TRANSCRIPT_MARKER_RE.search(body)
-    return body[match.end():] if match else body
+    if not match:
+        return body
+    section = body[match.end():]
+    target = transcript_link_target(section)
+    if target is None:
+        return section
+    if vault is None:
+        return ""
+    path = find_note_by_basename(Path(vault), target)
+    if path is None:
+        return ""
+    try:
+        return split_frontmatter(path.read_bytes())["body"].lstrip("\n")
+    except (OSError, UnicodeDecodeError):
+        return ""
 
 
 def _line_kind(line):
@@ -646,7 +742,7 @@ def scan_inbox(vault, limit=None):
             data = path.read_bytes()
             item["sha256"] = sha256_bytes(data)
             split = split_frontmatter(data)
-            parsed = parse_transcript(transcript_source(split["body"]))
+            parsed = parse_transcript(transcript_source(split["body"], vault))
             transcript, reason = is_transcript(split, parsed)
             item["is_transcript"] = transcript
             item["skip_reason"] = reason
@@ -1037,7 +1133,7 @@ def classify_items(args, vault, items, run_dir, skip):
         started = time.time()
         try:
             data = (vault / item["path"]).read_bytes()
-            parsed = parse_transcript(transcript_source(split_frontmatter(data)["body"]))
+            parsed = parse_transcript(transcript_source(split_frontmatter(data)["body"], vault))
             payload = classify_payload(item, parsed, getattr(args, "compiled_lexicon", None))
             roster_names = [offer["name"] for offer in payload.get("knownSpeakers", [])]
             messages = [
@@ -1465,7 +1561,7 @@ def clean_items(args, vault, items, class_records, run_dir, skip):
     for item, record in plans:
         try:
             data = (vault / item["path"]).read_bytes()
-            parsed = parse_transcript(transcript_source(split_frontmatter(data)["body"]))
+            parsed = parse_transcript(transcript_source(split_frontmatter(data)["body"], vault))
         except (OSError, UnicodeDecodeError) as error:
             warnings.append(f"{item['path']}: could not re-read for cleanup ({error})")
             results[item["path"]] = {"error": str(error)}
@@ -2123,9 +2219,59 @@ def render_summary(summary, style):
     return summary
 
 
-def build_note(schema, metadata, summary, style, preamble, cleaned, raw_body, reflection=None):
-    """Assemble the final note. The head is generated; everything after the
-    ``# Transcript`` marker is the original body, byte for byte."""
+def raw_note_stem(processed_name):
+    """``2026-07-24 - Therapy - Family.md`` -> ``2026-07-24 - Therapy - Family - Transcript``."""
+    stem = processed_name[:-3] if processed_name.lower().endswith(".md") else processed_name
+    return safe_title(stem + RAW_NOTE_SUFFIX)
+
+
+def raw_supported(schema):
+    """Whether this vault can hold the recording as its own source note.
+
+    A vault whose schema has no ``source`` type or no ``transcript`` source kind
+    cannot describe the recording's own note, so the pipeline keeps writing the
+    single combined note it always did rather than inventing vocabulary.
+    """
+    return "source" in schema["types"] and RAW_SOURCE_KIND in schema["source_kinds"]
+
+
+def raw_metadata(schema, recording_type, processed_stem):
+    """Frontmatter for the recording's own note.
+
+    Deliberately not ``processed_by``: nothing processed this note, that is the
+    whole point of it. ``parent`` is the only tie back to the note that was made
+    from it, and filing replaces frontmatter wholesale, so the organizer carries
+    it forward with ``type`` and ``source_kind``.
+    """
+    metadata = {
+        "type": "source",
+        "status": RAW_STATUS,
+        "source_kind": RAW_SOURCE_KIND,
+        "capture_type": TYPE_TO_CAPTURE[recording_type],
+        "parent": f"[[{processed_stem}]]",
+    }
+    if metadata["status"] not in schema["statuses"]:
+        metadata["status"] = "raw" if "raw" in schema["statuses"] else next(iter(schema["statuses"]))
+    if metadata["capture_type"] not in schema["capture_types"]:
+        metadata.pop("capture_type")
+    return {key: value for key, value in metadata.items() if key in schema["properties"]}
+
+
+def build_raw_note(schema, metadata, raw_body):
+    """The recording, with frontmatter and nothing else added."""
+    return serialize_frontmatter(metadata, schema) + "\n" + raw_body
+
+
+def build_note(schema, metadata, summary, style, preamble, cleaned, raw_body, reflection=None, raw_stem=None):
+    """Assemble the final note.
+
+    Everything above the ``# Transcript`` marker is generated. Below it goes
+    either the recording itself, byte for byte, or -- when the recording is
+    getting its own note -- a link to it and nothing else. Splitting them keeps a
+    processed note readable at the length of what it says rather than the length
+    of what was said, and lets the recording be filed as the source it is instead
+    of riding along inside a note about it.
+    """
     sections = []
     if summary:
         sections.append(render_summary(summary, style))
@@ -2135,7 +2281,9 @@ def build_note(schema, metadata, summary, style, preamble, cleaned, raw_body, re
     if reflection:
         sections.append(reflection.strip())
     head = serialize_frontmatter(metadata, schema) + "\n" + "\n\n".join(sections) + "\n\n# Transcript\n\n"
-    return head + raw_body, head
+    if raw_stem is None:
+        return head + raw_body, head
+    return head + f"[[{raw_stem}]]\n", head
 
 
 def frontmatter_metadata(schema, recording_type):
@@ -2182,7 +2330,7 @@ def corrected_source_text(parsed, args, proposals=()):
     return vault_lexicon.apply_corrections(text, entries)[0] if entries else text
 
 
-def check_note(item, cleaned, summary, note_text, head, parsed, args, proposals=()):
+def check_note(item, cleaned, summary, note_text, head, parsed, args, proposals=(), raw_text=None, raw_stem=None):
     """Every deterministic check that can fail a note, in one place.
 
     Returns (problems, measurements). A problem holds the note back: it keeps
@@ -2192,8 +2340,17 @@ def check_note(item, cleaned, summary, note_text, head, parsed, args, proposals=
     heads = [line for line in head.splitlines() if re.match(r"^#\s", line.strip())]
     if heads != ["# Transcript"]:
         problems.append(f"generated section must contain exactly one level-one heading (found {heads})")
-    if not note_text.endswith(item["raw_body"]):
-        problems.append("raw transcript section is not byte-identical to the source body")
+    # Whichever note ends up holding the recording holds all of it. The pair only
+    # loses nothing if the processed note points at the recording and the
+    # recording note is the source bytes with frontmatter in front.
+    if raw_text is None:
+        if not note_text.endswith(item["raw_body"]):
+            problems.append("raw transcript section is not byte-identical to the source body")
+    else:
+        if not raw_text.endswith(item["raw_body"]):
+            problems.append("raw transcript note is not byte-identical to the source body")
+        if not note_text.endswith(f"# Transcript\n\n[[{raw_stem}]]\n"):
+            problems.append("transcript section must hold exactly one link to the raw transcript note")
     source_text = corrected_source_text(parsed, args, proposals)
     source_words = len(source_text.split())
     # Prose only. A short dialogue carries one "**Name:**" per turn, and counting
@@ -2286,6 +2443,11 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
     artifacts.mkdir(exist_ok=True)
     warnings = []
     records = []
+    split_raw = raw_supported(schema)
+    if not split_raw:
+        warnings.append(
+            "schema has no source type or transcript source kind; keeping the recording inside each note"
+        )
     taken = set()
     for existing in scan_existing_names(vault):
         taken.add(existing)
@@ -2333,12 +2495,23 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
         if summary is None and summary_row.get("skipped") and summary_row["skipped"] != "tiny":
             records.append(review_record(item, f"summary failed: {summary_row['skipped']}"))
             continue
+        # The recording's note is named after the processed one and the processed
+        # one links to it by name, so both names are settled before either note is
+        # built. A note that fails its checks below keeps its original name and
+        # leaves these reserved but unused, which costs at most a plainer name for
+        # a later recording of the same day, type, and topic.
+        date = recording_date(record, item)
+        destination = assign_unique_name(
+            vault, INBOX_DIR, args, date, item["time_hhmm"], record["recording_type"], record["title"], taken, rel
+        )
+        raw_stem = raw_note_stem(Path(destination).name) if split_raw else None
+        raw_destination = assign_raw_name(vault, INBOX_DIR, raw_stem, taken) if raw_stem else None
         try:
             data = (vault / rel).read_bytes()
             if sha256_bytes(data) != item["sha256"]:
                 records.append(review_record(item, "note changed on disk during this run"))
                 continue
-            raw_body = transcript_source(split_frontmatter(data)["body"])
+            raw_body = transcript_source(split_frontmatter(data)["body"], vault)
             parsed = parse_transcript(raw_body)
             metadata = frontmatter_metadata(schema, record["recording_type"])
             note_text, head = build_note(
@@ -2350,6 +2523,14 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
                 cleaned_result["cleaned"],
                 raw_body,
                 reflection=summary_row.get("reflection"),
+                raw_stem=raw_stem,
+            )
+            raw_text = (
+                build_raw_note(
+                    schema, raw_metadata(schema, record["recording_type"], Path(destination).stem), raw_body
+                )
+                if raw_stem
+                else None
             )
             problems, measurements = check_note(
                 {**item, "raw_body": raw_body},
@@ -2360,6 +2541,8 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
                 parsed,
                 args,
                 cleaned_result.get("proposals") or [],
+                raw_text=raw_text,
+                raw_stem=raw_stem,
             )
         except (OSError, UnicodeDecodeError, UserError, ValueError) as error:
             message = f"{type(error).__name__}: {error}"
@@ -2400,14 +2583,12 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
         assembled["checks"] = problems
         assembled["classification_source"] = record["source"]
         assembled["warnings"] = list(record.get("warnings") or [])
-        date = record["spoken_date"] or item["date"]
         if not date:
             assembled["warnings"].append("no recording date in the filename; the new name has no date prefix")
         if record["spoken_date"] and item["date"] and record["spoken_date"] != item["date"]:
             assembled["warnings"].append(
                 f"transcript says {record['spoken_date']} but the filename says {item['date']}; kept the filename date"
             )
-            date = item["date"]
         if problems:
             assembled["status"] = "review"
             assembled["needs_review"] = True
@@ -2420,11 +2601,15 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
         assembled["artifact"] = name
         assembled["final_hash"] = sha256_text(note_text)
         assembled["date"] = date
-        assembled["destination"] = assign_unique_name(
-            vault, INBOX_DIR, args, date, item["time_hhmm"], record["recording_type"], record["title"], taken, rel
-        )
-        destination_path = vault / assembled["destination"]
-        if not path_is_inside(vault, destination_path):
+        assembled["destination"] = destination
+        if raw_text is not None:
+            raw_name = f"{sha256_text(rel)[:12]}.raw.md"
+            (artifacts / raw_name).write_text(raw_text, encoding="utf-8")
+            assembled["raw_artifact"] = raw_name
+            assembled["raw_final_hash"] = sha256_text(raw_text)
+            assembled["raw_destination"] = raw_destination
+        destinations = [assembled["destination"]] + ([raw_destination] if raw_destination else [])
+        if any(not path_is_inside(vault, vault / candidate) for candidate in destinations):
             assembled["status"] = "failed"
             assembled["needs_review"] = True
             assembled["review_reason"] = "destination escapes the vault"
@@ -2661,7 +2846,7 @@ def verify_records(args, vault, items_by_path, records, run_dir):
         path = payload["id"]
         record = by_path[path]
         item = items_by_path[path]
-        parsed = parse_transcript(transcript_source(split_frontmatter((vault / path).read_bytes())["body"]))
+        parsed = parse_transcript(transcript_source(split_frontmatter((vault / path).read_bytes())["body"], vault))
         messages = [
             {"role": "system", "content": CLASSIFY_SYSTEM},
             {"role": "user", "content": json.dumps(classify_payload(item, parsed), ensure_ascii=False)},
@@ -2801,7 +2986,22 @@ def reassemble_escalated(args, vault, schema, items_by_path, clean_results, reco
         try:
             if not cleaned:
                 raise UserError("cleaned transcript is no longer available in this run")
-            raw_body = transcript_source(split_frontmatter((vault / path).read_bytes())["body"])
+            # A new title renames the note, and the recording's note is named
+            # after it, so both halves are renamed together or the link breaks.
+            destination = assign_unique_name(
+                vault,
+                INBOX_DIR,
+                args,
+                record.get("date"),
+                item["time_hhmm"],
+                record["recording_type"],
+                record["title"],
+                taken,
+                path,
+            )
+            raw_stem = raw_note_stem(Path(destination).name) if record.get("raw_artifact") else None
+            raw_destination = assign_raw_name(vault, INBOX_DIR, raw_stem, taken) if raw_stem else None
+            raw_body = transcript_source(split_frontmatter((vault / path).read_bytes())["body"], vault)
             parsed = parse_transcript(raw_body)
             metadata = frontmatter_metadata(schema, record["recording_type"])
             note_text, head = build_note(
@@ -2813,6 +3013,14 @@ def reassemble_escalated(args, vault, schema, items_by_path, clean_results, reco
                 cleaned,
                 raw_body,
                 reflection=record.get("reflection"),
+                raw_stem=raw_stem,
+            )
+            raw_text = (
+                build_raw_note(
+                    schema, raw_metadata(schema, record["recording_type"], Path(destination).stem), raw_body
+                )
+                if raw_stem
+                else None
             )
             problems, measurements = check_note(
                 {**item, "raw_body": raw_body},
@@ -2823,6 +3031,8 @@ def reassemble_escalated(args, vault, schema, items_by_path, clean_results, reco
                 parsed,
                 args,
                 record.get("proposals") or [],
+                raw_text=raw_text,
+                raw_stem=raw_stem,
             )
             record["measurements"] = measurements
             record["checks"] = problems
@@ -2830,17 +3040,11 @@ def reassemble_escalated(args, vault, schema, items_by_path, clean_results, reco
                 raise UserError("; ".join(problems))
             (artifacts / record["artifact"]).write_text(note_text, encoding="utf-8")
             record["final_hash"] = sha256_text(note_text)
-            record["destination"] = assign_unique_name(
-                vault,
-                INBOX_DIR,
-                args,
-                record.get("date"),
-                item["time_hhmm"],
-                record["recording_type"],
-                record["title"],
-                taken,
-                path,
-            )
+            record["destination"] = destination
+            if raw_text is not None:
+                (artifacts / record["raw_artifact"]).write_text(raw_text, encoding="utf-8")
+                record["raw_final_hash"] = sha256_text(raw_text)
+                record["raw_destination"] = raw_destination
         except (OSError, UnicodeDecodeError, UserError, ValueError) as error:
             message = f"{type(error).__name__}: {error}"
             warnings.append(f"{path}: rebuilding after verification failed ({message})")
@@ -3088,6 +3292,11 @@ def write_plan(run_dir, records, counts, dedupe, dry_run, vault, schema_hash, op
                     "",
                 ]
             )
+            if record.get("raw_destination"):
+                report.insert(
+                    len(report) - 1,
+                    f"- Recording kept as `{Path(record['raw_destination']).name}`, linked from the note",
+                )
     else:
         report.extend(["- None", ""])
     report.extend(["## Renames", ""])
@@ -3144,12 +3353,35 @@ def apply_quarantine(vault, run_dir, record):
     return backup
 
 
+def write_atomic(path, text):
+    """Write ``text`` to ``path`` through a temporary file in the same directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle_id, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(handle_id, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
 def apply_process(vault, run_dir, record):
     """Rename and rewrite one note, atomically and recoverably.
 
     The original is copied to the run's backup directory before anything moves,
     the new content lands through a temporary file in the same directory, and the
     old name is only unlinked once the new one exists.
+
+    The recording's own note is written first, so an interruption between the two
+    writes leaves the recording duplicated rather than lost: the original note
+    still holds it, and resuming finds the recording note already there with the
+    planned bytes and finishes the rewrite.
     """
     source = vault / record["source"]
     destination = vault / record["destination"]
@@ -3161,22 +3393,24 @@ def apply_process(vault, run_dir, record):
         raise UserError("assembled note changed since planning")
     if destination.exists() and destination.resolve() != source.resolve():
         raise UserError("destination collision")
+    raw_text = None
+    raw_destination = None
+    if record.get("raw_artifact"):
+        raw_text = (run_dir / "assembled" / record["raw_artifact"]).read_text(encoding="utf-8")
+        if sha256_text(raw_text) != record["raw_final_hash"]:
+            raise UserError("raw transcript note changed since planning")
+        raw_destination = vault / record["raw_destination"]
+        if raw_destination.exists():
+            existing = raw_destination.read_text(encoding="utf-8")
+            if sha256_text(existing) != record["raw_final_hash"]:
+                raise UserError("raw transcript destination collision")
+            raw_text = None  # already written by an interrupted run
     backup = run_dir / "backup" / record["source"]
     backup.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, backup)
-    handle_id, temp_name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=str(destination.parent))
-    try:
-        with os.fdopen(handle_id, "w", encoding="utf-8") as handle:
-            handle.write(note_text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_name, destination)
-    except Exception:
-        try:
-            os.unlink(temp_name)
-        except OSError:
-            pass
-        raise
+    if raw_text is not None:
+        write_atomic(raw_destination, raw_text)
+    write_atomic(destination, note_text)
     if destination.resolve() != source.resolve() and source.exists():
         source.unlink()
     return backup
@@ -3543,6 +3777,226 @@ def process(args):
     )
 
 
+# --------------------------------------------------------------------------
+# Split: separating recordings out of notes already processed
+# --------------------------------------------------------------------------
+
+
+def plan_split(vault, schema, path, taken_casefold):
+    """Plan one note's split, or return None when there is nothing to split.
+
+    Entirely deterministic: the recording is the bytes after the marker and the
+    note keeps everything before it, so the two halves put back together are the
+    note that was there. No model reads either half -- what the recording is
+    about was already decided when the note was first processed, and re-deciding
+    it now would be a second opinion nobody asked for.
+    """
+    data = path.read_bytes()
+    split = split_frontmatter(data)
+    if split["malformed"] or not split["had_frontmatter"]:
+        return None
+    match = TRANSCRIPT_MARKER_RE.search(split["body"])
+    if not match:
+        return None
+    head = split["body"][: match.end()]
+    raw_body = split["body"][match.end():]
+    # Nothing may be lost: the note's body is exactly the head plus the recording.
+    if head + raw_body != split["body"]:
+        return {"path": path, "skip": "the note does not reconstruct from its two halves"}
+    if transcript_link_target(raw_body) is not None:
+        return None  # already split
+    if not raw_body.strip():
+        return {"path": path, "skip": "the transcript section is empty"}
+
+    previous = parse_frontmatter(split["frontmatter_text"])
+    metadata = {key: value for key, value in previous.items() if key in schema["properties"]}
+    # A note that is mostly a summary of a recording is a note about a source,
+    # not the source; the recording it points at is the source now. The schema
+    # forbids source_kind anywhere but a source, so it goes with the type.
+    converted = metadata.get("type") == "source"
+    if converted:
+        metadata["type"] = "note" if "note" in schema["types"] else metadata["type"]
+        if metadata["type"] != "source":
+            metadata.pop("source_kind", None)
+
+    stem = path.stem
+    raw_stem = raw_note_stem(path.name)
+    raw = raw_metadata(schema, "other", stem)
+    raw["capture_type"] = previous.get("capture_type") if "capture_type" in schema["properties"] else None
+    if raw["capture_type"] not in schema["capture_types"]:
+        raw.pop("capture_type", None)
+    domain = previous.get("domain")
+    if domain not in schema["domains"]:
+        return {"path": path, "skip": f"domain {domain!r} is not in the schema; file the note first"}
+    raw["domain"] = domain
+    subdomain = previous.get("subdomain")
+    warnings = []
+    if subdomain and subdomain in schema["subdomains"].get(domain, {}):
+        raw["subdomain"] = subdomain
+    elif subdomain:
+        warnings.append(f"subdomain {subdomain!r} is not in the schema; the recording is filed at the domain")
+    raw = {key: value for key, value in raw.items() if key in schema["properties"] and value}
+
+    directory = compile_destination(schema, raw).as_posix()
+    raw_destination = assign_raw_name(vault, directory, raw_stem, taken_casefold)
+    processed_text = serialize_frontmatter(metadata, schema) + head + f"[[{Path(raw_destination).stem}]]\n"
+    raw_text = build_raw_note(schema, raw, raw_body)
+    return {
+        "path": path,
+        "source": relative_path(vault, path),
+        "source_hash": sha256_bytes(data),
+        "destination": relative_path(vault, path),
+        "raw_destination": raw_destination,
+        "processed_text": processed_text,
+        "raw_text": raw_text,
+        "final_hash": sha256_text(processed_text),
+        "raw_final_hash": sha256_text(raw_text),
+        "converted_from_source": converted,
+        "warnings": warnings,
+    }
+
+
+def apply_split(vault, run_dir, record):
+    """Write the recording's note, then rewrite the note it came out of.
+
+    In that order, so an interruption between the two leaves the original note
+    intact and holding the recording; resuming finds the recording already
+    written with the planned bytes and finishes.
+    """
+    source = vault / record["source"]
+    data = source.read_bytes()
+    if sha256_bytes(data) != record["source_hash"]:
+        raise UserError("source changed since planning")
+    backup = run_dir / "backup" / record["source"]
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, backup)
+    raw_destination = vault / record["raw_destination"]
+    if raw_destination.exists():
+        # An interrupted run already wrote it; anything else with that name is
+        # somebody's note and is not ours to overwrite.
+        if sha256_text(raw_destination.read_text(encoding="utf-8")) != record["raw_final_hash"]:
+            raise UserError("raw transcript destination collision")
+    else:
+        write_atomic(raw_destination, record["raw_text"])
+    write_atomic(source, record["processed_text"])
+    return backup
+
+
+def split_notes(args):
+    """Move the recording out of every note that still carries one inline."""
+    vault = Path(args.vault).expanduser().resolve()
+    if not vault.is_dir():
+        raise UserError(f"vault root does not exist: {vault}")
+    schema_path = resolve_schema_path(vault, args.schema)
+    schema, schema_hash = compiled_schema_for(vault, schema_path, cache_dir=vault / STATE_DIR / "cache")
+    if not raw_supported(schema):
+        raise UserError(
+            "schema defines no 'source' note type or no 'transcript' source kind, "
+            "so a recording has no note of its own to move into"
+        )
+    warnings = []
+    records = []
+    skipped = []
+    # Only this run's own planned names; ``assign_raw_name`` checks the disk for
+    # everything already there.
+    taken = set()
+    with run_state.run_lock(vault / STATE_DIR):
+        run_dir = Path(args.run).expanduser().resolve() if args.run else unique_run_directory(vault)
+        for path in selected_notes(vault, schema_path, "vault", args.limit):
+            try:
+                planned = plan_split(vault, schema, path, taken)
+            except (OSError, UnicodeDecodeError, UserError, ValueError) as error:
+                warnings.append(f"{relative_path(vault, path)}: {type(error).__name__}: {error}")
+                continue
+            if planned is None:
+                continue
+            if planned.get("skip"):
+                skipped.append({"source": relative_path(vault, path), "reason": planned["skip"]})
+                warnings.append(f"{relative_path(vault, path)}: {planned['skip']}")
+                continue
+            warnings.extend(f"{planned['source']}: {warning}" for warning in planned["warnings"])
+            records.append(planned)
+
+        counts = {
+            "notes_to_split": len(records),
+            "skipped": len(skipped),
+            "converted_from_source": sum(1 for record in records if record["converted_from_source"]),
+            "applied": 0,
+        }
+        if args.apply:
+            log_path = run_dir / "apply-log.jsonl"
+            prior, _ = run_state.read_jsonl_recover_tail(log_path, repair=True)
+            done = {entry.get("source") for entry in prior if entry.get("status") == "ok"}
+            for record in records:
+                if record["source"] in done:
+                    counts["applied"] += 1
+                    continue
+                try:
+                    backup = apply_split(vault, run_dir, record)
+                    counts["applied"] += 1
+                    entry = {
+                        "op": "split",
+                        "status": "ok",
+                        "source": record["source"],
+                        "raw_destination": record["raw_destination"],
+                        "backup": relative_path(run_dir, backup),
+                    }
+                except (OSError, UserError) as error:
+                    entry = {"op": "split", "status": "failed", "source": record["source"], "error": str(error)}
+                    warnings.append(f"{record['source']}: split failed ({error})")
+                run_state.append_jsonl_fsync(log_path, entry)
+
+        plan = {
+            "dry_run": not args.apply,
+            "vault": str(vault),
+            "schema_hash": schema_hash,
+            "run_directory": str(run_dir),
+            "counts": counts,
+            "skipped": skipped,
+            "warnings": warnings,
+            "records": [
+                {key: value for key, value in record.items() if key not in {"path", "processed_text", "raw_text"}}
+                for record in records
+            ],
+        }
+        plan_path = run_dir / "split-plan.json"
+        run_state.atomic_write_json(plan_path, plan)
+        report = [
+            "# Vault Transcripts Split Report",
+            "",
+            f"- Dry run: `{str(not args.apply).lower()}`",
+            f"- Vault: `{vault}`",
+            f"- Notes to split: {counts['notes_to_split']}",
+            f"- Notes changing from `type: source` to `type: note`: {counts['converted_from_source']}",
+            f"- Skipped: {counts['skipped']}",
+            "",
+            "## Splits",
+            "",
+        ]
+        if records:
+            for record in records:
+                report.append(f"- `{record['source']}` → recording moved to `{record['raw_destination']}`")
+        else:
+            report.append("- None")
+        report.extend(["", "## Skipped", ""])
+        report.extend(
+            [f"- `{entry['source']}` — {entry['reason']}" for entry in skipped] if skipped else ["- None"]
+        )
+        report_path = run_dir / "split-report.md"
+        report_path.write_text("\n".join(report) + "\n", encoding="utf-8")
+    return structured(
+        "ok",
+        artifacts=[str(plan_path), str(report_path)],
+        warnings=warnings,
+        data={
+            "dry_run": not args.apply,
+            "vault": str(vault),
+            "run_directory": str(run_dir),
+            "counts": counts,
+        },
+    )
+
+
 def status(args):
     run_dir = Path(args.run).expanduser().resolve()
     state = run_state.load_run_state(run_dir, workflow=WORKFLOW)
@@ -3775,7 +4229,7 @@ class TrackingAction(argparse.Action):
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(description="Rename, clean, and summarize voice-note transcripts in an Obsidian inbox.")
-    parser.add_argument("mode", choices=["process", "status", "doctor"])
+    parser.add_argument("mode", choices=["process", "split", "status", "doctor"])
     parser.add_argument("--vault")
     parser.add_argument("--schema", action=TrackingAction)
     parser.add_argument("--voice", action=TrackingAction, help="voice-and-style note (default: the vault's, when present)")
@@ -3822,11 +4276,15 @@ def parse_args(argv):
         return args
     if not args.vault:
         raise UserError(f"{args.mode} requires --vault")
+    args.schema = args.schema or os.environ.get("VAULT_TRANSCRIPTS_SCHEMA") or None
+    if args.mode == "split":
+        # Deterministic text surgery: no model reads either half, so this runs
+        # with every endpoint down.
+        return args
     resolved = forge_llm.resolve_service("chat", base_url=args.base_url, model=args.model)
     args.base_url = resolved["url"]
     args.model = resolved["model"]
     args.api_key = args.api_key or os.environ.get("VAULT_TRANSCRIPTS_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
-    args.schema = args.schema or os.environ.get("VAULT_TRANSCRIPTS_SCHEMA") or None
     args.voice = args.voice or os.environ.get("VAULT_TRANSCRIPTS_VOICE") or None
     args.profile = args.profile or os.environ.get("VAULT_TRANSCRIPTS_PROFILE") or None
     if args.no_voice and args.voice and args.voice_provided:
@@ -3845,6 +4303,8 @@ def run(argv):
         return status(args)
     if args.mode == "doctor":
         return doctor(args)
+    if args.mode == "split":
+        return split_notes(args)
     return process(args)
 
 

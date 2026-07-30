@@ -40,6 +40,38 @@ Folder names are derived by code:
 The script refuses unregistered values, absolute paths, `..` traversal, unsafe
 labels, duplicate derived destinations, and destination collisions.
 
+### The sources tree
+
+A schema that declares a **Sources root** section files every `type: source`
+note by its `source_kind` instead, under one top-level tree:
+
+- sources root: `<pad2(root.number)> <root.label>` — `10 Sources`
+- source kind: `<root.number>.<pad2(kind.number)> <kind.label>` — `10.01 Book`
+- then the note's `domain` and `subdomain` **labels**, unnumbered:
+  `10 Sources/10.01 Book/Academic/Dissertation`
+
+`project` is deliberately not read for a source: a source belongs to its kind
+whichever projects happen to cite it. `domain` stays required and keeps its
+meaning; only the derivation changes. The unnumbered tail is what lets the tree
+grow a folder per domain without ninety more registry rows — drift checking
+treats anything unnumbered below a declared route as detail (see Schema Drift),
+while the numbered kind folders are declared routes and are checked normally.
+
+Declaring the root makes the table form of **Source kinds** mandatory (`Value`,
+`Number`, `Label`, `Definition`); a bullet list with a root declared is a parse
+error rather than a half-routed vault. Omitting the section restores filing by
+domain, so the switch is one section in the schema note. The root's number is
+reserved against domains the way `0` is reserved for the inbox.
+
+Because `source_kind` now selects a tree rather than only describing a note,
+`carry_forward_provenance` pins `type: source` and a schema-valid `source_kind`
+from the note's previous frontmatter over the classifier's answer, and carries
+`parent` with them. The writers of those values are scripts that knew what they
+were making — a transcript's recording half, an imported artifact — and a
+classifier reading a wall of timestamped speech has been seen to call it a
+meeting, which under kind routing moves the note rather than just mislabelling
+it.
+
 ## Schema Drift
 
 `validate_derived_paths` only catches two *declared* routes colliding with each
@@ -288,6 +320,19 @@ collision) follow the schema's own inbox contract:
   which is what permits moving filed notes at all.
 - In `inbox` mode they stay exactly where they are with the reason recorded.
 - Notes that failed to read at all are left in place and reported.
+
+`--reuse-frontmatter` files a note whose existing frontmatter already validates
+without asking the model at all: the values are read from the note, pushed
+through `validate_classification` unchanged, and recorded with
+`classification_source: frontmatter`. Anything that fails to validate falls
+through to the cache and the model exactly as it would have. Reused records are
+excluded from verification — there is no model judgment in them to review.
+
+This exists for schema migrations that move folders without changing what any
+note *is*. Without it, editing the schema note changes `schema_hash`, which is
+part of the classification cache key, so a whole-vault run re-derives every
+classification from the model: slow, and lossy, because a note the model hedges
+on lands in the review queue and gets pulled back into `00 Inbox`.
 
 ## Filenames
 

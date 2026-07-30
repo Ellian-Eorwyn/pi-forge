@@ -183,6 +183,33 @@ domain only:
 """
 
 
+# The same vault, opted in to filing sources by kind. Derived from SCHEMA rather
+# than written out again, so the two cannot drift apart on anything but the one
+# section under test.
+SOURCES_SCHEMA = SCHEMA.replace(
+    """## Source kinds
+
+- `book` — Book.
+- `manual` — Manual.
+""",
+    """## Sources root
+
+| Number | Label | Definition |
+| --- | --- | --- |
+| `10` | `Sources` | External source notes, filed by source kind. |
+
+## Source kinds
+
+| Value | Number | Label | Definition |
+| --- | --- | --- | --- |
+| `book` | `1` | `Book` | Book. |
+| `article` | `2` | `Article` | Article. |
+| `transcript` | `3` | `Transcript` | Transcript. |
+| `manual` | `7` | `Manual` | Manual. |
+""",
+)
+
+
 class StubChatHandler(BaseHTTPRequestHandler):
     responses = []
     requests = []
@@ -1224,6 +1251,149 @@ class HumanOwnedPropertyTests(unittest.TestCase):
             schema,
         )
         self.assertIn('\ncover: "https://example.com/a.png"\n', text)
+
+
+class SourcesTreeTests(unittest.TestCase):
+    """Filing ``type: source`` notes by source kind rather than by domain.
+
+    The routing itself is proven in ``forge/lib/tests/test_vault_sources.py``.
+    What is proven here is the organizer's half: that a run actually files into
+    the tree, and that a source note's identity survives a pass that would
+    otherwise re-derive it from the note's text.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        self.vault = self.root / "vault"
+        (self.vault / "99 Meta").mkdir(parents=True)
+        (self.vault / "00 Inbox").mkdir()
+        (self.vault / "99 Meta" / "0.00 Vault Schema.md").write_text(SOURCES_SCHEMA, encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def schema(self):
+        return vault_organizer.parse_schema_note(SOURCES_SCHEMA)
+
+    def test_a_source_files_into_the_tree_end_to_end(self):
+        note = self.vault / "00 Inbox" / "Isbister - 2016 - How Games Move Us.md"
+        note.write_text("# How Games Move Us\n\nEmotion by design.\n", encoding="utf-8")
+        response = ok_response(metadata={
+            "type": "source",
+            "status": "active",
+            "domain": "technology",
+            "subdomain": "obsidian",
+            "source_kind": "book",
+            "capture_type": "manual",
+        })
+        with StubServer([response]) as server:
+            result = run_script("inbox", "--vault", str(self.vault), "--base-url", server.url, "--apply")
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        filed = self.vault / "10 Sources" / "10.01 Book" / "Technology" / "Obsidian" / note.name
+        self.assertTrue(filed.is_file(), sorted(path.name for path in self.vault.rglob("*.md")))
+        self.assertFalse(note.exists())
+        self.assertIn("source_kind: book", filed.read_text(encoding="utf-8"))
+
+    def test_reuse_frontmatter_files_without_calling_the_model(self):
+        note = self.vault / "00 Inbox" / "Filed Already.md"
+        note.write_text(
+            "---\ntype: source\nstatus: active\ndomain: technology\nsubdomain: obsidian\n"
+            "source_kind: manual\ncapture_type: manual\n---\n\n# Filed Already\n\nBody.\n",
+            encoding="utf-8",
+        )
+        with StubServer([]) as server:
+            result = run_script(
+                "inbox", "--vault", str(self.vault), "--base-url", server.url, "--reuse-frontmatter", "--apply"
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["data"]["counts"]["reused"], 1)
+            self.assertEqual(payload["data"]["counts"]["classified"], 0)
+            self.assertEqual(server.requests, [])
+        filed = self.vault / "10 Sources" / "10.07 Manual" / "Technology" / "Obsidian" / note.name
+        self.assertTrue(filed.is_file(), sorted(path.name for path in self.vault.rglob("*.md")))
+
+    def test_reuse_falls_through_to_the_model_when_frontmatter_is_incomplete(self):
+        note = self.vault / "00 Inbox" / "Half Done.md"
+        note.write_text("---\ntype: source\n---\n\n# Half Done\n\nBody.\n", encoding="utf-8")
+        response = ok_response(metadata={
+            "type": "note", "status": "active", "domain": "technology", "subdomain": "obsidian",
+        })
+        with StubServer([response]) as server:
+            result = run_script(
+                "inbox", "--vault", str(self.vault), "--base-url", server.url, "--reuse-frontmatter"
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["data"]["counts"]["classified"], 1)
+            self.assertEqual(payload["data"]["counts"]["reused"], 0)
+            self.assertEqual(len(server.requests), 1)
+
+    def test_reuse_never_invents_a_human_owned_value(self):
+        schema = self.schema()
+        reused = vault_organizer.reuse_frontmatter_classification(
+            schema,
+            "type: source\nstatus: active\ndomain: technology\nsource_kind: book\n"
+            "date: 2026-01-15\nprocessed_by:\n  - vault-transcripts\n",
+        )
+        self.assertIsNotNone(reused)
+        validated, _ = reused
+        # Withheld from the candidate, then restored from the note by the same
+        # carry-forward the model path uses.
+        self.assertNotIn("date", validated["metadata"])
+        self.assertNotIn("processed_by", validated["metadata"])
+
+    def test_reused_records_are_not_sent_to_the_verifier(self):
+        records = {
+            "a.md": {"destination": "10 Sources/10.01 Book/x.md", "classification_source": "frontmatter"},
+            "b.md": {"destination": "04 Technology/y.md", "classification_source": "model"},
+        }
+        self.assertEqual([rel for rel, _ in vault_organizer.verifiable_records(records)], ["b.md"])
+
+    def test_a_source_note_keeps_its_kind_through_reclassification(self):
+        # The raw half of a transcript is a wall of timestamped speech, and a
+        # classifier reading it calls it a meeting. The note already knew.
+        schema = self.schema()
+        validated = {"metadata": {
+            "type": "note", "status": "active", "domain": "personal", "subdomain": "journal",
+        }}
+        warnings = []
+        vault_organizer.carry_forward_provenance(
+            validated,
+            'type: source\nsource_kind: transcript\nparent: "[[2026-07-24 - Therapy]]"\n',
+            schema,
+            warnings,
+        )
+        self.assertEqual(validated["metadata"]["type"], "source")
+        self.assertEqual(validated["metadata"]["source_kind"], "transcript")
+        self.assertEqual(validated["metadata"]["parent"], "[[2026-07-24 - Therapy]]")
+        self.assertTrue(any("kept type: source" in warning for warning in warnings))
+        self.assertEqual(
+            vault_organizer.compile_destination(schema, validated["metadata"]).as_posix(),
+            "10 Sources/10.03 Transcript/Personal/Journal",
+        )
+
+    def test_a_stale_kind_the_schema_dropped_is_not_pinned(self):
+        schema = self.schema()
+        validated = {"metadata": {"type": "note", "status": "active", "domain": "personal"}}
+        vault_organizer.carry_forward_provenance(
+            validated, "type: source\nsource_kind: papyrus\n", schema, []
+        )
+        self.assertEqual(validated["metadata"]["type"], "note")
+        self.assertNotIn("source_kind", validated["metadata"])
+
+    def test_pinning_is_off_for_a_vault_that_files_sources_by_domain(self):
+        schema = vault_organizer.parse_schema_note(SCHEMA)
+        validated = {"metadata": {"type": "note", "status": "active", "domain": "personal"}}
+        vault_organizer.carry_forward_provenance(
+            validated, "type: source\nsource_kind: book\n", schema, []
+        )
+        self.assertEqual(validated["metadata"]["type"], "note")
+
+    def test_the_classifier_is_never_shown_a_folder_number(self):
+        compact = vault_organizer.compact_schema_for_prompt(self.schema())
+        self.assertEqual(compact["source_kinds"]["book"], "Book.")
 
 
 if __name__ == "__main__":

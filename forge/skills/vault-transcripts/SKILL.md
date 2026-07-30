@@ -1,6 +1,6 @@
 ---
 name: vault-transcripts
-description: Process raw voice-note and meeting transcripts sitting in an Obsidian vault inbox - give each recording a real title, clean the speech-to-text artifacts without rewriting the speaker's meaning, write a summary, and add advisory frontmatter. Use before vault-organizer processes the inbox, so the organizer classifies a named, cleaned note. For recordings not yet transcribed use transcription; for transcripts outside a vault use transcript-cleanup.
+description: Process raw voice-note and meeting transcripts sitting in an Obsidian vault inbox - give each recording a real title, clean the speech-to-text artifacts without rewriting the speaker's meaning, write a summary, and keep the recording as its own linked source note. Use before vault-organizer processes the inbox, so the organizer classifies a named, cleaned note; use split to move the recording out of notes processed before the pair existed. For recordings not yet transcribed use transcription; for transcripts outside a vault use transcript-cleanup.
 ---
 
 # Vault Transcripts
@@ -8,7 +8,8 @@ description: Process raw voice-note and meeting transcripts sitting in an Obsidi
 A transcription app drops files like `20260724 131748-9788991C.md` into the vault
 inbox: no frontmatter, no headings, no paragraphs, and a filename that says
 nothing about the recording. This skill gives each one a name, a summary, and a
-readable body, and leaves the original transcription in place underneath.
+readable body, and keeps the original transcription beside it as a source note
+the new note links to.
 
 Run it **before** `vault-organizer` inbox processing. This skill decides what a
 recording is called and how it reads; the organizer decides where it belongs and
@@ -61,7 +62,33 @@ conversations.
 
    "Process my voice notes and apply it" is approval. A vague "sort out my inbox"
    is not.
-6. Offer to run `vault-organizer inbox` next, which files the cleaned notes.
+6. Offer to run `vault-organizer inbox` next, which files the cleaned notes —
+   both halves of each pair, the note and its recording.
+
+## Splitting notes processed before the pair existed
+
+Processing writes two notes: the note made from the recording, and the recording
+under its own name, which the note links to. Notes processed before that keep
+the recording inline under `# Transcript`. `split` moves it out, deterministically
+and with every endpoint down — no model reads either half, because what the
+recording is about was decided when the note was first processed.
+
+```bash
+python3 <skill-directory>/scripts/vault-transcripts.py split --vault <vault>
+```
+
+It plans one split per note that has frontmatter and a `# Transcript` marker
+still holding text; already-split notes, raw inbox exports, and notes with no
+marker are left alone. The recording's note is written straight into the sources
+tree, inheriting the note's own `domain` and `subdomain` — a domain the schema
+does not define holds the note back rather than being guessed at. A note that is
+itself `type: source` becomes `type: note`: the recording it now points at is the
+source.
+
+Read `split-report.md`, relay the counts and the type conversions, **get explicit
+approval, then `--apply`**. Every rewritten note is copied to `backup/` under the
+run directory first, and the recording is written before the note is rewritten,
+so an interruption leaves the original intact rather than the recording lost.
 
 ## Settings
 

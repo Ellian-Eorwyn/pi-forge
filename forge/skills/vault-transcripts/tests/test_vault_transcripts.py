@@ -41,6 +41,7 @@ capture_type: manual
 | `status` | yes | controlled scalar | Lifecycle. |
 | `domain` | yes | controlled scalar | Broad area. |
 | `subdomain` | no | controlled scalar | Nested area. |
+| `parent` | no | quoted wikilink | Parent hub. |
 | `source_kind` | conditional | controlled scalar | Source kind. |
 | `capture_type` | no | controlled scalar | Capture type. |
 | `processed_by` | no | list | Automated workflows that transformed this note. |
@@ -68,6 +69,7 @@ type: note
 
 - `raw` — Unprocessed.
 - `active` — Active.
+- `complete` — Finished.
 
 ## Domains
 
@@ -144,6 +146,28 @@ domain only:
 | --- | --- |
 | `type: daily` | `type: journal` |
 """
+
+# The same vault, opted in to filing sources by kind, so a recording gets a note
+# of its own in `10 Sources/10.03 Transcript`. Derived from SCHEMA so the two
+# cannot drift apart on anything but that one section.
+SOURCES_SCHEMA = SCHEMA.replace(
+    "## Source kinds\n\n- `transcript` — Verbatim speech.\n",
+    """## Sources root
+
+| Number | Label | Definition |
+| --- | --- | --- |
+| `10` | `Sources` | External source notes, filed by source kind. |
+
+## Source kinds
+
+| Value | Number | Label | Definition |
+| --- | --- | --- | --- |
+| `transcript` | `3` | `Transcript` | Verbatim speech. |
+""",
+)
+
+# A vault whose schema cannot describe a recording's own note.
+NO_SOURCE_SCHEMA = SCHEMA.replace("- `source` — External source.\n", "")
 
 
 def block(text, seconds, speaker=None):
@@ -360,6 +384,27 @@ class TranscriptMarkerTests(unittest.TestCase):
         preamble = "1. call the shop\n2. measure the counter\n\n"
         parsed = vt.parse_transcript(vt.transcript_source(f"# Transcript\n\n{preamble}{self.BODY}"))
         self.assertEqual(parsed["preamble"], preamble)
+
+    def test_a_link_under_the_marker_is_followed_to_the_recording(self):
+        with tempfile.TemporaryDirectory() as directory:
+            vault = Path(directory)
+            (vault / "00 Inbox").mkdir()
+            (vault / "00 Inbox" / "A Talk - Transcript.md").write_text(
+                f"---\ntype: source\nsource_kind: transcript\n---\n\n{self.BODY}", encoding="utf-8"
+            )
+            body = f"> [!summary]\n> A summary.\n\nCleaned.\n\n# Transcript\n\n[[A Talk - Transcript]]\n"
+            self.assertEqual(vt.transcript_source(body, vault), self.BODY)
+
+    def test_a_link_to_nothing_reads_as_no_recording(self):
+        # Better an empty read, which skips the note, than processing the link
+        # text as if somebody had said it.
+        with tempfile.TemporaryDirectory() as directory:
+            body = "Cleaned.\n\n# Transcript\n\n[[Gone Missing]]\n"
+            self.assertEqual(vt.transcript_source(body, Path(directory)), "")
+
+    def test_a_recording_that_merely_mentions_a_link_is_still_a_recording(self):
+        section = f"[[Some Note]] came up in conversation.\n\n{self.BODY}"
+        self.assertEqual(vt.transcript_source(f"# Transcript\n\n{section}", None), section)
 
 
 class ParsingTests(unittest.TestCase):
@@ -869,6 +914,17 @@ class PipelineTests(unittest.TestCase):
     def inbox(self):
         return sorted(path.name for path in (self.vault / "00 Inbox").glob("*.md"))
 
+    def assertProcessed(self, *names):
+        """The inbox holds exactly these notes and a recording note for each.
+
+        Processing writes a pair: the note made from the recording, and the
+        recording itself under its own name. Stating it once here keeps the
+        tests about what they are each testing, and still fails loudly if a
+        recording goes missing or an extra one appears.
+        """
+        expected = sorted([*names, *(f"{name[:-3]} - Transcript.md" for name in names)])
+        self.assertEqual(self.inbox(), expected)
+
     def test_dry_run_changes_nothing_and_plans_everything(self):
         self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
         before = self.inbox()
@@ -891,12 +947,35 @@ class PipelineTests(unittest.TestCase):
         self.write("20260724 131748-9788991C.md", body)
         with StubServer() as server:
             result = self.result_of(self.process(server.url, "--apply"))
-        self.assertEqual(self.inbox(), ["2026-07-24 - Memo - Espresso Machine Repairs.md"])
+        self.assertEqual(
+            self.inbox(),
+            [
+                "2026-07-24 - Memo - Espresso Machine Repairs - Transcript.md",
+                "2026-07-24 - Memo - Espresso Machine Repairs.md",
+            ],
+        )
         note = (self.vault / "00 Inbox" / "2026-07-24 - Memo - Espresso Machine Repairs.md").read_text(encoding="utf-8")
         self.assertTrue(note.startswith('---\ntype: note\nstatus: raw\ncapture_type: voice\nprocessed_by:\n  - "vault-transcripts"\n---\n'))
         self.assertIn("> [!summary]", note)
-        self.assertEqual(note.split("\n# Transcript\n\n", 1)[1], body)
+        # The note points at the recording; the recording is the note beside it,
+        # byte for byte under its own frontmatter.
+        self.assertEqual(
+            note.split("\n# Transcript\n\n", 1)[1],
+            "[[2026-07-24 - Memo - Espresso Machine Repairs - Transcript]]\n",
+        )
         self.assertEqual([line for line in note.splitlines() if line.startswith("# ")], ["# Transcript"])
+        raw = (
+            self.vault / "00 Inbox" / "2026-07-24 - Memo - Espresso Machine Repairs - Transcript.md"
+        ).read_text(encoding="utf-8")
+        self.assertTrue(raw.endswith(body))
+        self.assertTrue(
+            raw.startswith(
+                "---\ntype: source\nstatus: complete\n"
+                'parent: "[[2026-07-24 - Memo - Espresso Machine Repairs]]"\n'
+                "source_kind: transcript\ncapture_type: voice\n---\n"
+            ),
+            raw[:400],
+        )
         run_dir = Path(result["data"]["run_directory"])
         backup = run_dir / "backup" / "00 Inbox" / "20260724 131748-9788991C.md"
         self.assertEqual(backup.read_text(encoding="utf-8"), body)
@@ -912,7 +991,8 @@ class PipelineTests(unittest.TestCase):
             result = self.result_of(self.process(server.url))
             self.assertEqual(server.stage_requests("classify"), [])
         self.assertEqual(result["data"]["counts"]["transcripts"], 0)
-        self.assertEqual(result["data"]["counts"]["skipped_non_transcript"], 1)
+        # Both halves of the pair carry frontmatter now, so both are skipped.
+        self.assertEqual(result["data"]["counts"]["skipped_non_transcript"], 2)
 
     def test_exact_duplicates_are_quarantined_recoverably(self):
         body = transcript(SOLO_BLOCKS)
@@ -922,7 +1002,7 @@ class PipelineTests(unittest.TestCase):
             result = self.result_of(self.process(server.url, "--apply"))
             self.assertEqual(len(server.stage_requests("classify")), 1)
         self.assertEqual(result["data"]["counts"]["duplicates_exact"], 1)
-        self.assertEqual(self.inbox(), ["2026-06-12 - Memo - Espresso Machine Repairs.md"])
+        self.assertProcessed("2026-06-12 - Memo - Espresso Machine Repairs.md")
         quarantined = self.vault / ".vault-transcripts" / "duplicates" / "20260612 093818-7FE5D769 (1).md"
         self.assertEqual(quarantined.read_text(encoding="utf-8"), body)
 
@@ -946,7 +1026,7 @@ class PipelineTests(unittest.TestCase):
         self.write("New Recording 41.md", transcript(SOLO_BLOCKS))
         with StubServer() as server:
             result = self.result_of(self.process(server.url, "--apply"))
-        self.assertEqual(self.inbox(), ["Memo - Espresso Machine Repairs.md"])
+        self.assertProcessed("Memo - Espresso Machine Repairs.md")
         self.assertEqual(result["data"]["counts"]["undated"], 1)
         report = (run_dir_of(result) / "report.md").read_text(encoding="utf-8")
         self.assertIn("no recording date in the filename", report)
@@ -997,7 +1077,7 @@ class PipelineTests(unittest.TestCase):
         with StubServer(scripted={"classify": [first, second]}) as server:
             self.result_of(self.process(server.url, "--apply"))
             self.assertEqual(len(server.stage_requests("classify")), 2)
-        self.assertEqual(self.inbox(), ["2026-07-24 - Memo - Espresso Repairs.md"])
+        self.assertProcessed("2026-07-24 - Memo - Espresso Repairs.md")
 
     def test_two_recordings_with_the_same_title_both_survive(self):
         self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
@@ -1005,15 +1085,14 @@ class PipelineTests(unittest.TestCase):
         with StubServer() as server:
             result = self.result_of(self.process(server.url, "--apply"))
         self.assertEqual(result["data"]["counts"]["processed"], 2)
-        self.assertEqual(
-            self.inbox(),
-            [
-                "2026-07-24 - Memo - Espresso Machine Repairs.md",
-                "2026-07-24 1543 - Memo - Espresso Machine Repairs.md",
-            ],
+        self.assertProcessed(
+            "2026-07-24 - Memo - Espresso Machine Repairs.md",
+            "2026-07-24 1543 - Memo - Espresso Machine Repairs.md",
         )
-        for name in self.inbox():
-            self.assertIn("# Transcript", (self.vault / "00 Inbox" / name).read_text(encoding="utf-8"))
+        # Each note points at its own recording, not at the other one's.
+        for name in ("2026-07-24 - Memo - Espresso Machine Repairs", "2026-07-24 1543 - Memo - Espresso Machine Repairs"):
+            note = (self.vault / "00 Inbox" / f"{name}.md").read_text(encoding="utf-8")
+            self.assertTrue(note.endswith(f"# Transcript\n\n[[{name} - Transcript]]\n"), note[-200:])
 
     def test_an_overlong_summary_is_asked_for_again(self):
         self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
@@ -1060,7 +1139,7 @@ class PipelineTests(unittest.TestCase):
         }
         with StubServer(scripted=scripted) as server:
             result = self.result_of(self.process(server.url, "--apply"))
-        self.assertEqual(self.inbox(), ["Memo - Espresso Repairs.md"])
+        self.assertProcessed("Memo - Espresso Repairs.md")
         report = (run_dir_of(result) / "report.md").read_text(encoding="utf-8")
         self.assertIn("ignored spoken date 2019-01-01", report)
 
@@ -1083,7 +1162,7 @@ class PipelineTests(unittest.TestCase):
                 "summarize": [{"summary": "The speaker lists espresso machine maintenance tasks and next steps."}],
             }
             result = self.result_of(self.process(chat.url, "--apply", "--think-url", think.url, "--think-model", "code"))
-        self.assertEqual(self.inbox(), ["2026-07-24 - Memo - Espresso Machine Maintenance.md"])
+        self.assertProcessed("2026-07-24 - Memo - Espresso Machine Maintenance.md")
         self.assertEqual(result["data"]["verification"]["escalated"], 1)
         report = (run_dir_of(result) / "report.md").read_text(encoding="utf-8")
         self.assertIn("re-done with reasoning", report)
@@ -1124,7 +1203,7 @@ class PipelineTests(unittest.TestCase):
             server.reset()
             self.result_of(self.process(server.url, "--apply", "--run", str(run_dir_of(first))))
             self.assertEqual(server.requests, [])
-        self.assertEqual(self.inbox(), ["2026-07-24 - Memo - Espresso Machine Repairs.md"])
+        self.assertProcessed("2026-07-24 - Memo - Espresso Machine Repairs.md")
 
     def test_resume_refuses_changed_options(self):
         self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
@@ -1142,7 +1221,7 @@ class PipelineTests(unittest.TestCase):
             server.reset()
             second = self.result_of(self.process(server.url, "--apply", "--run", str(run_dir_of(first))))
             self.assertEqual(server.requests, [])
-        self.assertEqual(self.inbox(), ["2026-07-24 - Memo - Espresso Machine Repairs.md"])
+        self.assertProcessed("2026-07-24 - Memo - Espresso Machine Repairs.md")
         self.assertEqual(second["data"]["counts"]["applied"], 1)
         self.assertEqual(second["data"]["counts"]["review_required"], 0)
 
@@ -1201,7 +1280,7 @@ class PipelineTests(unittest.TestCase):
             payload = json.loads(server.stage_requests("clean")[0]["messages"][1]["content"])
         self.assertEqual(payload["speakers"], {"Speaker 1": "Ellie", "Speaker 2": "Gillian"})
         self.assertIn("**Ellie**", payload["chunk"])
-        self.assertEqual(self.inbox(), ["2026-07-24 - Conversation - Deployment Window Review.md"])
+        self.assertProcessed("2026-07-24 - Conversation - Deployment Window Review.md")
 
     def test_long_transcripts_are_chunked_with_context(self):
         self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS * 60))
@@ -1667,6 +1746,176 @@ class OutsideSourceTests(unittest.TestCase):
             vault = Path(directory)
             candidates = [{"path": "missing.md", "wikilink": "[[missing]]"}]
             self.assertEqual(vt.outside_sources("no links", vault, candidates), [])
+
+
+class SplitTests(unittest.TestCase):
+    """Moving the recording out of notes processed before the split existed.
+
+    Deterministic by construction: the recording is the bytes after the marker,
+    so every test here is really one claim -- the two halves put back together
+    are the note that was there.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.vault = Path(self.tmp.name).resolve() / "vault"
+        (self.vault / "99 Meta" / "99.02 Schemas").mkdir(parents=True)
+        (self.vault / "00 Inbox").mkdir()
+        (self.vault / "99 Meta" / "99.02 Schemas" / "0.00 Vault Schema.md").write_text(
+            SOURCES_SCHEMA, encoding="utf-8"
+        )
+        self.body = transcript(SOLO_BLOCKS)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def combined(self, relative, frontmatter, body=None):
+        path = self.vault / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        text = f"---\n{frontmatter}---\n\n> [!summary]\n> A summary.\n\nCleaned prose.\n\n# Transcript\n\n{body or self.body}"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def split(self, *extra):
+        completed = run_script("split", "--vault", str(self.vault), *extra)
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        return json.loads(completed.stdout)
+
+    def notes(self):
+        return sorted(
+            path.relative_to(self.vault).as_posix()
+            for path in self.vault.rglob("*.md")
+            if not any(part.startswith(".") for part in path.relative_to(self.vault).parts)
+        )
+
+    def test_a_dry_run_changes_nothing(self):
+        note = self.combined(
+            "01 Personal/1.01 Journal/A Talk.md",
+            "type: note\nstatus: active\ndomain: personal\nsubdomain: journal\n",
+        )
+        before = note.read_text(encoding="utf-8")
+        result = self.split()
+        self.assertEqual(result["data"]["counts"]["notes_to_split"], 1)
+        self.assertEqual(result["data"]["counts"]["applied"], 0)
+        self.assertEqual(note.read_text(encoding="utf-8"), before)
+        self.assertEqual(len(self.notes()), 2)  # the note and the schema
+
+    def test_the_two_halves_reconstruct_the_original(self):
+        note = self.combined(
+            "01 Personal/1.01 Journal/A Talk.md",
+            "type: note\nstatus: active\ndomain: personal\nsubdomain: journal\n",
+        )
+        original = note.read_text(encoding="utf-8")
+        self.split("--apply")
+        raw = self.vault / "10 Sources/10.03 Transcript/Personal/Journal/A Talk - Transcript.md"
+        self.assertTrue(raw.is_file(), self.notes())
+        head = note.read_text(encoding="utf-8").split("---\n", 2)[2].rsplit("[[", 1)[0]
+        recording = raw.read_text(encoding="utf-8").split("---\n", 2)[2].lstrip("\n")
+        self.assertEqual(head + recording, original.split("---\n", 2)[2])
+        self.assertEqual(recording, self.body)
+
+    def test_the_note_points_at_the_recording_and_back(self):
+        note = self.combined(
+            "01 Personal/1.01 Journal/A Talk.md",
+            "type: note\nstatus: active\ndomain: personal\nsubdomain: journal\n",
+        )
+        self.split("--apply")
+        raw = self.vault / "10 Sources/10.03 Transcript/Personal/Journal/A Talk - Transcript.md"
+        self.assertTrue(note.read_text(encoding="utf-8").endswith("# Transcript\n\n[[A Talk - Transcript]]\n"))
+        self.assertIn('parent: "[[A Talk]]"', raw.read_text(encoding="utf-8"))
+        self.assertIn("source_kind: transcript", raw.read_text(encoding="utf-8"))
+        self.assertIn("status: complete", raw.read_text(encoding="utf-8"))
+
+    def test_a_source_note_becomes_a_note_about_its_recording(self):
+        note = self.combined(
+            "01 Personal/1.01 Journal/A Lecture.md",
+            "type: source\nstatus: active\ndomain: personal\nsubdomain: journal\nsource_kind: video\n",
+        )
+        result = self.split("--apply")
+        self.assertEqual(result["data"]["counts"]["converted_from_source"], 1)
+        text = note.read_text(encoding="utf-8")
+        self.assertIn("type: note\n", text)
+        # The schema forbids source_kind anywhere but a source.
+        self.assertNotIn("source_kind", text)
+        raw = self.vault / "10 Sources/10.03 Transcript/Personal/Journal/A Lecture - Transcript.md"
+        self.assertIn("source_kind: transcript", raw.read_text(encoding="utf-8"))
+
+    def test_a_note_the_domain_does_not_cover_is_held_not_guessed(self):
+        self.combined("01 Personal/1.01 Journal/Stray.md", "type: note\nstatus: active\ndomain: gardening\n")
+        result = self.split("--apply")
+        self.assertEqual(result["data"]["counts"]["notes_to_split"], 0)
+        self.assertEqual(result["data"]["counts"]["skipped"], 1)
+        self.assertTrue(any("not in the schema" in warning for warning in result["warnings"]), result["warnings"])
+
+    def test_an_unknown_subdomain_files_at_the_domain_with_a_warning(self):
+        self.combined("01 Personal/Loose.md", "type: note\nstatus: active\ndomain: personal\nsubdomain: gardening\n")
+        result = self.split("--apply")
+        self.assertTrue((self.vault / "10 Sources/10.03 Transcript/Personal/Loose - Transcript.md").is_file(), self.notes())
+        self.assertTrue(any("subdomain" in warning for warning in result["warnings"]), result["warnings"])
+
+    def test_splitting_twice_is_a_no_op(self):
+        self.combined(
+            "01 Personal/1.01 Journal/A Talk.md",
+            "type: note\nstatus: active\ndomain: personal\nsubdomain: journal\n",
+        )
+        self.split("--apply")
+        after = self.notes()
+        result = self.split("--apply")
+        self.assertEqual(result["data"]["counts"]["notes_to_split"], 0)
+        self.assertEqual(self.notes(), after)
+
+    def test_two_notes_of_the_same_name_get_separate_recordings(self):
+        self.combined(
+            "01 Personal/1.01 Journal/A Talk.md",
+            "type: note\nstatus: active\ndomain: personal\nsubdomain: journal\n",
+        )
+        self.combined(
+            "99 Meta/99.02 Schemas/A Talk.md",
+            "type: note\nstatus: active\ndomain: personal\nsubdomain: journal\n",
+            body=transcript(TINY_BLOCKS),
+        )
+        self.split("--apply")
+        recordings = sorted(
+            path.name for path in (self.vault / "10 Sources/10.03 Transcript/Personal/Journal").glob("*.md")
+        )
+        self.assertEqual(recordings, ["A Talk - Transcript (2).md", "A Talk - Transcript.md"])
+
+    def test_a_note_with_no_marker_is_left_alone(self):
+        path = self.vault / "01 Personal" / "Plain.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("---\ntype: note\nstatus: active\ndomain: personal\n---\n\nJust prose.\n", encoding="utf-8")
+        result = self.split("--apply")
+        self.assertEqual(result["data"]["counts"]["notes_to_split"], 0)
+        self.assertEqual(result["data"]["counts"]["skipped"], 0)
+
+    def test_a_raw_export_without_frontmatter_is_left_for_the_pipeline(self):
+        path = self.vault / "00 Inbox" / "20260724 131748-9788991C.md"
+        path.write_text(self.body, encoding="utf-8")
+        result = self.split("--apply")
+        self.assertEqual(result["data"]["counts"]["notes_to_split"], 0)
+        self.assertEqual(path.read_text(encoding="utf-8"), self.body)
+
+    def test_the_original_is_backed_up_before_it_is_rewritten(self):
+        note = self.combined(
+            "01 Personal/1.01 Journal/A Talk.md",
+            "type: note\nstatus: active\ndomain: personal\nsubdomain: journal\n",
+        )
+        original = note.read_text(encoding="utf-8")
+        result = self.split("--apply")
+        run_dir = Path(result["data"]["run_directory"])
+        backup = run_dir / "backup" / "01 Personal/1.01 Journal/A Talk.md"
+        self.assertEqual(backup.read_text(encoding="utf-8"), original)
+        log = [json.loads(line) for line in (run_dir / "apply-log.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(log[0]["op"], "split")
+        self.assertEqual(log[0]["status"], "ok")
+
+    def test_a_vault_without_the_vocabulary_is_refused(self):
+        (self.vault / "99 Meta" / "99.02 Schemas" / "0.00 Vault Schema.md").write_text(
+            NO_SOURCE_SCHEMA, encoding="utf-8"
+        )
+        completed = run_script("split", "--vault", str(self.vault))
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("source", json.loads(completed.stdout)["errors"][0]["message"])
 
 
 if __name__ == "__main__":

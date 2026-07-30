@@ -81,6 +81,7 @@ from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
     require_safe_label,
     resolve_schema_path,
     revised_note_text,
+    sources_routing_enabled,
     safe_basename,
     safe_title,
     section_bounds,
@@ -693,6 +694,8 @@ def carry_forward_provenance(validated, frontmatter_text, schema, warnings):
         else:
             warnings.append("previous capture_type: generated dropped: schema no longer defines it")
 
+    carry_forward_source_identity(metadata, previous, schema, warnings)
+
     processed_by = previous.get("processed_by")
     if isinstance(processed_by, str):
         processed_by = [processed_by]
@@ -703,6 +706,40 @@ def carry_forward_provenance(validated, frontmatter_text, schema, warnings):
     elif processed_by:
         warnings.append("previous processed_by dropped: schema does not define it as a list property")
     return validated
+
+
+def carry_forward_source_identity(metadata, previous, schema, warnings):
+    """Keep a script-declared source note a source note.
+
+    Once ``source_kind`` selects the folder, re-reading it out of the note's text
+    is a guess where the note already carries the answer. A transcript's raw half
+    and an imported artifact are both written by a script that knew exactly what
+    it was making, and a classifier reading a wall of timestamped speech has been
+    seen to call it a meeting. Losing that judgment does not merely mislabel the
+    note, it moves it to a different tree, and the next run moves it again.
+
+    Only a pairing the schema accepts is kept, so a stale kind cannot pin a note
+    to a folder the schema no longer compiles. ``parent`` comes along because
+    filing replaces frontmatter wholesale and the back-link to the processed note
+    is the only thing tying the two halves together.
+    """
+    if not sources_routing_enabled(schema):
+        return
+    kind = previous.get("source_kind")
+    if previous.get("type") != "source" or not isinstance(kind, str) or kind not in schema["source_kinds"]:
+        return
+    if "source" not in schema["types"]:
+        warnings.append("previous type: source dropped: schema no longer defines it")
+        return
+    if metadata.get("type") != "source" or metadata.get("source_kind") != kind:
+        classified = metadata.get("type")
+        detail = f" (classified as {classified})" if classified and classified != "source" else ""
+        warnings.append(f"kept type: source with source_kind: {kind}{detail}")
+    metadata["type"] = "source"
+    metadata["source_kind"] = kind
+    parent = previous.get("parent")
+    if "parent" in schema["properties"] and valid_wikilink(parent) and not metadata.get("parent"):
+        metadata["parent"] = parent
 
 
 def load_profile(args, vault):
@@ -741,6 +778,38 @@ def classification_profile_prefix(args):
     return vault_profile.profile_prefix(getattr(args, "compiled_profile", None), classification_site())
 
 
+def reuse_frontmatter_classification(schema, frontmatter_text):
+    """The note's own frontmatter as a classification, or None if it is not complete.
+
+    A schema change that only moves folders does not change what any note is, so
+    re-deriving a thousand already-correct classifications from a model is both
+    slow and a way to lose them: the model is not deterministic, and every note it
+    hedges on lands in the review queue and gets pulled back to the inbox. Frontmatter
+    that already validates is a better answer than a fresh guess, and it compiles
+    to a destination the same way.
+
+    Returns None rather than a partial result when anything fails to validate, so
+    those notes fall through to the model exactly as they would have.
+    """
+    if not frontmatter_text:
+        return None
+    previous = parse_frontmatter(frontmatter_text)
+    withheld = set(human_owned_properties(schema)) | {"processed_by"}
+    candidate = {
+        key: previous[key]
+        for key in schema["property_order"]
+        if key in previous and key not in withheld and previous[key] not in (None, "", [])
+    }
+    if not candidate:
+        return None
+    validated, warnings, errors = validate_classification(
+        {"metadata": candidate, "needs_review": False, "review_reason": None, "suggestions": []}, schema
+    )
+    if errors or validated.get("needs_review"):
+        return None
+    return validated, warnings
+
+
 def classify_note(args, schema, title, relative_source, frontmatter_text, body, schema_hash, cache, cache_path):
     body_hash = sha256_text(normalize_body_for_hash(body))
     frontmatter_hash = sha256_text(frontmatter_text or "")
@@ -749,6 +818,12 @@ def classify_note(args, schema, title, relative_source, frontmatter_text, body, 
         title, body_hash, frontmatter_hash, schema_hash, args.model, args.base_url, args.think_prefill,
         getattr(args, "profile_hash", "none"),
     )
+    if getattr(args, "reuse_frontmatter", False) and not args.force_reclassify:
+        reused = reuse_frontmatter_classification(schema, frontmatter_text)
+        if reused is not None:
+            validated, warnings = reused
+            carry_forward_provenance(validated, frontmatter_text, schema, warnings)
+            return validated, warnings, "frontmatter", key
     if not args.force_reclassify and key in cache:
         cached = cache[key]
         validated, warnings, errors = validate_classification(cached["response"], schema)
@@ -914,11 +989,20 @@ VERIFY_EXCERPT_CHARS = 1000
 
 
 def verifiable_records(records):
-    """Records a reviewer can judge: something was actually decided by the model."""
+    """Records a reviewer can judge: something was actually decided by the model.
+
+    A record reused from the note's own frontmatter is excluded. There is no
+    judgment in it to second-guess -- the values were already in the note and
+    already validate -- so sending them to the thinking model would spend the
+    expensive pass re-deciding notes nobody classified.
+    """
     return [
         (rel, record)
         for rel, record in sorted(records.items())
-        if record.get("destination") and not record.get("needs_review") and record.get("status") != "failed"
+        if record.get("destination")
+        and not record.get("needs_review")
+        and record.get("status") != "failed"
+        and record.get("classification_source") != "frontmatter"
     ]
 
 
@@ -1201,6 +1285,7 @@ def initial_counts():
         "selected": 0,
         "classified": 0,
         "cached": 0,
+        "reused": 0,
         "unchanged": 0,
         "frontmatter_updates": 0,
         "moves": 0,
@@ -1231,6 +1316,8 @@ def recompute_counts(records, dedupe, items):
             continue
         if record.get("classification_source") == "cache":
             counts["cached"] += 1
+        elif record.get("classification_source") == "frontmatter":
+            counts["reused"] += 1
         elif record.get("classification_source") == "model":
             counts["classified"] += 1
         if record.get("status") == "failed":
@@ -1425,6 +1512,7 @@ def write_plan(
         f"- Selected: {counts['selected']}",
         f"- Newly classified: {counts['classified']}",
         f"- Cached classifications: {counts['cached']}",
+        f"- Reused from existing frontmatter: {counts['reused']}",
         f"- Frontmatter updates: {counts['frontmatter_updates']}",
         f"- Moves: {counts['moves']}",
         f"- Unchanged: {counts['unchanged']}",
@@ -1618,6 +1706,7 @@ def resolved_options(args):
         "prompt_version": PROMPT_VERSION,
         "cache_prompt": args.cache_prompt,
         "think_prefill": args.think_prefill,
+        "reuse_frontmatter": args.reuse_frontmatter,
         "schema": args.schema,
         "profile": args.profile,
     }
@@ -2482,6 +2571,11 @@ def parse_args(argv):
     parser.add_argument("--think-model")
     parser.add_argument("--think-prefill", action="store_true", help="prefill an empty think block (for thinking backends like :8008)")
     parser.add_argument("--force-reclassify", action="store_true")
+    parser.add_argument(
+        "--reuse-frontmatter",
+        action="store_true",
+        help="file notes whose existing frontmatter already validates without asking the model (schema migrations)",
+    )
     parser.add_argument("--profile", action=TrackingAction, help="personal-context register note (default: the vault's, when present)")
     parser.add_argument("--no-profile", action="store_true", help="disable personal context for this run")
     parser.add_argument("--verbose", action="store_true")
