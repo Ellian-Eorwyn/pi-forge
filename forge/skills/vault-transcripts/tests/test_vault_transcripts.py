@@ -700,6 +700,21 @@ class NoteBuildingTests(unittest.TestCase):
         self.assertLess(note.index("## Observations"), note.index("# Transcript"))
         self.assertIn(reflection, head)
 
+    def test_memo_reflection_sits_before_the_raw_transcript(self):
+        reflection = "## Context\n\n- Continues the espresso repair thread."
+        note, _head = vt.build_note(
+            self.schema,
+            vt.frontmatter_metadata(self.schema, "memo"),
+            "A short summary.",
+            "callout",
+            "",
+            "Cleaned memo text.",
+            "raw memo\n",
+            reflection=reflection,
+        )
+        self.assertLess(note.index("Cleaned memo text."), note.index("## Context"))
+        self.assertLess(note.index("## Context"), note.index("# Transcript"))
+
     def check(self, body, cleaned, summary="A summary of the recording."):
         parsed = vt.parse_transcript(body)
         item = {
@@ -1487,6 +1502,139 @@ class SummarySystemTests(unittest.TestCase):
     def test_without_a_site_the_summary_system_prompt_is_unchanged(self):
         system = vault_transcripts.summary_system(None, vault_transcripts.vault_voice.CONTEXT_NONE)
         self.assertEqual(system, vault_transcripts.SUMMARY_SYSTEM)
+
+
+class ReflectionTests(unittest.TestCase):
+    CANDIDATES = {"[[Espresso machine]]"}
+    URLS = {"https://ok.example/seal"}
+
+    def render(self, value, recording_type="memo"):
+        return vt.validate_reflection(value, recording_type, self.CANDIDATES, self.URLS)
+
+    def test_only_memo_and_journal_get_a_reflection(self):
+        self.assertEqual(sorted(vt.REFLECTION_SECTIONS), ["journal", "memo"])
+        self.assertEqual(sorted(vt.REFLECTION_SYSTEMS), ["journal", "memo"])
+
+    def test_memo_sections_render_in_order_and_omit_the_empty_ones(self):
+        markdown, dropped = self.render(
+            {
+                "context": ["Continues the repair thread."],
+                "open_questions": [],
+                "next_steps": ["Order the gasket."],
+                "connections": ["[[Espresso machine]] has the model number."],
+            }
+        )
+        self.assertEqual(dropped, [])
+        self.assertEqual(
+            [line for line in markdown.splitlines() if line.startswith("## ")],
+            ["## Context", "## Next steps", "## Connections"],
+        )
+        self.assertNotIn("Open questions", markdown)
+
+    def test_a_journal_keeps_its_own_section_set(self):
+        markdown, _dropped = self.render(
+            {"observations": ["The owner described a hard week."], "context": ["ignored"]}, "journal"
+        )
+        self.assertIn("## Observations", markdown)
+        self.assertNotIn("## Context", markdown)
+
+    def test_a_cited_outside_connection_survives(self):
+        markdown, dropped = self.render(
+            {"connections": ["Outside vault: the seal is food-grade (https://ok.example/seal)."]}
+        )
+        self.assertEqual(dropped, [])
+        self.assertIn("Outside vault: the seal is food-grade", markdown)
+
+    def test_an_outside_connection_citing_an_unread_url_is_dropped(self):
+        markdown, dropped = self.render({"connections": ["Outside vault: a claim (https://nope.example/x)."]})
+        self.assertEqual(markdown, "")
+        self.assertEqual(len(dropped), 1)
+        self.assertIn("https://nope.example/x", dropped[0])
+
+    def test_an_uncited_claim_is_dropped_however_it_is_labelled(self):
+        for item in (
+            "Gaskets usually last five years.",
+            "Outside knowledge: gaskets usually last five years.",
+            "Outside vault: gaskets usually last five years.",
+        ):
+            markdown, dropped = self.render({"connections": [item]})
+            self.assertEqual(markdown, "", item)
+            self.assertEqual(len(dropped), 1, item)
+
+    def test_a_wikilink_outside_the_candidate_set_is_dropped(self):
+        markdown, dropped = self.render({"connections": ["[[Invented Note]] looks related."]})
+        self.assertEqual(markdown, "")
+        self.assertIn("[[Invented Note]]", dropped[0])
+
+    def test_one_bad_connection_does_not_cost_the_rest_of_the_reflection(self):
+        markdown, dropped = self.render(
+            {
+                "context": ["Continues the repair thread."],
+                "connections": ["Remembered fact.", "[[Espresso machine]] has the model number."],
+            }
+        )
+        self.assertIn("## Context", markdown)
+        self.assertIn("[[Espresso machine]] has the model number.", markdown)
+        self.assertNotIn("Remembered fact.", markdown)
+        self.assertEqual(len(dropped), 1)
+
+    def test_a_malformed_response_is_still_fatal(self):
+        with self.assertRaises(vt.UserError):
+            self.render(["not", "an", "object"])
+        with self.assertRaises(vt.UserError):
+            self.render({"context": ["fine"], "connections": [{"not": "a string"}]})
+
+
+class OutsideSourceTests(unittest.TestCase):
+    NOTE = (
+        "---\ntype: note\n---\n\n"
+        "## Findings\n\n"
+        "- Group seals are food grade.\n"
+        '  - "Rated to 120 C for food contact" — https://ok.example/seal\n\n'
+        "## Sources\n\n"
+        "- https://bare.example/nothing\n"
+    )
+
+    def harvest(self, material):
+        with tempfile.TemporaryDirectory() as directory:
+            vault = Path(directory)
+            (vault / "Espresso machine.md").write_text(self.NOTE, encoding="utf-8")
+            candidates = [{"path": "Espresso machine.md", "wikilink": "[[Espresso machine]]"}]
+            return vt.outside_sources(material, vault, candidates)
+
+    def test_a_link_in_the_recording_is_harvested_with_its_line(self):
+        found = self.harvest("I found the part page at https://parts.example/gasket-42 and it looks right.")
+        self.assertEqual(found[0]["url"], "https://parts.example/gasket-42")
+        self.assertEqual(found[0]["source"], "this recording")
+        self.assertIn("looks right", found[0]["excerpt"])
+
+    def test_a_cited_quote_in_a_candidate_note_is_harvested_and_attributed(self):
+        entry = next(row for row in self.harvest("no links here") if row["url"] == "https://ok.example/seal")
+        self.assertEqual(entry["source"], "[[Espresso machine]]")
+        self.assertIn("food contact", entry["excerpt"])
+
+    def test_a_bare_url_carrying_no_claim_is_not_a_source(self):
+        urls = {row["url"] for row in self.harvest("https://also-bare.example/x")}
+        self.assertNotIn("https://bare.example/nothing", urls)
+        self.assertNotIn("https://also-bare.example/x", urls)
+
+    def test_a_repeated_url_is_harvested_once(self):
+        material = "See https://ok.example/seal for the rating, which the note also cites."
+        found = [row for row in self.harvest(material) if row["url"] == "https://ok.example/seal"]
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["source"], "this recording")
+
+    def test_harvesting_is_capped(self):
+        material = "\n".join(
+            f"A claim worth citing here about part {index} at https://example.com/{index}" for index in range(40)
+        )
+        self.assertEqual(len(self.harvest(material)), vt.OUTSIDE_SOURCE_LIMIT)
+
+    def test_an_unreadable_candidate_is_skipped_rather_than_fatal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            vault = Path(directory)
+            candidates = [{"path": "missing.md", "wikilink": "[[missing]]"}]
+            self.assertEqual(vt.outside_sources("no links", vault, candidates), [])
 
 
 if __name__ == "__main__":

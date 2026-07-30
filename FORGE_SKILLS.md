@@ -15,7 +15,7 @@
 | Managed instructions (`AGENTS.md` with its `<project_context>` wrapper) | 1274 |
 | Skills menu (metadata for all model-visible skills) | 3117 |
 | **Total launch context (always processed)** | **7540** |
-| Maximum if every `SKILL.md` body is also loaded at once | 52626 |
+| Maximum if every `SKILL.md` body is also loaded at once | 52915 |
 
 Of that total, the forge profile itself owns 4390 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
 
@@ -66,11 +66,11 @@ Sorted by launch cost. `Prompt lines` counts a tool's `promptSnippet` and `promp
 | [`spreadsheet-analysis`](forge/skills/spreadsheet-analysis/SKILL.md) | Analyze and enrich tabular datasets | 129 | 2233 | 2334 | Model-visible |
 | [`transcript-cleanup`](forge/skills/transcript-cleanup/SKILL.md) | Clean and structure raw transcripts | 144 | 1174 | 1291 | Model-visible |
 | [`transcription`](forge/skills/transcription/SKILL.md) | Transcribe audio or video, then correct and clean it | 141 | 1639 | 1754 | Model-visible |
-| [`vault-capture`](forge/skills/vault-capture/SKILL.md) | Turn a braindump into schema-valid notes in an Obsidian vault inbox - split unedited thinking... | 138 | 2157 | 2268 | Model-visible |
+| [`vault-capture`](forge/skills/vault-capture/SKILL.md) | Turn a braindump into schema-valid notes in an Obsidian vault inbox - split unedited thinking... | 138 | 2305 | 2416 | Model-visible |
 | [`vault-connections`](forge/skills/vault-connections/SKILL.md) | Search an Obsidian vault by meaning, propose links for per-id review, publish completed liter... | 151 | 2305 | 2430 | Model-visible |
 | [`vault-handoff`](forge/skills/vault-handoff/SKILL.md) | Send completed text artifacts to pi-vault review | 63 | 325 | 363 | Model-visible |
 | [`vault-organizer`](forge/skills/vault-organizer/SKILL.md) | Organize an Obsidian vault or vault inbox from a human-maintained schema note - classify Mark... | 150 | 2388 | 2512 | Model-visible |
-| [`vault-transcripts`](forge/skills/vault-transcripts/SKILL.md) | Process raw voice-note and meeting transcripts sitting in an Obsidian vault inbox - give each... | 152 | 2355 | 2479 | Model-visible |
+| [`vault-transcripts`](forge/skills/vault-transcripts/SKILL.md) | Process raw voice-note and meeting transcripts sitting in an Obsidian vault inbox - give each... | 152 | 2496 | 2620 | Model-visible |
 | [`web-collection`](forge/skills/web-collection/SKILL.md) | Archive and organize web sources | 138 | 2017 | 2129 | Model-visible |
 | [`web-research`](forge/skills/web-research/SKILL.md) | Quick web search and page reading for information lookup. | 146 | 3942 | 4063 | Model-visible |
 

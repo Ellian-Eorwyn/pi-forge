@@ -123,6 +123,8 @@ FILENAME_STAMP_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})[ _-](\d{2})(\d{2})(\d{2}
 EXPORT_STAMP_RE = re.compile(r"\s*\d{4}-\d{2}-\d{2}\s+\d{2}[_:]\d{2}[_:]\d{2}\s*$")
 COPY_SUFFIX_RE = re.compile(r"\s*\((\d+)\)$")
 MEDIA_EXTENSION_RE = re.compile(r"\.(mov|m4v|mp4|m4a|mp3|wav|aac|webm)$", re.IGNORECASE)
+URL_RE = re.compile(r"https?://[^\s<>\"'\])]+", re.IGNORECASE)
+WIKILINK_RE = re.compile(r"\[\[[^\]]+\]\]")
 GENERIC_CAPTURE_NAME_RE = re.compile(
     r"^(new recording|recording|voice memo|audio|new note|untitled)(\s*\d+)?$|^img[_-]?\d+$",
     re.IGNORECASE,
@@ -1601,25 +1603,103 @@ labels tell the reader nothing.
   never state one of its facts as something the recording said, and never let it
   supply an outcome or a feeling the transcript does not."""
 
-REFLECTION_SYSTEM = """You add a careful reflection after the owner's cleaned journal text.
+# Where a connection is allowed to come from. Shared by every reflection prompt
+# so the citation contract is written once. The rule the vault owner asked for:
+# the vault first, and anything from outside it has to be text this pipeline
+# actually read, carrying the URL it came from. There is no live fetch here, so a
+# fact the model merely remembers can never be checked and is not admissible.
+REFLECTION_SOURCE_RULES = """Where connections may come from:
+- The vault first. Use a "vaultCandidates" wikilink exactly as it is given to you.
+- "outsideSources" is the only material from outside the vault available to you.
+  Each entry is text this pipeline actually read, with the URL it came from. Use
+  one only when its excerpt genuinely supports what you write.
+- A connection drawn from "outsideSources" must begin `Outside vault:` and end
+  with that entry's URL in parentheses. Never cite a URL that is not listed there.
+- Never state a fact from outside the vault on your own authority. If you know
+  something relevant and it is not in "outsideSources", leave it out. When
+  "outsideSources" is empty, every connection is a vault wikilink or there are none.
+- Do not manufacture content to fill a section. Empty arrays are correct and common."""
+
+# The owner asked for this paragraph to read the same in every reflection prompt:
+# the register is what stops standing background from being mistaken for
+# something the recording said.
+REFLECTION_CONTEXT_RULE = """- "personalContext" is standing background about the owner, given so a passing
+  reference can be read for what it is. Use it to understand this recording, not
+  as material to reflect on: it is not something the owner produced today, so
+  never present one of its facts as an observation, and never let it turn a
+  tentative reading into a settled one."""
+
+JOURNAL_REFLECTION_SYSTEM = f"""You add a careful reflection after the owner's cleaned journal text.
 
 Return exactly one JSON object:
-{"observations": ["..."], "interpretations": ["..."], "open_questions": ["..."], "connections": ["..."]}
+{{"observations": ["..."], "interpretations": ["..."], "open_questions": ["..."], "connections": ["..."]}}
 
 Rules:
 - Observations state what the owner directly described before interpreting it.
 - Interpretations are tentative and never diagnose, override, or claim privileged access to the owner's meaning.
 - Open questions preserve uncertainty and invite later reflection.
-- Connections must be directly relevant. Use a supplied vault wikilink exactly when it fits.
-- A connection from general knowledge must begin `Outside knowledge:` and remain explicitly qualified.
-- Do not manufacture a connection to fill a section. Empty arrays are correct.
+- Connections must be directly relevant.
 - Keep each item concise. Do not repeat the cleaned journal.
-- "personalContext" is standing background about the owner, given so a passing
-  reference can be read for what it is. Use it to understand the entry, not as
-  material to reflect on: it is not something the owner wrote today, so never
-  present one of its facts as an observation, and never let it turn a tentative
-  interpretation into a settled one.
+{REFLECTION_CONTEXT_RULE}
+
+{REFLECTION_SOURCE_RULES}
 """
+
+MEMO_REFLECTION_SYSTEM = f"""You add a short reflection after the owner's cleaned memo.
+
+A memo is a working note — a task, an idea, a plan, a thought caught before it was
+lost. It is not introspection, and this is not a summary: the memo is already
+there. Your job is to place it against the rest of the vault and name what it
+leaves open.
+
+Return exactly one JSON object:
+{{"context": ["..."], "open_questions": ["..."], "next_steps": ["..."], "connections": ["..."]}}
+
+Rules:
+- Context: what this memo belongs to — the project, thread, or earlier note it
+  continues. One or two lines. Never a restatement of the memo.
+- Open questions: what the memo leaves unresolved — a decision not made, a fact
+  not known, a dependency not named. Only what the memo itself raises. Do not
+  invent doubt the owner did not express.
+- Next steps: an action the memo implies but did not state as a step. When the
+  memo already lists its own steps, this section is empty.
+- Connections: vault notes this relates to, with a few words on why.
+- Keep each item concise. Do not repeat the cleaned memo.
+- A two-line memo usually gets Connections only, and often nothing at all.
+- Say nothing about the owner's state of mind. That is a journal's business, not
+  a memo's.
+{REFLECTION_CONTEXT_RULE}
+
+{REFLECTION_SOURCE_RULES}
+"""
+
+# Which reflection a recording type gets, and the order its sections render in.
+# Membership here is also the gate: a type absent from this table gets no
+# reflection at all. Journal sections are introspective; memo sections are not,
+# because "Interpretations" on an errand list is either empty or padding.
+REFLECTION_SECTIONS = {
+    "journal": (
+        ("observations", "Observations"),
+        ("interpretations", "Interpretations"),
+        ("open_questions", "Open questions"),
+        ("connections", "Connections"),
+    ),
+    "memo": (
+        ("context", "Context"),
+        ("open_questions", "Open questions"),
+        ("next_steps", "Next steps"),
+        ("connections", "Connections"),
+    ),
+}
+
+REFLECTION_SYSTEMS = {"journal": JOURNAL_REFLECTION_SYSTEM, "memo": MEMO_REFLECTION_SYSTEM}
+
+# A cited line has to say something the excerpt supports, so a bare URL under a
+# `## Sources` list is not a citable source: it carries a link and no claim.
+OUTSIDE_SOURCE_MIN_CHARS = 20
+OUTSIDE_SOURCE_EXCERPT_CHARS = 300
+OUTSIDE_SOURCE_LIMIT = 12
+OUTSIDE_SOURCE_READ_BYTES = 40000
 
 
 def summary_system(voice, context_mode, profile=None, site=None):
@@ -1638,10 +1718,10 @@ def connections_script():
     return Path(__file__).resolve().parents[2] / "vault-connections" / "scripts" / "vault-connections.py"
 
 
-def journal_connection_candidates(vault, query):
+def connection_candidates(vault, query):
     script = connections_script()
     if not script.is_file():
-        return [], "vault-connections is not installed; journal reflection has no vault candidates"
+        return [], "vault-connections is not installed; reflection has no vault candidates"
     try:
         completed = subprocess.run(
             [sys.executable, str(script), "search", query, "--vault", str(vault), "--search-limit", "10"],
@@ -1652,7 +1732,7 @@ def journal_connection_candidates(vault, query):
     except (OSError, subprocess.SubprocessError) as error:
         return [], f"vault search failed: {error}"
     if completed.returncode != 0:
-        return [], "vault search failed; journal reflection has no vault candidates"
+        return [], "vault search failed; reflection has no vault candidates"
     try:
         payload = json.loads(completed.stdout)
     except json.JSONDecodeError:
@@ -1670,38 +1750,126 @@ def journal_connection_candidates(vault, query):
     return candidates[:8], None
 
 
-def validate_reflection(value, allowed_wikilinks):
+def cited_lines(text, source):
+    """Lines carrying both a URL and enough prose to be a claim.
+
+    A `## Sources` entry is a bare link, so it cites nothing on its own: there is
+    no statement for a later reflection to stand behind. A quote-plus-URL line
+    from a research import is the opposite, and is the shape this looks for.
+    """
+    found = []
+    for line in str(text).splitlines():
+        collapsed = re.sub(r"\s+", " ", line).strip().lstrip("-*+> ").strip()
+        urls = URL_RE.findall(collapsed)
+        if not urls:
+            continue
+        prose = collapsed
+        for url in urls:
+            prose = prose.replace(url, " ")
+        if len(re.sub(r"[^0-9A-Za-z]+", "", prose)) < OUTSIDE_SOURCE_MIN_CHARS:
+            continue
+        found.append(
+            {
+                "url": urls[0].rstrip(".,;:)"),
+                "source": source,
+                "excerpt": collapsed[:OUTSIDE_SOURCE_EXCERPT_CHARS],
+            }
+        )
+    return found
+
+
+def source_body(vault, relative, fallback=""):
+    """The note's body as it sits on disk, for harvesting what the owner wrote.
+
+    The cleaned text would nearly always do, but a link is exactly the kind of
+    token a cleanup pass can wrap or truncate, and the raw file is the record.
+    """
+    try:
+        return split_frontmatter((vault / relative).read_bytes())["body"]
+    except (OSError, ValueError):
+        return fallback
+
+
+def outside_sources(material, vault, candidates):
+    """Outside-the-vault text this pipeline is actually holding, with its URLs.
+
+    Nothing here is fetched. There are exactly two ways outside material can be
+    in hand without a network call: the owner put a link in the recording, or the
+    material was researched earlier and imported into a vault note that kept its
+    citations. Anything else the model might say about the world outside is
+    unverifiable, and ``validate_reflection`` drops it.
+    """
+    harvested = list(cited_lines(material, "this recording"))
+    for candidate in candidates:
+        path = vault / candidate["path"]
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                text = handle.read(OUTSIDE_SOURCE_READ_BYTES)
+        except OSError:
+            continue
+        harvested.extend(cited_lines(text, candidate["wikilink"]))
+    seen, unique = set(), []
+    for entry in harvested:
+        if entry["url"] in seen:
+            continue
+        seen.add(entry["url"])
+        unique.append(entry)
+        if len(unique) >= OUTSIDE_SOURCE_LIMIT:
+            break
+    return unique
+
+
+def validate_reflection(value, recording_type, allowed_wikilinks, allowed_urls=()):
+    """Render the reflection, dropping connections that cite nothing checkable.
+
+    Returns ``(markdown, dropped)``. A malformed response is still fatal, but a
+    single bad connection is not: raising here costs the note its summary *and*
+    its reflection, which is a wildly disproportionate price for one line the
+    model oversold. Dropped lines are returned so the caller can report them --
+    excluded and recorded, never silently swallowed.
+    """
     if not isinstance(value, dict):
-        raise UserError("journal reflection response is not an object")
-    headings = (
-        ("observations", "Observations"),
-        ("interpretations", "Interpretations"),
-        ("open_questions", "Open questions"),
-        ("connections", "Connections"),
-    )
-    sections = []
-    for key, heading in headings:
+        raise UserError("reflection response is not an object")
+    sections, dropped = [], []
+    for key, heading in REFLECTION_SECTIONS[recording_type]:
         raw = value.get(key, [])
         if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
-            raise UserError(f"journal reflection {key} must be an array of strings")
+            raise UserError(f"reflection {key} must be an array of strings")
         items = [re.sub(r"\s+", " ", item).strip() for item in raw if item.strip()]
         if key == "connections":
-            for item in items:
-                links = re.findall(r"\[\[[^\]]+\]\]", item)
-                if any(link not in allowed_wikilinks for link in links):
-                    raise UserError("journal reflection used a wikilink that was not found in the vault")
-                if not links and not item.startswith("Outside knowledge:"):
-                    raise UserError("non-vault journal connections must begin 'Outside knowledge:'")
+            items = [item for item in items if keep_connection(item, allowed_wikilinks, allowed_urls, dropped)]
         if items:
             sections.extend([f"## {heading}", "", *(f"- {item}" for item in items), ""])
-    return "\n".join(sections).strip()
+    return "\n".join(sections).strip(), dropped
 
 
-def reflect_journal(args, service, record, cleaned, candidates):
+def keep_connection(item, allowed_wikilinks, allowed_urls, dropped):
+    """A connection survives only if it points at something that can be checked."""
+    links = WIKILINK_RE.findall(item)
+    if links:
+        unknown = [link for link in links if link not in allowed_wikilinks]
+        if unknown:
+            dropped.append(f"wikilink not in the vault: {unknown[0]}")
+            return False
+        return True
+    if not item.startswith("Outside vault:"):
+        dropped.append(f"no vault link and not labelled `Outside vault:`: {item[:80]}")
+        return False
+    cited = [url.rstrip(".,;:)") for url in URL_RE.findall(item)]
+    if not any(url in allowed_urls for url in cited):
+        detail = f"cites {cited[0]}" if cited else "cites no source"
+        dropped.append(f"outside connection {detail}, which this run never read: {item[:80]}")
+        return False
+    return True
+
+
+def reflect_note(args, service, record, cleaned, candidates, sources=()):
+    recording_type = record["recording_type"]
     payload = {
         "title": record["title"],
-        "cleanedJournal": cleaned[:12000],
+        "cleanedText": cleaned[:12000],
         "vaultCandidates": candidates,
+        "outsideSources": list(sources),
     }
     site = profile_site_for(record)
     profile = getattr(args, "compiled_profile", None)
@@ -1712,7 +1880,7 @@ def reflect_journal(args, service, record, cleaned, candidates):
     ]
     if selected:
         payload["personalContext"] = vault_profile.profile_offers(selected)
-    system = REFLECTION_SYSTEM
+    system = REFLECTION_SYSTEMS[recording_type]
     prefix = vault_voice.prompt_prefix(getattr(args, "compiled_voice", None), vault_voice.CONTEXT_OWNER)
     if prefix:
         system += "\n\n" + prefix
@@ -1730,9 +1898,14 @@ def reflect_journal(args, service, record, cleaned, candidates):
         response_format={"type": "json_object"},
         timeout=args.request_timeout,
         api_key=args.api_key,
-        task="reflect-journal",
+        task=f"reflect-{recording_type}",
     )
-    return validate_reflection(value, {entry["wikilink"] for entry in candidates})
+    return validate_reflection(
+        value,
+        recording_type,
+        {entry["wikilink"] for entry in candidates},
+        {entry["url"] for entry in payload["outsideSources"]},
+    )
 
 
 def check_summary(summary):
@@ -1868,11 +2041,14 @@ def summarize_items(args, vault, items, class_records, clean_results, run_dir, s
         try:
             summary = summarize_one(args, service, messages)
             reflection = None
-            if context_mode == vault_voice.CONTEXT_OWNER and record["recording_type"] == "journal":
-                candidates, warning = journal_connection_candidates(vault, f"{record['title']} {summary}")
+            if context_mode == vault_voice.CONTEXT_OWNER and record["recording_type"] in REFLECTION_SECTIONS:
+                candidates, warning = connection_candidates(vault, f"{record['title']} {summary}")
                 if warning:
                     warnings.append(f"{item['path']}: {warning}")
-                reflection = reflect_journal(args, service, record, body, candidates)
+                sources = outside_sources(source_body(vault, item["path"], body), vault, candidates)
+                reflection, dropped = reflect_note(args, service, record, body, candidates, sources)
+                for detail in dropped:
+                    warnings.append(f"{item['path']}: dropped a connection — {detail}")
             row = {
                 "path": item["path"],
                 "sha256": item["sha256"],
@@ -3511,7 +3687,7 @@ def doctor(args):
         "ok": True,
         "configured": False,
         "stages": {
-            "summary and journal reflection": "owner",
+            "summary and memo/journal reflection": "owner",
             "cleanup and classification": "never — both run behind a fabrication gate",
         },
     }

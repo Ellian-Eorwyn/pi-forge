@@ -135,11 +135,20 @@ and a note that changed since the proposal was made is refused rather than
 overwritten. Accepted edits preserve frontmatter, scoped rules, and unrelated
 human-authored sections.
 
-Journal drafts keep the cleaned authorial account first, then add only non-empty
-`## Observations`, `## Interpretations`, `## Open questions`, and
-`## Connections` sections. Vault connections are valid wikilinks found through
-hybrid search; broader-knowledge connections begin `Outside knowledge:`. The
-original braindump remains byte-identical under `# Braindump`.
+Every kind but `draft` ends with a reflection. A journal keeps the cleaned
+authorial account first and adds non-empty `## Observations`,
+`## Interpretations`, `## Open questions`, and `## Connections`; `idea`, `task`,
+`question`, `reference`, and `plan` get `## Context`, `## Open questions`,
+`## Next steps`, and `## Connections`. A `draft` gets none — it is prose being
+composed, and machine commentary appended to it damages the draft.
+
+Reflections source from the vault first, as wikilinks to notes that exist.
+Material from outside the vault is admissible only as text the run actually read —
+a link in the braindump, or a citation already imported into a vault note — and
+such a connection begins `Outside vault:` and carries that source's URL. Nothing
+is fetched at draft time, so a fact the model merely recalls cannot be checked and
+holds the note, exactly as an invented link does. The original braindump remains
+byte-identical under `# Braindump`.
 
 ## Rules
 

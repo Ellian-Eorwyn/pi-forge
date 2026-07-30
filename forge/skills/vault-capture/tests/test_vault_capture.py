@@ -424,6 +424,122 @@ class UnitTests(unittest.TestCase):
         self.assertTrue(problems)
 
 
+class ReflectionTests(unittest.TestCase):
+    """Which kinds get reflection sections, and what a connection may cite."""
+
+    CANDIDATE = {"path": "Espresso machine.md", "wikilink": "[[Espresso machine]]"}
+    SOURCE = {
+        "url": "https://ok.example/seal",
+        "source": "[[Espresso machine]]",
+        "excerpt": "rated for food contact https://ok.example/seal",
+    }
+
+    def entry(self, body, kind="task", candidates=True, sources=True):
+        return {
+            "item": {"text": "need to order a new gasket for the espresso machine before the weekend"},
+            "body": body,
+            "note": {"kind": kind},
+            "connection_candidates": [self.CANDIDATE] if candidates else [],
+            "outside_sources": [self.SOURCE] if sources else [],
+        }
+
+    def connections(self, *items, kind="task", **kwargs):
+        body = "Order a new gasket.\n\n## Connections\n\n" + "\n".join(f"- {item}" for item in items) + "\n"
+        return vc.check_reflection(self.entry(body, kind, **kwargs))
+
+    def test_every_kind_but_draft_gets_a_reflection(self):
+        self.assertEqual(sorted(vc.KIND_TO_REFLECTION), sorted(vc.CAPTURE_KINDS))
+        self.assertEqual(vc.KIND_TO_REFLECTION["draft"], ())
+        for kind in ("idea", "task", "question", "reference", "plan"):
+            self.assertEqual(vc.KIND_TO_REFLECTION[kind], vc.WORKING_SECTIONS, kind)
+        self.assertEqual(vc.KIND_TO_REFLECTION["journal"], vc.JOURNAL_SECTIONS)
+
+    def test_the_section_list_and_its_guidance_travel_in_the_payload(self):
+        payload = vc.draft_payload({"text": "dump"}, {"kind": "task", "title": "T", "gist": "g", "covers": []})
+        self.assertEqual(payload["thisNote"]["reflectionSections"], list(vc.WORKING_SECTIONS))
+        self.assertEqual(sorted(payload["thisNote"]["sectionGuidance"]), sorted(vc.WORKING_SECTIONS))
+
+    def test_a_draft_is_given_no_sections_and_held_for_writing_one(self):
+        payload = vc.draft_payload({"text": "dump"}, {"kind": "draft", "title": "T", "gist": "g", "covers": []})
+        self.assertNotIn("reflectionSections", payload["thisNote"])
+        problems = self.connections("[[Espresso machine]] has the model number.", kind="draft")
+        self.assertTrue(any("does not get" in problem for problem in problems))
+
+    def test_a_task_is_held_for_writing_a_journal_section(self):
+        entry = self.entry("Body.\n\n## Interpretations\n\n- Reading into it.\n")
+        self.assertTrue(any("Interpretations" in problem for problem in vc.check_reflection(entry)))
+
+    def test_a_candidate_wikilink_and_a_cited_outside_line_both_pass(self):
+        self.assertEqual(
+            self.connections(
+                "[[Espresso machine]] has the model number.",
+                "Outside vault: the seal is food-grade (https://ok.example/seal).",
+            ),
+            [],
+        )
+
+    def test_an_uncited_connection_holds_the_note(self):
+        problems = self.connections("Gaskets usually last about five years.")
+        self.assertTrue(any("not labelled 'Outside vault:'" in problem for problem in problems))
+
+    def test_an_outside_connection_citing_an_unread_url_holds_the_note(self):
+        problems = self.connections("Outside vault: a claim (https://nope.example/x).")
+        self.assertTrue(any("https://nope.example/x" in problem for problem in problems))
+
+    def test_a_wikilink_outside_the_candidate_set_holds_the_note(self):
+        problems = self.connections("[[Invented Note]] looks related.", candidates=False)
+        self.assertTrue(any("not a candidate note" in problem for problem in problems))
+
+    def test_a_cited_url_is_not_treated_as_an_invented_link(self):
+        body = "Order a gasket.\n\n## Connections\n\n- Outside vault: food-grade (https://ok.example/seal).\n"
+        source = self.entry(body)["item"]["text"]
+        self.assertEqual(vc.invented_specifics(source, body, {self.SOURCE["url"]})["links"], [])
+        # Without the allowlist the same URL is invention, which is what makes the
+        # widening load-bearing rather than decorative.
+        self.assertEqual(vc.invented_specifics(source, body)["links"], [self.SOURCE["url"]])
+        self.assertEqual(vc.check_draft(self.entry(body))[0], [])
+
+    def test_a_reflection_check_without_a_kind_still_checks_connections(self):
+        entry = self.entry("Body.\n\n## Connections\n\n- Remembered fact.\n")
+        del entry["note"]
+        self.assertTrue(vc.check_reflection(entry))
+
+
+class OutsideSourceTests(unittest.TestCase):
+    """What counts as outside material this run actually read."""
+
+    NOTE = (
+        "---\ntype: note\n---\n\n"
+        "## Findings\n\n"
+        "- Group seals are food grade.\n"
+        '  - "Rated to 120 C for food contact" — https://ok.example/seal\n\n'
+        "## Sources\n\n"
+        "- https://bare.example/nothing\n"
+    )
+
+    def harvest(self, braindump):
+        with tempfile.TemporaryDirectory() as directory:
+            vault = Path(directory)
+            (vault / "Espresso machine.md").write_text(self.NOTE, encoding="utf-8")
+            candidates = [{"path": "Espresso machine.md", "wikilink": "[[Espresso machine]]"}]
+            return vc.collect_outside_sources(vault, braindump, candidates)
+
+    def test_a_link_in_the_braindump_is_harvested_with_its_line(self):
+        found = self.harvest("found the part page at https://parts.example/gasket-42 and it looks right")
+        self.assertEqual(found[0]["url"], "https://parts.example/gasket-42")
+        self.assertEqual(found[0]["source"], "this braindump")
+
+    def test_a_cited_quote_in_a_candidate_note_is_harvested_and_attributed(self):
+        entry = next(row for row in self.harvest("no links") if row["url"] == "https://ok.example/seal")
+        self.assertEqual(entry["source"], "[[Espresso machine]]")
+        self.assertIn("food contact", entry["excerpt"])
+
+    def test_a_bare_url_carrying_no_claim_is_not_a_source(self):
+        urls = {row["url"] for row in self.harvest("https://also-bare.example/x")}
+        self.assertNotIn("https://bare.example/nothing", urls)
+        self.assertNotIn("https://also-bare.example/x", urls)
+
+
 class ExemplarTests(unittest.TestCase):
     """Which of the user's notes a draft is allowed to imitate."""
 

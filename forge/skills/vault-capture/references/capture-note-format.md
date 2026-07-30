@@ -94,6 +94,52 @@ These outrank every style rule below.
 Headings (`##` or deeper) only when the note genuinely moves between parts.
 Bullets only for things that are really a list. A short note gets neither.
 
+## The reflection
+
+Mirrored by the reflection paragraphs of `DRAFT_SYSTEM` in
+`scripts/vault-capture.py`, and by `KIND_TO_REFLECTION` and `SECTION_GUIDANCE`
+beside it; if you change one, change both.
+
+Every kind but `draft` ends with a reflection, appended after the note's own
+content. `draft` is the exception on purpose: it is prose the person is composing,
+and appending machine commentary to a draft damages the thing being drafted.
+
+| Kind | Sections, in order |
+| --- | --- |
+| `journal` | `## Observations`, `## Interpretations`, `## Open questions`, `## Connections` |
+| `idea`, `task`, `question`, `reference`, `plan` | `## Context`, `## Open questions`, `## Next steps`, `## Connections` |
+| `draft` | none |
+
+The journal set is introspective; the working set is not. `Context` names what the
+note belongs to — the project, thread, or earlier note it continues. `Next steps`
+names an action the material implied without stating, and is empty when the note
+already lists its own steps. `Interpretations` on an errand list is either empty or
+padding, which is why only journals get it.
+
+Empty sections are omitted, and a short braindump legitimately produces one
+section or none. The section list and its per-section guidance travel in the user
+message, not the system prompt, because they vary by kind and the system prompt
+has to stay byte-stable for the prefix cache.
+
+Where a connection may come from:
+
+- The vault first: a wikilink from `connectionCandidates`, which contains only
+  notes that exist.
+- Otherwise `outsideSources` — text this pipeline read, carrying the URL it came
+  from. There are two ways such text exists without a network call: the person put
+  a link in the braindump, or the material was researched earlier and imported
+  into a vault note that kept its citations. Nothing is fetched at draft time.
+- A connection drawn from outside the vault begins `Outside vault:` and ends with
+  its source's URL in parentheses.
+- **A fact the model merely remembers is not admissible.** It cannot be checked
+  against either origin, so a connection citing nothing — or citing a URL this run
+  never read — holds the note. That is the same treatment an invented link gets,
+  because it is the same kind of mistake.
+
+Those cited URLs are the one thing that widens the invented-links check: a URL in
+`outsideSources` is legitimately absent from the braindump, and only that set is
+allowed through. A URL from anywhere else is still invention.
+
 ## Splitting
 
 The split stage decides how many notes a dump becomes, and it is the weakest
@@ -118,7 +164,10 @@ back: it is reported with its reason and not written.
 | --- | --- |
 | No level-one heading, no frontmatter, no `# Braindump` in a draft | A draft that tried to author the note's structure |
 | Invented names, mid-sentence | A person, product, or place the braindump never mentioned |
-| Invented links | A URL the model supplied from its own memory |
+| Invented links | A URL the model supplied from its own memory, rather than from the braindump or `outsideSources` |
+| Uncited outside connection | A claim from outside the vault with no source this run actually read |
+| A connection linking a note that is not a candidate | A wikilink that would not resolve in the vault |
+| A reflection section the kind does not get | `Interpretations` on a task, any section at all on a `draft` |
 | Primary note ends with the braindump byte-for-byte | Any drift in the thing that must not drift |
 | Frontmatter keys and values against the schema note | Metadata the organizer would strip or reject |
 | Title charset, length, and reserved names | Filenames that break Obsidian links or say nothing |

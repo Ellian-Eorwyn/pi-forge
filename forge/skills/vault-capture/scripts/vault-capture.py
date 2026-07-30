@@ -76,6 +76,54 @@ KIND_TO_NOTE_TYPE = {
 }
 FALLBACK_NOTE_TYPE = "note"
 
+# Which reflection sections a kind gets, keyed on kind rather than schema type:
+# `idea`, `question`, `reference`, and `plan` all collapse to type `note`, so the
+# type cannot tell them apart from each other or from anything else filed there.
+#
+# A journal's sections are introspective. Everything else gets the working-note
+# set, because "Interpretations" on an errand list is either empty or padding.
+# `draft` is the one kind with none: it is prose the person is composing, and
+# appending machine commentary to a draft damages the thing being drafted.
+JOURNAL_SECTIONS = ("Observations", "Interpretations", "Open questions", "Connections")
+WORKING_SECTIONS = ("Context", "Open questions", "Next steps", "Connections")
+KIND_TO_REFLECTION = {
+    "idea": WORKING_SECTIONS,
+    "task": WORKING_SECTIONS,
+    "journal": JOURNAL_SECTIONS,
+    "question": WORKING_SECTIONS,
+    "reference": WORKING_SECTIONS,
+    "draft": (),
+    "plan": WORKING_SECTIONS,
+}
+REFLECTION_HEADINGS = set(JOURNAL_SECTIONS) | set(WORKING_SECTIONS)
+SECTION_GUIDANCE = {
+    "Observations": "What the person directly described, stated before any reading of it.",
+    "Interpretations": (
+        "Tentative readings only. Never diagnose the person, and never claim to know what "
+        "their words meant better than they did."
+    ),
+    "Open questions": (
+        "What the material leaves unresolved — a decision not made, a fact not known, a "
+        "dependency not named. Only what it actually raises; do not invent doubt."
+    ),
+    "Context": (
+        "What this note belongs to — the project, thread, or earlier note it continues. One "
+        "or two lines, and never a restatement of the note."
+    ),
+    "Next steps": (
+        "An action the material implies but did not state as a step. When it already lists "
+        "its own steps, this section is empty."
+    ),
+    "Connections": "Vault notes this relates to, with a few words on why.",
+}
+
+# A cited line has to say something its excerpt supports, so a bare URL under a
+# `## Sources` list is not a citable source: it carries a link and no claim.
+OUTSIDE_SOURCE_MIN_CHARS = 20
+OUTSIDE_SOURCE_EXCERPT_CHARS = 300
+OUTSIDE_SOURCE_LIMIT = 12
+OUTSIDE_SOURCE_READ_BYTES = 40000
+
 FILENAME_PATTERNS = ("topic", "date-topic")
 DEFAULT_MAX_NOTES = 8
 MAX_TITLE_CHARS = 60
@@ -105,6 +153,7 @@ PREFS_RUN_CONTEXT_CHARS = 6000
 BRAINDUMP_HEADING = "# Braindump"
 WORD_RE = re.compile(r"[a-z][a-z-]{2,}")
 URL_RE = re.compile(r"https?://[^\s<>\"'\])]+", re.IGNORECASE)
+WIKILINK_RE = re.compile(r"\[\[[^\]]+\]\]")
 NUMBER_RE = re.compile(r"\d+(?:[.,:/]\d+)*")
 PROPER_NOUN_RE = re.compile(r"\b([A-Z][a-zA-Z]*(?:['’][a-zA-Z]+)?)\b")
 TIMESTAMP_LINE_RE = re.compile(r"^\*\d{1,2}(?::\d{2}){1,2}\*$")
@@ -505,7 +554,7 @@ def collect_exemplars(vault, query, wanted=EXEMPLAR_COUNT, note_type=None):
 
 
 def collect_connection_candidates(vault, query):
-    """Return only existing notes, so generated journal wikilinks resolve."""
+    """Return only existing notes, so generated wikilinks resolve."""
     paths, warning = search_vault(vault, query)
     if warning:
         return [], warning
@@ -515,6 +564,62 @@ def collect_connection_candidates(vault, query):
         if path.is_file() and relative.endswith(".md") and not relative.startswith(f"{INBOX_DIR}/"):
             candidates.append({"path": relative, "wikilink": f"[[{Path(relative).stem}]]"})
     return candidates[:8], None
+
+
+def cited_lines(text, source):
+    """Lines carrying both a URL and enough prose to be a claim.
+
+    A `## Sources` entry is a bare link, so it cites nothing on its own: there is
+    no statement for a reflection to stand behind. A quote-plus-URL line from a
+    research import is the opposite, and is the shape this looks for.
+    """
+    found = []
+    for line in str(text).splitlines():
+        collapsed = re.sub(r"\s+", " ", line).strip().lstrip("-*+> ").strip()
+        urls = URL_RE.findall(collapsed)
+        if not urls:
+            continue
+        prose = collapsed
+        for url in urls:
+            prose = prose.replace(url, " ")
+        if len(re.sub(r"[^0-9A-Za-z]+", "", prose)) < OUTSIDE_SOURCE_MIN_CHARS:
+            continue
+        found.append(
+            {
+                "url": urls[0].rstrip(".,;:)"),
+                "source": source,
+                "excerpt": collapsed[:OUTSIDE_SOURCE_EXCERPT_CHARS],
+            }
+        )
+    return found
+
+
+def collect_outside_sources(vault, braindump, candidates):
+    """Outside-the-vault text this pipeline is actually holding, with its URLs.
+
+    Nothing here is fetched. There are exactly two ways outside material can be
+    in hand without a network call: the person put a link in the braindump, or the
+    material was researched earlier and imported into a vault note that kept its
+    citations. Anything a model merely remembers about the world cannot be
+    checked against either, so ``check_reflection`` holds the note over it.
+    """
+    harvested = list(cited_lines(braindump, "this braindump"))
+    for candidate in candidates:
+        try:
+            with (vault / candidate["path"]).open("r", encoding="utf-8", errors="replace") as handle:
+                text = handle.read(OUTSIDE_SOURCE_READ_BYTES)
+        except OSError:
+            continue
+        harvested.extend(cited_lines(text, candidate["wikilink"]))
+    seen, unique = set(), []
+    for entry in harvested:
+        if entry["url"] in seen:
+            continue
+        seen.add(entry["url"])
+        unique.append(entry)
+        if len(unique) >= OUTSIDE_SOURCE_LIMIT:
+            break
+    return unique
 
 
 # --------------------------------------------------------------------------- #
@@ -551,7 +656,16 @@ When `thisNote.styleForThisKind` is present it is the vault owner's own rule for
 
 `glossary` lists specialist terms and names this person uses that the material appears to contain in mistranscribed or misspelled form, each with the words that were produced instead. Where a passage really is that term — the sound and the sense both fit — write the correct spelling; where it is not, leave the text alone. Never introduce a glossary term into a passage that did not say it. `knownPeople` gives the vault's spelling and wikilink for people this material mentions: use that spelling, and when the note links a person, link them as the `wikilink` given rather than inventing a target.
 
-For a journal note, keep the cleaned authorial account first. Mechanically correct written text without changing its wording or meaning. For spoken material, remove filler, false starts, and accidental repetition while preserving emphasis, meaningful self-correction, uncertainty, wording, and sequence. Then add only the non-empty reflection sections `## Observations`, `## Interpretations`, `## Open questions`, and `## Connections`, in that order. Do not diagnose the person or override what their words mean. Under Connections, use only `connectionCandidates` as vault wikilinks. A connection from general knowledge must begin `Outside knowledge:` and be explicitly qualified.
+For a journal note, keep the cleaned authorial account first. Mechanically correct written text without changing its wording or meaning. For spoken material, remove filler, false starts, and accidental repetition while preserving emphasis, meaningful self-correction, uncertainty, wording, and sequence. Do not diagnose the person or override what their words mean.
+
+When `thisNote.reflectionSections` is present, append those sections after the note's own content, as `##` headings, in the order given. `thisNote.sectionGuidance` says what belongs under each one. Omit any section that would be empty, and do not manufacture content to fill one: a short note often gets Connections only, or no sections at all.
+
+Where the material for those sections may come from:
+
+- The vault first. Under Connections, use a `connectionCandidates` wikilink exactly as it is given to you.
+- `outsideSources` is the only material from outside the vault available to you. Each entry is text this pipeline actually read, with the URL it came from. Use one only when its excerpt genuinely supports what you write.
+- A line drawn from `outsideSources` must begin `Outside vault:` and end with that entry's URL in parentheses. Never cite a URL that is not listed there.
+- Never state a fact from outside the vault on your own authority. If you know something relevant and it is not in `outsideSources`, leave it out. When `outsideSources` is absent or empty, every connection is a vault wikilink or there are none.
 
 Return exactly one JSON object:
 
@@ -595,6 +709,7 @@ def draft_payload(
     relevant_vocabulary=None,
     glossary=None,
     known_people=None,
+    outside_sources=None,
 ):
     payload = {
         "braindump": item["text"][:DRAFT_INPUT_CHARS],
@@ -611,10 +726,18 @@ def draft_payload(
     }
     if type_style:
         payload["thisNote"]["styleForThisKind"] = type_style
+    # The section list and its guidance vary by kind, so they ride here rather
+    # than in the system prompt, which has to stay byte-stable for the cache.
+    sections = KIND_TO_REFLECTION.get(note["kind"], ())
+    if sections:
+        payload["thisNote"]["reflectionSections"] = list(sections)
+        payload["thisNote"]["sectionGuidance"] = {name: SECTION_GUIDANCE[name] for name in sections}
     if exemplars:
         payload["styleExamples"] = exemplars
     if connection_candidates:
         payload["connectionCandidates"] = connection_candidates
+    if outside_sources:
+        payload["outsideSources"] = outside_sources
     if relevant_vocabulary:
         payload["relevantVocabulary"] = relevant_vocabulary
     if glossary:
@@ -663,6 +786,7 @@ def draft_items(args, service, system, planned, run_dir):
                     entry.get("relevant_vocabulary"),
                     entry.get("glossary"),
                     entry.get("known_people"),
+                    entry.get("outside_sources"),
                 ),
                 "draft-note",
             )
@@ -721,17 +845,24 @@ def capitalized_tokens(text):
     return confident, ambiguous
 
 
-def invented_specifics(source, body):
+def invented_specifics(source, body, allowed_urls=()):
     """Specifics in the draft with no root in the braindump.
 
     Rewording is the job, so most of a draft cannot be checked against its
     source. Names, links, and figures can: they were either in the braindump or
     the model made them up, and that is worth catching exactly.
 
+    ``allowed_urls`` is the code-supplied ``outsideSources`` set -- text this run
+    actually read, with the URL it came from. Those URLs are legitimately absent
+    from the braindump, so without this the correctly-cited outside connection
+    the reflection sections ask for would be held as an invented link. Only that
+    set widens the check; a URL from anywhere else is still invention.
+
     Returns ``{"names", "uncertain_names", "links", "numbers"}``. Only ``names``
     and ``links`` are strong enough to hold a note back; the rest are handed to
     the reviewer, which reads the braindump anyway.
     """
+    permitted = {str(url).rstrip(".,;:)").casefold() for url in allowed_urls or ()}
     source_lower = normalized_source(source)
     source_words = set(content_words(source))
     prose = strip_structure(body)
@@ -752,7 +883,11 @@ def invented_specifics(source, body):
     return {
         "names": names,
         "uncertain_names": [token for token in uncertain if token not in names],
-        "links": [url for url in URL_RE.findall(body) if url.rstrip(".,;:").casefold() not in source_lower],
+        "links": [
+            url
+            for url in URL_RE.findall(body)
+            if url.rstrip(".,;:)").casefold() not in permitted and url.rstrip(".,;:").casefold() not in source_lower
+        ],
         "numbers": [number for number in NUMBER_RE.findall(prose) if number not in source_lower],
     }
 
@@ -786,6 +921,60 @@ def coverage_ratio(source, bodies):
     return len(kept) / len(set(source_words))
 
 
+def body_sections(body):
+    """``{heading: [bullet, ...]}`` for the `##` sections of a drafted body."""
+    sections, current = {}, None
+    for line in str(body).splitlines():
+        stripped = line.strip()
+        heading = re.match(r"^##+\s+(.*)$", stripped)
+        if heading:
+            current = heading.group(1).strip()
+            sections.setdefault(current, [])
+            continue
+        if current is not None and re.match(r"^[-*+]\s+", stripped):
+            sections[current].append(re.sub(r"^[-*+]\s+", "", stripped).strip())
+    return sections
+
+
+def check_reflection(entry):
+    """Hold a note whose reflection points at something that cannot be checked.
+
+    A hold rather than a notice, and rather than the quiet line-dropping
+    ``vault-transcripts`` does: an uncited outside claim is the same class of
+    fabrication as the invented link right above it in ``check_draft``, capture
+    already has a hold path for that, and its contract is that a result is never
+    silently discarded. A held note is reported with its reason and re-runnable.
+    """
+    problems = []
+    kind = (entry.get("note") or {}).get("kind")
+    sections = body_sections(entry["body"])
+    # Section membership needs to know the kind. Where a caller cannot say --
+    # only the re-draft recheck, which works from a record -- the connection
+    # rules below still apply; they do not depend on it.
+    if kind:
+        allowed_sections = KIND_TO_REFLECTION.get(kind, ())
+        for heading in sections:
+            if heading in REFLECTION_HEADINGS and heading not in allowed_sections:
+                problems.append(f"a {kind} note wrote the reflection section {heading!r}, which it does not get")
+    allowed_wikilinks = {candidate["wikilink"] for candidate in entry.get("connection_candidates") or []}
+    allowed_urls = {source["url"] for source in entry.get("outside_sources") or []}
+    for item in sections.get("Connections", []):
+        links = WIKILINK_RE.findall(item)
+        if links:
+            unknown = [link for link in links if link not in allowed_wikilinks]
+            if unknown:
+                problems.append(f"a connection links {unknown[0]}, which is not a candidate note")
+            continue
+        if not item.startswith("Outside vault:"):
+            problems.append(f"a connection has no vault link and is not labelled 'Outside vault:': {item[:80]}")
+            continue
+        cited = [url.rstrip(".,;:)") for url in URL_RE.findall(item)]
+        if not any(url in allowed_urls for url in cited):
+            detail = f"cites {cited[0]}" if cited else "cites no source"
+            problems.append(f"an outside connection {detail}, which this run never read: {item[:80]}")
+    return problems
+
+
 def check_draft(entry):
     """Everything that can fail one drafted note. Returns (problems, notices)."""
     problems = []
@@ -798,7 +987,9 @@ def check_draft(entry):
         problems.append("the draft wrote its own frontmatter")
     if BRAINDUMP_HEADING.casefold() in body.casefold():
         problems.append("the draft wrote its own braindump section")
-    found = invented_specifics(entry["item"]["text"], body)
+    problems.extend(check_reflection(entry))
+    cited_urls = {source["url"] for source in entry.get("outside_sources") or []}
+    found = invented_specifics(entry["item"]["text"], body, cited_urls)
     if found["names"]:
         problems.append(f"these names are not in the braindump: {', '.join(found['names'][:6])}")
     if found["links"]:
@@ -925,6 +1116,12 @@ def assemble_one(args, schema, item, entries, taken, date, warnings, prior=None)
             "title": entry.get("title") or entry["note"]["title"],
             "gist": entry["note"]["gist"],
             "notices": entry["notices"],
+            # Carried so a re-draft is given the same links and cited excerpts the
+            # first attempt had. Without them the redraft is asked for reflection
+            # sections with nothing it is allowed to cite, and every connection it
+            # writes is then held.
+            "connection_candidates": entry.get("connection_candidates") or [],
+            "outside_sources": entry.get("outside_sources") or [],
             "is_primary": primary is not None and entry["id"] == primary["id"],
             "status": "review" if entry.get("held") else "ok",
             "held_reason": entry.get("held"),
@@ -1102,6 +1299,8 @@ def verify_records(args, schema, system, items_by_id, records, run_dir):
                 item,
                 {"kind": record["kind"], "title": record["title"], "gist": record["gist"], "covers": []},
                 type_style=record.get("type_style"),
+                connection_candidates=record.get("connection_candidates"),
+                outside_sources=record.get("outside_sources"),
             ),
             "redraft-note",
             background=True,
@@ -1119,7 +1318,15 @@ def verify_records(args, schema, system, items_by_id, records, run_dir):
         if outcome["ok"]:
             item = items_by_id[record["source_id"]]
             entry = outcome["value"]
-            rechecked, notices = check_draft({"item": item, "body": entry["body"]})
+            rechecked, notices = check_draft(
+                {
+                    "item": item,
+                    "body": entry["body"],
+                    "note": {"kind": record["kind"]},
+                    "connection_candidates": record.get("connection_candidates"),
+                    "outside_sources": record.get("outside_sources"),
+                }
+            )
             record["notices"] = notices
             if rechecked:
                 record["status"] = "review"
@@ -1770,9 +1977,10 @@ def capture(args):
                 {"name": person["name"], "wikilink": person["link"] or f"[[{person['name']}]]"}
                 for person in vault_lexicon.candidate_speakers(material, (lexicon or {}).get("speakers", []))
             ]
-            if note_type == "journal":
+            if KIND_TO_REFLECTION.get(entry["note"]["kind"]):
                 candidates, warning = collect_connection_candidates(vault, entry["note"]["gist"])
                 entry["connection_candidates"] = candidates
+                entry["outside_sources"] = collect_outside_sources(vault, entry["item"]["text"], candidates)
                 if warning and warning not in seen_warnings:
                     seen_warnings.add(warning)
                     warnings.append(warning)

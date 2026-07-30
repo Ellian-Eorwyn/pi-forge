@@ -128,10 +128,18 @@ note — either lands where the next run will find it.
 - Clean external sources as structured full content: remove filler and
   redundancy, regroup related passages, and add headings while preserving every
   substantive claim, example, qualification, and disagreement.
-- After an owner journal's cleaned text, add non-empty `## Observations`,
-  `## Interpretations`, `## Open questions`, and `## Connections`, then the raw
-  transcript. Reflection uses vault search first, qualifies outside knowledge,
-  and is excluded from transcript-fidelity comparisons.
+- After an owner memo's or journal's cleaned text, add its reflection, then the
+  raw transcript. A journal gets non-empty `## Observations`,
+  `## Interpretations`, `## Open questions`, and `## Connections`; a memo gets
+  `## Context`, `## Open questions`, `## Next steps`, and `## Connections`. No
+  other recording type gets a reflection, and reflection is excluded from
+  transcript-fidelity comparisons.
+- Reflection sources from the vault first. Material from outside the vault is
+  admissible only as text this run actually read — a link in the recording, or a
+  citation already imported into a vault note — and such a connection begins
+  `Outside vault:` and carries that source's URL. Nothing is fetched at
+  reflection time, so a fact the model merely recalls cannot be checked: it is
+  dropped from the reflection and reported as dropped.
 
 ## Reference
 

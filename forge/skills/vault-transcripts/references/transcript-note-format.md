@@ -25,8 +25,8 @@ processed_by:
 
 <cleaned transcript — headings ## or deeper>
 
-<owner journal reflection only, with non-empty Observations, Interpretations,
-Open questions, and Connections sections>
+<owner memo or journal reflection only, non-empty sections only — see Part B2 for
+which sections each type gets>
 
 # Transcript
 
@@ -115,11 +115,7 @@ voice rules and stays reviewable.
 For an owner journal, written text receives mechanical correction only. Spoken
 text receives a light fidelity edit: filler, false starts, and accidental
 repetition may be removed while emphasis, meaningful self-correction,
-uncertainty, wording, and sequence remain. A generated reflection follows the
-cleaned authorial section. Empty reflection sections are omitted; vault
-connections are valid wikilinks found by hybrid search, and broader-knowledge
-connections begin `Outside knowledge:`. The reflection is not part of transcript
-fidelity measurement.
+uncertainty, wording, and sequence remain.
 
 A note under the tiny threshold gets punctuation, casing, and one short
 paragraph. No headings, no lists, no restructuring.
@@ -200,6 +196,47 @@ every successful correction would read as the cleanup drifting from the source.
 
 Corrections the model made that are not yet recorded are proposed in the report,
 so the next run can make them free.
+
+## The reflection
+
+Not part of the cleanup contract above: the reflection is a separate model call,
+mirrored by `JOURNAL_REFLECTION_SYSTEM`, `MEMO_REFLECTION_SYSTEM`, and the shared
+`REFLECTION_SOURCE_RULES` in `scripts/vault-transcripts.py`.
+
+An owner memo and an owner journal each receive a generated reflection after the
+cleaned authorial section. No other recording type does. Empty sections are
+omitted, and a short recording legitimately gets one section or none at all.
+
+| Type | Sections, in order |
+| --- | --- |
+| `journal` | `## Observations`, `## Interpretations`, `## Open questions`, `## Connections` |
+| `memo` | `## Context`, `## Open questions`, `## Next steps`, `## Connections` |
+
+The journal set is introspective; the memo set is not. A memo is a working note —
+a task, an idea, a plan, a thought caught before it was lost — so `Context` names
+what it belongs to, `Next steps` names an action it implied without stating, and
+nothing comments on the owner's state of mind. `Interpretations` on an errand list
+is either empty or padding, which is why memos do not get it.
+
+Where a connection may come from, in both sets:
+
+- The vault first: a valid wikilink from hybrid search, checked against the notes
+  that search actually returned.
+- Otherwise, `outsideSources` — text this pipeline read, carrying the URL it came
+  from. There are two ways such text exists without a network call: the owner put
+  a link in the recording, or the material was researched earlier and imported
+  into a vault note that kept its citations. Nothing is fetched at reflection
+  time.
+- A connection drawn from outside the vault begins `Outside vault:` and ends with
+  its source's URL in parentheses.
+- **A fact the model merely remembers is not admissible.** There is no way to
+  check it, so a connection that cites nothing, or cites a URL this run never
+  read, is dropped from the rendered reflection and reported as dropped. This is
+  the one place the pipeline discards model output rather than holding the note:
+  raising instead would cost the note its summary *and* its reflection over a
+  single oversold line, and the exclusion is recorded either way.
+
+The reflection is not part of transcript fidelity measurement.
 
 ## What the checks enforce before a model ever reviews the result
 
