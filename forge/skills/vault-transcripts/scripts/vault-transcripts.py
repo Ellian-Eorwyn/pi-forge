@@ -125,6 +125,9 @@ COPY_SUFFIX_RE = re.compile(r"\s*\((\d+)\)$")
 MEDIA_EXTENSION_RE = re.compile(r"\.(mov|m4v|mp4|m4a|mp3|wav|aac|webm)$", re.IGNORECASE)
 URL_RE = re.compile(r"https?://[^\s<>\"'\])]+", re.IGNORECASE)
 WIKILINK_RE = re.compile(r"\[\[[^\]]+\]\]")
+# The marker `build_note` writes, matched where a *line* is exactly that, so a
+# passing mention inside the recording is not mistaken for the boundary.
+TRANSCRIPT_MARKER_RE = re.compile(r"(?:\A|\r?\n)# Transcript[ \t]*\r?\n\r?\n?")
 GENERIC_CAPTURE_NAME_RE = re.compile(
     r"^(new recording|recording|voice memo|audio|new note|untitled)(\s*\d+)?$|^img[_-]?\d+$",
     re.IGNORECASE,
@@ -398,6 +401,26 @@ def timestamp_seconds(text):
     return parts[0] * 60 + parts[1]
 
 
+def transcript_source(body):
+    """The recording itself, with any generated head this note already carries.
+
+    A body holding the ``# Transcript`` marker has been through this pipeline
+    before: everything after the marker is the original recording, everything
+    before it was written by a previous run. Normally such a note also has
+    frontmatter and ``is_transcript`` skips it, but the two can come apart --
+    strip the frontmatter off a processed note and the marker is still sitting
+    there, which is how 32 notes in one real inbox arrived.
+
+    Re-processing has to start from the recording. Left alone, the leftover
+    marker is not part of any timestamped block, so ``parse_transcript`` reads it
+    as handwritten preamble, ``build_note`` copies it into the generated head and
+    then adds the real marker after it, and every note in the run is held for a
+    level-one heading it never wrote.
+    """
+    match = TRANSCRIPT_MARKER_RE.search(body)
+    return body[match.end():] if match else body
+
+
 def _line_kind(line):
     stripped = line.strip()
     timestamp = TIMESTAMP_RE.match(stripped)
@@ -622,7 +645,7 @@ def scan_inbox(vault, limit=None):
             data = path.read_bytes()
             item["sha256"] = sha256_bytes(data)
             split = split_frontmatter(data)
-            parsed = parse_transcript(split["body"])
+            parsed = parse_transcript(transcript_source(split["body"]))
             transcript, reason = is_transcript(split, parsed)
             item["is_transcript"] = transcript
             item["skip_reason"] = reason
@@ -1013,7 +1036,7 @@ def classify_items(args, vault, items, run_dir, skip):
         started = time.time()
         try:
             data = (vault / item["path"]).read_bytes()
-            parsed = parse_transcript(split_frontmatter(data)["body"])
+            parsed = parse_transcript(transcript_source(split_frontmatter(data)["body"]))
             payload = classify_payload(item, parsed, getattr(args, "compiled_lexicon", None))
             roster_names = [offer["name"] for offer in payload.get("knownSpeakers", [])]
             messages = [
@@ -1441,7 +1464,7 @@ def clean_items(args, vault, items, class_records, run_dir, skip):
     for item, record in plans:
         try:
             data = (vault / item["path"]).read_bytes()
-            parsed = parse_transcript(split_frontmatter(data)["body"])
+            parsed = parse_transcript(transcript_source(split_frontmatter(data)["body"]))
         except (OSError, UnicodeDecodeError) as error:
             warnings.append(f"{item['path']}: could not re-read for cleanup ({error})")
             results[item["path"]] = {"error": str(error)}
@@ -2368,7 +2391,7 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
             if sha256_bytes(data) != item["sha256"]:
                 records.append(review_record(item, "note changed on disk during this run"))
                 continue
-            raw_body = split_frontmatter(data)["body"]
+            raw_body = transcript_source(split_frontmatter(data)["body"])
             parsed = parse_transcript(raw_body)
             metadata = frontmatter_metadata(schema, record["recording_type"])
             note_text, head = build_note(
@@ -2691,7 +2714,7 @@ def verify_records(args, vault, items_by_path, records, run_dir):
         path = payload["id"]
         record = by_path[path]
         item = items_by_path[path]
-        parsed = parse_transcript(split_frontmatter((vault / path).read_bytes())["body"])
+        parsed = parse_transcript(transcript_source(split_frontmatter((vault / path).read_bytes())["body"]))
         messages = [
             {"role": "system", "content": CLASSIFY_SYSTEM},
             {"role": "user", "content": json.dumps(classify_payload(item, parsed), ensure_ascii=False)},
@@ -2831,7 +2854,7 @@ def reassemble_escalated(args, vault, schema, items_by_path, clean_results, reco
         try:
             if not cleaned:
                 raise UserError("cleaned transcript is no longer available in this run")
-            raw_body = split_frontmatter((vault / path).read_bytes())["body"]
+            raw_body = transcript_source(split_frontmatter((vault / path).read_bytes())["body"])
             parsed = parse_transcript(raw_body)
             metadata = frontmatter_metadata(schema, record["recording_type"])
             note_text, head = build_note(

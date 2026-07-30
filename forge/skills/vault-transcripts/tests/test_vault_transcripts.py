@@ -330,6 +330,38 @@ def run_script(*args, environment=None):
     return subprocess.run([sys.executable, str(SCRIPT), *arguments], capture_output=True, text=True, env=env)
 
 
+class TranscriptMarkerTests(unittest.TestCase):
+    """A note that already carries `# Transcript` must not gain a second one."""
+
+    BODY = transcript(SOLO_BLOCKS)
+
+    def test_a_body_without_the_marker_is_returned_unchanged(self):
+        self.assertEqual(vt.transcript_source(self.BODY), self.BODY)
+
+    def test_a_head_stripped_note_yields_the_recording_alone(self):
+        self.assertEqual(vt.transcript_source(f"# Transcript\n\n{self.BODY}"), self.BODY)
+
+    def test_a_fully_processed_note_yields_the_recording_alone(self):
+        processed = f"---\ntype: note\n---\n\n> [!summary]\n> A summary.\n\nCleaned.\n\n# Transcript\n\n{self.BODY}"
+        body = vt.split_frontmatter(processed.encode("utf-8"))["body"]
+        self.assertEqual(vt.transcript_source(body), self.BODY)
+
+    def test_the_marker_is_matched_only_as_a_whole_line(self):
+        spoken = f"I wrote # Transcript at the top of it.\n\n{self.BODY}"
+        self.assertEqual(vt.transcript_source(spoken), spoken)
+        deeper = f"## Transcript\n\n{self.BODY}"
+        self.assertEqual(vt.transcript_source(deeper), deeper)
+
+    def test_the_leftover_marker_no_longer_reaches_the_preamble(self):
+        parsed = vt.parse_transcript(vt.transcript_source(f"# Transcript\n\n{self.BODY}"))
+        self.assertEqual(parsed["preamble"], "")
+
+    def test_a_handwritten_preamble_still_survives_untouched(self):
+        preamble = "1. call the shop\n2. measure the counter\n\n"
+        parsed = vt.parse_transcript(vt.transcript_source(f"# Transcript\n\n{preamble}{self.BODY}"))
+        self.assertEqual(parsed["preamble"], preamble)
+
+
 class ParsingTests(unittest.TestCase):
     def test_filename_patterns(self):
         self.assertEqual(

@@ -40,6 +40,13 @@ Rules the script enforces, not suggestions:
 - Everything after `# Transcript` is the source body unchanged, including its
   handwritten preamble and any trailing text. The cleanup is a convenience; the
   transcription is the record.
+- The marker is also read on the way *in*. A note that already carries it has
+  been through this pipeline before, so processing starts from what follows it.
+  Normally frontmatter makes such a note skip entirely, but the two can come
+  apart — strip the frontmatter off a processed note and the marker remains — and
+  without this the leftover marker parses as handwritten preamble, gets copied
+  into the generated section, and holds every note in the run for a level-one
+  heading the cleanup never wrote.
 - Frontmatter carries only `type`, `status: raw`, `capture_type`, and
   `processed_by`, all validated against the vault's schema note.
   `vault-organizer` replaces this block when it files the note and reads the
