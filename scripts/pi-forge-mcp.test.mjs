@@ -335,6 +335,12 @@ function makeFakeInstallSource(source, version = "0.0.0-test") {
 		join(source, "forge", "lib", "connected-services.mjs"),
 		readFileSync(join(repositoryRoot, "forge", "lib", "connected-services.mjs"), "utf8"),
 	);
+	// The real `configure-pi-forge.mjs` is copied below rather than stubbed, so
+	// every module it imports has to be here too or the install fails to load.
+	writeFileSync(
+		join(source, "forge", "lib", "moshi-hook.mjs"),
+		readFileSync(join(repositoryRoot, "forge", "lib", "moshi-hook.mjs"), "utf8"),
+	);
 	writeFileSync(
 		join(source, "forge", "scripts", "configure-pi-forge.mjs"),
 		readFileSync(join(repositoryRoot, "forge", "scripts", "configure-pi-forge.mjs"), "utf8"),
@@ -498,6 +504,12 @@ function makeFakePackageTarball(root) {
 	writeFileSync(
 		join(packageRoot, "lib", "connected-services.mjs"),
 		readFileSync(join(repositoryRoot, "forge", "lib", "connected-services.mjs"), "utf8"),
+	);
+	// The real `configure-pi-forge.mjs` is copied below rather than stubbed, so
+	// every module it imports has to be here too or the install fails to load.
+	writeFileSync(
+		join(packageRoot, "lib", "moshi-hook.mjs"),
+		readFileSync(join(repositoryRoot, "forge", "lib", "moshi-hook.mjs"), "utf8"),
 	);
 	writeFileSync(
 		join(packageRoot, "scripts", "configure-pi-forge.mjs"),
