@@ -35,6 +35,14 @@ footnote block. The per-kind sections, their aliases, their fill modes, and thei
 budgets are in [wiki-kinds.json](wiki-kinds.json), which is also the prompt text
 sent to the drafting model — the `guidance` strings are what the model reads.
 
+The lead is rendered as an `> [!abstract]` callout. A wiki note is skimmed before
+it is read, and the lead is the sentence that decides whether to keep reading, so
+it is worth setting apart. Wrapping is idempotent — the lead is rewritten on
+every expansion — and a note whose lead is still plain prose gets the callout the
+next time it is expanded. `forge/skills/vault-transcripts/references/loom-notes.css`
+styles it alongside the callouts the transcript pipeline writes; without that
+snippet it renders as a stock Obsidian abstract callout, which is fine.
+
 The schema's approved-property list is closed and strips anything else, so no
 per-kind structured data can live in frontmatter. A figure's lifespan, a work's
 year, and a place's region belong in the lead sentence, which is where a reader

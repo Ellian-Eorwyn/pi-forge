@@ -354,7 +354,7 @@ def clean_suggestions(raw, warnings):
     return cleaned
 
 
-def scan_vault(vault, schema_path, mode, limit):
+def scan_vault(vault, schema_path, mode, limit, only_sources=False):
     schema_data = schema_path.read_bytes()
     schema_split = split_frontmatter(schema_data)
     schema_body_hash = sha256_text(normalize_body_for_hash(schema_split["body"]))
@@ -376,10 +376,12 @@ def scan_vault(vault, schema_path, mode, limit):
             "first_line_hash": "",
             "error": None,
         }
+        note_type = None
         try:
             data = path.read_bytes()
             item["sha256"] = sha256_bytes(data)
             frontmatter = split_frontmatter(data)
+            note_type = parse_frontmatter(frontmatter["frontmatter_text"]).get("type")
             normalized = normalize_body_for_hash(frontmatter["body"])
             item["body_hash"] = sha256_text(normalized)
             item["body_chars"] = len(normalized)
@@ -391,6 +393,12 @@ def scan_vault(vault, schema_path, mode, limit):
         except (OSError, UnicodeDecodeError) as error:
             item["error"] = str(error)
             item["sha256"] = item["sha256"] or sha256_file(path)
+        # A migration that only moves sources leaves everything else exactly
+        # where it is, including the folder trees somebody arranged by hand
+        # below a declared route. Those are legitimate structure the schema
+        # does not describe, and a whole-vault run would dissolve them.
+        if only_sources and note_type != "source":
+            continue
         items.append(item)
     return items, schema_body_hash
 
@@ -1707,6 +1715,7 @@ def resolved_options(args):
         "cache_prompt": args.cache_prompt,
         "think_prefill": args.think_prefill,
         "reuse_frontmatter": args.reuse_frontmatter,
+        "only_sources": args.only_sources,
         "schema": args.schema,
         "profile": args.profile,
     }
@@ -1827,7 +1836,7 @@ def organize(args):
             scan_data = json.loads(scan_path.read_text(encoding="utf-8"))
             items = scan_data["items"]
             if resuming:
-                current_items, _ = scan_vault(vault, schema_path, args.mode, args.limit)
+                current_items, _ = scan_vault(vault, schema_path, args.mode, args.limit, args.only_sources)
                 # Named for what it is: files moving under the run, not the
                 # schema-versus-disk drift checked above. `drift` alone would
                 # also shadow the mode function of that name.
@@ -1839,7 +1848,7 @@ def organize(args):
                 for changed in input_drift["changed"]:
                     warnings.append(f"input drift: {changed['after']['path']} changed after the scan; it will be refused at apply")
         else:
-            items, _ = scan_vault(vault, schema_path, args.mode, args.limit)
+            items, _ = scan_vault(vault, schema_path, args.mode, args.limit, args.only_sources)
             run_state.atomic_write_json(scan_path, {"items": items})
             run_state.update_run_state(
                 run_dir,
@@ -2571,6 +2580,11 @@ def parse_args(argv):
     parser.add_argument("--think-model")
     parser.add_argument("--think-prefill", action="store_true", help="prefill an empty think block (for thinking backends like :8008)")
     parser.add_argument("--force-reclassify", action="store_true")
+    parser.add_argument(
+        "--only-sources",
+        action="store_true",
+        help="vault mode: consider only notes their own frontmatter calls sources, leaving every other note alone",
+    )
     parser.add_argument(
         "--reuse-frontmatter",
         action="store_true",
