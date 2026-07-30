@@ -43,6 +43,7 @@ import forge_verify
 import run_state
 import vault_lexicon
 import vault_profile
+import vault_reflection
 import vault_voice
 from vault_schema import (
     INBOX_DIR,
@@ -79,13 +80,13 @@ FALLBACK_NOTE_TYPE = "note"
 # Which reflection sections a kind gets, keyed on kind rather than schema type:
 # `idea`, `question`, `reference`, and `plan` all collapse to type `note`, so the
 # type cannot tell them apart from each other or from anything else filed there.
+# The headings themselves are shared with vault-transcripts; only this mapping
+# from kind to heading set is this skill's.
 #
-# A journal's sections are introspective. Everything else gets the working-note
-# set, because "Interpretations" on an errand list is either empty or padding.
 # `draft` is the one kind with none: it is prose the person is composing, and
 # appending machine commentary to a draft damages the thing being drafted.
-JOURNAL_SECTIONS = ("Observations", "Interpretations", "Open questions", "Connections")
-WORKING_SECTIONS = ("Context", "Open questions", "Next steps", "Connections")
+JOURNAL_SECTIONS = vault_reflection.JOURNAL_HEADINGS
+WORKING_SECTIONS = vault_reflection.WORKING_HEADINGS
 KIND_TO_REFLECTION = {
     "idea": WORKING_SECTIONS,
     "task": WORKING_SECTIONS,
@@ -95,7 +96,7 @@ KIND_TO_REFLECTION = {
     "draft": (),
     "plan": WORKING_SECTIONS,
 }
-REFLECTION_HEADINGS = set(JOURNAL_SECTIONS) | set(WORKING_SECTIONS)
+REFLECTION_HEADINGS = vault_reflection.REFLECTION_HEADINGS
 SECTION_GUIDANCE = {
     "Observations": "What the person directly described, stated before any reading of it.",
     "Interpretations": (
@@ -116,13 +117,6 @@ SECTION_GUIDANCE = {
     ),
     "Connections": "Vault notes this relates to, with a few words on why.",
 }
-
-# A cited line has to say something its excerpt supports, so a bare URL under a
-# `## Sources` list is not a citable source: it carries a link and no claim.
-OUTSIDE_SOURCE_MIN_CHARS = 20
-OUTSIDE_SOURCE_EXCERPT_CHARS = 300
-OUTSIDE_SOURCE_LIMIT = 12
-OUTSIDE_SOURCE_READ_BYTES = 40000
 
 FILENAME_PATTERNS = ("topic", "date-topic")
 DEFAULT_MAX_NOTES = 8
@@ -152,7 +146,7 @@ PREFS_RUN_CONTEXT_CHARS = 6000
 
 BRAINDUMP_HEADING = "# Braindump"
 WORD_RE = re.compile(r"[a-z][a-z-]{2,}")
-URL_RE = re.compile(r"https?://[^\s<>\"'\])]+", re.IGNORECASE)
+URL_RE = vault_reflection.URL_RE
 WIKILINK_RE = re.compile(r"\[\[[^\]]+\]\]")
 NUMBER_RE = re.compile(r"\d+(?:[.,:/]\d+)*")
 PROPER_NOUN_RE = re.compile(r"\b([A-Z][a-zA-Z]*(?:['’][a-zA-Z]+)?)\b")
@@ -566,60 +560,14 @@ def collect_connection_candidates(vault, query):
     return candidates[:8], None
 
 
-def cited_lines(text, source):
-    """Lines carrying both a URL and enough prose to be a claim.
-
-    A `## Sources` entry is a bare link, so it cites nothing on its own: there is
-    no statement for a reflection to stand behind. A quote-plus-URL line from a
-    research import is the opposite, and is the shape this looks for.
-    """
-    found = []
-    for line in str(text).splitlines():
-        collapsed = re.sub(r"\s+", " ", line).strip().lstrip("-*+> ").strip()
-        urls = URL_RE.findall(collapsed)
-        if not urls:
-            continue
-        prose = collapsed
-        for url in urls:
-            prose = prose.replace(url, " ")
-        if len(re.sub(r"[^0-9A-Za-z]+", "", prose)) < OUTSIDE_SOURCE_MIN_CHARS:
-            continue
-        found.append(
-            {
-                "url": urls[0].rstrip(".,;:)"),
-                "source": source,
-                "excerpt": collapsed[:OUTSIDE_SOURCE_EXCERPT_CHARS],
-            }
-        )
-    return found
-
-
 def collect_outside_sources(vault, braindump, candidates):
-    """Outside-the-vault text this pipeline is actually holding, with its URLs.
+    """This skill's half of the shared harvest: the braindump plus its candidates.
 
-    Nothing here is fetched. There are exactly two ways outside material can be
-    in hand without a network call: the person put a link in the braindump, or the
-    material was researched earlier and imported into a vault note that kept its
-    citations. Anything a model merely remembers about the world cannot be
-    checked against either, so ``check_reflection`` holds the note over it.
+    What counts as a citable line, and the refusal to fetch anything, live in
+    ``vault_reflection`` because they are the same for a recording. Only the
+    label a braindump citation carries is this skill's.
     """
-    harvested = list(cited_lines(braindump, "this braindump"))
-    for candidate in candidates:
-        try:
-            with (vault / candidate["path"]).open("r", encoding="utf-8", errors="replace") as handle:
-                text = handle.read(OUTSIDE_SOURCE_READ_BYTES)
-        except OSError:
-            continue
-        harvested.extend(cited_lines(text, candidate["wikilink"]))
-    seen, unique = set(), []
-    for entry in harvested:
-        if entry["url"] in seen:
-            continue
-        seen.add(entry["url"])
-        unique.append(entry)
-        if len(unique) >= OUTSIDE_SOURCE_LIMIT:
-            break
-    return unique
+    return vault_reflection.outside_sources(braindump, "this braindump", vault, candidates)
 
 
 # --------------------------------------------------------------------------- #
@@ -1892,12 +1840,12 @@ def capture(args):
         cache_dir=vault / STATE_DIR / "cache",
         dictionary_path=vault_lexicon.default_dictionary_path(),
     )
-    profile_path = vault_profile.resolve_profile_path(vault, args.profile, disabled=args.no_profile)
-    profile, profile_hash, profile_warnings = vault_profile.compiled_profile_for(
+    profile_path, profile_warnings = vault_profile.resolve_profile_or_warn(vault, args.profile, disabled=args.no_profile)
+    profile, profile_hash, compile_warnings = vault_profile.compiled_profile_for(
         vault, profile_path, cache_dir=vault / STATE_DIR / "cache"
     )
     args.compiled_profile = profile
-    warnings = list(profile_warnings)
+    warnings = profile_warnings + compile_warnings
 
     with run_state.run_lock(vault / STATE_DIR):
         if resuming:

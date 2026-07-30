@@ -37,6 +37,7 @@ Outside a vault, use `forge-output/literature-library/<source-stem>/`.
 - `acquire <run-directory>`: resolve open-access status and fetch every pending record. Publishes verified PDFs under hash-bound move operations.
 - `acquire … --allow-browser`: after the direct paths fail, retry **open-access** records through the browser service.
 - `acquire … --institutional`: also attempt closed-access records, but only if this machine egresses from the institution's network.
+- `acquire … --retry-deferred`: requeue `deferred-institutional` records. Pair with `--institutional` once the machine is on the network that deferred them.
 - `acquire … --batch-size 50 --batch-pause 30 --chunk-size 8 --host-delay-ms 3000`: pacing. Batches carry the pause; chunks bound how much an interrupted run repeats.
 - `convert <run-directory>`: convert every acquired PDF to Markdown with bibliographic frontmatter, escalating scanned documents to OCR. Add `--refresh-all` to reconvert.
 - `retry <run-directory> [--item <id> | --disposition <d> | --all-failed]`: requeue terminal failures.

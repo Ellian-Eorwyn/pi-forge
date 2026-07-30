@@ -32,18 +32,34 @@ The `forge` profile provides agents with the following built-in skills:
 - **`document-ingest`**: Normalize documents with provenance
 - **`file-conversion`**: Convert files, including Markdown and EPUB
 - **`literature-extraction`**: Extract structured evidence from research documents
+- **`literature-library`**: Turn a citation list into named PDFs and Markdown
 - **`organize-folder`**: Sort a messy folder via a reviewable manifest
 - **`personal-admin`**: Summarize personal documents into action plans
+- **`project-extraction`**: Track deliverables, dates, and risks across project records
 - **`report-output`**: Assemble polished deliverables from processed outputs
+- **`reviewer-2`**: Peer-review a draft article without modifying it
 - **`site-builder`**: Build a static website from a content folder
+- **`skill-builder`**: Create, revise, audit, and package skills
 - **`spreadsheet-analysis`**: Analyze and enrich tabular datasets
 - **`transcript-cleanup`**: Clean and structure raw transcripts
 - **`transcription`**: Transcribe audio or video, then correct and clean it
+- **`vault-capture`**: Turn a braindump into schema-valid vault notes
 - **`vault-connections`**: Search and connect vault notes, then publish validated research runs through reviewed inbox/wiki proposals
 - **`vault-handoff`**: Send completed text artifacts to pi-vault review
 - **`vault-organizer`**: Classify and organize Obsidian notes from a schema note
+- **`vault-transcripts`**: Classify, clean, and summarize raw transcripts into vault notes
+- **`vault-wiki`**: Expand thin wiki entity notes into cited reference cards
 - **`web-collection`**: Archive and organize web sources
 - **`web-research`**: Quick or deep web research with provenance and validation
+
+The vault skills share three optional vault-owned layers, each a note the vault
+itself holds and each disableable per run: a **voice policy** (`--voice`), a
+**lexicon** of terms and speakers (`--lexicon`), and a **personal context**
+register of cards (`--profile`). The personal-context layer informs how notes are
+filed, drafted, and searched — never what they say. Its cards are structurally
+barred from becoming note content, cards gated to a route are refused wherever
+the destination is still undecided, and a missing or ambiguous register costs the
+layer rather than the run.
 
 
 ### Skills vs. Extensions (Architectural Boundary)

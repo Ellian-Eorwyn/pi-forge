@@ -708,23 +708,20 @@ def carry_forward_provenance(validated, frontmatter_text, schema, warnings):
 def load_profile(args, vault):
     """Compile the personal-context layer for classification, or carry on without.
 
-    Never raises: a broken register costs the layer, not the run.
+    A broken or ambiguous register costs the layer, not the run. A ``--profile``
+    path that does not exist still raises, so a typo cannot silently disable the
+    layer the command asked for.
     """
-    try:
-        profile_path = vault_profile.resolve_profile_path(
-            vault, getattr(args, "profile", None), disabled=getattr(args, "no_profile", False)
-        )
-    except UserError as error:
-        args.compiled_profile, args.profile_path, args.profile_hash = None, None, "none"
-        args.profile_warnings = [f"personal context note could not be read: {error}"]
-        return None, None, "none"
-    profile, profile_hash, warnings = vault_profile.compiled_profile_for(
+    profile_path, warnings = vault_profile.resolve_profile_or_warn(
+        vault, getattr(args, "profile", None), disabled=getattr(args, "no_profile", False)
+    )
+    profile, profile_hash, compile_warnings = vault_profile.compiled_profile_for(
         vault, profile_path, cache_dir=vault / ".vault-organizer" / "cache"
     )
     args.compiled_profile = profile
     args.profile_path = profile_path
     args.profile_hash = profile_hash
-    args.profile_warnings = warnings
+    args.profile_warnings = warnings + compile_warnings
     return profile_path, profile, profile_hash
 
 
@@ -1622,6 +1619,7 @@ def resolved_options(args):
         "cache_prompt": args.cache_prompt,
         "think_prefill": args.think_prefill,
         "schema": args.schema,
+        "profile": args.profile,
     }
 
 
@@ -1629,7 +1627,19 @@ def run_configuration(args, vault, schema_hash):
     return {
         "workflow": WORKFLOW,
         "command": args.mode,
-        "input": {"vault": str(vault), "mode": args.mode, "schema_hash": schema_hash},
+        "input": {
+            "vault": str(vault),
+            "mode": args.mode,
+            "schema_hash": schema_hash,
+            # A changed register would file the rest of the run by different
+            # habits than the ones it started with, the same way a changed voice
+            # note makes a resumed draft run incompatible in the sibling skills.
+            **vault_profile.profile_state(
+                getattr(args, "profile_path", None),
+                getattr(args, "profile_hash", None),
+                classification_site(),
+            ),
+        },
         "options": resolved_options(args),
     }
 
@@ -1643,6 +1653,7 @@ RESUMABLE_OPTION_FLAGS = {
     "near_dupe_review": "--near-dupe-review",
     "limit": "--limit",
     "schema": "--schema",
+    "profile": "--profile",
 }
 
 

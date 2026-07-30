@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -21,7 +22,11 @@ import vault_wiki as vw  # noqa: E402
 from vault_schema import UserError, sha256_bytes, split_frontmatter  # noqa: E402
 
 SPECS = skill.kind_specs()
-REAL_VAULT = Path("~/Documents/Obsidian/Loom").expanduser()
+# An opt-in corpus check against a vault that actually holds wiki notes. It is
+# the only test here that needs one, and the path is nobody's business but the
+# person running it, so it comes from the environment rather than the repo.
+_CORPUS = os.environ.get("PI_FORGE_WIKI_CORPUS", "")
+REAL_VAULT = Path(_CORPUS).expanduser() if _CORPUS else None
 
 SCHEMA_NOTE = """---
 type: system
@@ -754,7 +759,10 @@ class KindArgumentTests(unittest.TestCase):
             skill.parse_kinds("figure,sandwich")
 
 
-@unittest.skipUnless(REAL_VAULT.is_dir(), "the live vault is not present")
+@unittest.skipUnless(
+    REAL_VAULT is not None and REAL_VAULT.is_dir(),
+    "set PI_FORGE_WIKI_CORPUS to a vault holding wiki notes to run the corpus check",
+)
 class RealCorpusTests(unittest.TestCase):
     """The strongest available check: every real wiki note survives a merge."""
 

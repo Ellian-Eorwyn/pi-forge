@@ -353,11 +353,6 @@ def _validate_kind_spec(kind, raw, path):
     }
 
 
-def managed_ids(spec):
-    """Sections a generator is allowed to write."""
-    return tuple(section["id"] for section in spec["sections"] if not section["owner"])
-
-
 def section_by_id(spec, identifier):
     for section in spec["sections"]:
         if section["id"] == identifier:
@@ -631,37 +626,6 @@ def assert_only_managed_changed(original, merged, spec):
     if lost:
         raise MergeError(f"merge dropped unmanaged section(s): {', '.join(lost)}")
     raise MergeError("merge changed content outside the managed sections")
-
-
-# --------------------------------------------------------------------------- #
-# Body rendering from a template
-# --------------------------------------------------------------------------- #
-
-
-def render_from_template(template_body, filled, spec):
-    """Fill a template for a note that does not exist yet.
-
-    Ordering and spacing come from the template, and any section left unfilled
-    disappears with its heading, so a sparse draft still produces a clean card
-    rather than a page of empty headings.
-    """
-    body = template_body
-    replacements = {}
-    for section in spec["sections"]:
-        if not section["placeholder"]:
-            continue
-        # Keyed by section id for this skill, by placeholder name for the
-        # research-import path, which knows the five fields and nothing else.
-        value = filled.get(section["id"])
-        if value is None:
-            value = filled.get(section["placeholder"])
-        replacements[section["placeholder"]] = value or ""
-    for name in WIKI_TEMPLATE_FIELDS:
-        replacements.setdefault(name, filled.get(name, "") or "")
-    for key, value in replacements.items():
-        body = body.replace(f"{{{{{key}}}}}", value)
-    owner_headings = [section["heading"] for section in spec["sections"] if section["owner"] and section["heading"]]
-    return strip_unfilled(body, keep_headings=owner_headings)
 
 
 def footnote_references(text):

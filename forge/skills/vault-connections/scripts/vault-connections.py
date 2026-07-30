@@ -756,19 +756,23 @@ def load_voice(args, vault):
 def load_profile(args, vault):
     """Compile the personal-context layer, or carry on without it.
 
-    Unlike the voice policy, a broken register never fails the run: the
-    warnings go to the report and every stage behaves as it did before.
+    Unlike the voice policy, a broken or ambiguous register never fails the run:
+    the warnings go to the report and every stage behaves as it did before. A
+    ``--profile`` path that does not exist is the one exception, because there
+    the command named a layer that is not there.
     """
-    profile_path = vault_profile.resolve_profile_path(
+    profile_path, warnings = vault_profile.resolve_profile_or_warn(
         vault,
         getattr(args, "profile", None),
         disabled=getattr(args, "no_profile", False),
     )
-    profile, profile_hash, warnings = vault_profile.compiled_profile_for(vault, profile_path, cache_dir=cache_dir(vault))
+    profile, profile_hash, compile_warnings = vault_profile.compiled_profile_for(
+        vault, profile_path, cache_dir=cache_dir(vault)
+    )
     args.compiled_profile = profile
     args.profile_path = profile_path
     args.profile_hash = profile_hash
-    args.profile_warnings = warnings
+    args.profile_warnings = warnings + compile_warnings
     return profile_path, profile, profile_hash
 
 

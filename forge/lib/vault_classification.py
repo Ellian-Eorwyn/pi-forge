@@ -1,7 +1,6 @@
 """Shared schema-constrained note classification for vault workflows."""
 
 import json
-import re
 
 import forge_llm
 import run_state

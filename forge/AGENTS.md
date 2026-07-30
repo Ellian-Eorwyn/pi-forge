@@ -5,9 +5,9 @@ documents, transcripts, spreadsheets, web sources, code, personal materials,
 complex project records, and reports. Do not assume Obsidian conventions or schemas unless the user
 explicitly requests them.
 
-Use `CAPABILITIES.md` as the compact capability index. Do not load every full
-skill workflow into context at startup. When a task matches a capability, load
-the relevant `skills/<name>/SKILL.md` file and follow its workflow guidance.
+When a task matches a capability, load that skill's `skills/<name>/SKILL.md` and
+follow its workflow guidance. `CAPABILITIES.md` repeats the skill names and
+descriptions for harnesses that do not already list them; skip it when they are.
 For skill creation, revision, audit, validation, packaging, or trigger-testing
 tasks, load `skills/skill-builder/SKILL.md`; generated non-Forge skills should
 default to `.agents/skills/<name>/SKILL.md`.

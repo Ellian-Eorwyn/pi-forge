@@ -24,6 +24,19 @@ spec = importlib.util.spec_from_file_location("literature_library", SCRIPT)
 literature_library = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(literature_library)
 
+# PyMuPDF is an optional dependency everywhere else in this skill, so the tests
+# that need a genuine PDF — one that opens, paginates, and yields text — skip
+# rather than fail where it is absent. A fake fixture would not exercise the
+# probe at all, which is the whole point of those cases.
+try:
+    import fitz  # noqa: F401
+
+    HAVE_FITZ = True
+except ImportError:
+    HAVE_FITZ = False
+
+NEEDS_FITZ = "PyMuPDF is not installed; real-PDF fixtures are unavailable"
+
 
 # Derived from a real Consensus.app export. Every oddity here is one the real
 # file has: `ER  - ` carries a trailing space, one title holds a literal U+FFFD
@@ -844,6 +857,7 @@ class ProbeTests(unittest.TestCase):
     def tearDown(self):
         self._directory.cleanup()
 
+    @unittest.skipUnless(HAVE_FITZ, NEEDS_FITZ)
     def test_born_digital_pdf_does_not_escalate_to_ocr(self):
         path = self.root / "digital.pdf"
         _text_pdf(path)
@@ -852,6 +866,7 @@ class ProbeTests(unittest.TestCase):
         self.assertGreater(probe["alnumPerPage"], literature_library.MIN_ALNUM_CHARS_PER_PAGE)
         self.assertEqual(probe["emptyRatio"], 0.0)
 
+    @unittest.skipUnless(HAVE_FITZ, NEEDS_FITZ)
     def test_image_only_pdf_escalates_to_ocr(self):
         digital = self.root / "digital.pdf"
         _text_pdf(digital)
@@ -861,6 +876,10 @@ class ProbeTests(unittest.TestCase):
         self.assertTrue(probe["needsOcr"])
         self.assertIn("extractable text", probe["reason"])
 
+    # Without PyMuPDF `probe_pdf` reports that it cannot tell rather than
+    # routing to an OCR pass it also could not run, so the escalation this
+    # asserts only exists when the library is installed.
+    @unittest.skipUnless(HAVE_FITZ, NEEDS_FITZ)
     def test_unreadable_file_is_an_ocr_candidate_rather_than_a_crash(self):
         path = self.root / "broken.pdf"
         path.write_bytes(b"%PDF-1.4 truncated and invalid")
@@ -951,6 +970,7 @@ class MarkdownDocumentTests(unittest.TestCase):
         self.assertIn("First line of the article.", document)
 
 
+@unittest.skipUnless(HAVE_FITZ, NEEDS_FITZ)
 class ConvertCommandTests(unittest.TestCase):
     def setUp(self):
         self._directory = tempfile.TemporaryDirectory()

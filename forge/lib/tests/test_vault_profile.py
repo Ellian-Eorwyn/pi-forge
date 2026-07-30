@@ -372,8 +372,12 @@ class ResolutionTests(unittest.TestCase):
                 target = vault / folder
                 target.mkdir(parents=True)
                 (target / vp.PROFILE_BASENAME).write_text(REGISTER, encoding="utf-8")
-            with self.assertRaises(UserError):
+            with self.assertRaises(vp.AmbiguousProfileError):
                 vp.resolve_profile_path(vault)
+
+    def test_ambiguity_is_a_user_error_subclass(self):
+        """Callers that only knew the old exception must keep catching this one."""
+        self.assertTrue(issubclass(vp.AmbiguousProfileError, UserError))
 
     def test_an_explicitly_named_missing_register_is_an_error(self):
         with tempfile.TemporaryDirectory() as root:
@@ -384,6 +388,46 @@ class ResolutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             vault = build_vault(root)
             self.assertIsNone(vp.resolve_profile_path(vault, disabled=True))
+
+
+class DegradingResolutionTests(unittest.TestCase):
+    """``resolve_profile_or_warn`` is what the skills call, and it draws the line
+    between vault state a run can survive and a command that asked for the wrong
+    thing."""
+
+    def test_an_ambiguous_vault_costs_the_layer_not_the_run(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root)
+            for folder in ("99 Meta/99.01 Vault Design", "09 Wiki/9.01 Concepts"):
+                target = vault / folder
+                target.mkdir(parents=True)
+                (target / vp.PROFILE_BASENAME).write_text(REGISTER, encoding="utf-8")
+            path, warnings = vp.resolve_profile_or_warn(vault)
+            self.assertIsNone(path)
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("more than one", warnings[0])
+
+    def test_a_named_register_that_is_missing_still_raises(self):
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(UserError) as caught:
+                vp.resolve_profile_or_warn(root, raw_profile="typo.md")
+            self.assertNotIsInstance(caught.exception, vp.AmbiguousProfileError)
+
+    def test_a_healthy_vault_warns_about_nothing(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = build_vault(root)
+            path, warnings = vp.resolve_profile_or_warn(vault)
+            self.assertEqual(path, (vault / vp.DEFAULT_PROFILE).resolve())
+            self.assertEqual(warnings, [])
+
+    def test_the_ambiguous_path_compiles_to_an_empty_layer(self):
+        """The contract the call sites depend on: a None path is a clean no-layer
+        result, so nothing downstream has to special-case the degraded run."""
+        with tempfile.TemporaryDirectory() as root:
+            profile, profile_hash, warnings = vp.compiled_profile_for(Path(root), None)
+            self.assertIsNone(profile)
+            self.assertEqual(profile_hash, "none")
+            self.assertEqual(warnings, [])
 
 
 class CompileTests(unittest.TestCase):

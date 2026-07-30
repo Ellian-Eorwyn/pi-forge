@@ -12,12 +12,12 @@
 |---|---:|
 | Base system prompt (intro, tools list, guidelines, connected services) | 390 |
 | Tool JSON schemas (13 tools) | 2760 |
-| Managed instructions (`AGENTS.md` with its `<project_context>` wrapper) | 1274 |
+| Managed instructions (`AGENTS.md` with its `<project_context>` wrapper) | 1275 |
 | Skills menu (metadata for all model-visible skills) | 3260 |
-| **Total launch context (always processed)** | **7683** |
-| Maximum if every `SKILL.md` body is also loaded at once | 55870 |
+| **Total launch context (always processed)** | **7684** |
+| Maximum if every `SKILL.md` body is also loaded at once | 55988 |
 
-Of that total, the forge profile itself owns 4533 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
+Of that total, the forge profile itself owns 4534 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
 
 Of the skills menu above, the shared wrapper (instructions and XML envelope, independent of skill count) is ~92 tokens; the rest scales with the number of skills.
 
@@ -55,7 +55,7 @@ Sorted by launch cost. `Prompt lines` counts a tool's `promptSnippet` and `promp
 | [`document-ingest`](forge/skills/document-ingest/SKILL.md) | Normalize documents and email with provenance | 127 | 3645 | 3746 | Model-visible |
 | [`file-conversion`](forge/skills/file-conversion/SKILL.md) | Convert files and EML with originals preserved | 142 | 1401 | 1517 | Model-visible |
 | [`literature-extraction`](forge/skills/literature-extraction/SKILL.md) | Extract structured evidence from research documents | 142 | 3480 | 3594 | Model-visible |
-| [`literature-library`](forge/skills/literature-library/SKILL.md) | Turn a citation file into a library of PDFs and clean Markdown | 150 | 2899 | 3022 | Model-visible |
+| [`literature-library`](forge/skills/literature-library/SKILL.md) | Turn a citation file into a library of PDFs and clean Markdown | 150 | 2939 | 3061 | Model-visible |
 | [`organize-folder`](forge/skills/organize-folder/SKILL.md) | Sort a messy folder via a reviewable manifest | 132 | 1790 | 1895 | Model-visible |
 | [`personal-admin`](forge/skills/personal-admin/SKILL.md) | Summarize personal documents into action plans | 143 | 1259 | 1376 | Model-visible |
 | [`project-extraction`](forge/skills/project-extraction/SKILL.md) | Search and refresh live project controls | 146 | 2436 | 2555 | Model-visible |
@@ -71,7 +71,7 @@ Sorted by launch cost. `Prompt lines` counts a tool's `promptSnippet` and `promp
 | [`vault-handoff`](forge/skills/vault-handoff/SKILL.md) | Send completed text artifacts to pi-vault review | 63 | 325 | 363 | Model-visible |
 | [`vault-organizer`](forge/skills/vault-organizer/SKILL.md) | Organize an Obsidian vault or vault inbox from a human-maintained schema note - classify Mark... | 150 | 2388 | 2512 | Model-visible |
 | [`vault-transcripts`](forge/skills/vault-transcripts/SKILL.md) | Process raw voice-note and meeting transcripts sitting in an Obsidian vault inbox - give each... | 152 | 2496 | 2620 | Model-visible |
-| [`vault-wiki`](forge/skills/vault-wiki/SKILL.md) | Install the seven wiki entry templates and expand wiki entity notes into complete, cited refe... | 143 | 2111 | 2230 | Model-visible |
+| [`vault-wiki`](forge/skills/vault-wiki/SKILL.md) | Install the seven wiki entry templates and expand wiki entity notes into complete, cited refe... | 143 | 2190 | 2308 | Model-visible |
 | [`web-collection`](forge/skills/web-collection/SKILL.md) | Archive and organize web sources | 138 | 2017 | 2129 | Model-visible |
 | [`web-research`](forge/skills/web-research/SKILL.md) | Quick web search and page reading for information lookup. | 146 | 3942 | 4063 | Model-visible |
 

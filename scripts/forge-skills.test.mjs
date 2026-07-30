@@ -3631,8 +3631,14 @@ test("extracted organize-folder and spreadsheet tools expose structured executio
 test("shared library Python tests pass", () => {
 	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_eml_parser.py")]);
 	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_forge_llm.py")]);
+	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_forge_verify.py")]);
 	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_vault_schema.py")]);
 	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_schema_drift.py")]);
+	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_vault_lexicon.py")]);
+	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_vault_voice.py")]);
+	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_vault_profile.py")]);
+	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_vault_reflection.py")]);
+	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_vault_wiki.py")]);
 });
 
 test("vault-organizer Python tests pass", () => {
@@ -3653,8 +3659,20 @@ test("vault-capture Python tests pass", () => {
 	run(python, [join(skillsRoot, "vault-capture", "tests", "test_vault_capture.py")]);
 });
 
+test("vault-wiki Python tests pass", () => {
+	run(python, [join(skillsRoot, "vault-wiki", "tests", "test_vault_wiki.py")]);
+});
+
 test("literature-library Python tests pass", () => {
 	run(python, [join(skillsRoot, "literature-library", "tests", "test_literature_library.py")]);
+});
+
+test("reviewer-2 Python tests pass", () => {
+	run(python, [join(skillsRoot, "reviewer-2", "tests", "test_reviewer_2.py")]);
+});
+
+test("organize-folder Python tests pass", () => {
+	run(python, [join(skillsRoot, "organize-folder", "scripts", "test_organize_folder.py")]);
 });
 
 function startChunkWorkerFixture(workspace, options = {}) {

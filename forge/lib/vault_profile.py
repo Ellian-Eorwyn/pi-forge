@@ -92,6 +92,16 @@ WORKSPACE_MARKER = ".forge-workspace"
 # Resolution
 # --------------------------------------------------------------------------
 
+class AmbiguousProfileError(UserError):
+    """More than one register note in the vault.
+
+    A subclass because this is vault state rather than a mistake in the command:
+    the run asked for nothing that cannot be honoured, it just cannot tell which
+    card layer was meant. Callers degrade — warn, continue without the layer —
+    where a bad ``--profile`` path stays fatal.
+    """
+
+
 def resolve_profile_path(vault, raw_profile=None, disabled=False):
     """Return the register note, or ``None`` when disabled or absent."""
     if disabled:
@@ -113,8 +123,23 @@ def resolve_profile_path(vault, raw_profile=None, disabled=False):
             matches.append(candidate.resolve())
     if len(matches) > 1:
         listed = ", ".join(str(path) for path in sorted(matches))
-        raise UserError(f"more than one '{PROFILE_BASENAME}' in the vault ({listed}); pass --profile")
+        raise AmbiguousProfileError(f"more than one '{PROFILE_BASENAME}' in the vault ({listed}); pass --profile")
     return matches[0] if matches else None
+
+
+def resolve_profile_or_warn(vault, raw_profile=None, disabled=False):
+    """Resolve the register, degrading to no layer when the vault is ambiguous.
+
+    Returns ``(path, warnings)``. An explicit ``--profile`` that does not exist
+    still raises, because the run named a card layer and cannot quietly proceed
+    without it. Ambiguity is the vault's own state, so it costs the layer and a
+    warning rather than the run -- the same bargain ``compiled_profile_for``
+    makes for a malformed register, and the reason every skill can share this.
+    """
+    try:
+        return resolve_profile_path(vault, raw_profile, disabled=disabled), []
+    except AmbiguousProfileError as error:
+        return None, [f"personal context layer disabled: {error}"]
 
 
 def _workspace_roots(vault):
@@ -583,6 +608,7 @@ def profile_digest(profile):
 
 __all__ = [
     "COMPILED_PROFILE_VERSION",
+    "AmbiguousProfileError",
     "DEFAULT_CONTEXT_BUDGET",
     "DEFAULT_PREFIX_BUDGET",
     "DEFAULT_PROFILE",
@@ -605,6 +631,7 @@ __all__ = [
     "profile_prefix",
     "profile_site",
     "profile_state",
+    "resolve_profile_or_warn",
     "resolve_profile_path",
     "select_cards",
 ]

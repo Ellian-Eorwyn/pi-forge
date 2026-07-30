@@ -680,8 +680,8 @@ MARKDOWN_DIR = "markdown"
 CONVERSION_DIR = "conversion"
 OCR_DIR = "ocr"
 
-FILE_CONVERSION_TOOL = Path(__file__).resolve().parents[1].parent / "file-conversion" / "scripts" / "file-conversion.py"
-DOCUMENT_INGEST_TOOL = Path(__file__).resolve().parents[1].parent / "document-ingest" / "scripts" / "document-ingest.mjs"
+FILE_CONVERSION_TOOL = Path(__file__).resolve().parents[2] / "file-conversion" / "scripts" / "file-conversion.py"
+DOCUMENT_INGEST_TOOL = Path(__file__).resolve().parents[2] / "document-ingest" / "scripts" / "document-ingest.mjs"
 
 # Escalation thresholds. Measured against a real 21-document humanities corpus
 # where the sparsest born-digital article still carried ~1450 alphanumeric

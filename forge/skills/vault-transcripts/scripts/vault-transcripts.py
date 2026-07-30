@@ -39,6 +39,7 @@ import forge_verify
 import run_state
 import vault_lexicon
 import vault_profile
+import vault_reflection
 import vault_voice
 from vault_schema import (
     INBOX_DIR,
@@ -123,7 +124,7 @@ FILENAME_STAMP_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})[ _-](\d{2})(\d{2})(\d{2}
 EXPORT_STAMP_RE = re.compile(r"\s*\d{4}-\d{2}-\d{2}\s+\d{2}[_:]\d{2}[_:]\d{2}\s*$")
 COPY_SUFFIX_RE = re.compile(r"\s*\((\d+)\)$")
 MEDIA_EXTENSION_RE = re.compile(r"\.(mov|m4v|mp4|m4a|mp3|wav|aac|webm)$", re.IGNORECASE)
-URL_RE = re.compile(r"https?://[^\s<>\"'\])]+", re.IGNORECASE)
+URL_RE = vault_reflection.URL_RE
 WIKILINK_RE = re.compile(r"\[\[[^\]]+\]\]")
 # The marker `build_note` writes, matched where a *line* is exactly that, so a
 # passing mention inside the recording is not mistaken for the boundary.
@@ -1717,13 +1718,6 @@ REFLECTION_SECTIONS = {
 
 REFLECTION_SYSTEMS = {"journal": JOURNAL_REFLECTION_SYSTEM, "memo": MEMO_REFLECTION_SYSTEM}
 
-# A cited line has to say something the excerpt supports, so a bare URL under a
-# `## Sources` list is not a citable source: it carries a link and no claim.
-OUTSIDE_SOURCE_MIN_CHARS = 20
-OUTSIDE_SOURCE_EXCERPT_CHARS = 300
-OUTSIDE_SOURCE_LIMIT = 12
-OUTSIDE_SOURCE_READ_BYTES = 40000
-
 
 def summary_system(voice, context_mode, profile=None, site=None):
     parts = [SUMMARY_SYSTEM]
@@ -1773,34 +1767,6 @@ def connection_candidates(vault, query):
     return candidates[:8], None
 
 
-def cited_lines(text, source):
-    """Lines carrying both a URL and enough prose to be a claim.
-
-    A `## Sources` entry is a bare link, so it cites nothing on its own: there is
-    no statement for a later reflection to stand behind. A quote-plus-URL line
-    from a research import is the opposite, and is the shape this looks for.
-    """
-    found = []
-    for line in str(text).splitlines():
-        collapsed = re.sub(r"\s+", " ", line).strip().lstrip("-*+> ").strip()
-        urls = URL_RE.findall(collapsed)
-        if not urls:
-            continue
-        prose = collapsed
-        for url in urls:
-            prose = prose.replace(url, " ")
-        if len(re.sub(r"[^0-9A-Za-z]+", "", prose)) < OUTSIDE_SOURCE_MIN_CHARS:
-            continue
-        found.append(
-            {
-                "url": urls[0].rstrip(".,;:)"),
-                "source": source,
-                "excerpt": collapsed[:OUTSIDE_SOURCE_EXCERPT_CHARS],
-            }
-        )
-    return found
-
-
 def source_body(vault, relative, fallback=""):
     """The note's body as it sits on disk, for harvesting what the owner wrote.
 
@@ -1814,32 +1780,13 @@ def source_body(vault, relative, fallback=""):
 
 
 def outside_sources(material, vault, candidates):
-    """Outside-the-vault text this pipeline is actually holding, with its URLs.
+    """This skill's half of the shared harvest: the recording plus its candidates.
 
-    Nothing here is fetched. There are exactly two ways outside material can be
-    in hand without a network call: the owner put a link in the recording, or the
-    material was researched earlier and imported into a vault note that kept its
-    citations. Anything else the model might say about the world outside is
-    unverifiable, and ``validate_reflection`` drops it.
+    What counts as a citable line, and the refusal to fetch anything, live in
+    ``vault_reflection`` because they are the same for a braindump. Only the
+    label a recording's own citation carries is this skill's.
     """
-    harvested = list(cited_lines(material, "this recording"))
-    for candidate in candidates:
-        path = vault / candidate["path"]
-        try:
-            with path.open("r", encoding="utf-8", errors="replace") as handle:
-                text = handle.read(OUTSIDE_SOURCE_READ_BYTES)
-        except OSError:
-            continue
-        harvested.extend(cited_lines(text, candidate["wikilink"]))
-    seen, unique = set(), []
-    for entry in harvested:
-        if entry["url"] in seen:
-            continue
-        seen.add(entry["url"])
-        unique.append(entry)
-        if len(unique) >= OUTSIDE_SOURCE_LIMIT:
-            break
-    return unique
+    return vault_reflection.outside_sources(material, "this recording", vault, candidates)
 
 
 def validate_reflection(value, recording_type, allowed_wikilinks, allowed_urls=()):
@@ -3411,10 +3358,11 @@ def process(args):
         dictionary_path=dictionary_path(args),
     )
     args.compiled_lexicon = lexicon
-    profile_path = vault_profile.resolve_profile_path(vault, args.profile, disabled=args.no_profile)
-    profile, profile_hash, profile_warnings = vault_profile.compiled_profile_for(
+    profile_path, resolve_warnings = vault_profile.resolve_profile_or_warn(vault, args.profile, disabled=args.no_profile)
+    profile, profile_hash, compile_warnings = vault_profile.compiled_profile_for(
         vault, profile_path, cache_dir=vault / STATE_DIR / "cache"
     )
+    profile_warnings = resolve_warnings + compile_warnings
     args.compiled_profile = profile
     configuration = run_configuration(
         args, vault, schema_hash, voice_path, voice_hash, lexicon_path, lexicon_hash, profile_path, profile_hash

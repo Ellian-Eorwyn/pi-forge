@@ -138,6 +138,10 @@ links them. That skill still never touches a body.
 - The drafting and reviewing models see byte-identical source text, so the
   reviewer never objects to a claim the drafter had support for.
 - Every write is backed up first, journaled, and revertible.
+- This skill takes `--voice` but no `--profile`. A wiki card describes an entity
+  in the world, sourced and quotable, so the owner's personal context has nothing
+  to contribute to it and could only leak into a note meant to be impersonal.
+  The sibling vault skills, which write *the owner's* notes, all take it.
 
 ## Rules
 

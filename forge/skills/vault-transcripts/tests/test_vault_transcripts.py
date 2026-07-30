@@ -1660,7 +1660,7 @@ class OutsideSourceTests(unittest.TestCase):
         material = "\n".join(
             f"A claim worth citing here about part {index} at https://example.com/{index}" for index in range(40)
         )
-        self.assertEqual(len(self.harvest(material)), vt.OUTSIDE_SOURCE_LIMIT)
+        self.assertEqual(len(self.harvest(material)), vt.vault_reflection.OUTSIDE_SOURCE_LIMIT)
 
     def test_an_unreadable_candidate_is_skipped_rather_than_fatal(self):
         with tempfile.TemporaryDirectory() as directory:
