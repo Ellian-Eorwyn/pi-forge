@@ -114,5 +114,34 @@ class VocabularyTests(unittest.TestCase):
         self.assertNotIn("Interpretations", vr.WORKING_HEADINGS)
 
 
+class CalloutTests(unittest.TestCase):
+    """How a generated section is marked, for both note-writing skills."""
+
+    def test_a_section_renders_collapsed_with_its_title(self):
+        self.assertEqual(
+            vr.render_callout("reflection", "Observations", ["- The week was difficult."]),
+            "> [!reflection]- Observations\n> - The week was difficult.",
+        )
+
+    def test_an_open_callout_drops_the_fold_marker_and_can_go_untitled(self):
+        """The summary case: open, and its title is the callout type itself."""
+        self.assertEqual(vr.render_callout("summary", None, ["One paragraph."], collapsed=False), "> [!summary]\n> One paragraph.")
+
+    def test_a_blank_line_becomes_a_bare_marker(self):
+        """What holds a callout together across a paragraph break, so a section
+        written as prose survives as prose rather than as two callouts."""
+        rendered = vr.render_callout("reflection", "Context", ["First paragraph.", "", "Second paragraph."])
+        self.assertEqual(rendered.splitlines()[2], ">")
+        self.assertTrue(all(line.startswith(">") for line in rendered.splitlines()))
+
+    def test_a_section_with_nothing_under_it_is_just_its_head(self):
+        self.assertEqual(vr.render_callout("reflection", "Next steps", []), "> [!reflection]- Next steps")
+
+    def test_connections_is_the_one_section_marked_differently(self):
+        self.assertEqual(vr.callout_type_for("Connections"), "connections")
+        for heading in vr.REFLECTION_HEADINGS - {"Connections"}:
+            self.assertEqual(vr.callout_type_for(heading), "reflection", heading)
+
+
 if __name__ == "__main__":
     unittest.main()

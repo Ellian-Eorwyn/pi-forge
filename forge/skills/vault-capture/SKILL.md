@@ -136,11 +136,20 @@ overwritten. Accepted edits preserve frontmatter, scoped rules, and unrelated
 human-authored sections.
 
 Every kind but `draft` ends with a reflection. A journal keeps the cleaned
-authorial account first and adds non-empty `## Observations`,
-`## Interpretations`, `## Open questions`, and `## Connections`; `idea`, `task`,
-`question`, `reference`, and `plan` get `## Context`, `## Open questions`,
-`## Next steps`, and `## Connections`. A `draft` gets none — it is prose being
-composed, and machine commentary appended to it damages the draft.
+authorial account first and adds non-empty `Observations`, `Interpretations`,
+`Open questions`, and `Connections`; `idea`, `task`, `question`, `reference`, and
+`plan` get `Context`, `Open questions`, `Next steps`, and `Connections`. A
+`draft` gets none — it is prose being composed, and machine commentary appended
+to it damages the draft.
+
+Each of those renders as a collapsed callout — `> [!reflection]- <Section>`, and
+`> [!connections]- Connections` — so a reader can tell the machine's reading of a
+braindump from their own thinking, which a `##` heading could not do. The model
+still writes `##` and the deterministic checks still read `##`; the callouts go
+on afterwards, once the note has passed them.
+`forge/skills/vault-transcripts/references/loom-notes.css` styles these callout
+types vault-wide, the same ones `vault-transcripts` writes. A vault without it
+still reads correctly, since folding is Markdown rather than CSS.
 
 Reflections source from the vault first, as wikilinks to notes that exist.
 Material from outside the vault is admissible only as text the run actually read —

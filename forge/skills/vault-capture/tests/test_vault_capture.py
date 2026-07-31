@@ -505,6 +505,168 @@ class ReflectionTests(unittest.TestCase):
         self.assertTrue(vc.check_reflection(entry))
 
 
+class ReflectionRenderingTests(unittest.TestCase):
+    """The reflection as callouts: what folds, what is left alone, and when.
+
+    The model is never asked for callout syntax. It writes `##` sections, the
+    deterministic checks read them, and the rendering happens afterwards -- so
+    these tests are as much about ordering as about Markdown.
+    """
+
+    def setUp(self):
+        import vault_schema
+
+        self.schema = vault_schema.parse_schema_note(SCHEMA)
+
+    def body(self, *sections, lead="Order a new gasket before the weekend."):
+        return "\n\n".join([lead, *(f"## {heading}\n\n{content}" for heading, content in sections)]) + "\n"
+
+    def test_each_reflection_section_becomes_a_collapsed_callout(self):
+        folded = vc.fold_reflection(
+            self.body(
+                ("Context", "- Continues the espresso repair thread."),
+                ("Next steps", "- Call the shop about the warranty."),
+                ("Connections", "- [[Espresso machine]] — the machine this is about"),
+            ),
+            "task",
+        )
+        self.assertIn("> [!reflection]- Context\n> - Continues the espresso repair thread.", folded)
+        self.assertIn("> [!reflection]- Next steps", folded)
+        # Connections point outward, so they are marked as their own kind.
+        self.assertIn("> [!connections]- Connections\n> - [[Espresso machine]] — the machine this is about", folded)
+        self.assertNotIn("##", folded)
+
+    def test_a_journal_folds_its_own_sections(self):
+        folded = vc.fold_reflection(
+            self.body(
+                ("Observations", "- The week was long."),
+                ("Interpretations", "- Possibly about the move."),
+                ("Open questions", "- Whether to say something."),
+                ("Connections", "- [[Moving house]] — the thread this belongs to"),
+            ),
+            "journal",
+        )
+        self.assertEqual(folded.count("> [!reflection]-"), 3)
+        self.assertEqual(folded.count("> [!connections]-"), 1)
+
+    def test_prose_under_a_heading_survives_as_prose(self):
+        """The model is told to write prose where prose is right, so a section
+        is not assumed to be bullets. A blank line has to stay inside the
+        callout or the second paragraph falls out of it."""
+        folded = vc.fold_reflection(
+            self.body(("Context", "This continues the repair thread.\n\nIt is the last part still leaking.")), "task"
+        )
+        self.assertIn(
+            "> [!reflection]- Context\n"
+            "> This continues the repair thread.\n"
+            ">\n"
+            "> It is the last part still leaking.",
+            folded,
+        )
+
+    def test_a_nested_bullet_keeps_its_indentation(self):
+        folded = vc.fold_reflection(
+            self.body(("Next steps", "- Call the shop\n  - ask for the part number first")), "task"
+        )
+        self.assertIn("> - Call the shop\n>   - ask for the part number first", folded)
+
+    def test_a_body_heading_sharing_a_reflection_name_is_left_alone(self):
+        """A note may legitimately write its own `## Next steps` and then get a
+        reflection with one too. What makes a heading the reflection's is where
+        it sits, not what it is called."""
+        folded = vc.fold_reflection(
+            self.body(
+                ("Next steps", "- The steps the braindump actually listed."),
+                ("Context", "- Continues the repair thread."),
+                ("Next steps", "- Check the warranty before ordering."),
+                ("Connections", "- [[Espresso machine]] — the machine"),
+            ),
+            "task",
+        )
+        self.assertIn("## Next steps\n\n- The steps the braindump actually listed.", folded)
+        self.assertIn("> [!reflection]- Next steps\n> - Check the warranty before ordering.", folded)
+        self.assertEqual(folded.count("> [!reflection]- Next steps"), 1)
+
+    def test_an_interrupted_tail_folds_only_what_it_can_prove(self):
+        folded = vc.fold_reflection(
+            self.body(
+                ("Context", "- Continues the repair thread."),
+                ("Parts list", "- One gasket, one seal."),
+                ("Connections", "- [[Espresso machine]] — the machine"),
+            ),
+            "task",
+        )
+        self.assertIn("> [!connections]- Connections", folded)
+        self.assertIn("## Context", folded)
+        self.assertIn("## Parts list", folded)
+
+    def test_sections_out_of_order_are_not_read_as_a_reflection(self):
+        folded = vc.fold_reflection(
+            self.body(("Connections", "- [[Espresso machine]] — the machine"), ("Context", "- The repair thread.")),
+            "task",
+        )
+        self.assertIn("> [!reflection]- Context", folded)
+        self.assertIn("## Connections", folded)
+
+    def test_nothing_is_ever_lost_to_folding(self):
+        original = self.body(
+            ("Context", "- Continues the repair thread."),
+            ("Parts list", "- One gasket, one seal."),
+            ("Connections", "- [[Espresso machine]] — the machine"),
+        )
+        folded = vc.fold_reflection(original, "task")
+        for line in original.splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                self.assertIn(stripped, folded)
+
+    def test_a_draft_is_never_folded(self):
+        """A draft gets no reflection at all, so a heading it happens to share a
+        name with is the person's own prose."""
+        original = self.body(("Context", "- The paragraph I am still working on."))
+        self.assertEqual(vc.fold_reflection(original, "draft"), original)
+
+    def test_a_body_with_no_reflection_comes_back_unchanged(self):
+        original = "A short note that got no sections at all.\n"
+        self.assertEqual(vc.fold_reflection(original, "task"), original)
+
+    def test_folding_twice_changes_nothing(self):
+        once = vc.fold_reflection(self.body(("Connections", "- [[Espresso machine]] — the machine")), "task")
+        self.assertEqual(vc.fold_reflection(once, "task"), once)
+
+    def test_the_checks_read_the_sections_before_anything_is_folded(self):
+        """The order the whole design rests on: `check_reflection` sees `##`,
+        and only a body that survived it is ever rendered."""
+        body = self.body(("Connections", "- Gaskets usually last about five years."))
+        entry = {
+            "item": {"text": "need a new gasket for the espresso machine"},
+            "body": body,
+            "note": {"kind": "task"},
+            "connection_candidates": [],
+            "outside_sources": [],
+        }
+        self.assertTrue(vc.check_reflection(entry))
+        self.assertEqual(sorted(vc.body_sections(body)), ["Connections"])
+        # And the body kept for re-checking is still the one the checks read.
+        vc.build_note_text(self.schema, vc.frontmatter_metadata(self.schema, "task"), "task", entry["body"])
+        self.assertIn("## Connections", entry["body"])
+
+    def test_the_note_text_folds_the_reflection_and_keeps_the_braindump(self):
+        braindump = "gasket's cracked again, need to order one before saturday"
+        text = vc.build_note_text(
+            self.schema,
+            vc.frontmatter_metadata(self.schema, "task"),
+            "task",
+            self.body(("Connections", "- [[Espresso machine]] — the machine")),
+            braindump,
+        )
+        self.assertIn("> [!connections]- Connections", text)
+        self.assertNotIn("## Connections", text)
+        # The one invariant folding must not disturb: the person's own words,
+        # verbatim, under the one level-one heading in the file.
+        self.assertTrue(text.endswith(f"{vc.BRAINDUMP_HEADING}\n\n{braindump}\n"))
+
+
 class OutsideSourceTests(unittest.TestCase):
     """What counts as outside material this run actually read."""
 
@@ -688,6 +850,35 @@ class PipelineTests(CaptureFixture):
         self.assertEqual(len(with_dump), 1, "exactly one note carries the original")
         sibling = next(name for name in bodies if name not in with_dump)
         self.assertIn(f'related:\n  - "[[{Path(with_dump[0]).stem}]]"', bodies[sibling])
+
+    def test_a_written_note_carries_its_reflection_as_callouts(self):
+        """End to end: the model writes `##`, the vault gets callouts, and the
+        person's own words are untouched below them."""
+        drafted = {
+            "title": "Espresso Machine Gasket Replacement",
+            "body": (
+                "The gasket is cracked around the rim and leaks on a double shot.\n\n"
+                "## Context\n\n"
+                "This continues the espresso repair thread.\n\n"
+                "It is the last part still leaking.\n\n"
+                "## Next steps\n\n"
+                "- check whether the warranty covers the gasket first\n"
+            ),
+        }
+        with StubServer(scripted={"draft": [drafted]}) as server:
+            self.result_of(self.capture(server.url))
+        note = self.read_note("Espresso Machine Gasket Replacement.md")
+        self.assertIn(
+            "> [!reflection]- Context\n"
+            "> This continues the espresso repair thread.\n"
+            ">\n"
+            "> It is the last part still leaking.",
+            note,
+        )
+        self.assertIn("> [!reflection]- Next steps\n> - check whether the warranty covers the gasket first", note)
+        self.assertNotIn("## ", note)
+        self.assertIn("The gasket is cracked around the rim and leaks on a double shot.", note)
+        self.assertTrue(note.endswith(BRAINDUMP.rstrip("\n") + "\n"))
 
     def test_an_invented_name_holds_the_note_back(self):
         drafted = {

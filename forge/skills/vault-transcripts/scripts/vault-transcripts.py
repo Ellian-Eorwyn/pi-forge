@@ -142,6 +142,10 @@ EXPORT_STAMP_RE = re.compile(r"\s*\d{4}-\d{2}-\d{2}\s+\d{2}[_:]\d{2}[_:]\d{2}\s*
 COPY_SUFFIX_RE = re.compile(r"\s*\((\d+)\)$")
 MEDIA_EXTENSION_RE = re.compile(r"\.(mov|m4v|mp4|m4a|mp3|wav|aac|webm)$", re.IGNORECASE)
 URL_RE = vault_reflection.URL_RE
+# Shared with vault-capture: a reader who meets both kinds of note in one vault
+# should meet the same apparatus, so how a generated section is marked is one
+# decision made in one place.
+render_callout = vault_reflection.render_callout
 WIKILINK_RE = re.compile(r"\[\[[^\]]+\]\]")
 # The marker `build_note` writes, matched where a *line* is exactly that, so a
 # passing mention inside the recording is not mistaken for the boundary.
@@ -2136,7 +2140,7 @@ def validate_reflection(value, recording_type, allowed_wikilinks, allowed_urls=(
             # was indistinguishable from one the cleanup wrote, which put the
             # model's reading of a recording on the same footing as the words
             # actually spoken.
-            kind = "connections" if key == "connections" else "reflection"
+            kind = vault_reflection.callout_type_for(heading)
             sections.append(render_callout(kind, heading, [f"- {item}" for item in items]))
     return "\n\n".join(sections).strip(), dropped
 
@@ -2485,20 +2489,6 @@ def strip_callout_lines(text):
     dropped it.
     """
     return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith(">"))
-
-
-def render_callout(kind, title, lines, collapsed=True):
-    """One generated section as an Obsidian callout.
-
-    Everything the pipeline writes into a note is marked this way, so a reader
-    can tell at a glance which prose is the speaker's and which is the machine's.
-    Collapsed by default: the sections are worth having and not worth scrolling
-    past, and folding them is Markdown rather than CSS, so a vault with no
-    stylesheet still reads correctly.
-    """
-    marker = f"> [!{kind}]{'-' if collapsed else ''}"
-    head = f"{marker} {title}" if title else marker
-    return "\n".join([head, *(f"> {line}" if line else ">" for line in lines)])
 
 
 def render_summary(summary, style):

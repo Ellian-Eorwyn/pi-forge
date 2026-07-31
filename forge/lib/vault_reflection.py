@@ -12,6 +12,11 @@ The section headings are shared too, but their *arrangement* is not: capture
 maps them by note kind, transcripts by recording type and pairs each with the
 response key it validates. Those are genuinely different tables over the same
 vocabulary, so only the vocabulary is here.
+
+How a finished section is *marked* is shared as well. Both skills render one as a
+collapsed Obsidian callout so a reader can tell the machine's reading from the
+owner's own words, and a reader who meets both kinds of note in one vault should
+meet the same apparatus, so the renderer lives here rather than twice.
 """
 
 import re
@@ -30,6 +35,35 @@ URL_RE = re.compile(r"https?://[^\s<>\"'\])]+", re.IGNORECASE)
 JOURNAL_HEADINGS = ("Observations", "Interpretations", "Open questions", "Connections")
 WORKING_HEADINGS = ("Context", "Open questions", "Next steps", "Connections")
 REFLECTION_HEADINGS = frozenset(JOURNAL_HEADINGS) | frozenset(WORKING_HEADINGS)
+
+# Connections point outward and the rest look inward, so they read as two kinds
+# of apparatus and are styled as two. Every other section is one reflection.
+CONNECTIONS_HEADING = "Connections"
+CONNECTIONS_CALLOUT = "connections"
+REFLECTION_CALLOUT = "reflection"
+
+
+def render_callout(kind, title, lines, collapsed=True):
+    """One generated section as an Obsidian callout.
+
+    Everything the pipelines write into a note is marked this way, so a reader
+    can tell at a glance which prose is the owner's and which is the machine's.
+    Collapsed by default: the sections are worth having and not worth scrolling
+    past, and folding them is Markdown rather than CSS, so a vault with no
+    stylesheet still reads correctly.
+
+    ``lines`` is passed through as written, so a section that is prose survives
+    as prose: every line is quoted and a blank one becomes a bare ``>``, which is
+    what continues a callout across a paragraph break.
+    """
+    marker = f"> [!{kind}]{'-' if collapsed else ''}"
+    head = f"{marker} {title}" if title else marker
+    return "\n".join([head, *(f"> {line}" if line else ">" for line in lines)])
+
+
+def callout_type_for(heading):
+    """Which callout a reflection section is written as."""
+    return CONNECTIONS_CALLOUT if heading == CONNECTIONS_HEADING else REFLECTION_CALLOUT
 
 
 def cited_lines(text, source):
@@ -92,14 +126,19 @@ def outside_sources(material, material_label, vault, candidates):
 
 
 __all__ = [
+    "CONNECTIONS_CALLOUT",
+    "CONNECTIONS_HEADING",
     "JOURNAL_HEADINGS",
     "OUTSIDE_SOURCE_EXCERPT_CHARS",
     "OUTSIDE_SOURCE_LIMIT",
     "OUTSIDE_SOURCE_MIN_CHARS",
     "OUTSIDE_SOURCE_READ_BYTES",
+    "REFLECTION_CALLOUT",
     "REFLECTION_HEADINGS",
     "URL_RE",
     "WORKING_HEADINGS",
+    "callout_type_for",
     "cited_lines",
     "outside_sources",
+    "render_callout",
 ]

@@ -152,6 +152,11 @@ NUMBER_RE = re.compile(r"\d+(?:[.,:/]\d+)*")
 PROPER_NOUN_RE = re.compile(r"\b([A-Z][a-zA-Z]*(?:['’][a-zA-Z]+)?)\b")
 TIMESTAMP_LINE_RE = re.compile(r"^\*\d{1,2}(?::\d{2}){1,2}\*$")
 SPEAKER_LINE_RE = re.compile(r"^\*\*(.+)\*\*$")
+# What counts as a section of a drafted body. The checks read the body through
+# this and so does the callout rendering, so the two cannot disagree about where
+# a section starts.
+SECTION_HEADING_RE = re.compile(r"^##+\s+(.*)$")
+BULLET_RE = re.compile(r"^[-*+]\s+")
 SENTENCE_START_RE = re.compile(r"(?:^|[.!?:;]\s+|[\n\r]\s*|[-*]\s+|[\"“(\[]\s*)$")
 
 # Words that open a sentence in English and would otherwise read as names.
@@ -869,18 +874,32 @@ def coverage_ratio(source, bodies):
     return len(kept) / len(set(source_words))
 
 
+def body_blocks(body):
+    """A drafted body as its opening lines and its `##` sections.
+
+    Lines are kept exactly as written, because one caller checks what a section
+    says and the other has to render it back out without touching it.
+    """
+    lead, blocks = [], []
+    for line in str(body).splitlines():
+        heading = SECTION_HEADING_RE.match(line.strip())
+        if heading:
+            blocks.append({"heading": heading.group(1).strip(), "line": line, "lines": []})
+        elif blocks:
+            blocks[-1]["lines"].append(line)
+        else:
+            lead.append(line)
+    return lead, blocks
+
+
 def body_sections(body):
     """``{heading: [bullet, ...]}`` for the `##` sections of a drafted body."""
-    sections, current = {}, None
-    for line in str(body).splitlines():
-        stripped = line.strip()
-        heading = re.match(r"^##+\s+(.*)$", stripped)
-        if heading:
-            current = heading.group(1).strip()
-            sections.setdefault(current, [])
-            continue
-        if current is not None and re.match(r"^[-*+]\s+", stripped):
-            sections[current].append(re.sub(r"^[-*+]\s+", "", stripped).strip())
+    sections = {}
+    for block in body_blocks(body)[1]:
+        items = sections.setdefault(block["heading"], [])
+        items.extend(
+            BULLET_RE.sub("", line.strip()).strip() for line in block["lines"] if BULLET_RE.match(line.strip())
+        )
     return sections
 
 
@@ -1005,9 +1024,81 @@ def assign_filename(title, pattern, date, taken_casefold):
     return candidate
 
 
-def build_note_text(schema, metadata, body, braindump=None):
-    """The generated body, then the braindump verbatim when this is the primary."""
-    text = serialize_frontmatter(metadata, schema) + "\n" + body.strip() + "\n"
+def reflection_tail(blocks, sections):
+    """How many trailing sections of a body are its reflection.
+
+    Read backwards, taking sections while each one comes earlier in the kind's
+    order than the one after it. That is exactly the shape drafting was asked
+    for -- the reflection appended after the note's own content, in the order
+    given -- and it is what keeps the rendering off a note that writes its own
+    ``## Next steps`` mid-body: a heading is the reflection's because of where
+    it sits, not because of what it is called.
+    """
+    order = {name: index for index, name in enumerate(sections)}
+    count, following = 0, len(sections)
+    for block in reversed(blocks):
+        position = order.get(block["heading"])
+        if position is None or position >= following:
+            break
+        following = position
+        count += 1
+    return count
+
+
+def callout_body(lines):
+    """A section's lines as callout content: trailing space and outer blanks gone."""
+    trimmed = [line.rstrip() for line in lines]
+    while trimmed and not trimmed[0]:
+        trimmed.pop(0)
+    while trimmed and not trimmed[-1]:
+        trimmed.pop()
+    return trimmed
+
+
+def fold_reflection(body, kind):
+    """The drafted reflection sections, rewrapped as collapsed callouts.
+
+    Drafting writes the whole note, reflection included, as one Markdown body,
+    and the deterministic checks read those sections back out of it -- so the
+    model is asked for `##` headings and the callouts are put on afterwards,
+    here, once the body has passed. Asking it for callout syntax directly would
+    put the checks at the mercy of a model getting `>` prefixes right.
+
+    Only the reflection is touched, and the section's own lines pass through as
+    written, so a section the model wrote as prose stays prose. A body with no
+    reflection -- a `draft`, or a note short enough that every section was
+    legitimately omitted -- comes back unchanged, as does a body whose tail
+    cannot be read as one, which is the case a heading collision produces.
+    """
+    sections = KIND_TO_REFLECTION.get(kind, ())
+    if not sections:
+        return body
+    lead, blocks = body_blocks(body)
+    folded = reflection_tail(blocks, sections)
+    if not folded:
+        return body
+    kept = list(lead)
+    for block in blocks[: len(blocks) - folded]:
+        kept.append(block["line"])
+        kept.extend(block["lines"])
+    rendered = [
+        vault_reflection.render_callout(
+            vault_reflection.callout_type_for(block["heading"]), block["heading"], callout_body(block["lines"])
+        )
+        for block in blocks[len(blocks) - folded :]
+    ]
+    own = "\n".join(kept).rstrip()
+    return "\n\n".join([own, *rendered] if own else rendered)
+
+
+def build_note_text(schema, metadata, kind, body, braindump=None):
+    """The generated body, then the braindump verbatim when this is the primary.
+
+    The kind is here rather than defaulted because it decides how the reflection
+    renders, and a call site that forgot it would quietly write the plain
+    headings this exists to replace.
+    """
+    text = serialize_frontmatter(metadata, schema) + "\n" + fold_reflection(body, kind).strip() + "\n"
     if braindump is not None:
         text += f"\n{BRAINDUMP_HEADING}\n\n{braindump}"
         if not text.endswith("\n"):
@@ -1099,7 +1190,7 @@ def assemble_one(args, schema, item, entries, taken, date, warnings, prior=None)
         related = [back_link] if back_link and not record["is_primary"] else []
         record["metadata"] = frontmatter_metadata(schema, record["kind"], related)
         record["text"] = build_note_text(
-            schema, record["metadata"], entry["body"], item["text"] if record["is_primary"] else None
+            schema, record["metadata"], record["kind"], entry["body"], item["text"] if record["is_primary"] else None
         )
         if record["is_primary"] and not record["text"].endswith(item["text"].rstrip("\n") + "\n"):
             record["status"] = "review"
@@ -1285,7 +1376,7 @@ def verify_records(args, schema, system, items_by_id, records, run_dir):
                 continue
             record["title"] = entry["title"]
             record["text"] = build_note_text(
-                schema, record["metadata"], entry["body"], item["text"] if record["is_primary"] else None
+                schema, record["metadata"], record["kind"], entry["body"], item["text"] if record["is_primary"] else None
             )
             record["verified"] = "escalated"
         else:

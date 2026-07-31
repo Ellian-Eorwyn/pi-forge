@@ -27,6 +27,15 @@ can be descaled on the same trip.
 Worth checking whether the warranty covers the gasket first — if it does, none
 of this costs anything.
 
+> [!reflection]- Context
+> - Continues the espresso repair thread.
+
+> [!reflection]- Next steps
+> - Check the warranty before ordering the part.
+
+> [!connections]- Connections
+> - [[Espresso machine]] — the machine this is about
+
 # Braindump
 
 <the braindump, byte for byte>
@@ -36,6 +45,14 @@ Rules the script enforces, not suggestions:
 
 - The generated section contains no level-one heading. The only `# ` in the file
   is `# Braindump`, and only in the primary note.
+- The reflection is a callout, collapsed, and everything above it is the note
+  itself. That is the one visible difference between what the person thought and
+  what a model made of it, and a `##` heading could not carry it: as a heading
+  the reflection was indistinguishable from a section of the note proper.
+  `forge/skills/vault-transcripts/references/loom-notes.css` styles these callout
+  types — the same ones `vault-transcripts` writes, unscoped, so generated
+  material looks generated wherever it appears. A vault without the snippet still
+  reads correctly, since folding is Markdown rather than CSS.
 - Everything after `# Braindump` is the source text unchanged. The drafts are a
   convenience; what the person actually said is the record.
 - **One note per dump carries the braindump** — the primary, chosen
@@ -106,9 +123,26 @@ and appending machine commentary to a draft damages the thing being drafted.
 
 | Kind | Sections, in order |
 | --- | --- |
-| `journal` | `## Observations`, `## Interpretations`, `## Open questions`, `## Connections` |
-| `idea`, `task`, `question`, `reference`, `plan` | `## Context`, `## Open questions`, `## Next steps`, `## Connections` |
+| `journal` | `Observations`, `Interpretations`, `Open questions`, `Connections` |
+| `idea`, `task`, `question`, `reference`, `plan` | `Context`, `Open questions`, `Next steps`, `Connections` |
 | `draft` | none |
+
+Each becomes `> [!reflection]- <Section>`, except `Connections`, which becomes
+`> [!connections]- Connections`. Both are collapsed.
+
+The model is not asked for that syntax. It writes the sections as `##` headings,
+`body_sections` reads them back out for `check_reflection` to validate, and
+`fold_reflection` rewraps them on the way into the file — after the checks have
+passed, in `build_note_text`, so both re-drafting and a resumed run render the
+same way and nothing depends on a model getting `>` prefixes right. The body kept
+in `drafted.jsonl` is the `##` form the checks read.
+
+What folds is the trailing run of sections that belong to the note's kind, taken
+in the kind's own order — which is the shape drafting was asked for. A note that
+writes its own `## Next steps` mid-body keeps it as a heading, because what makes
+a section the reflection's is where it sits and not what it is called; a tail
+that cannot be read as a reflection is left alone entirely. Section content
+passes through as written, so a section the model wrote as prose stays prose.
 
 The journal set is introspective; the working set is not. `Context` names what the
 note belongs to — the project, thread, or earlier note it continues. `Next steps`
