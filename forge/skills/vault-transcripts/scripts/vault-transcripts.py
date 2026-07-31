@@ -4949,6 +4949,7 @@ def doctor(args):
                     "path": str(profile_path),
                     "profile_hash": profile_hash,
                     "compiler_version": vault_profile.COMPILED_PROFILE_VERSION,
+                    "owner": (profile or {}).get("owner"),
                     "cards": vault_profile.profile_digest(profile),
                     "budgets": {
                         "prefix": vault_profile.DEFAULT_PREFIX_BUDGET,

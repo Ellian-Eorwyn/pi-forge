@@ -54,7 +54,25 @@ function schemaWithMeta(metaNumber = 99, workflowsNumber = 6): string {
 `;
 }
 
-function makeVault(options: { schema?: string; schemaAt?: string; notes?: string[]; indexed?: number } = {}) {
+const REGISTER_WITH_OWNER = `# Personal Context
+
+## Owner
+
+| Field | Value |
+| --- | --- |
+| \`name\` | \`Ellie\` |
+| \`pronouns\` | \`they/them\` |
+
+## Cards
+
+| Card | Tier | Scope | Applies | Triggers | Notes |
+| --- | --- | --- | --- | --- | --- |
+| \`[[Mental Health]]\` | \`when-relevant\` | \`owner-authored\` | \`personal\` | \`name\` | Private. |
+`;
+
+function makeVault(
+	options: { schema?: string; schemaAt?: string; notes?: string[]; indexed?: number; register?: string } = {},
+) {
 	const root = mkdtempSync(join(tmpdir(), "vault-context-"));
 	mkdirSync(join(root, ".obsidian"), { recursive: true });
 	if (options.schema !== undefined) {
@@ -62,6 +80,11 @@ function makeVault(options: { schema?: string; schemaAt?: string; notes?: string
 		const full = join(root, relative);
 		mkdirSync(join(full, ".."), { recursive: true });
 		writeFileSync(full, options.schema);
+	}
+	if (options.register !== undefined) {
+		const full = join(root, "99 Meta", "99.02 Schemas", "0.03 Personal Context.md");
+		mkdirSync(join(full, ".."), { recursive: true });
+		writeFileSync(full, options.register);
 	}
 	for (const note of options.notes ?? []) {
 		const full = join(root, note);
@@ -210,6 +233,72 @@ test("the injected message flags a missing schema, a missing index, and a missin
 		assert.match(withoutSchema, /Schema note: NOT FOUND/);
 	} finally {
 		rmSync(bare, { recursive: true, force: true });
+	}
+});
+
+test("a declared owner is read and the session is told to use their name", () => {
+	const root = makeVault({ schema: SCHEMA_WITH_WIKI, register: REGISTER_WITH_OWNER, notes: ["A.md"] });
+	try {
+		const info = inspectVault(root);
+		assert.deepEqual(info?.owner, { name: "Ellie", pronouns: "they/them" });
+		const message = vaultContextMessage(info as NonNullable<typeof info>);
+		assert.match(message, /You are working with Ellie \(they\/them\)\./);
+		assert.match(message, /Address them by name/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("pronouns are optional and the name alone is enough", () => {
+	const register = REGISTER_WITH_OWNER.replace(/^\| `pronouns`.*$\n/m, "");
+	const root = makeVault({ schema: SCHEMA_WITH_WIKI, register, notes: ["A.md"] });
+	try {
+		assert.deepEqual(inspectVault(root)?.owner, { name: "Ellie" });
+		const message = vaultContextMessage(inspectVault(root) as NonNullable<ReturnType<typeof inspectVault>>);
+		assert.match(message, /You are working with Ellie\. Address them by name/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a vault with no register, or a register with no owner row, says nothing about a name", () => {
+	const bare = makeVault({ schema: SCHEMA_WITH_WIKI, notes: ["A.md"] });
+	try {
+		assert.equal(inspectVault(bare)?.owner, undefined);
+		const message = vaultContextMessage(inspectVault(bare) as NonNullable<ReturnType<typeof inspectVault>>);
+		assert.doesNotMatch(message, /You are working with/);
+	} finally {
+		rmSync(bare, { recursive: true, force: true });
+	}
+
+	const register = REGISTER_WITH_OWNER.replace(/^\| `name`.*$\n/m, "");
+	const unnamed = makeVault({ schema: SCHEMA_WITH_WIKI, register, notes: ["A.md"] });
+	try {
+		assert.equal(inspectVault(unnamed)?.owner, undefined);
+	} finally {
+		rmSync(unnamed, { recursive: true, force: true });
+	}
+});
+
+test("only the Owner section is read, never the private cards below it", () => {
+	const root = makeVault({ schema: SCHEMA_WITH_WIKI, register: REGISTER_WITH_OWNER, notes: ["A.md"] });
+	try {
+		const message = vaultContextMessage(inspectVault(root) as NonNullable<ReturnType<typeof inspectVault>>);
+		// The card table has a `name` trigger and a private card title; neither is ours to inject.
+		assert.doesNotMatch(message, /Mental Health/);
+		assert.doesNotMatch(message, /when-relevant/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a paragraph pasted into the name row is refused rather than used as a salutation", () => {
+	const register = REGISTER_WITH_OWNER.replace("`Ellie`", "x".repeat(41));
+	const root = makeVault({ schema: SCHEMA_WITH_WIKI, register, notes: ["A.md"] });
+	try {
+		assert.equal(inspectVault(root)?.owner, undefined);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
 	}
 });
 

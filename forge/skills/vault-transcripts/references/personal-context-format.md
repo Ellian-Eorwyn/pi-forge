@@ -20,6 +20,14 @@ capture_type: manual
 
 # Personal Context
 
+## Owner
+
+| Field | Value |
+| --- | --- |
+| `name` | `Ellie` |
+| `pronouns` | `they/them` |
+| `full name` | `Ellian Eorwyn` |
+
 ## Cards
 
 | Card | Tier | Scope | Applies | Triggers | Notes |
@@ -28,6 +36,33 @@ capture_type: manual
 | `[[People in My Life]]` | `when-relevant` | `owner-authored` | `personal` | `Gillian`, `Kodama` | Route-gated. |
 | `[[Mental Health History]]` | `when-relevant` | `owner-authored` | `personal/therapy`, `personal/grief` | `OCD`, `dissociate` | Tightly gated. |
 ```
+
+### The owner record
+
+`## Owner` is optional and independent of the cards. `name` is the only required
+row; `pronouns` and `full name` may be omitted. Every value is capped at
+`MAX_OWNER_FIELD_CHARS` (40) — a name, not a biography — and an unknown field
+warns and is dropped.
+
+It exists because a card is background a prompt may consult, while a name is how
+the output addresses someone. Leaving it as one more bullet inside a card would
+mean every stage had to notice and interpret it; declaring it means
+`profile_prefix` can state it outright:
+
+> The vault owner is Ellie (they/them). Call them Ellie wherever the output
+> speaks to or about them; do not write "the user" or "the owner". Never insert
+> their name into text drawn from a source that did not already say it.
+
+That last clause is the same gate the cards sit behind. The record follows the
+cards' context modes too, so a stage held at `CONTEXT_NONE` is told no name at
+all — a name is the most quotable fact there is.
+
+The record is read twice, by two languages. `forge/lib/vault_profile.py` compiles
+it for the Python skills, and `forge/extensions/vault-context.ts` reads the
+`## Owner` section alone — never the cards — so a pi-forge session inside the
+vault can use the name in conversation.
+
+### The card table
 
 `Card` and `Tier` are the required columns; `Scope`, `Applies`, `Triggers`, and
 `Notes` are optional. Values may be backticked. `Applies` and `Triggers` are
@@ -105,6 +140,7 @@ card called `Mental Health` collides with a therapy note of that name.
 | Constant | Value | Why |
 | --- | --- | --- |
 | `MAX_CARD_CHARS` | 700 | ~175 tokens. Enforced at parse time so cards stay condensed by construction. |
+| `MAX_OWNER_FIELD_CHARS` | 40 | One owner field. Long enough for a full name with particles; short enough that a paragraph in the wrong row cannot become a salutation. Duplicated in `vault-context.ts` and `configure-pi-forge.mjs`. |
 | `DEFAULT_PREFIX_BUDGET` | 900 | Half of `vault_voice`'s prefix budget; the always-tier stacks on it in the same system message. |
 | `DEFAULT_CONTEXT_BUDGET` | 1200 | Per-item. Roughly two cards. |
 | `MAX_SELECTED_CARDS` | 3 | Caps *triggered* cards only — the always-tier renders separately under its own budget. |
@@ -138,3 +174,11 @@ without the layer. A single unparseable row costs its own card; the rest of the
 register still compiles. This is a deliberate departure from
 `compiled_voice_for`, justified by the profile being enrichment rather than a
 contract.
+
+The owner record degrades one level further in. The card table is a contract — a
+register that declares cards and cannot list them is broken, and saying so is the
+point — but the owner record is not part of it, so a register whose card table
+fails still yields its name. The reverse holds too: an unreadable `## Owner`
+section costs the name and leaves every card standing. A half-read name is worth
+less than none, since getting someone's name wrong is the failure the record
+exists to prevent.

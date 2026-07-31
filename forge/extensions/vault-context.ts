@@ -11,6 +11,10 @@
  * answers which kind of question. Re-deriving that costs several tool calls at
  * the start of every session, and the model often skips it and greps instead.
  *
+ * The same is true of who the vault belongs to. The personal-context register
+ * may declare an owner, and a session that reads it can use the person's name
+ * instead of calling them "the user" for an hour.
+ *
  * Detection is filesystem-only and cheap: walk up for `.obsidian/`, then read a
  * few known paths. Outside a vault this extension does nothing at all.
  */
@@ -21,7 +25,9 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 const CONTEXT_CUSTOM_TYPE = "vault-context";
 const DEFAULT_SCHEMA_RELATIVE = join("99 Meta", "99.02 Schemas", "0.00 Vault Schema.md");
-const SCHEMA_BASENAME = "0.00 Vault Schema.md";
+const DEFAULT_PROFILE_RELATIVE = join("99 Meta", "99.02 Schemas", "0.03 Personal Context.md");
+/** Matches `MAX_OWNER_FIELD_CHARS` in `forge/lib/vault_profile.py`: a name, not a biography. */
+const MAX_OWNER_FIELD_CHARS = 40;
 const SKIPPED_DIRECTORIES = new Set([".obsidian", ".git", ".vault-organizer", ".vault-connections", "node_modules"]);
 // Bounds so a pathological directory can never make startup feel slow.
 const MAX_ASCEND = 24;
@@ -43,12 +49,19 @@ const WORKSPACE_MARKER_CONTENT = [
 	"",
 ].join("\n");
 
+interface VaultOwner {
+	name: string;
+	pronouns?: string;
+}
+
 interface VaultInfo {
 	root: string;
 	name: string;
 	noteCount: number;
 	truncated: boolean;
 	schemaNote?: string;
+	/** Declared by the personal-context register's `## Owner` section, when it has one. */
+	owner?: VaultOwner;
 	wikiDomain: boolean;
 	organizerState: boolean;
 	indexedNotes?: number;
@@ -102,10 +115,10 @@ function countNotes(root: string): { count: number; truncated: boolean } {
 	return { count, truncated: false };
 }
 
-/** The schema note at its canonical path, else a shallow search for its basename. */
-function findSchemaNote(root: string): string | undefined {
-	const canonical = join(root, DEFAULT_SCHEMA_RELATIVE);
-	if (existsSync(canonical)) return DEFAULT_SCHEMA_RELATIVE;
+/** A config note at its canonical path, else a shallow search for its basename. */
+function findConfigNote(root: string, canonicalRelative: string): string | undefined {
+	if (existsSync(join(root, canonicalRelative))) return canonicalRelative;
+	const target = basename(canonicalRelative);
 	const queue: { directory: string; depth: number }[] = [{ directory: root, depth: 0 }];
 	while (queue.length > 0) {
 		const { directory, depth } = queue.shift() as { directory: string; depth: number };
@@ -117,7 +130,7 @@ function findSchemaNote(root: string): string | undefined {
 		}
 		for (const entry of entries) {
 			const full = join(directory, entry.name);
-			if (entry.isFile() && entry.name === SCHEMA_BASENAME) return relative(root, full);
+			if (entry.isFile() && entry.name === target) return relative(root, full);
 			if (entry.isDirectory() && depth < MAX_SCHEMA_SEARCH_DEPTH) {
 				if (entry.name.startsWith(".") || SKIPPED_DIRECTORIES.has(entry.name)) continue;
 				queue.push({ directory: full, depth: depth + 1 });
@@ -125,6 +138,61 @@ function findSchemaNote(root: string): string | undefined {
 		}
 	}
 	return undefined;
+}
+
+function findSchemaNote(root: string): string | undefined {
+	return findConfigNote(root, DEFAULT_SCHEMA_RELATIVE);
+}
+
+/** The `## Owner` section only, so a same-named row elsewhere in the note cannot match. */
+function ownerSection(text: string): string {
+	const start = /^##\s+Owner\s*$/m.exec(text);
+	if (!start) return "";
+	const rest = text.slice(start.index + start[0].length);
+	const end = /^#{1,2}\s+\S/m.exec(rest);
+	return end ? rest.slice(0, end.index) : rest;
+}
+
+function unwrapInlineCode(cell: string): string {
+	const text = cell.trim();
+	return text.length >= 2 && text.startsWith("`") && text.endsWith("`") ? text.slice(1, -1).trim() : text;
+}
+
+/** One `| \`field\` | \`value\` |` row from the owner table. */
+function ownerField(section: string, field: string): string | undefined {
+	for (const line of section.split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed.startsWith("|") || !trimmed.endsWith("|")) continue;
+		const cells = trimmed.slice(1, -1).split("|").map(unwrapInlineCode);
+		if (cells.length !== 2 || cells[0]?.toLowerCase() !== field) continue;
+		const value = cells[1] as string;
+		return value.length > 0 && value.length <= MAX_OWNER_FIELD_CHARS ? value : undefined;
+	}
+	return undefined;
+}
+
+/**
+ * Who the vault belongs to, as its personal-context register declares them.
+ *
+ * A deliberately partial read of the same section `vault_profile.py` parses:
+ * the name and pronouns are what a conversation needs, and the cards below them
+ * are private material this extension has no business putting into context. A
+ * register with no owner row returns nothing and the session says nothing.
+ */
+function readOwner(root: string): VaultOwner | undefined {
+	const note = findConfigNote(root, DEFAULT_PROFILE_RELATIVE);
+	if (!note) return undefined;
+	let text: string;
+	try {
+		text = readFileSync(join(root, note), "utf8");
+	} catch {
+		return undefined;
+	}
+	const section = ownerSection(text);
+	const name = ownerField(section, "name");
+	if (!name) return undefined;
+	const pronouns = ownerField(section, "pronouns");
+	return pronouns ? { name, pronouns } : { name };
 }
 
 function readIndexedNoteCount(root: string): number | undefined {
@@ -268,6 +336,7 @@ export function inspectVault(cwd: string): VaultInfo | undefined {
 		noteCount: count,
 		truncated,
 		schemaNote,
+		owner: readOwner(root),
 		wikiDomain: hasWikiDomain(root, schemaNote),
 		organizerState: existsSync(join(root, ".vault-organizer")),
 		indexedNotes: readIndexedNoteCount(root),
@@ -279,10 +348,21 @@ export function vaultContextMessage(vault: VaultInfo): string {
 	const lines = [
 		"[OBSIDIAN VAULT DETECTED]",
 		"The working directory is inside an Obsidian vault. Prefer the vault skills over ad-hoc file reading.",
+	];
+
+	if (vault.owner) {
+		const who = vault.owner.pronouns ? `${vault.owner.name} (${vault.owner.pronouns})` : vault.owner.name;
+		lines.push(
+			"",
+			`You are working with ${who}. Address them by name; do not call them "the user" or "the owner".`,
+		);
+	}
+
+	lines.push(
 		"",
 		`- Vault root: ${vault.root}`,
 		`- Notes: ${vault.truncated ? `${vault.noteCount}+` : vault.noteCount} Markdown files`,
-	];
+	);
 
 	if (vault.schemaNote) {
 		lines.push(`- Schema note (sole source of truth for folders and frontmatter): ${vault.schemaNote}`);
@@ -296,7 +376,7 @@ export function vaultContextMessage(vault: VaultInfo): string {
 			: `- vault-connections index: built, ${vault.indexedNotes} notes embedded.`,
 	);
 	if (vault.schemaNote && !vault.wikiDomain) {
-		lines.push("- No `wiki` domain in the schema, so vault-connections `wiki` will fail closed until the user adds one.");
+		lines.push("- No `wiki` domain in the schema, so vault-connections `wiki` will fail closed until one is added.");
 	}
 	if (vault.schemaNote && !vault.organizerState) {
 		lines.push("- vault-organizer has never run here, so notes are not yet guaranteed to match the schema. Dry-run before proposing any apply.");

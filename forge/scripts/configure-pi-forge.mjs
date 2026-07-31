@@ -21,6 +21,9 @@ const COMPACTION_TRIGGER_RATIO = 0.75;
 const COMPACTION_RESERVE_TOKENS = CONTEXT_WINDOW - Math.floor(CONTEXT_WINDOW * COMPACTION_TRIGGER_RATIO);
 const CONTEXT_BUDGET_SOFT_RATIO = COMPACTION_TRIGGER_RATIO;
 const CONTEXT_BUDGET_VERBATIM_RECENT_TOKENS = 20000;
+// Matches `MAX_OWNER_FIELD_CHARS` in forge/lib/vault_profile.py and the same
+// constant in forge/extensions/vault-context.ts: a name, not a biography.
+const MAX_IDENTITY_FIELD_CHARS = 40;
 
 const [agentDirectoryArgument, profileDirectoryArgument] = process.argv.slice(2);
 if (!agentDirectoryArgument || !profileDirectoryArgument) {
@@ -65,7 +68,7 @@ const retainedPackages = packages.filter((entry) => {
 	return typeof entry?.source !== "string" || resolve(entry.source) !== previousProfileDirectory;
 });
 
-const profileInstructions = readFileSync(sourceAgentsPath, "utf8");
+const profileInstructions = readFileSync(sourceAgentsPath, "utf8") + identityBlock(settings.forgeUser);
 settings.packages = [profileDirectory, ...retainedPackages];
 settings.defaultProvider = "forge-local";
 settings.defaultModel = "code";
@@ -175,6 +178,43 @@ try {
 	for (const line of notice.err) process.stderr.write(`${line}\n`);
 } catch (error) {
 	process.stderr.write(`Moshi hook: ${error.message}\n`);
+}
+
+/** One `forgeUser` field, collapsed to a single line, or "" if unusable. */
+function identityField(value) {
+	if (typeof value !== "string") return "";
+	const text = value.replace(/\s+/g, " ").trim();
+	return text.length > 0 && text.length <= MAX_IDENTITY_FIELD_CHARS ? text : "";
+}
+
+/**
+ * Who this install belongs to, as a block appended to the profile instructions.
+ *
+ * The installed `AGENTS.md` is rewritten from the packaged profile on every
+ * install and every `pi-forge-update`, so a name added to it by hand would not
+ * survive the next one. `settings.json` is read, merged, and rewritten, so
+ * `forgeUser` does — which makes it the one place a name can live and still be
+ * there tomorrow. Inside an Obsidian vault the `vault-context` extension says
+ * this from the vault's own owner record; this covers everywhere else.
+ *
+ * An install that declares no `forgeUser` appends nothing, which is the path
+ * every install took before this existed.
+ */
+function identityBlock(forgeUser) {
+	if (!forgeUser || typeof forgeUser !== "object" || Array.isArray(forgeUser)) return "";
+	const name = identityField(forgeUser.name);
+	if (!name) return "";
+	const pronouns = identityField(forgeUser.pronouns);
+	const who = pronouns ? `${name} (${pronouns})` : name;
+	return [
+		"",
+		"## Who You Are Working With",
+		"",
+		`You are working with ${who}. Address them by name; do not call them "the user"`,
+		"or \"the owner\". Inside an Obsidian vault, that vault's own owner record wins",
+		"over this one.",
+		"",
+	].join("\n");
 }
 
 /**

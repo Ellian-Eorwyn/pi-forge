@@ -12,6 +12,11 @@ A register note declares the cards; each card is an ordinary vault note whose
 ``## Context`` bullets are the only part a prompt ever sees. Splitting them
 that way is what lets a card be minimal in a prompt and complete on the page.
 
+The register also carries an optional ``## Owner`` record: what to call this
+person, and their pronouns. A card is background a prompt may consult; the name
+is how the output addresses them, which is why it is a declared field rather
+than another bullet a model has to notice and interpret.
+
 Two gates decide whether a card may be injected, and they are deliberately
 asymmetric:
 
@@ -38,6 +43,7 @@ from vault_schema import (
     INBOX_DIR,
     PROTECTED_DIRS,
     UserError,
+    heading_index,
     link_basename,
     section_bounds,
     sha256_file,
@@ -49,10 +55,18 @@ from vault_schema import (
 
 DEFAULT_PROFILE = "99 Meta/99.02 Schemas/0.03 Personal Context.md"
 PROFILE_BASENAME = "0.03 Personal Context.md"
-COMPILED_PROFILE_VERSION = 1
+COMPILED_PROFILE_VERSION = 2
 
 CARDS_SECTION = "Cards"
 CONTEXT_SECTION = "Context"
+OWNER_SECTION = "Owner"
+
+# Register column value -> profile key. The columns read as English because a
+# person maintains them; the keys are what the pipeline passes around.
+OWNER_FIELDS = {"name": "name", "pronouns": "pronouns", "full name": "full_name"}
+# A name, not a biography. Long enough for a full name with particles, short
+# enough that a paragraph pasted into the wrong row cannot become a salutation.
+MAX_OWNER_FIELD_CHARS = 40
 
 TIER_ALWAYS = "always"
 TIER_RELEVANT = "when-relevant"
@@ -204,17 +218,62 @@ def _parse_route(value):
     return "/".join(parts)
 
 
-def parse_profile_note(text):
-    """Parse the register's card table.
+def parse_owner(lines):
+    """The optional ``## Owner`` record: what to call this person.
 
-    Structural problems raise, because a register whose table cannot be read is
-    unusable. Row problems only skip their own row: losing every card because
-    one cell has a typo is the wrong trade for an enrichment layer.
+    Returns ``(owner_or_none, warnings)``. An absent section is silent — most
+    vaults never declare one, and without it every stage behaves exactly as it
+    did before the section existed. A section that is present but unreadable
+    warns and yields nothing: no name at all is better than a mangled one, since
+    getting someone's name wrong is the failure this record exists to prevent.
+    """
+    try:
+        heading_index(lines, OWNER_SECTION)
+    except UserError:
+        return None, []
+    try:
+        rows = table_after(lines, OWNER_SECTION, ["Field", "Value"])
+    except UserError as error:
+        return None, [f"{OWNER_SECTION}: {error}; nothing can address the owner by name"]
+
+    fields = {}
+    warnings = []
+    for row in rows:
+        label = strip_inline_code(row["Field"]).lower()
+        key = OWNER_FIELDS.get(label)
+        if key is None:
+            warnings.append(f"{OWNER_SECTION}: unknown field {label!r}; use one of {', '.join(OWNER_FIELDS)}")
+            continue
+        value = " ".join(strip_inline_code(row["Value"]).split())
+        if not value:
+            continue
+        if len(value) > MAX_OWNER_FIELD_CHARS:
+            warnings.append(f"{OWNER_SECTION}: {label} is over {MAX_OWNER_FIELD_CHARS} characters; ignored")
+            continue
+        if key in fields:
+            warnings.append(f"{OWNER_SECTION}: duplicate field {label}; the later row is ignored")
+            continue
+        fields[key] = value
+
+    if "name" not in fields:
+        warnings.append(f"{OWNER_SECTION}: no `name` row, so nothing can address the owner by name")
+        return None, warnings
+    return fields, warnings
+
+
+def parse_profile_note(text):
+    """Parse the register's owner record and card table.
+
+    Structural problems in the card table raise, because a register whose table
+    cannot be read is unusable. Row problems only skip their own row: losing
+    every card because one cell has a typo is the wrong trade for an enrichment
+    layer. The owner record never raises at all -- see :func:`parse_owner`.
     """
     lines = str(text).splitlines()
+    owner, owner_warnings = parse_owner(lines)
     rows = table_after(lines, CARDS_SECTION, ["Card", "Tier"])
     cards = []
-    warnings = []
+    warnings = list(owner_warnings)
     seen = set()
     for order, row in enumerate(rows):
         raw = strip_inline_code(row["Card"])
@@ -270,7 +329,7 @@ def parse_profile_note(text):
                 "facts": [],
             }
         )
-    return {"cards": cards, "warnings": warnings}
+    return {"cards": cards, "owner": owner, "warnings": warnings}
 
 
 def parse_card_note(text):
@@ -327,11 +386,27 @@ def load_profile(vault, profile_path):
     # Resolved, because the index holds resolved paths and a symlinked vault
     # root (/var -> /private/var on macOS) otherwise breaks every relative_to.
     vault = Path(vault).resolve()
-    parsed = parse_profile_note(Path(profile_path).read_text(encoding="utf-8"))
+    text = Path(profile_path).read_text(encoding="utf-8")
+    register_digest = sha256_file(Path(profile_path))
+    try:
+        parsed = parse_profile_note(text)
+    except UserError as error:
+        # The card table is a contract and a register that declares cards it
+        # cannot list is broken. The owner record is not part of that contract:
+        # someone's name is still their name when the table below it has a typo,
+        # and a register that declares nothing else is a complete register.
+        owner, owner_warnings = parse_owner(text.splitlines())
+        if owner is None:
+            raise
+        return (
+            {"cards": [], "owner": owner},
+            sha256_text(register_digest),
+            owner_warnings + [f"the card table could not be read ({error}); only the owner record survives"],
+        )
     warnings = list(parsed["warnings"])
     index = _basename_index(vault)
     cards = []
-    digests = [sha256_file(Path(profile_path))]
+    digests = [register_digest]
     for card in parsed["cards"]:
         matches = index.get(card["name"], [])
         if not matches:
@@ -353,7 +428,9 @@ def load_profile(vault, profile_path):
             continue
         digests.append(sha256_text(f"{card['name']}:{sha256_file(path)}"))
         cards.append({**card, "facts": facts, "path": path.relative_to(vault).as_posix()})
-    profile = {"cards": cards}
+    # The owner record lives in the register itself, so the register digest that
+    # already leads this list covers it: renaming yourself busts the cache.
+    profile = {"cards": cards, "owner": parsed["owner"]}
     return profile, sha256_text("|".join(digests)), warnings
 
 
@@ -387,7 +464,9 @@ def compiled_profile_for(vault, profile_path, cache_dir=None):
         profile, profile_hash, warnings = load_profile(vault, profile_path)
     except (UserError, OSError, UnicodeDecodeError) as error:
         return None, "none", [f"personal context note could not be compiled ({error})"]
-    if not profile["cards"]:
+    # A register that only declares an owner is a complete, useful layer: the
+    # name still reaches every prompt. Only a register with neither is empty.
+    if not profile["cards"] and not profile["owner"]:
         return None, profile_hash, warnings + ["personal context note resolved no usable cards"]
     if cache_path:
         try:
@@ -413,11 +492,17 @@ def compiled_profile_for(vault, profile_path, cache_dir=None):
 
 def _plain(profile):
     """JSON-safe form: frozensets do not survive a round trip."""
-    return {"cards": [{**card, "routes": sorted(card["routes"])} for card in profile["cards"]]}
+    return {
+        "cards": [{**card, "routes": sorted(card["routes"])} for card in profile["cards"]],
+        "owner": profile.get("owner"),
+    }
 
 
 def _revive(plain):
-    return {"cards": [{**card, "routes": frozenset(card["routes"])} for card in plain["cards"]]}
+    return {
+        "cards": [{**card, "routes": frozenset(card["routes"])} for card in plain["cards"]],
+        "owner": plain.get("owner"),
+    }
 
 
 def _rehash(vault, register_hash, plain):
@@ -550,9 +635,36 @@ def _render(cards, header, budget):
     return "\n".join(lines) if len(lines) > 1 else ""
 
 
+def owner_sentence(profile, site):
+    """One line naming this person, for the top of a system prompt.
+
+    Gated on the same context mode the cards are, so a stage held behind the
+    fabrication gate stays behind it. A name is the most quotable fact there is,
+    and the stages that may not know anything about the owner are exactly the
+    ones that would put it somewhere it does not belong.
+    """
+    owner = (profile or {}).get("owner")
+    if not owner or site["context_mode"] == vault_voice.CONTEXT_NONE:
+        return ""
+    who = f"{owner['name']} ({owner['pronouns']})" if owner.get("pronouns") else owner["name"]
+    return (
+        f"The vault owner is {who}. Call them {owner['name']} wherever the output speaks to or "
+        'about them; do not write "the user" or "the owner". Never insert their name into text '
+        "drawn from a source that did not already say it."
+    )
+
+
 def profile_prefix(profile, site, budget=DEFAULT_PREFIX_BUDGET):
-    """The always-tier block, byte-stable for a given site so caching survives."""
-    return _render(select_cards(profile, "", site, tier=TIER_ALWAYS, limit=MAX_SELECTED_CARDS), PREFIX_HEADER, budget)
+    """The owner line and always-tier block, byte-stable for a given site.
+
+    The two are independent: a register that names an owner and declares no
+    always-tier card still gets its name into every prompt.
+    """
+    sentence = owner_sentence(profile, site)
+    cards = _render(select_cards(profile, "", site, tier=TIER_ALWAYS, limit=MAX_SELECTED_CARDS), PREFIX_HEADER, budget)
+    if not sentence:
+        return cards
+    return f"{sentence}\n\n{cards}" if cards else sentence
 
 
 def profile_context(profile, site, material, budget=DEFAULT_CONTEXT_BUDGET):
@@ -613,7 +725,10 @@ __all__ = [
     "DEFAULT_PREFIX_BUDGET",
     "DEFAULT_PROFILE",
     "MAX_CARD_CHARS",
+    "MAX_OWNER_FIELD_CHARS",
     "MAX_SELECTED_CARDS",
+    "OWNER_FIELDS",
+    "OWNER_SECTION",
     "PROFILE_BASENAME",
     "TIER_ALWAYS",
     "TIER_RELEVANT",
@@ -622,7 +737,9 @@ __all__ = [
     "compiled_profile_for",
     "expand_routes",
     "load_profile",
+    "owner_sentence",
     "parse_card_note",
+    "parse_owner",
     "parse_profile_note",
     "profile_context",
     "profile_digest",

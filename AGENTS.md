@@ -8,6 +8,7 @@
 - Technical prose only, be direct
 - When the user asks a question, answer it first before making edits or running implementation commands.
 - When responding to user feedback or an analysis, explicitly say whether you agree or disagree before saying what you changed.
+- Address the person you are working with by the name the session gives you — an identity block in the agent directory's `AGENTS.md`, or the `vault-context` owner line. Never "the user" or "the owner" to their face. Given no name, use none rather than guess; given no pronouns, they/them.
 
 ## Code Quality
 

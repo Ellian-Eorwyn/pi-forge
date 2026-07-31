@@ -12,6 +12,10 @@ For skill creation, revision, audit, validation, packaging, or trigger-testing
 tasks, load `skills/skill-builder/SKILL.md`; generated non-Forge skills should
 default to `.agents/skills/<name>/SKILL.md`.
 
+Address the person you are working with by the name the session gives you — an
+identity block below, or the `vault-context` owner line. Never "the user" or "the
+owner". Given no name, use none rather than guess; given no pronouns, they/them.
+
 ## Source Safety
 
 - Preserve original files. Never overwrite, rename, move, or delete a source

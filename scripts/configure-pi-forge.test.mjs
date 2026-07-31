@@ -139,3 +139,47 @@ test("a customized chat endpoint survives configuration", () => {
 		assert.equal(chat.model, "code");
 	});
 });
+
+function installedProfile(agentDirectory) {
+	return readFileSync(join(agentDirectory, "AGENTS.md"), "utf8");
+}
+
+test("a declared forgeUser is rendered into the installed profile", () => {
+	withAgentDirectory({ forgeUser: { name: "Ellie", pronouns: "they/them" } }, (agentDirectory) => {
+		const settings = configure(agentDirectory);
+		const profile = installedProfile(agentDirectory);
+		assert.match(profile, /## Who You Are Working With/);
+		assert.match(profile, /You are working with Ellie \(they\/them\)\./);
+		assert.match(profile, /Address them by name/);
+		// The setting itself is preserved, or the next update would lose the name.
+		assert.deepEqual(settings.forgeUser, { name: "Ellie", pronouns: "they/them" });
+	});
+});
+
+test("configuring twice regenerates the identity block rather than stacking it", () => {
+	withAgentDirectory({ forgeUser: { name: "Ellie" } }, (agentDirectory) => {
+		configure(agentDirectory);
+		configure(agentDirectory);
+		const profile = installedProfile(agentDirectory);
+		assert.equal(profile.match(/## Who You Are Working With/g)?.length, 1);
+		assert.match(profile, /You are working with Ellie\. Address them by name/);
+	});
+});
+
+test("an install with no forgeUser gets the packaged profile unchanged", () => {
+	withAgentDirectory(undefined, (agentDirectory) => {
+		configure(agentDirectory);
+		const profile = installedProfile(agentDirectory);
+		assert.doesNotMatch(profile, /Who You Are Working With/);
+		assert.equal(profile, readFileSync(join(repositoryRoot, "forge", "AGENTS.md"), "utf8"));
+	});
+});
+
+test("an unusable forgeUser is ignored rather than half-rendered", () => {
+	for (const forgeUser of [{ pronouns: "they/them" }, { name: "   " }, { name: "x".repeat(41) }, "Ellie", []]) {
+		withAgentDirectory({ forgeUser }, (agentDirectory) => {
+			configure(agentDirectory);
+			assert.doesNotMatch(installedProfile(agentDirectory), /Who You Are Working With/);
+		});
+	}
+});

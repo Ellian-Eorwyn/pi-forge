@@ -32,6 +32,20 @@ capture_type: manual
 | `[[Old Passwords]]` | `on-request` | `owner-authored` |  | `password` | Never automatic. |
 """
 
+OWNER_SECTION = """## Owner
+
+| Field | Value |
+| --- | --- |
+| `name` | `Ellie` |
+| `pronouns` | `they/them` |
+| `full name` | `Ellian Eorwyn` |
+
+"""
+
+# The register as a vault that declares who it belongs to writes it: the owner
+# record above the cards, which is also the order a person reads them in.
+NAMED_REGISTER = REGISTER.replace("## Cards", OWNER_SECTION + "## Cards")
+
 CARDS = {
     "Core Identity": "# Core Identity\n\n## Context\n\n- Sociologist; they/them.\n- Lives in the Bay Area.\n",
     "Thinkers I Read": "# Thinkers I Read\n\n## Context\n\n- Rorty, for anti-foundationalism.\n",
@@ -102,6 +116,142 @@ class ParseTests(unittest.TestCase):
     def test_a_missing_cards_table_raises(self):
         with self.assertRaises(UserError):
             vp.parse_profile_note("# Personal Context\n\nNo table here.\n")
+
+
+class OwnerTests(unittest.TestCase):
+    """The ``## Owner`` record: optional, never fatal, and never half-read."""
+
+    def test_every_field_parses(self):
+        owner = vp.parse_profile_note(NAMED_REGISTER)["owner"]
+        self.assertEqual(owner, {"name": "Ellie", "pronouns": "they/them", "full_name": "Ellian Eorwyn"})
+
+    def test_a_register_without_the_section_is_silent(self):
+        parsed = vp.parse_profile_note(REGISTER)
+        self.assertIsNone(parsed["owner"])
+        self.assertEqual(parsed["warnings"], [])
+
+    def test_pronouns_and_full_name_are_optional(self):
+        register = NAMED_REGISTER.replace("| `pronouns` | `they/them` |\n", "").replace(
+            "| `full name` | `Ellian Eorwyn` |\n", ""
+        )
+        self.assertEqual(vp.parse_profile_note(register)["owner"], {"name": "Ellie"})
+
+    def test_a_record_without_a_name_yields_nothing(self):
+        register = NAMED_REGISTER.replace("| `name` | `Ellie` |\n", "")
+        parsed = vp.parse_profile_note(register)
+        self.assertIsNone(parsed["owner"])
+        self.assertTrue(any("no `name` row" in warning for warning in parsed["warnings"]))
+
+    def test_an_unknown_field_is_dropped_and_the_rest_survive(self):
+        register = NAMED_REGISTER.replace("| `pronouns` |", "| `nickname` |")
+        parsed = vp.parse_profile_note(register)
+        self.assertEqual(parsed["owner"], {"name": "Ellie", "full_name": "Ellian Eorwyn"})
+        self.assertTrue(any("nickname" in warning for warning in parsed["warnings"]))
+
+    def test_a_paragraph_in_the_name_row_is_refused(self):
+        """A name, not a biography. Nothing should be able to make a salutation
+        out of a value that was clearly pasted into the wrong row."""
+        register = NAMED_REGISTER.replace("| `Ellie` |", f"| {'x' * (vp.MAX_OWNER_FIELD_CHARS + 1)} |")
+        parsed = vp.parse_profile_note(register)
+        self.assertIsNone(parsed["owner"])
+        self.assertTrue(any("over" in warning for warning in parsed["warnings"]))
+
+    def test_a_malformed_table_costs_the_name_not_the_cards(self):
+        register = NAMED_REGISTER.replace("| Field | Value |\n| --- | --- |\n", "")
+        parsed = vp.parse_profile_note(register)
+        self.assertIsNone(parsed["owner"])
+        self.assertEqual(len(parsed["cards"]), 5)
+        self.assertTrue(any(vp.OWNER_SECTION in warning for warning in parsed["warnings"]))
+
+    def test_a_register_that_only_names_an_owner_still_compiles(self):
+        """A name with no cards is a complete layer, not an empty one: the name
+        reaches every prompt whether or not any card does."""
+        register = NAMED_REGISTER.split("| `[[Core Identity]]`")[0]
+        with tempfile.TemporaryDirectory() as root:
+            vault = build_vault(root, register=register)
+            profile, _hash, _warnings = vp.compiled_profile_for(vault, vault / vp.DEFAULT_PROFILE)
+            self.assertIsNotNone(profile)
+            self.assertEqual(profile["cards"], [])
+            self.assertEqual(profile["owner"]["name"], "Ellie")
+
+    def test_a_broken_card_table_costs_the_cards_and_keeps_the_name(self):
+        """The card table is a contract; the owner record is not part of it."""
+        register = NAMED_REGISTER.replace("| Card | Tier | Scope | Applies | Triggers | Notes |", "| Card |")
+        with tempfile.TemporaryDirectory() as root:
+            vault = build_vault(root, register=register)
+            profile, _hash, warnings = vp.compiled_profile_for(vault, vault / vp.DEFAULT_PROFILE)
+            self.assertEqual(profile["owner"]["name"], "Ellie")
+            self.assertEqual(profile["cards"], [])
+            self.assertTrue(any("card table could not be read" in warning for warning in warnings))
+
+    def test_a_register_that_is_broken_end_to_end_still_compiles_to_nothing(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = build_vault(root, register="# Personal Context\n\nThe table is gone.\n")
+            profile, profile_hash, warnings = vp.compiled_profile_for(vault, vault / vp.DEFAULT_PROFILE)
+            self.assertIsNone(profile)
+            self.assertEqual(profile_hash, "none")
+            self.assertTrue(warnings)
+
+
+class OwnerRenderTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.vault = build_vault(self.tmp.name, register=NAMED_REGISTER)
+        self.profile, _hash, _warnings = vp.compiled_profile_for(self.vault, self.vault / vp.DEFAULT_PROFILE)
+        self.site = vp.profile_site(vv.CONTEXT_OWNER, routes=["personal/therapy"])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_the_prefix_names_the_owner_and_keeps_the_cards(self):
+        prefix = vp.profile_prefix(self.profile, self.site)
+        self.assertIn("The vault owner is Ellie (they/them)", prefix)
+        self.assertIn("Sociologist", prefix)
+
+    def test_the_owner_line_survives_a_register_with_no_always_tier_card(self):
+        register = NAMED_REGISTER.replace("| `[[Core Identity]]` | `always` |", "| `[[Core Identity]]` | `on-request` |")
+        with tempfile.TemporaryDirectory() as root:
+            vault = build_vault(root, register=register)
+            profile, _hash, _warnings = vp.compiled_profile_for(vault, vault / vp.DEFAULT_PROFILE)
+            prefix = vp.profile_prefix(profile, self.site)
+            self.assertIn("The vault owner is Ellie", prefix)
+            self.assertNotIn("Sociologist", prefix)
+
+    def test_the_prefix_is_byte_stable_across_calls(self):
+        first = vp.profile_prefix(self.profile, self.site)
+        second = vp.profile_prefix(self.profile, vp.profile_site(vv.CONTEXT_OWNER, routes=["personal/therapy"]))
+        self.assertEqual(first, second)
+
+    def test_a_fabrication_gated_stage_is_told_no_name(self):
+        """The stages held at CONTEXT_NONE may not know anything personal, and a
+        name is the most quotable fact there is."""
+        site = vp.profile_site(vv.CONTEXT_NONE, routes=["personal"])
+        self.assertEqual(vp.profile_prefix(self.profile, site), "")
+
+    def test_source_material_still_learns_the_name(self):
+        """Someone else's lecture is still being processed for this person, and
+        the sentence carries its own rule against writing the name into it."""
+        site = vp.profile_site(vv.CONTEXT_SOURCE, routes=["academic"])
+        self.assertIn("Ellie", vp.profile_prefix(self.profile, site))
+
+    def test_the_owner_survives_the_compiled_cache(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = build_vault(root, register=NAMED_REGISTER)
+            cache = vault / ".vault-transcripts" / "cache"
+            first, _hash, _warnings = vp.compiled_profile_for(vault, vault / vp.DEFAULT_PROFILE, cache_dir=cache)
+            second, _hash, _warnings = vp.compiled_profile_for(vault, vault / vp.DEFAULT_PROFILE, cache_dir=cache)
+            self.assertEqual(first["owner"], second["owner"])
+            self.assertEqual(second["owner"]["name"], "Ellie")
+
+    def test_renaming_yourself_invalidates_the_cache(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = build_vault(root, register=NAMED_REGISTER)
+            cache = vault / ".vault-transcripts" / "cache"
+            _first, first_hash, _warnings = vp.compiled_profile_for(vault, vault / vp.DEFAULT_PROFILE, cache_dir=cache)
+            (vault / vp.DEFAULT_PROFILE).write_text(NAMED_REGISTER.replace("`Ellie`", "`Ellian`"), encoding="utf-8")
+            profile, second_hash, _warnings = vp.compiled_profile_for(vault, vault / vp.DEFAULT_PROFILE, cache_dir=cache)
+            self.assertNotEqual(first_hash, second_hash)
+            self.assertEqual(profile["owner"]["name"], "Ellian")
 
 
 class CardTests(unittest.TestCase):
