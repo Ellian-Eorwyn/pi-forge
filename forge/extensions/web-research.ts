@@ -54,6 +54,12 @@ interface WebDiscoverParams {
 	advanced?: AdvancedParams;
 }
 
+interface ReferenceLookupParams {
+	subject: string;
+	provider: string;
+	limit?: number;
+}
+
 interface AcademicWebResearchParams {
 	query: string;
 	output: string;
@@ -289,6 +295,29 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
+		name: "forge_reference_lookup",
+		label: "Forge reference lookup",
+		description:
+			"Ask one named source which of its entries could be about a subject, and choose between the unranked candidates yourself. Use for a citable entry from a specific source; use forge_web_search for ranked results to a question.",
+		promptSnippet: "Resolve a name to one source's entries",
+		parameters: Type.Object({
+			subject: Type.String({ description: "The name of the thing, without framing words." }),
+			provider: Type.String({ description: "Provider id: sep, iep, wikipedia, wiktionary, inpho, suttacentral, openlibrary, and the rest of the search registry." }),
+			limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum candidates. Ignored by a source that publishes a whole index." })),
+		}),
+		executionMode: "sequential",
+		async execute(_toolCallId, params, signal) {
+			const input = params as ReferenceLookupParams;
+			const result = await runNode(buildReferenceLookupArgs(input), signal);
+			const report = JSON.parse(result.stdout);
+			return {
+				content: [{ type: "text", text: JSON.stringify(report, null, 2) }],
+				details: { ...report, stderr: result.stderr },
+			};
+		},
+	});
+
+	pi.registerTool({
 		name: "forge_academic_web_research",
 		label: "Academic web research",
 		description:
@@ -363,6 +392,12 @@ function buildWebDiscoverArgs(input: WebDiscoverParams & { output: string }): st
 	if (input.render === false) args.push("--no-render");
 	else if (input.render === true) args.push("--render");
 	args.push(...buildAdvancedArgs(input.advanced));
+	return args;
+}
+
+function buildReferenceLookupArgs(input: ReferenceLookupParams): string[] {
+	const args = [webResearchScript, "reference-resolve", input.subject, "--provider", input.provider];
+	if (input.limit !== undefined) args.push("--limit", String(input.limit));
 	return args;
 }
 

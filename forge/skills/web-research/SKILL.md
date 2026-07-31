@@ -114,11 +114,15 @@ local embeddings endpoint ranks chunks before evidence extraction.
 
      ```bash
      node <skill-directory>/scripts/web-research.mjs academic <query...> \
-       --output <run-directory> [--limit N] [--providers crossref,semantic-scholar,pubmed,arxiv] \
+       --output <run-directory> [--limit N] [--providers crossref,openalex,semantic-scholar,pubmed,arxiv] \
        [--contact-email <email>]
      ```
 
-     This queries no-key academic providers, writes `works.jsonl`,
+     Crossref, OpenAlex, Semantic Scholar, Europe PMC, PubMed, arXiv, CORE,
+     DBLP, DataCite, OpenAIRE and DOAJ answer a query; OpenCitations and
+     Unpaywall take the DOIs the others found. All work without a key —
+     OpenAlex and CORE go further with a free one, and Unpaywall needs a
+     contact email. This writes `works.jsonl`,
      `source_records.jsonl`, `field_provenance.jsonl`,
      `dedupe_decisions.jsonl`, `provider_requests.jsonl`,
      `provider_errors.jsonl`, `academic_report.md`, aggregate `works.ris`,
@@ -171,15 +175,34 @@ routing is automatic — pass `--providers` only to override it.
   (lookup by ISBN/OCLC/LCCN only)
 - **News**: `gdelt` · **Technical**: `stackexchange`, `hackernews`
 - **General**: `searxng`
+- **Needs a free key**: `guardian`, `nyt` (news) · `wolfram` (computation) ·
+  `marginalia`, `exa`, `tavily` (general)
 
 An identifier in the query is decisive and is looked up rather than searched:
 a sutta reference (`MN 118`, `SN 56.11`), a Taishō number (`T. 262`), or an
 ISBN. `search_results.json` records the routing decisions, so a run can say why
 it asked what it asked and which providers were skipped.
 
-None of these require credentials. Providers that offer a free key read it from
-`connectedServices.apiKeys` or `FORGE_API_KEY_<PROVIDER>`; without one they are
-skipped and the rest still run. Run `doctor` to see what is reachable.
+Everything above the keyed tier works with no credentials at all. A key is read
+from `connectedServices.apiKeys` or `FORGE_API_KEY_<PROVIDER>`; without one the
+provider is skipped with a logged reason and the rest still run. Two services
+meter by daily spend rather than by rate — OpenAlex and NYT — and a ledger at
+`~/.pi-forge/cache/web-research/budget.json` skips an exhausted provider instead
+of retrying into a refusal. Run `doctor` to see what is reachable and which keys
+are present.
+
+   - **`reference-resolve`** — Ask one source which of its entries could be
+     about a subject:
+
+     ```bash
+     node <skill-directory>/scripts/web-research.mjs reference-resolve <subject...> \
+       --provider <id> [--limit N]
+     ```
+
+     Answers on stdout with unranked `candidates` and any `failures`; there is
+     no run directory, because a lookup is not a run. Deciding which candidate
+     is *about* the subject is left to the caller: a source's own relevance
+     order is not that judgement, and vault-wiki's matcher is calibrated for it.
 
 ### SearXNG Parameters
 

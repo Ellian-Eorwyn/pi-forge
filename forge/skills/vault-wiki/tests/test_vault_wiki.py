@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "vault-wiki.py"
 sys.dont_write_bytecode = True
@@ -466,22 +467,76 @@ class TitleMatchTests(unittest.TestCase):
     def test_best_candidate_returns_none_when_nothing_matches(self):
         self.assertIsNone(skill.best_candidate("God Trick", [("God and Other Ultimates", "u/god")]))
 
-    def test_anchor_pairs_extracts_titles_and_absolute_urls(self):
-        html = '<a href="entries/madhyamaka/">Madhyamaka</a><a href="about.html">About</a>'
-        pairs = skill.anchor_pairs(html, "^entries/", "https://plato.stanford.edu/contents.html")
-        self.assertEqual(pairs, [("Madhyamaka", "https://plato.stanford.edu/entries/madhyamaka/")])
 
-    def test_anchor_pairs_strips_nested_markup(self):
-        html = '<a href="entries/x/"><em>Two</em> Truths</a>'
-        self.assertEqual(skill.anchor_pairs(html, "^entries/", "https://plato.stanford.edu/")[0][0], "Two Truths")
+class ResolveSourceUrlTests(unittest.TestCase):
+    """Which of the two resolution paths a source takes, and who does the matching.
 
+    Index parsing and TLS handling used to be tested here. Both moved into
+    web-research when the native resolvers did — one implementation now serves
+    every caller, and Node reaches these hosts on machines where this
+    interpreter's ``urllib`` cannot verify a certificate at all.
+    """
 
-class TlsContextTests(unittest.TestCase):
-    def test_a_verifying_context_is_built(self):
-        context = skill.tls_context()
-        # Verification is never disabled to work around a missing CA bundle.
-        self.assertTrue(context.check_hostname)
-        self.assertNotEqual(context.verify_mode, 0)
+    def setUp(self):
+        self.calls = []
+
+    def fake_candidates(self, result):
+        def call(subject, provider, limit=6):
+            self.calls.append((subject, provider, limit))
+            return result
+
+        return call
+
+    def test_a_source_with_a_provider_is_resolved_through_the_registry(self):
+        entry = {"id": "sep", "site": "plato.stanford.edu", "provider": "sep"}
+        candidates = [
+            # An alphabetical index offers `truth` long before the entry that is
+            # actually about the subject; the matching stays on this side of the
+            # subprocess precisely so that ordering does not decide it.
+            ("Truth", "https://plato.stanford.edu/entries/truth/"),
+            ("The Theory of Two Truths in India", "https://plato.stanford.edu/entries/twotruths-india/"),
+        ]
+        with mock.patch.object(skill, "reference_candidates", self.fake_candidates(candidates)):
+            located = skill.resolve_source_url(Path("/nonexistent"), "Two Truths Doctrine, Saṃvṛti and Paramārtha", entry)
+        self.assertEqual(located["url"], "https://plato.stanford.edu/entries/twotruths-india/")
+        # The gloss after the comma is not part of the name to look up.
+        self.assertEqual(self.calls, [("two truths doctrine", "sep", 6)])
+
+    def test_an_unreachable_provider_resolves_to_nothing_rather_than_raising(self):
+        entry = {"id": "iep", "site": "iep.utm.edu", "provider": "iep"}
+        with mock.patch.object(skill, "reference_candidates", self.fake_candidates([])):
+            self.assertIsNone(skill.resolve_source_url(Path("/nonexistent"), "Madhyamaka", entry))
+
+    def test_a_source_without_a_provider_pins_searxng(self):
+        # `site:` is SearXNG syntax. Routed freely it would be sent to providers
+        # that treat it as a literal string to search for.
+        entry = {"id": "britannica", "site": "britannica.com", "provider": None, "resolve": {"method": "search"}}
+        seen = []
+
+        def fake_run(command, arguments, output_dir, timeout=None):
+            seen.append((command, arguments))
+            return {"results": [{"url": "https://www.britannica.com/topic/anicca", "domain": "britannica.com", "title": "anicca"}]}
+
+        with mock.patch.object(skill, "run_web_research", fake_run):
+            located = skill.resolve_source_url(Path("/nonexistent"), "Impermanence", entry)
+        self.assertEqual(located["url"], "https://www.britannica.com/topic/anicca")
+        self.assertEqual(seen[0][0], "search")
+        self.assertIn("--providers", seen[0][1])
+        self.assertEqual(seen[0][1][seen[0][1].index("--providers") + 1], "searxng")
+
+    def test_a_failure_reported_by_the_subprocess_is_kept_reportable(self):
+        # A swallowed error is indistinguishable from "this subject has no entry",
+        # which is the most misleading thing this pipeline could report.
+        skill._HTTP_FAILURES.clear()
+        completed = SimpleNamespace(
+            stdout=json.dumps({"provider": "iep", "candidates": [], "failures": [{"host": "iep.utm.edu", "error": "request timed out after 30000ms"}]}),
+            stderr="",
+        )
+        with mock.patch.object(skill, "web_research_script", lambda: Path("/tmp/web-research.mjs")):
+            with mock.patch.object(skill.subprocess, "run", lambda *a, **k: completed):
+                self.assertEqual(skill.reference_candidates("Madhyamaka", "iep"), [])
+        self.assertEqual(skill.http_failures(), ["iep.utm.edu: request timed out after 30000ms"])
+        skill._HTTP_FAILURES.clear()
 
 
 class CitationCollapseTests(unittest.TestCase):

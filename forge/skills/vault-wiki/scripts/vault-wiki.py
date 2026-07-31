@@ -31,14 +31,9 @@ import json
 import os
 import re
 import shutil
-import ssl
 import subprocess
 import sys
 import tempfile
-import time
-import urllib.error
-import urllib.parse
-import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
@@ -72,10 +67,6 @@ DEFAULT_SEARCH_LIMIT = 6
 # said so ("the excerpt cuts off mid-sentence") — a false flag that costs a
 # thinking escalation and teaches the operator to distrust the reviewer. Sharing
 # one budget makes that class of disagreement impossible.
-# SearXNG rate-limits a burst of queries and answers with zero results rather
-# than an error, which reads exactly like "this subject has no source". Pacing the
-# searches is what keeps that from silently emptying a run.
-SEARCH_DELAY_SECONDS = 2.0
 SOURCE_EXCERPT_CHARS = 4000
 DRAFT_SOURCE_BUDGET = 8000
 # Items this large hold ~3 to a packet rather than 20, so review costs roughly
@@ -317,73 +308,7 @@ def run_web_research(command, arguments, output_dir, timeout=WEB_TIMEOUT):
         return None
 
 
-USER_AGENT = "pi-forge-vault-wiki/1 (+https://github.com/pi-forge)"
-HTTP_TIMEOUT = 30
-INDEX_MAX_AGE_SECONDS = 7 * 24 * 3600
-ANCHOR_RE = re.compile(r"<a\s[^>]*href=\"([^\"#?]+)\"[^>]*>(.*?)</a>", re.S | re.I)
-TAG_RE = re.compile(r"<[^>]+>")
-
-
-CA_BUNDLE_CANDIDATES = (
-    "/etc/ssl/cert.pem",
-    "/etc/ssl/certs/ca-certificates.crt",
-    "/etc/pki/tls/certs/ca-bundle.crt",
-    "/usr/local/etc/openssl/cert.pem",
-)
-_TLS_CONTEXT = None
 _HTTP_FAILURES = []
-
-
-def tls_context():
-    """A verifying TLS context, working around Python builds with no CA bundle.
-
-    A macOS framework Python points OpenSSL at an `etc/openssl/cert.pem` that
-    does not exist, so every HTTPS call fails verification while `curl` on the
-    same machine succeeds. Certificate verification is never disabled to get
-    around it — an unverified fetch is exactly what a citation must not rest on.
-    Instead the first usable bundle wins: an operator-set SSL_CERT_FILE, then a
-    system bundle, then certifi if it happens to be installed.
-    """
-    global _TLS_CONTEXT
-    if _TLS_CONTEXT is not None:
-        return _TLS_CONTEXT
-    candidates = []
-    for variable in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
-        if os.environ.get(variable):
-            candidates.append(os.environ[variable])
-    candidates.extend(CA_BUNDLE_CANDIDATES)
-    for path in candidates:
-        if path and os.path.isfile(path):
-            try:
-                _TLS_CONTEXT = ssl.create_default_context(cafile=path)
-                return _TLS_CONTEXT
-            except (OSError, ssl.SSLError):
-                continue
-    try:
-        import certifi
-
-        _TLS_CONTEXT = ssl.create_default_context(cafile=certifi.where())
-    except Exception:
-        _TLS_CONTEXT = ssl.create_default_context()
-    return _TLS_CONTEXT
-
-
-def http_get(url, params=None):
-    """One GET, returning text, or None on any failure.
-
-    Forgiving by design: a resolver that cannot reach its source falls through to
-    the next source rather than failing the run. But the reason is recorded — a
-    silently swallowed TLS error is indistinguishable from "this subject has no
-    source", which is the most misleading thing this pipeline could report.
-    """
-    target = url if not params else f"{url}?{urllib.parse.urlencode(params)}"
-    request = urllib.request.Request(target, headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"})
-    try:
-        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT, context=tls_context()) as response:
-            return response.read().decode("utf-8", errors="replace")
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as error:
-        _HTTP_FAILURES.append(f"{urllib.parse.urlsplit(target).netloc}: {type(error).__name__} {error}")
-        return None
 
 
 def http_failures():
@@ -394,44 +319,48 @@ def http_failures():
     return list(seen)
 
 
-def http_json(url, params=None):
-    raw = http_get(url, params)
-    if raw is None:
-        return None
+def reference_candidates(subject, provider, limit=6):
+    """Entry candidates one source offers for a subject name.
+
+    Every outbound request this skill makes now goes through web-research, which
+    owns the provider registry, the retry ladder and the shared index cache. The
+    three resolvers that used to live here — MediaWiki opensearch, the SEP
+    contents index, WordPress REST search — are the same three the registry
+    implements, and one copy is enough.
+
+    Two things travel back rather than being decided over there. The candidates
+    are unranked, because which entry is *about* a subject is `best_candidate`'s
+    judgement and it is calibrated against failures the registry's own matcher
+    has never seen. And the failures are named, because a swallowed error is
+    indistinguishable from "this subject has no entry".
+    """
+    script = web_research_script()
+    if script is None:
+        return []
     try:
-        return json.loads(raw)
+        completed = subprocess.run(
+            ["node", str(script), "reference-resolve", subject, "--provider", provider, "--limit", str(limit)],
+            capture_output=True,
+            text=True,
+            timeout=WEB_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        _HTTP_FAILURES.append(f"{provider}: {type(error).__name__} {error}")
+        return []
+    try:
+        report = json.loads(completed.stdout)
     except json.JSONDecodeError:
-        return None
-
-
-def cached_text(cache_dir, key, loader, max_age=INDEX_MAX_AGE_SECONDS):
-    """Read a cached document, fetching it once when absent or stale."""
-    path = cache_dir / "index" / f"{sha256_text(key)[:16]}.txt"
-    if path.is_file() and (time.time() - path.stat().st_mtime) < max_age:
-        try:
-            return path.read_text(encoding="utf-8")
-        except OSError:
-            pass
-    fetched = loader()
-    if fetched is None:
-        # A stale copy beats nothing: an index that is a week old still resolves
-        # every entry that existed a week ago.
-        return path.read_text(encoding="utf-8") if path.is_file() else None
-    run_state.atomic_write_text(path, fetched)
-    return fetched
-
-
-def anchor_pairs(html, href_pattern, base):
-    """(title, absolute url) for every anchor whose href matches."""
-    pattern = re.compile(href_pattern, re.I)
-    pairs = []
-    for href, label in ANCHOR_RE.findall(html or ""):
-        if not pattern.search(href):
-            continue
-        text = re.sub(r"\s+", " ", TAG_RE.sub("", label)).strip()
-        if text:
-            pairs.append((text, urllib.parse.urljoin(base, href)))
-    return pairs
+        detail = (completed.stderr or completed.stdout or "no output").strip().splitlines()
+        _HTTP_FAILURES.append(f"{provider}: reference-resolve failed — {detail[-1] if detail else 'no output'}")
+        return []
+    for failure in report.get("failures") or []:
+        _HTTP_FAILURES.append(f"{failure.get('host') or provider}: {failure.get('error')}")
+    return [
+        (str(entry.get("title") or ""), str(entry.get("url") or ""))
+        for entry in report.get("candidates") or []
+        if entry.get("url") and entry.get("title")
+    ]
 
 
 def best_candidate(title, candidates):
@@ -458,56 +387,12 @@ def web_cache_dir(vault):
     per-run cache means a re-run re-fetches every page — slow, rude to the search
     instance, and the fastest way to get rate-limited into a run full of "no
     source resolved". A vault-level cache makes a second pass nearly free.
+
+    Holds search and read runs. Published source indexes are cached by
+    web-research instead, under ``~/.pi-forge/cache/web-research/index``, because
+    they are shared by every caller rather than by every run of this skill.
     """
     return vault / STATE_DIR / "cache" / "web"
-
-
-def resolve_via_mediawiki(title, entry):
-    """Ask a MediaWiki site's own search for the article."""
-    api = (entry.get("resolve") or {}).get("api")
-    if not api:
-        return None
-    payload = http_json(api, {"action": "opensearch", "search": subject_key(title), "limit": 6, "format": "json"})
-    if not isinstance(payload, list) or len(payload) < 4:
-        return None
-    titles, urls = payload[1], payload[3]
-    if not isinstance(titles, list) or not isinstance(urls, list):
-        return None
-    return best_candidate(title, list(zip(titles, urls)))
-
-
-def resolve_via_index(cache_dir, title, entry):
-    """Match against a source's own table of contents.
-
-    Strictly better than searching for the site: the SEP publishes all 2,511 of
-    its entries on one page, so one cached fetch resolves every lookup offline —
-    and it finds entries a site-restricted web search misses outright, including
-    `entries/madhyamaka/` and `entries/twotruths-india/`.
-    """
-    config = entry.get("resolve") or {}
-    url = config.get("url")
-    if not url:
-        return None
-    html = cached_text(cache_dir, url, lambda: http_get(url))
-    if not html:
-        return None
-    return best_candidate(title, anchor_pairs(html, config.get("hrefPattern") or "", url))
-
-
-def resolve_via_wordpress(title, entry):
-    """Ask a WordPress site's REST search for the entry."""
-    api = (entry.get("resolve") or {}).get("api")
-    if not api:
-        return None
-    payload = http_json(api, {"search": subject_key(title), "per_page": 6})
-    if not isinstance(payload, list):
-        return None
-    candidates = [
-        (str(hit.get("title") or ""), str(hit.get("url") or ""))
-        for hit in payload
-        if isinstance(hit, dict) and hit.get("url")
-    ]
-    return best_candidate(title, candidates)
 
 
 def resolve_source_url(cache_dir, title, entry, extra_terms=""):
@@ -517,49 +402,57 @@ def resolve_source_url(cache_dir, title, entry, extra_terms=""):
     so there is no ``/entries/latour/`` to construct, and a guessed URL that 404s
     is indistinguishable from a real one that was never checked.
 
-    Each source declares how it is queried. A native lookup — the site's own API
-    or published index — is preferred over general web search for two reasons.
-    It is unaffected when the search engines behind SearXNG rate-limit or CAPTCHA
-    the instance, which silently empties an entire run. And it is more accurate:
-    the site's own index knows its entry titles, so a wrong hit is rejected
-    before anything is downloaded.
+    A source that names a registry ``provider`` is asked through it: the site's
+    own API or published index, which keeps working when the engines behind
+    SearXNG rate-limit the instance and which knows its own entry titles, so a
+    wrong hit is rejected before anything is downloaded. Everything else falls
+    through to site-restricted general web search.
+
+    The matching stays here either way. ``best_candidate`` is calibrated against
+    real failures — it keeps "The Theory of Two Truths in India" for the two
+    truths doctrine while rejecting the SEP's entry on *truth* for the same note
+    — and a source's own relevance order is not that judgement.
     """
-    method = (entry.get("resolve") or {}).get("method", "search")
-    if method == "mediawiki":
-        return resolve_via_mediawiki(title, entry)
-    if method == "index":
-        return resolve_via_index(cache_dir, title, entry)
-    if method == "wordpress":
-        return resolve_via_wordpress(title, entry)
+    provider = entry.get("provider")
+    if provider:
+        return best_candidate(title, reference_candidates(subject_key(title), provider))
     return resolve_via_search(cache_dir, title, entry, extra_terms)
 
 
 def resolve_via_search(cache_dir, title, entry, extra_terms=""):
     """Site-restricted general web search — the fallback for sources with no API.
 
+    Pinned to SearXNG, because ``site:`` is SearXNG's syntax and means nothing to
+    a direct provider: routed freely, "Bruno Latour site:britannica.com" asks
+    Wikipedia for the literal string "site:britannica.com". The seven sources
+    that land here have no registry provider at all — four of them publish no API,
+    and PhilPapers answers 403 to any non-browser client — so pinning costs
+    nothing and removes a whole class of wrong answer.
+
     The bare title is tried before the disambiguator, because adding topic words
-    makes the query *worse*: web-research picks its engines from the query text,
-    so "Sheila Jasanoff science and technology studies scholar site:en.wikipedia.org"
-    routes to arXiv and returns telescope papers, while the bare name returns her
-    article first. The disambiguator is a fallback for genuinely ambiguous names,
-    not a default.
+    makes the query *worse*: query text selects engines, so "Sheila Jasanoff
+    science and technology studies scholar site:en.wikipedia.org" routes to arXiv
+    and returns telescope papers, while the bare name returns her article first.
+    The disambiguator is a fallback for genuinely ambiguous names, not a default.
     """
     queries = [f"{title} site:{entry['site']}"]
     if extra_terms.strip():
         queries.append(f"{title} {extra_terms.strip()} site:{entry['site']}")
     for query in queries:
         output = cache_dir / "search" / sha256_text(query)[:16]
-        fresh = not (output / "research_report.json").is_file()
-        if fresh:
-            time.sleep(SEARCH_DELAY_SECONDS)
-        report = run_web_research("search", [query, "--limit", str(DEFAULT_SEARCH_LIMIT)], output)
+        # No pre-emptive delay: spacing is the transport's job now. lib/searxng.mjs
+        # paces requests and, more to the point, a throttled instance raises rather
+        # than answering HTTP 200 with an empty list — which is the failure the old
+        # two-second sleep was defending against blind. Deleting the sleep adopts
+        # that recalibration deliberately.
+        report = run_web_research("search", [query, "--limit", str(DEFAULT_SEARCH_LIMIT), "--providers", "searxng"], output)
         if not report:
             continue
-        if fresh and not (report.get("results") or []):
-            # Zero results on a fresh query is as likely to be throttling as a
-            # genuine absence, and a cached empty answer would poison every later
-            # run. Drop it so the next pass asks again.
-            shutil.rmtree(output, ignore_errors=True)
+        # A cached empty result used to be deleted here, because a throttled
+        # SearXNG was indistinguishable from a genuine absence and caching the
+        # confusion poisoned every later run. searchSearxng now raises transiently
+        # on that response, so an empty result means the query genuinely matched
+        # nothing and is worth keeping.
         site = entry["site"].casefold()
         for result in report.get("results") or []:
             url = result.get("url")
@@ -2033,17 +1926,17 @@ def command_doctor(args):
         counts[kind] = {"notes": len(notes), "incomplete": thin}
     data["wiki"] = counts
 
-    # Every native resolver depends on outbound HTTPS from this interpreter, which
-    # fails on a Python with no CA bundle even where curl succeeds. Probing one
-    # source of each method makes that a diagnosis rather than a run full of
-    # "no source resolved".
+    # Every native resolver now runs inside web-research, so this probes the
+    # subprocess boundary as much as the sites: node missing, a provider renamed,
+    # or a source down all surface here as one named failure rather than as a run
+    # full of "no source resolved".
     probes = {}
-    for source_id, label in (("wikipedia", "mediawiki"), ("sep", "index"), ("iep", "wordpress")):
+    for source_id in ("wikipedia", "sep", "iep"):
         entry = next((item for item in policy["sources"] if item["id"] == source_id), None)
-        if entry is None:
+        if entry is None or not entry.get("provider"):
             continue
         resolved = resolve_source_url(web_cache_dir(vault), "Madhyamaka", entry)
-        probes[label] = resolved["url"] if resolved else None
+        probes[entry["provider"]] = resolved["url"] if resolved else None
     data["resolvers"] = probes
     if not any(probes.values()):
         warnings.append("no native source resolver reached its site; expansion will find nothing")
@@ -2051,8 +1944,9 @@ def command_doctor(args):
         warnings.append(f"outbound request failed — {failure}")
         if "CERTIFICATE_VERIFY_FAILED" in failure:
             warnings.append(
-                "this Python cannot verify TLS: no CA bundle was found. Set SSL_CERT_FILE to a "
-                "bundle (on macOS, /etc/ssl/cert.pem) or install certifi"
+                "TLS verification failed in the web-research subprocess. Node uses its own bundled CA "
+                "store, so this usually means a proxy is re-signing traffic: point NODE_EXTRA_CA_CERTS "
+                "at that proxy's certificate"
             )
 
     script = web_research_script()

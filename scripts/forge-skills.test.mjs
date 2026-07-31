@@ -7,9 +7,11 @@ import {
 	mkdtempSync,
 	mkdirSync,
 	readFileSync,
+	readdirSync,
 	realpathSync,
 	rmSync,
 	symlinkSync,
+	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -654,6 +656,122 @@ function startAcademicResearchFixture() {
 </feed>`);
 			return;
 		}
+		if (url.pathname === "/openalex/works") {
+			// The rate-limit headers are the fixture's point as much as the body:
+			// OpenAlex reports its remaining daily allowance on every response, and
+			// that is what the budget ledger records.
+			response.writeHead(200, {
+				"Content-Type": "application/json",
+				"x-ratelimit-limit-usd": "0.1",
+				"x-ratelimit-remaining-usd": "0.098",
+				"x-ratelimit-cost-usd": "0.001",
+			});
+			response.end(
+				JSON.stringify({
+					meta: { count: 1 },
+					results: [
+						{
+							id: "https://openalex.org/W1234",
+							doi: "https://doi.org/10.1234/ALPHA",
+							title: "Alpha & Beta RIS Study",
+							publication_year: 2024,
+							publication_date: "2024-05-02",
+							type: "article",
+							ids: { openalex: "https://openalex.org/W1234", doi: "https://doi.org/10.1234/alpha" },
+							// {word: [positions]} out of order on purpose: rebuilding it
+							// has to sort by position, not by key.
+							abstract_inverted_index: { abstract: [1], OpenAlex: [0], study: [3], alpha: [2] },
+							primary_location: {
+								landing_page_url: "https://doi.org/10.1234/alpha",
+								pdf_url: null,
+								source: { display_name: "Journal of Test Metadata", issn: ["1234-5678"], type: "journal", host_organization_name: "Fixture Press" },
+							},
+							open_access: { is_oa: true, oa_status: "hybrid", oa_url: "https://example.test/alpha-oa.pdf" },
+							authorships: [{ author: { display_name: "Ada Lovelace", orcid: "https://orcid.org/0000-0002-1825-0097" } }],
+						},
+					],
+				}),
+			);
+			return;
+		}
+		if (url.pathname === "/core/search/works/") {
+			response.writeHead(200, { "Content-Type": "application/json" });
+			response.end(
+				JSON.stringify({
+					totalHits: 1,
+					results: [
+						{
+							id: 999,
+							doi: "10.1234/alpha",
+							title: "Alpha & Beta RIS Study",
+							abstract: "CORE repository abstract for the alpha study.",
+							authors: [{ name: "Ada Lovelace" }],
+							yearPublished: 2024,
+							publishedDate: "",
+							publisher: "",
+							documentType: "",
+							downloadUrl: "https://core.ac.uk/download/999.pdf",
+							sourceFulltextUrls: [],
+							links: [{ type: "display", url: "https://core.ac.uk/works/999" }],
+							journals: [{ title: "Journal of Test Metadata", identifiers: [] }],
+							identifiers: [
+								{ identifier: "999", type: "core_id" },
+								{ identifier: "10.1234/alpha", type: "doi" },
+							],
+						},
+					],
+				}),
+			);
+			return;
+		}
+		if (url.pathname === "/dblp/search/publ/api") {
+			response.writeHead(200, { "Content-Type": "application/json" });
+			response.end(
+				JSON.stringify({
+					result: {
+						hits: {
+							"@total": "1",
+							hit: [
+								{
+									"@score": "3",
+									info: {
+										// dblp appends a homonym-disambiguating number to a name
+										// and a full stop to a title; both come off in normalization.
+										authors: { author: [{ "@pid": "1/2345", text: "Ada Lovelace 0001" }] },
+										title: "Alpha & Beta RIS Study.",
+										venue: "Journal of Test Metadata",
+										year: "2024",
+										type: "Journal Articles",
+										key: "journals/jtm/Lovelace24",
+										doi: "10.1234/ALPHA",
+										ee: "https://doi.org/10.1234/alpha",
+										url: "https://dblp.org/rec/journals/jtm/Lovelace24",
+									},
+								},
+							],
+						},
+					},
+				}),
+			);
+			return;
+		}
+		if (url.pathname.startsWith("/opencitations/meta/v1/metadata/")) {
+			response.writeHead(200, { "Content-Type": "application/json" });
+			response.end(
+				JSON.stringify([
+					{
+						id: "doi:10.1234/alpha openalex:W1234 omid:br/0699",
+						title: "Alpha & Beta RIS Study",
+						author: "Lovelace, Ada [omid:ra/0601]; Hopper, Grace [omid:ra/0602]",
+						pub_date: "2024-05-02",
+						venue: "Journal of Test Metadata [issn:1234-5678 omid:br/0698]",
+						type: "journal article",
+						publisher: "Fixture Press [crossref:1 omid:ra/0603]",
+					},
+				]),
+			);
+			return;
+		}
 		if (url.pathname.startsWith("/doaj/search/articles/")) {
 			response.writeHead(500, { "Content-Type": "application/json" });
 			response.end(JSON.stringify({ error: "fixture provider failure" }));
@@ -679,6 +797,10 @@ function startAcademicResearchFixture() {
 					FORGE_ACADEMIC_PUBMED_URL: `${origin}/pubmed`,
 					FORGE_ACADEMIC_ARXIV_URL: `${origin}/arxiv`,
 					FORGE_ACADEMIC_DOAJ_URL: `${origin}/doaj`,
+					FORGE_ACADEMIC_OPENALEX_URL: `${origin}/openalex`,
+					FORGE_ACADEMIC_CORE_URL: `${origin}/core`,
+					FORGE_ACADEMIC_DBLP_URL: `${origin}/dblp`,
+					FORGE_ACADEMIC_OPENCITATIONS_URL: `${origin}/opencitations`,
 					FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1",
 				},
 				requests,
@@ -4781,6 +4903,91 @@ test("web-research deep records unsafe result URLs as failed sources", async () 
 	});
 });
 
+test("web-research reference-resolve answers on stdout and caches the index it read", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		let served = 0;
+		const server = createServer((request, response) => {
+			served += 1;
+			response.writeHead(200, { "Content-Type": "text/html" });
+			response.end('<html><body><a href="entries/madhyamaka/">Madhyamaka</a><a href="entries/truth/">Truth</a></body></html>');
+		});
+		await new Promise((ready) => server.listen(0, "127.0.0.1", ready));
+		const origin = `http://127.0.0.1:${server.address().port}`;
+		const cacheDirectory = join(workspace, "cache");
+		const environment = {
+			FORGE_SEARCH_SEP_URL: origin,
+			FORGE_WEB_RESEARCH_CACHE_DIR: cacheDirectory,
+			FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1",
+		};
+		try {
+			const first = jsonOutput(
+				await runAsyncWithEnvironment(
+					"node",
+					[script("web-research", "web-research.mjs"), "reference-resolve", "Madhyamaka", "--provider", "sep"],
+					environment,
+				),
+			);
+			assert.equal(first.provider, "sep");
+			assert.deepEqual(first.failures, []);
+			// Unranked and unfiltered: the caller does the matching, so `Truth`
+			// comes back alongside the entry that is actually about the subject.
+			assert.deepEqual(
+				first.candidates.map((entry) => entry.title),
+				["Madhyamaka", "Truth"],
+			);
+			assert.equal(first.candidates[0].url, "https://plato.stanford.edu/entries/madhyamaka/");
+			assert.equal(served, 1);
+
+			// The cache is on disk, not in the process: this is a second process.
+			jsonOutput(
+				await runAsyncWithEnvironment(
+					"node",
+					[script("web-research", "web-research.mjs"), "reference-resolve", "Truth", "--provider", "sep"],
+					environment,
+				),
+			);
+			assert.equal(served, 1, "a 305 KB index must not be refetched per lookup");
+
+			// Stale beats nothing. An index a week old still resolves every entry
+			// that existed a week ago; a failed fetch resolves none of them, and
+			// "no source" is the most misleading thing this pipeline can report.
+			const [cached] = readdirSync(join(cacheDirectory, "index")).map((name) => join(cacheDirectory, "index", name));
+			const eightDaysAgo = new Date(Date.now() - 8 * 24 * 3600 * 1000);
+			utimesSync(cached, eightDaysAgo, eightDaysAgo);
+			await new Promise((closed) => {
+				server.closeAllConnections();
+				server.close(closed);
+			});
+			const stale = jsonOutput(
+				await runAsyncWithEnvironment(
+					"node",
+					[script("web-research", "web-research.mjs"), "reference-resolve", "Madhyamaka", "--provider", "sep"],
+					environment,
+				),
+			);
+			assert.equal(stale.candidates.length, 2, "the expired copy still answers");
+			assert.match(stale.failures[0].error, /stale cached index/);
+		} finally {
+			server.closeAllConnections();
+			server.close();
+		}
+	});
+});
+
+test("web-research reference-resolve refuses a keyed provider rather than guessing", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const report = jsonOutput(
+			await runAsyncWithEnvironment(
+				"node",
+				[script("web-research", "web-research.mjs"), "reference-resolve", "anything", "--provider", "exa"],
+				{ FORGE_WEB_RESEARCH_CACHE_DIR: join(workspace, "cache"), FORGE_API_KEY_EXA: "" },
+			),
+		);
+		assert.deepEqual(report.candidates, []);
+		assert.match(report.failures[0].error, /no API key configured/);
+	});
+});
+
 test("web-research academic dedupes works and exports RIS artifacts", async () => {
 	await withAsyncWorkspace(async (workspace) => {
 		const fixture = await startAcademicResearchFixture();
@@ -4828,6 +5035,97 @@ test("web-research academic dedupes works and exports RIS artifacts", async () =
 			const risManifest = JSON.parse(readFileSync(join(academicRun, "ris_manifest.json"), "utf8"));
 			assert.equal(risManifest.records.length, 3);
 			for (const record of risManifest.records) assert.equal(existsSync(join(academicRun, record.risPath)), true);
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("web-research academic folds OpenAlex, CORE, DBLP and OpenCitations into one work", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startAcademicResearchFixture();
+		try {
+			const academicRun = join(workspace, "academic-new-providers");
+			const cacheDirectory = join(workspace, "cache");
+			const result = jsonOutput(
+				await runAsyncWithEnvironment(
+					"node",
+					[
+						script("web-research", "web-research.mjs"),
+						"academic",
+						"alpha beta scholarly metadata",
+						"--output",
+						academicRun,
+						"--providers",
+						"crossref,openalex,core,dblp,opencitations",
+						"--limit",
+						"5",
+					],
+					{ ...fixture.environment, FORGE_WEB_RESEARCH_CACHE_DIR: cacheDirectory },
+				),
+			);
+			assert.equal(result.valid, true);
+			const works = readFileSync(join(academicRun, "works.jsonl"), "utf8")
+				.trim()
+				.split(/\r?\n/)
+				.map((line) => JSON.parse(line));
+			const alpha = works.find((work) => work.identifiers.doi === "10.1234/alpha");
+			assert.ok(alpha, "the five providers describe one work, not five");
+			// Crossref outranks OpenAlex for abstracts, and OpenAlex outranks CORE.
+			assert.equal(alpha.abstract_best, "Crossref abstract for the alpha study.");
+			// Identifiers merge across providers rather than one winning outright.
+			assert.equal(alpha.identifiers.openalex_id, "https://openalex.org/W1234");
+			assert.equal(alpha.identifiers.omid, "br/0699");
+			assert.equal(alpha.identifiers.core_id, "999");
+			assert.equal(alpha.identifiers.dblp_key, "journals/jtm/Lovelace24");
+
+			const provenance = readFileSync(join(academicRun, "field_provenance.jsonl"), "utf8")
+				.trim()
+				.split(/\r?\n/)
+				.map((line) => JSON.parse(line));
+			// OpenAlex ships abstracts as {word: [positions]}; rebuilding has to
+			// order by position rather than by key.
+			const openAlexAbstract = provenance.find((row) => row.field_name === "abstract_best" && row.source_provider === "openalex");
+			assert.equal(openAlexAbstract.value, "OpenAlex abstract alpha study");
+			// dblp appends a homonym-disambiguating number to a name and a full
+			// stop to a title.
+			const dblpAuthors = provenance.find((row) => row.field_name === "authors" && row.source_provider === "dblp");
+			assert.equal(dblpAuthors.value[0].name, "Ada Lovelace");
+			const dblpTitle = provenance.find((row) => row.field_name === "canonical_title" && row.source_provider === "dblp");
+			assert.equal(dblpTitle.value, "Alpha & Beta RIS Study");
+			// OpenCitations packs every identifier into one string and brackets the
+			// venue's; both come apart in normalization.
+			const openCitationsVenue = provenance.find((row) => row.field_name === "venue_name" && row.source_provider === "opencitations");
+			assert.equal(openCitationsVenue.value, "Journal of Test Metadata");
+
+			// OpenAlex reports its remaining daily allowance in every response, and
+			// the ledger records what it said rather than a local guess.
+			const ledger = JSON.parse(readFileSync(join(cacheDirectory, "budget.json"), "utf8"));
+			const [day] = Object.keys(ledger.days);
+			assert.equal(ledger.days[day].openalex.remainingUsd, 0.098);
+			assert.equal(ledger.days[day].openalex.limitUsd, 0.1);
+			assert.equal(ledger.days[day].openalex.calls, 1);
+		} finally {
+			await fixture.close();
+		}
+	});
+});
+
+test("web-research academic redacts a provider key before archiving the request URL", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const fixture = await startAcademicResearchFixture();
+		try {
+			const academicRun = join(workspace, "academic-redaction");
+			await runAsyncWithEnvironment(
+				"node",
+				[script("web-research", "web-research.mjs"), "academic", "alpha", "--output", academicRun, "--providers", "pubmed", "--limit", "2"],
+				{ ...fixture.environment, FORGE_API_KEY_PUBMED: "sekrit-ncbi-key" },
+			);
+			const journal = readFileSync(join(academicRun, "provider_requests.jsonl"), "utf8");
+			assert.equal(journal.includes("sekrit-ncbi-key"), false, "the key must never reach a file on disk");
+			assert.match(journal, /api_key=REDACTED/);
+			// The request itself still carried the real key.
+			assert.ok(fixture.requests.some((entry) => entry.search.includes("api_key=sekrit-ncbi-key")));
 		} finally {
 			await fixture.close();
 		}

@@ -36,8 +36,11 @@ import {
 	sourceIdForUrl as acquisitionSourceIdForUrl,
 	writeAcquisitionArtifacts,
 } from "./acquisition.mjs";
+import { HostLimiter, WEB_RESEARCH_HOST_RULES, hostForUrl, httpRequest, redactSecrets } from "../../../lib/http-fetch.mjs";
+import { providerBudgetState, recordProviderSpend, reportedRateLimit } from "./provider-budget.mjs";
 import {
 	pingSearxng,
+	referenceCandidates,
 	searchLimiter,
 	searchProviderAvailability,
 	searchProviderBase,
@@ -46,7 +49,7 @@ import {
 	searchResultRecord,
 	searchSearxng,
 } from "./search-providers.mjs";
-import { routeQuery, runRoutedSearch } from "./search-router.mjs";
+import { routeQuery, runRoutedSearch, searchProviderBudgets } from "./search-router.mjs";
 
 const DEFAULT_USER_AGENT = ACQUISITION_DEFAULT_USER_AGENT;
 const DEFAULT_TIMEOUT_MS = ACQUISITION_DEFAULT_TIMEOUT_MS;
@@ -88,38 +91,62 @@ const DEEP_MANIFEST_COLUMNS = [
 	"duplicate_of",
 	"error",
 ];
-const ACADEMIC_DEFAULT_PROVIDERS = ["crossref", "semantic-scholar", "europepmc", "pubmed", "arxiv", "datacite", "openaire", "doaj"];
+const ACADEMIC_DEFAULT_PROVIDERS = [
+	"crossref",
+	"openalex",
+	"semantic-scholar",
+	"europepmc",
+	"pubmed",
+	"arxiv",
+	"core",
+	"dblp",
+	"datacite",
+	"openaire",
+	"doaj",
+];
 const ACADEMIC_PROVIDER_BASES = {
 	crossref: "https://api.crossref.org",
+	openalex: "https://api.openalex.org",
 	"semantic-scholar": "https://api.semanticscholar.org",
 	europepmc: "https://www.ebi.ac.uk/europepmc/webservices/rest",
 	pubmed: "https://eutils.ncbi.nlm.nih.gov/entrez/eutils",
 	arxiv: "https://export.arxiv.org/api",
+	core: "https://api.core.ac.uk/v3",
+	dblp: "https://dblp.org",
 	datacite: "https://api.datacite.org",
 	openaire: "https://api.openaire.eu",
 	doaj: "https://doaj.org/api",
+	opencitations: "https://api.opencitations.net",
 	unpaywall: "https://api.unpaywall.org/v2",
 };
 const ACADEMIC_PROVIDER_ENV = {
 	crossref: "FORGE_ACADEMIC_CROSSREF_URL",
+	openalex: "FORGE_ACADEMIC_OPENALEX_URL",
 	"semantic-scholar": "FORGE_ACADEMIC_SEMANTIC_SCHOLAR_URL",
 	europepmc: "FORGE_ACADEMIC_EUROPEPMC_URL",
 	pubmed: "FORGE_ACADEMIC_PUBMED_URL",
 	arxiv: "FORGE_ACADEMIC_ARXIV_URL",
+	core: "FORGE_ACADEMIC_CORE_URL",
+	dblp: "FORGE_ACADEMIC_DBLP_URL",
 	datacite: "FORGE_ACADEMIC_DATACITE_URL",
 	openaire: "FORGE_ACADEMIC_OPENAIRE_URL",
 	doaj: "FORGE_ACADEMIC_DOAJ_URL",
+	opencitations: "FORGE_ACADEMIC_OPENCITATIONS_URL",
 	unpaywall: "FORGE_ACADEMIC_UNPAYWALL_URL",
 };
 const ACADEMIC_PROVIDER_LABELS = {
 	crossref: "Crossref",
+	openalex: "OpenAlex",
 	"semantic-scholar": "Semantic Scholar",
 	europepmc: "Europe PMC",
 	pubmed: "PubMed",
 	arxiv: "arXiv",
+	core: "CORE",
+	dblp: "DBLP",
 	datacite: "DataCite",
 	openaire: "OpenAIRE",
 	doaj: "DOAJ",
+	opencitations: "OpenCitations",
 	unpaywall: "Unpaywall",
 };
 const quietJsdomConsole = new VirtualConsole();
@@ -301,7 +328,9 @@ async function processUrlQueue(runDirectory, options, acquisitionContext) {
  */
 async function routedSearch(query, base, searchParams, limit, flags) {
 	const services = resolveConnectedServices({ searxngUrl: flags?.searxng });
-	const routed = routeQuery(query, { providers: flags?.providers, apiKeys: services.apiKeys });
+	// Read once per search rather than once per provider: the ledger is a file.
+	const budget = searchProviderBudgets();
+	const routed = routeQuery(query, { providers: flags?.providers, apiKeys: services.apiKeys, budget });
 	const context = (id) => ({
 		base: id === "searxng" ? base : searchProviderBase(id, flags ?? {}),
 		userAgent: searchParams.userAgent ?? DEFAULT_USER_AGENT,
@@ -730,10 +759,19 @@ function academicProviderList(flags, classification) {
 		: null;
 	const providers = requested ?? ACADEMIC_DEFAULT_PROVIDERS;
 	const unique = [...new Set(providers)];
+	// The DOI-driven providers go last, because what they take as input is what
+	// the search providers ahead of them produced. OpenCitations needs no
+	// credential, so it is appended unconditionally and simply does nothing when
+	// nothing upstream found a DOI; Unpaywall needs a contact email.
+	if (!requested) unique.push("opencitations");
 	if (flags.contactEmail || process.env.FORGE_ACADEMIC_CONTACT_EMAIL || process.env.UNPAYWALL_EMAIL) unique.push("unpaywall");
 	return unique.filter((provider) => {
 		if (!ACADEMIC_PROVIDER_BASES[provider]) return false;
-		if (provider === "arxiv" && classification.domain !== "technical-preprint" && classification.domain !== "general") return flags.providers?.includes(provider);
+		// arXiv and DBLP are both discipline-bound: a biomedical query has no
+		// business in a preprint server or a computer-science bibliography.
+		if ((provider === "arxiv" || provider === "dblp") && classification.domain !== "technical-preprint" && classification.domain !== "general") {
+			return flags.providers?.includes(provider);
+		}
 		if (provider === "pubmed" && classification.domain !== "biomedical" && !flags.providers?.includes(provider)) return true;
 		return true;
 	});
@@ -801,18 +839,32 @@ function fieldValueMap(record) {
 	};
 }
 
+/**
+ * Which provider's value wins when two disagree; lower is preferred. Today this
+ * decides only `abstract_best`, but it is the general tiebreak.
+ *
+ * The relative order of the original nine is unchanged -- the newcomers are
+ * inserted between them. OpenAlex sits above arXiv because its abstract is the
+ * published one where arXiv's is the preprint's, and CORE below Semantic Scholar
+ * because CORE indexes repository deposits whose abstracts are often truncated
+ * by the repository rather than the publisher.
+ */
 function providerPriority(provider) {
 	return {
 		pubmed: 1,
 		europepmc: 2,
 		crossref: 3,
-		arxiv: 4,
-		"semantic-scholar": 5,
-		datacite: 6,
-		openaire: 7,
-		doaj: 8,
-		unpaywall: 9,
-	}[provider] ?? 10;
+		openalex: 4,
+		arxiv: 5,
+		"semantic-scholar": 6,
+		core: 7,
+		datacite: 8,
+		openaire: 9,
+		doaj: 10,
+		dblp: 11,
+		opencitations: 12,
+		unpaywall: 13,
+	}[provider] ?? 14;
 }
 
 function preferValue(field, current, incoming, currentProvider, incomingProvider) {
@@ -1022,6 +1074,21 @@ function providerCapabilities(provider) {
 			strengths: ["DOI metadata", "publisher-deposited bibliographic verification"],
 			limits: ["abstract coverage varies", "not full-text access"],
 		},
+		openalex: {
+			...common,
+			optionalAuth: true,
+			// Checked live on 2026-07-31: the anonymous tier answers HTTP 200 with
+			// x-ratelimit-limit-usd: 0.1 per day. A keyword search costs $0.001 (10
+			// credits) and a single-record lookup $0.0001, so roughly 100 searches
+			// or 1,000 lookups a day with no key at all; a free key raises the
+			// ceiling to $1/day. Every response reports the remaining balance, which
+			// is what the budget ledger records rather than guessing.
+			rateLimit: "$0.10/day anonymous, $1.00/day with a free key; balance reported per response",
+			dailyBudget: { usd: 0.1, keyedUsd: 1, reportedBy: "x-ratelimit-remaining-usd" },
+			fields: ["id", "doi", "title", "authorships", "primary_location", "open_access", "type", "publication_date"],
+			strengths: ["broadest single academic index", "author disambiguation", "open-access status per work"],
+			limits: ["abstracts are an inverted index, not prose", "a daily spend cap rather than a request rate"],
+		},
 		"semantic-scholar": {
 			...common,
 			optionalAuth: true,
@@ -1048,6 +1115,33 @@ function providerCapabilities(provider) {
 			strengths: ["technical preprints", "stable arXiv identifiers"],
 			limits: ["limited disciplinary coverage", "preprints are not peer-reviewed"],
 		},
+		core: {
+			...common,
+			optionalAuth: true,
+			// Checked live on 2026-07-31: the search endpoint answers without a key,
+			// reporting x-ratelimit-limit: 10 per window. A free key raises it. Note
+			// the path needs its trailing slash -- /v3/search/works?q= is a 301.
+			rateLimit: "10 requests per window without a key; free key raises it",
+			fields: ["id", "doi", "title", "abstract", "authors", "yearPublished", "downloadUrl", "sourceFulltextUrls"],
+			strengths: ["open-access full text across institutional repositories", "direct PDF URLs"],
+			limits: ["repository deposits, so metadata quality varies by source", "duplicate deposits of one work are common"],
+		},
+		dblp: {
+			...common,
+			fields: ["title", "authors", "venue", "year", "doi", "ee", "type"],
+			strengths: ["computer-science bibliography curated by hand", "venue and series names are canonical"],
+			limits: ["computer science only", "no abstracts"],
+		},
+		opencitations: {
+			...common,
+			// Lookup-only: it takes a DOI and returns that work's record or its
+			// citation links. Nothing here answers a keyword query, so the runner
+			// hands it the DOIs the search providers already found.
+			requiresKnownDois: true,
+			fields: ["id", "title", "author", "pub_date", "venue", "publisher", "type"],
+			strengths: ["open citation data", "resolves a DOI to OMID, OpenAlex and PMID in one call"],
+			limits: ["lookup by DOI only, no keyword search", "no abstracts"],
+		},
 		datacite: {
 			...common,
 			fields: ["doi", "resourceType", "creators", "descriptions", "publisher"],
@@ -1069,6 +1163,7 @@ function providerCapabilities(provider) {
 		unpaywall: {
 			...common,
 			authRequired: true,
+			requiresKnownDois: true,
 			fields: ["doi", "oa_status", "best_oa_location", "oa_locations"],
 			strengths: ["legal OA copy discovery"],
 			limits: ["requires DOI and email", "not a search provider"],
@@ -1076,19 +1171,50 @@ function providerCapabilities(provider) {
 	}[provider];
 }
 
+/**
+ * Minimum milliseconds between calls to one academic host, where the service
+ * publishes a figure. NCBI allows three requests a second without a key and ten
+ * with one; Crossref asks for politeness rather than publishing a number.
+ * Everything else here is documented as "be reasonable", and one shared limiter
+ * across a run is what that amounts to.
+ */
+const ACADEMIC_PROVIDER_SPACING_MS = {
+	pubmed: 350,
+	openalex: 200,
+	core: 1000,
+	dblp: 1000,
+	opencitations: 500,
+};
+
+// One limiter for the whole process, so two providers on the same host (nothing
+// today, but Europe PMC and its neighbours move around) share one budget.
+const academicLimiter = new HostLimiter();
+
 function rawResponsePath(runDirectory, provider, requestId, extension) {
 	mkdirSync(join(runDirectory, "raw", provider), { recursive: true });
 	return join("raw", provider, `${requestId}.${extension}`);
 }
 
+/**
+ * One provider request, archived.
+ *
+ * The archiving is the point: every raw response is written under `raw/` and
+ * journalled into provider_requests.jsonl, so a work record can be traced back
+ * to the bytes it was derived from. The transport underneath is the shared one,
+ * which is what gives an academic provider the retry ladder, per-host spacing
+ * and 429 handling that this function used to lack entirely.
+ *
+ * `record.url` is redacted before it is written. Several providers take their
+ * key as a query parameter, and this record goes to disk.
+ */
 async function providerFetch(runDirectory, provider, url, options, state) {
 	const startedAt = nowIso();
 	const requestId = `${provider}-${sha256(`${startedAt}:${url}`).slice(0, 12)}`;
 	const record = {
 		request_id: requestId,
 		provider,
-		url,
-		method: "GET",
+		url: redactSecrets(url),
+		method: options.method ?? "GET",
 		status: "failed",
 		http_status: null,
 		started_at: startedAt,
@@ -1097,15 +1223,23 @@ async function providerFetch(runDirectory, provider, url, options, state) {
 		raw_hash: null,
 		error: null,
 	};
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), options.timeoutMs);
 	try {
-		assertFetchableUrl(url);
-		const response = await fetch(url, {
-			signal: controller.signal,
-			headers: { "user-agent": options.userAgent, accept: options.accept ?? "application/json, application/xml;q=0.9, text/xml;q=0.8" },
+		const response = await httpRequest(url, {
+			method: options.method ?? "GET",
+			body: options.body,
+			headers: {
+				"user-agent": options.userAgent,
+				accept: options.accept ?? "application/json, application/xml;q=0.9, text/xml;q=0.8",
+				...(options.headers ?? {}),
+			},
+			timeoutMs: options.timeoutMs,
+			hostRules: WEB_RESEARCH_HOST_RULES,
+			limiter: academicLimiter,
+			spacingMs: ACADEMIC_PROVIDER_SPACING_MS[provider],
 		});
 		record.http_status = response.status;
+		record.rate_limit = reportedRateLimit(response.headers);
+		recordProviderSpend(provider, { headers: response.headers });
 		const text = await response.text();
 		const hash = sha256(text);
 		const contentType = response.headers.get("content-type") ?? "";
@@ -1125,15 +1259,24 @@ async function providerFetch(runDirectory, provider, url, options, state) {
 		state.providerRequests.push(record);
 		state.providerErrors.push({
 			provider,
-			url,
+			url: record.url,
 			error: record.error,
 			http_status: record.http_status,
 			recorded_at: record.ended_at,
 		});
 		return { text: "", json: null, record, error: record.error };
-	} finally {
-		clearTimeout(timer);
 	}
+}
+
+/**
+ * providerFetch options carrying `Authorization: Bearer <key>` when one is
+ * configured, and unchanged when none is. Both OpenAlex and CORE accept the key
+ * as a query parameter too; a header keeps it out of the archived URL entirely.
+ */
+function withBearer(context, provider) {
+	const key = context.apiKeys?.[provider];
+	if (!key) return context.options;
+	return { ...context.options, headers: { ...(context.options.headers ?? {}), authorization: `Bearer ${key}` } };
 }
 
 function buildUrl(base, pathname, params = {}) {
@@ -1190,6 +1333,174 @@ function normalizeCrossrefItem(item) {
 			identifiers: "message.items[].DOI",
 		},
 		transformations: { abstract_best: item.abstract ? "stripped XML/HTML tags and normalized whitespace" : null, identifiers: "normalized DOI" },
+	};
+}
+
+/**
+ * OpenAlex stores abstracts as an inverted index -- {word: [positions]} -- which
+ * is how it distributes text it may not redistribute verbatim. Rebuilding it is
+ * lossless for word order and lossy for whitespace, which is what a normalized
+ * abstract is anyway.
+ */
+function abstractFromInvertedIndex(index) {
+	if (!index || typeof index !== "object" || Array.isArray(index)) return null;
+	const words = [];
+	for (const [word, positions] of Object.entries(index)) {
+		for (const position of asArray(positions)) {
+			if (Number.isInteger(position)) words[position] = word;
+		}
+	}
+	const text = words.filter((word) => word !== undefined).join(" ");
+	return normalizeWhitespace(text) || null;
+}
+
+function normalizeOpenAlexItem(item) {
+	const location = item.primary_location ?? item.best_oa_location ?? null;
+	const source = location?.source ?? null;
+	const openAccess = item.open_access ?? {};
+	const fullText = [item.best_oa_location?.pdf_url, location?.pdf_url, openAccess.oa_url].filter(Boolean);
+	return {
+		canonical_title: normalizeWhitespace(item.title ?? item.display_name),
+		abstract_best: abstractFromInvertedIndex(item.abstract_inverted_index),
+		authors: asArray(item.authorships).map((authorship) =>
+			compactObject({
+				name: authorship.author?.display_name ?? authorship.raw_author_name,
+				orcid: authorship.author?.orcid ?? null,
+				openalex_author_id: authorship.author?.id ?? null,
+			}),
+		),
+		publication_year: Number.isInteger(item.publication_year) ? item.publication_year : null,
+		publication_date: item.publication_date ?? null,
+		venue_name: source?.display_name ?? null,
+		venue_type: source?.type ?? null,
+		publisher: source?.host_organization_name ?? null,
+		type: item.type === "article" && /preprint/i.test(source?.type ?? "") ? "preprint" : (item.type ?? "unknown"),
+		identifiers: compactObject({
+			doi: normalizeDoi(item.doi ?? item.ids?.doi),
+			pmid: normalizeIdentifier(String(item.ids?.pmid ?? "").replace(/^https?:\/\/\S*\/(\d+)$/, "$1")),
+			openalex_id: normalizeIdentifier(item.id),
+			issn: asArray(source?.issn),
+		}),
+		urls: [location?.landing_page_url, item.id].filter(Boolean),
+		oa_status: openAccess.oa_status ?? null,
+		oa_locations: fullText.map((url) => ({ pdfUrl: url })),
+		full_text_candidates: fullText.map((url) => ({ url, source: "OpenAlex" })),
+		licenses: location?.license ? [{ type: location.license }] : [],
+		field_paths: {
+			canonical_title: "results[].title",
+			abstract_best: "results[].abstract_inverted_index",
+			identifiers: "results[].ids",
+			oa_status: "results[].open_access.oa_status",
+		},
+		transformations: {
+			abstract_best: item.abstract_inverted_index ? "rebuilt from the inverted index" : null,
+			identifiers: "normalized DOI",
+		},
+	};
+}
+
+function normalizeCoreItem(item) {
+	const identifiers = asArray(item.identifiers);
+	const doi = item.doi ?? identifiers.find((entry) => entry?.type === "doi")?.identifier;
+	const fullText = [item.downloadUrl, ...asArray(item.sourceFulltextUrls)].filter(Boolean);
+	const landing = asArray(item.links).find((link) => link?.type === "display")?.url;
+	return {
+		canonical_title: normalizeWhitespace(item.title),
+		abstract_best: normalizeWhitespace(item.abstract),
+		authors: asArray(item.authors).map((author) => compactObject({ name: normalizeWhitespace(author?.name ?? author) })),
+		publication_year: Number.isInteger(item.yearPublished) ? item.yearPublished : yearFromDate(item.publishedDate),
+		publication_date: item.publishedDate || null,
+		venue_name: asArray(item.journals).map((journal) => journal?.title).find(Boolean) ?? null,
+		venue_type: asArray(item.journals).some((journal) => journal?.title) ? "journal" : null,
+		publisher: item.publisher || null,
+		type: /thesis/i.test(item.documentType ?? "") ? "thesis" : "article",
+		identifiers: compactObject({
+			doi: normalizeDoi(doi),
+			core_id: normalizeIdentifier(identifiers.find((entry) => entry?.type === "core_id")?.identifier ?? item.id),
+		}),
+		urls: [landing, ...fullText].filter(Boolean),
+		// Every CORE hit is an open-access deposit; that is what the index is.
+		oa_status: fullText.length > 0 ? "green" : null,
+		full_text_candidates: fullText.map((url) => ({ url, source: "CORE" })),
+		field_paths: { canonical_title: "results[].title", abstract_best: "results[].abstract", identifiers: "results[].identifiers" },
+		transformations: { identifiers: "normalized DOI" },
+	};
+}
+
+/**
+ * OpenCitations Meta packs every identifier a work has into one space-separated
+ * string -- "doi:10.2307/3178066 openalex:W3146083582 omid:br/06220235134" --
+ * and does the same for venue and publisher, each with its identifiers in
+ * brackets. Splitting them is the whole normalization.
+ */
+function parseOpenCitationsIds(value) {
+	const ids = {};
+	for (const token of String(value ?? "").split(/\s+/)) {
+		const [scheme, ...rest] = token.split(":");
+		if (!scheme || rest.length === 0) continue;
+		ids[scheme.toLowerCase()] = rest.join(":");
+	}
+	return ids;
+}
+
+function openCitationsLabel(value) {
+	return normalizeWhitespace(String(value ?? "").replace(/\s*\[[^\]]*\]\s*$/, "")) || null;
+}
+
+function normalizeOpenCitationsItem(item) {
+	const ids = parseOpenCitationsIds(item.id);
+	const venueIds = parseOpenCitationsIds(String(item.venue ?? "").match(/\[([^\]]*)\]/)?.[1] ?? "");
+	return {
+		canonical_title: normalizeWhitespace(item.title),
+		abstract_best: null,
+		// "Haraway, Donna [omid:ra/06220677100]; Chen, Yamei [omid:...]"
+		authors: String(item.author ?? "")
+			.split(";")
+			.map((entry) => openCitationsLabel(entry))
+			.filter(Boolean)
+			.map((name) => ({ name })),
+		publication_year: yearFromDate(item.pub_date),
+		publication_date: item.pub_date || null,
+		venue_name: openCitationsLabel(item.venue),
+		venue_type: /journal/i.test(item.type ?? "") ? "journal" : null,
+		publisher: openCitationsLabel(item.publisher),
+		type: /journal article/i.test(item.type ?? "") ? "article" : (item.type || "unknown"),
+		identifiers: compactObject({
+			doi: normalizeDoi(ids.doi),
+			pmid: normalizeIdentifier(ids.pmid),
+			omid: normalizeIdentifier(ids.omid),
+			openalex_id: normalizeIdentifier(ids.openalex),
+			issn: venueIds.issn ? [venueIds.issn] : [],
+		}),
+		urls: ids.doi ? [`https://doi.org/${ids.doi}`] : [],
+		field_paths: { canonical_title: "[].title", identifiers: "[].id", venue_name: "[].venue" },
+		transformations: { identifiers: "split the space-separated identifier string", venue_name: "stripped the bracketed identifiers" },
+	};
+}
+
+function normalizeDblpItem(hit) {
+	const info = hit?.info ?? hit ?? {};
+	// One author comes back as an object, several as an array. dblp does this
+	// everywhere, which is why asArray exists.
+	const authors = asArray(info.authors?.author).map((author) =>
+		// "Fei-Yue Wang 0001" -- the trailing number disambiguates people who
+		// share a name and is not part of it.
+		compactObject({ name: normalizeWhitespace(String(author?.text ?? author).replace(/\s+\d{4}$/, "")), dblp_pid: author?.["@pid"] ?? null }),
+	);
+	return {
+		canonical_title: normalizeWhitespace(info.title).replace(/\.$/, ""),
+		abstract_best: null,
+		authors,
+		publication_year: Number.parseInt(info.year, 10) || null,
+		publication_date: info.year ? String(info.year) : null,
+		venue_name: firstText(info.venue),
+		venue_type: /journal/i.test(info.type ?? "") ? "journal" : /conference|proceedings/i.test(info.type ?? "") ? "proceedings" : null,
+		publisher: info.publisher ?? null,
+		type: /journal/i.test(info.type ?? "") ? "article" : /informal|preprint/i.test(info.type ?? "") ? "preprint" : "proceedings",
+		identifiers: compactObject({ doi: normalizeDoi(info.doi), dblp_key: normalizeIdentifier(info.key) }),
+		urls: [info.ee, info.url].filter(Boolean),
+		field_paths: { canonical_title: "result.hits.hit[].info.title", identifiers: "result.hits.hit[].info.doi" },
+		transformations: { authors: "stripped dblp's homonym-disambiguating suffix", identifiers: "normalized DOI" },
 	};
 }
 
@@ -1415,17 +1726,79 @@ const ACADEMIC_PROVIDERS = {
 		hydrate: async (record) => record,
 		normalize: normalizeCrossrefItem,
 	},
+	openalex: {
+		providerCapabilities: () => providerCapabilities("openalex"),
+		async search(context) {
+			const url = buildUrl(context.base, "/works", { search: context.query, per_page: context.limit });
+			// The key goes in a header rather than the `api_key` query parameter
+			// OpenAlex also accepts, so it never reaches the archived request URL
+			// in the first place -- redaction is the backstop, not the plan.
+			const response = await providerFetch(context.runDirectory, "openalex", url, withBearer(context, "openalex"), context.state);
+			return asArray(response.json?.results);
+		},
+		lookup: async () => [],
+		hydrate: async (record) => record,
+		normalize: normalizeOpenAlexItem,
+	},
 	"semantic-scholar": {
 		providerCapabilities: () => providerCapabilities("semantic-scholar"),
 		async search(context) {
 			const fields = "paperId,externalIds,title,authors,year,venue,abstract,citationCount,influentialCitationCount,publicationTypes,fieldsOfStudy,openAccessPdf,url,journal,publicationDate";
 			const url = buildUrl(context.base, "/graph/v1/paper/search", { query: context.query, limit: context.limit, fields });
-			const response = await providerFetch(context.runDirectory, "semantic-scholar", url, context.options, context.state);
+			// An introductory key grants 1 RPS, which is often *slower* than the
+			// shared anonymous pool. It is supported because the capability table
+			// has always claimed it was, not because it is an upgrade.
+			const key = context.apiKeys?.["semantic-scholar"];
+			const options = key ? { ...context.options, headers: { "x-api-key": key } } : context.options;
+			const response = await providerFetch(context.runDirectory, "semantic-scholar", url, options, context.state);
 			return asArray(response.json?.data);
 		},
 		lookup: async () => [],
 		hydrate: async (record) => record,
 		normalize: normalizeSemanticScholarItem,
+	},
+	core: {
+		providerCapabilities: () => providerCapabilities("core"),
+		async search(context) {
+			// The trailing slash is load-bearing: /v3/search/works?q= is a 301.
+			const url = buildUrl(context.base, "/search/works/", { q: context.query, limit: context.limit });
+			const response = await providerFetch(context.runDirectory, "core", url, withBearer(context, "core"), context.state);
+			return asArray(response.json?.results);
+		},
+		lookup: async () => [],
+		hydrate: async (record) => record,
+		normalize: normalizeCoreItem,
+	},
+	dblp: {
+		providerCapabilities: () => providerCapabilities("dblp"),
+		async search(context) {
+			const url = buildUrl(context.base, "/search/publ/api", { q: context.query, format: "json", h: context.limit });
+			const response = await providerFetch(context.runDirectory, "dblp", url, context.options, context.state);
+			return asArray(response.json?.result?.hits?.hit);
+		},
+		lookup: async () => [],
+		hydrate: async (record) => record,
+		normalize: normalizeDblpItem,
+	},
+	opencitations: {
+		providerCapabilities: () => providerCapabilities("opencitations"),
+		/**
+		 * Lookup-only, like unpaywall: OpenCitations Meta answers a DOI, not a
+		 * phrase. It is run last so the DOIs the search providers found are what
+		 * it is given.
+		 */
+		async search(context) {
+			const records = [];
+			for (const doi of [...new Set(context.knownDois)].filter(Boolean).slice(0, context.limit)) {
+				const url = `${context.base}/meta/v1/metadata/doi:${encodeURIComponent(doi)}`;
+				const response = await providerFetch(context.runDirectory, "opencitations", url, context.options, context.state);
+				for (const entry of asArray(response.json)) records.push(entry);
+			}
+			return records;
+		},
+		lookup: async () => [],
+		hydrate: async (record) => record,
+		normalize: normalizeOpenCitationsItem,
 	},
 	europepmc: {
 		providerCapabilities: () => providerCapabilities("europepmc"),
@@ -1441,6 +1814,10 @@ const ACADEMIC_PROVIDERS = {
 	pubmed: {
 		providerCapabilities: () => providerCapabilities("pubmed"),
 		async search(context) {
+			// NCBI allows three requests a second without a key and ten with one.
+			// The capability table has claimed optionalAuth since it was written;
+			// this is the line that makes the claim true.
+			const apiKey = context.apiKeys?.pubmed;
 			const searchUrl = buildUrl(context.base, "/esearch.fcgi", {
 				db: "pubmed",
 				term: context.query,
@@ -1448,6 +1825,7 @@ const ACADEMIC_PROVIDERS = {
 				retmax: context.limit,
 				tool: "pi-forge",
 				email: context.contactEmail,
+				api_key: apiKey,
 			});
 			const searchResponse = await providerFetch(context.runDirectory, "pubmed", searchUrl, context.options, context.state);
 			const ids = asArray(searchResponse.json?.esearchresult?.idlist).slice(0, context.limit);
@@ -1458,6 +1836,7 @@ const ACADEMIC_PROVIDERS = {
 				retmode: "json",
 				tool: "pi-forge",
 				email: context.contactEmail,
+				api_key: apiKey,
 			});
 			const summaryResponse = await providerFetch(context.runDirectory, "pubmed", summaryUrl, context.options, context.state);
 			return ids.map((id) => ({ uid: id, summary: summaryResponse.json?.result?.[id] })).filter((item) => item.summary);
@@ -1658,7 +2037,9 @@ function buildAcademicReport(state) {
 	for (const provider of state.providers) {
 		const requests = state.providerRequests.filter((request) => request.provider === provider);
 		const errors = state.providerErrors.filter((error) => error.provider === provider);
-		lines.push(`- ${ACADEMIC_PROVIDER_LABELS[provider] ?? provider}: ${requests.length} request(s), ${errors.length} error(s)`);
+		const skip = (state.providerSkips ?? []).find((entry) => entry.provider === provider);
+		const label = ACADEMIC_PROVIDER_LABELS[provider] ?? provider;
+		lines.push(skip ? `- ${label}: not asked — ${skip.reason}` : `- ${label}: ${requests.length} request(s), ${errors.length} error(s)`);
 	}
 	lines.push("");
 	lines.push("## Works", "");
@@ -3131,8 +3512,9 @@ async function commandDoctor(options) {
 	// Which providers a query could actually reach right now. Reports whether a
 	// key is *present*, never its value.
 	const services = resolveConnectedServices({ searxngUrl: options.searxng });
+	const budget = searchProviderBudgets();
 	const providers = searchProviderList().map((id) => {
-		const availability = searchProviderAvailability(id, { apiKeys: services.apiKeys });
+		const availability = searchProviderAvailability(id, { apiKeys: services.apiKeys, budget });
 		const capability = searchProviderCapabilities(id) ?? {};
 		return {
 			id,
@@ -3140,11 +3522,16 @@ async function commandDoctor(options) {
 			reason: availability.reason,
 			authRequired: capability.authRequired === true,
 			keyConfigured: Boolean(services.apiKeys?.[id]),
+			budgetExhausted: Boolean(budget[id]?.exhausted),
 		};
 	});
 	const keyed = providers.filter((provider) => provider.authRequired && !provider.keyConfigured);
 	if (keyed.length > 0) {
 		remediation.push(`optional provider keys not set (${keyed.map((provider) => provider.id).join(", ")}); those providers are skipped`);
+	}
+	const spent = providers.filter((provider) => provider.budgetExhausted);
+	if (spent.length > 0) {
+		remediation.push(`daily budget spent for ${spent.map((provider) => provider.id).join(", ")}; those providers resume tomorrow`);
 	}
 	const report = { tools, capabilities, searxng, providers, chat, chatProbe, think, thinkProbe, embeddings, remediation };
 	if (options.json) {
@@ -3227,6 +3614,60 @@ async function commandSearch(positionals, flags) {
 	const completion = { runDirectory, query, results: results.length, params: searchParams };
 	runState = updateRunState(runDirectory, (draft) => completeResearchRun(draft, completion), { type: "run_completed", items: 1 });
 	process.stdout.write(`${JSON.stringify(runState.completion, null, 2)}\n`);
+}
+
+/**
+ * Resolve a subject name to the candidate entries one source offers.
+ *
+ * No run directory: a lookup is not a run. It answers on stdout and leaves
+ * nothing behind but the shared index cache, which is the point -- vault-wiki
+ * calls this once per note per source, and a run directory per call would be
+ * 900 directories for one expansion.
+ *
+ * Candidates come back unranked and unfiltered. Deciding which entry is *about*
+ * a subject is editorial, the caller owns that judgement, and moving it here
+ * would replace a calibrated matcher with a different one.
+ */
+async function commandReferenceResolve(positionals, flags) {
+	if (positionals.length === 0) fail("reference-resolve requires a subject");
+	if (!flags.provider) fail("reference-resolve requires --provider <id>");
+	const subject = positionals.join(" ");
+	const providerId = String(flags.provider).trim();
+	const services = resolveConnectedServices({ searxngUrl: flags.searxng });
+	const availability = searchProviderAvailability(providerId, { apiKeys: services.apiKeys, budget: searchProviderBudgets() });
+	const base = providerId === "searxng" ? searxngBase(flags.searxng) : searchProviderBase(providerId, flags);
+	const report = { provider: providerId, subject, candidates: [], failures: [] };
+	if (!availability.available) {
+		report.failures.push({ host: providerId, error: availability.reason });
+	} else if (!base) {
+		report.failures.push({ host: providerId, error: "no base URL configured" });
+	} else {
+		const staleIndexes = [];
+		try {
+			report.candidates = await referenceCandidates(providerId, subject, {
+				providerId,
+				base,
+				userAgent: flags.userAgent ?? DEFAULT_USER_AGENT,
+				timeoutMs: flags.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+				limit: flags.limit ?? 6,
+				limiter: searchLimiter,
+				apiKey: services.apiKeys?.[providerId] ?? null,
+				retrievedAt: nowIso(),
+				staleIndexes,
+			});
+		} catch (error) {
+			// Never fatal. A resolver that cannot reach its source falls through to
+			// the next source, and the caller reports "no source" -- but the reason
+			// travels with it, because a swallowed TLS error is indistinguishable
+			// from "this subject has no entry", which is the most misleading thing
+			// this pipeline could say.
+			report.failures.push({ host: hostForUrl(base) ?? providerId, error: error instanceof Error ? error.message : String(error) });
+		}
+		for (const stale of staleIndexes) {
+			report.failures.push({ host: hostForUrl(stale.key) ?? providerId, error: `served a stale cached index: ${stale.error}` });
+		}
+	}
+	process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 }
 
 async function commandRead(positionals, flags) {
@@ -3919,6 +4360,10 @@ async function commandAcademic(positionals, flags) {
 	const classification = classifyAcademicQuery(query);
 	const providers = academicProviderList(flags, classification);
 	const contactEmail = flags.contactEmail || process.env.FORGE_ACADEMIC_CONTACT_EMAIL || process.env.UNPAYWALL_EMAIL || null;
+	// Same ladder as every other service: explicit, then environment, then
+	// persisted. A provider whose key is absent runs on its anonymous tier rather
+	// than failing -- none of the academic providers requires one.
+	const { apiKeys } = resolveConnectedServices();
 	const limit = flags.limit ?? DEFAULT_LIMIT;
 	const options = {
 		userAgent: flags.userAgent ?? DEFAULT_USER_AGENT,
@@ -3945,6 +4390,11 @@ async function commandAcademic(positionals, flags) {
 		options,
 		providerRequests: [],
 		providerErrors: [],
+		// A provider that was not asked, and why. Distinct from providerErrors:
+		// nothing failed, the run declined to spend an allowance it had already
+		// spent, and a report that omitted this would look like the provider
+		// simply had nothing to say.
+		providerSkips: [],
 		works: [],
 	};
 	const sourceRecords = [];
@@ -3973,10 +4423,22 @@ async function commandAcademic(positionals, flags) {
 				const providerNormalized = [];
 				try {
 					const knownDois = normalizedRecords.map((record) => record.identifiers?.doi).filter(Boolean);
-					if (providerName !== "unpaywall" || (contactEmail && knownDois.length > 0)) {
+					// A DOI-driven provider takes what the search providers ahead of
+					// it found; with nothing to look up there is nothing to ask, and
+					// asking anyway is an error the run would then report. Declared
+					// rather than named, because this is now true of two providers and
+					// hardcoding the second is where a third goes wrong.
+					const capabilities = providerCapabilities(providerName) ?? {};
+					const hasInput = !capabilities.requiresKnownDois || knownDois.length > 0;
+					const hasCredential = providerName !== "unpaywall" || Boolean(contactEmail);
+					// OpenAlex meters by daily spend rather than by rate. Once the
+					// allowance is gone, asking again buys three retries and a 429.
+					const budget = providerBudgetState(providerName);
+					if (budget.exhausted) state.providerSkips.push({ provider: providerName, reason: budget.reason, recorded_at: nowIso() });
+					if (hasInput && hasCredential && !budget.exhausted) {
 						await runAcademicProvider(
 							providerName,
-							{ query, limit, base: providerBases[providerName], runDirectory, options, state: providerState, contactEmail, classification, knownDois },
+							{ query, limit, base: providerBases[providerName], runDirectory, options, state: providerState, contactEmail, classification, knownDois, apiKeys },
 							providerSources,
 							providerNormalized,
 						);
@@ -4035,8 +4497,10 @@ async function commandAcademic(positionals, flags) {
 			dedupeDecisions: decisions.length,
 			providerRequests: state.providerRequests.length,
 			providerErrors: state.providerErrors.length,
+			providerSkips: state.providerSkips.length,
 			risRecords: risManifest.length,
 		},
+		providerSkips: state.providerSkips,
 		providerCapabilities: Object.fromEntries(providers.map((provider) => [provider, providerCapabilities(provider)])),
 	});
 	writeJsonl(join(runDirectory, "works.jsonl"), works);
@@ -4190,6 +4654,7 @@ const FLAG_SPECS = {
 	"--item": { key: "item", value: true },
 	"--all-failed": { key: "allFailed", value: false },
 	"--read-only": { key: "readOnly", value: false },
+	"--provider": { key: "provider", value: true },
 };
 
 function parseArguments(args) {
@@ -4257,6 +4722,7 @@ function usage() {
       [--cache-dir <dir>] [--force-refresh] [--playwright-ws <ws-endpoint>] [--timeout-ms N]
   web-research.mjs academic <query...> --output <dir> [--limit N]
       [--providers <comma-separated>] [--contact-email <email>] [--timeout-ms N]
+  web-research.mjs reference-resolve <subject...> --provider <id> [--limit N] [--timeout-ms N]
   web-research.mjs validate <run-directory> [--read-only]
   web-research.mjs status <run-directory> [--json]
   web-research.mjs refresh <run-directory>
@@ -4278,6 +4744,7 @@ async function main() {
 	else if (command === "deep") await commandDeep(positionals, flags);
 	else if (command === "discover") await commandDiscover(positionals, flags);
 	else if (command === "academic") await commandAcademic(positionals, flags);
+	else if (command === "reference-resolve") await commandReferenceResolve(positionals, flags);
 	else if (command === "status") commandStatus(positionals);
 	else if (command === "refresh") commandRefresh(positionals);
 	else if (command === "retry") {

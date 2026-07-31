@@ -35,10 +35,10 @@ links them. That skill still never touches a body.
    which makes bulk drafting far slower.
 
    Two `doctor` warnings are worth acting on before a long run rather than after:
-   a **TLS failure** (this Python cannot find a CA bundle — set `SSL_CERT_FILE`,
-   on macOS to `/etc/ssl/cert.pem`), and a **throttled search backend** (SearXNG
-   answering HTTP 200 with zero results because its upstream engines have
-   rate-limited it). Either one turns a whole run into "no source resolved".
+   **no native source resolver reached its site** (web-research could not be run,
+   or every source is down), and a **throttled search backend** (SearXNG's
+   upstream engines have rate-limited it). Either one turns a whole run into
+   "no source resolved".
 3. Install the templates if `doctor` says they are missing or stale:
 
    ```bash
@@ -115,8 +115,10 @@ links them. That skill still never touches a body.
   Trick" — which no encyclopedia has an entry on — ends up held back rather than
   drafted uncited. That is the correct outcome, not a failure to explain away.
 - **Sources are looked up through their own APIs and indexes** where they have
-  them (Wikipedia, SEP, IEP), and only fall back to general web search otherwise.
-  So a rate-limited search backend degrades coverage rather than emptying the run.
+  them (Wikipedia, SEP, IEP), via web-research's provider registry, and only fall
+  back to site-restricted search otherwise. So a rate-limited search backend
+  degrades coverage rather than emptying the run. Which entry is *about* the
+  subject is still decided here, not by the source's own relevance order.
 - **`weakSources` means every source only *covers* the subject** — a broader
   encyclopedia entry that discusses it rather than an entry about it. Still
   citeable and still included in `--accept-batch`, since the reviewer sees the

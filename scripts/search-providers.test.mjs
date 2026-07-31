@@ -24,6 +24,15 @@ const ROUTES = {
 				search: [{ id: "Q2123673", label: "Anapanasati", description: "Buddhist meditation practice", concepturi: "http://www.wikidata.org/entity/Q2123673" }],
 			};
 		}
+		if (url.searchParams.get("action") === "opensearch") {
+			// A positional array, not an object: [query, titles, descriptions, urls].
+			return [
+				url.searchParams.get("search"),
+				["Anapanasati", "Anapanasati Sutta"],
+				["", ""],
+				["https://en.wikipedia.org/wiki/Anapanasati", "https://en.wikipedia.org/wiki/Anapanasati_Sutta"],
+			];
+		}
 		return {
 			query: {
 				searchinfo: { totalhits: 2115 },
@@ -89,21 +98,55 @@ const ROUTES = {
 	"/thinker.json": () => ({ responseData: { total: 1, results: [{ wiki: "Plato", url: "/thinker/3724", sep_dir: "plato", label: "Plato", type: "thinker", ID: 3724 }] } }),
 	"/idea.json": () => ({ responseData: { total: 0, results: [] } }),
 	// IEP
-	"/wp-json/wp/v2/search": () => [{ id: 25926, title: "Cognitive Phenomenology", url: "https://iep.utm.edu/cognitive-phenomenology/", type: "post" }],
+	"/wp-json/wp/v2/search": () => [
+		{ id: 25926, title: "Cognitive Phenomenology", url: "https://iep.utm.edu/cognitive-phenomenology/", type: "post" },
+		{ id: 25927, title: "Phenomenology", url: "https://iep.utm.edu/phenomenology/", type: "post" },
+	],
+	// The New York Times
+	"/search/v2/articlesearch.json": () => ({
+		response: {
+			docs: [
+				{
+					headline: { main: "A Headline" },
+					web_url: "https://www.nytimes.com/2026/07/01/a.html",
+					abstract: "The abstract the paper wrote.",
+					pub_date: "2026-07-01T09:00:00Z",
+					section_name: "World",
+				},
+			],
+		},
+	}),
+	// Wolfram|Alpha
+	"/query": () => ({
+		queryresult: {
+			success: true,
+			pods: [
+				{ title: "Input", primary: true, subpods: [{ plaintext: "2 + 2" }] },
+				{ title: "Result", primary: true, subpods: [{ plaintext: "4" }] },
+				// A pod with no plaintext is not a result; it is a plot image.
+				{ title: "Number line", subpods: [{ plaintext: "" }] },
+			],
+		},
+	}),
 	// BDRC
 	"/resource/P1614.jsonld": () => ({ "@graph": [{ "@id": "bdr:NM1246", "rdfs:label": { "@language": "bo-x-ewts", "@value": "mi la ras pa" }, "@type": "PersonPersonalName" }] }),
 	// SEP contents index
+	// The contents page cross-files an entry alphabetically, so one slug can be
+	// listed under more than one title -- `japanese-zen` appears twice below, as
+	// it does on the real page. Search wants one row per entry; a caller matching
+	// titles wants every name the entry is published under.
 	"/contents.html": () =>
 		`<html><body>
 			<a href="entries/phenomenology/">Phenomenology</a>
 			<a href="entries/perception-problem/">Perception, The Problem of</a>
 			<a href="entries/japanese-zen/">Japanese Philosophy, Zen Buddhism in</a>
+			<a class="entry" href="entries/japanese-zen/">Zen Buddhism in Japanese Philosophy</a>
 		</body></html>`,
 };
 
-// Both CBETA and the Hacker News Algolia index answer at /search, so they cannot
-// be two keys in one object. They are told apart by their query parameters,
-// which is also how they differ in real life.
+// Five providers answer at /search, so they cannot be five keys in one object.
+// They are told apart by method and query parameters, which is also how they
+// differ in real life.
 const cbetaSearch = (url) => ({
 	num_found: 126,
 	results: [{ id: 8392, term_hits: 16, canon: "T", work: "T0602", juan: 1, title: "佛說大安般守意經", byline: "後漢 安世高譯", time_dynasty: "東漢" }],
@@ -112,25 +155,63 @@ const cbetaSearch = (url) => ({
 const hackerNewsSearch = () => ({
 	hits: [{ objectID: "1", title: "Why async Rust is hard", url: "https://ex.org/p", points: 300, num_comments: 120, created_at: "2026-03-01T00:00:00Z" }],
 });
+const guardianSearch = () => ({
+	response: {
+		status: "ok",
+		userTier: "developer",
+		results: [
+			{
+				id: "world/2026/jul/01/a",
+				webTitle: "A Guardian Headline",
+				webUrl: "https://www.theguardian.com/world/2026/jul/01/a",
+				webPublicationDate: "2026-07-01T08:00:00Z",
+				sectionName: "World",
+				fields: { trailText: "<p>The standfirst, with <b>markup</b>.</p>" },
+			},
+		],
+	},
+});
+const marginaliaSearch = () => ({
+	license: "CC-BY-NC-SA 4.0",
+	results: [{ url: "https://small.example/page", title: "A Small Site", description: "Something no aggregator surfaced.", quality: 3.5 }],
+});
+const exaSearch = () => ({
+	results: [{ title: "An Exa Hit", url: "https://exa.example/a", text: "Extracted page text.", score: 0.42, publishedDate: "2026-06-01T00:00:00Z" }],
+});
+const tavilySearch = () => ({
+	results: [{ title: "A Tavily Hit", url: "https://tavily.example/a", content: "Extracted page text.", score: 0.91, published_date: "2026-06-02" }],
+});
 
 function startFixture() {
 	const requests = [];
 	const server = createServer((request, response) => {
 		const url = new URL(request.url, "http://127.0.0.1");
-		requests.push(url.pathname + url.search);
-		let handler = ROUTES[url.pathname];
-		if (url.pathname === "/search") {
-			handler = url.searchParams.has("hitsPerPage") ? hackerNewsSearch : cbetaSearch;
-		}
-		if (!handler) {
-			response.writeHead(404, { "content-type": "application/json" });
-			response.end(JSON.stringify({ error: "no fixture", path: url.pathname }));
-			return;
-		}
-		const body = handler(url);
-		const isHtml = typeof body === "string";
-		response.writeHead(200, { "content-type": isHtml ? "text/html" : "application/json" });
-		response.end(isHtml ? body : JSON.stringify(body));
+		const chunks = [];
+		request.on("data", (chunk) => chunks.push(chunk));
+		request.on("end", () => {
+			const rawBody = Buffer.concat(chunks).toString("utf8");
+			requests.push({ path: url.pathname + url.search, method: request.method, headers: request.headers, body: rawBody });
+			let handler = ROUTES[url.pathname];
+			if (url.pathname === "/search") {
+				if (request.method === "POST") {
+					// Exa and Tavily are both POST-only and differ in what they call
+					// the result count, exactly as their published schemas do.
+					handler = rawBody.includes("numResults") ? exaSearch : tavilySearch;
+				} else if (url.searchParams.has("hitsPerPage")) handler = hackerNewsSearch;
+				else if (url.searchParams.has("api-key")) handler = guardianSearch;
+				else if (url.searchParams.has("query")) handler = marginaliaSearch;
+				else handler = cbetaSearch;
+			}
+			if (!handler) {
+				response.writeHead(404, { "content-type": "application/json" });
+				response.end(JSON.stringify({ error: "no fixture", path: url.pathname }));
+				return;
+			}
+			const body = handler(url, rawBody);
+			const isHtml = typeof body === "string";
+			response.writeHead(200, { "content-type": isHtml ? "text/html" : "application/json" });
+			response.end(isHtml ? body : JSON.stringify(body));
+		});
 	});
 	return new Promise((resolve) => {
 		server.listen(0, "127.0.0.1", () => {
@@ -290,7 +371,7 @@ test("suttacentral searches and resolves a citation to the canonical record", as
 		const resolved = await SEARCH_PROVIDERS.suttacentral.resolve("MN 118", contextFor(fixture));
 		assert.equal(resolved.title, "MN 118 — Mindfulness of Breathing");
 		assert.match(resolved.content, /teaches mindfulness of breathing in detail/);
-		assert.ok(fixture.requests.some((path) => path.startsWith("/api/suttaplex/mn118")));
+		assert.ok(fixture.requests.some((entry) => entry.path.startsWith("/api/suttaplex/mn118")));
 	});
 });
 
@@ -438,7 +519,7 @@ test("a provider is asked its own query when the router overrides it", async () 
 			queryOverrides: { wikipedia: "anapanasati" },
 		});
 		assert.ok(merged.results.length > 0);
-		asked.push(...fixture.requests.filter((path) => path.startsWith("/w/api.php")));
+		asked.push(...fixture.requests.filter((entry) => entry.path.startsWith("/w/api.php")).map((entry) => entry.path));
 		assert.ok(
 			asked.some((path) => path.includes("srsearch=anapanasati") && !path.includes("what")),
 			`the framing question reached the provider: ${asked.join(" ")}`,
@@ -462,4 +543,144 @@ test("classification records what it read, so a run can explain its routing", ()
 	assert.equal(classified.identifiers.bookIdentifier, null); // not the whole string
 	assert.ok(classified.intents.includes("news"));
 	assert.ok(classified.intents.includes("canon"));
+});
+
+// --- The keyed tier --------------------------------------------------------
+
+test("a keyed provider is skipped without a key and asked with one", async () => {
+	// The whole point of the two tiers: adding a provider that needs a credential
+	// must not change what a machine with no credentials does.
+	const withoutKey = routeQuery("latest news about Tibet", { apiKeys: {} });
+	assert.equal(withoutKey.providers.includes("guardian"), false);
+	assert.equal(withoutKey.providers.includes("nyt"), false);
+	assert.ok(withoutKey.providers.includes("gdelt"), "the no-key news provider still runs");
+	assert.match(
+		withoutKey.decisions.find((entry) => entry.provider === "guardian").reason,
+		/no API key configured/,
+	);
+
+	const withKey = routeQuery("latest news about Tibet", { apiKeys: { guardian: "k", nyt: "k" } });
+	assert.ok(withKey.providers.includes("guardian"));
+	assert.ok(withKey.providers.includes("nyt"));
+});
+
+test("guardian, nyt, marginalia and wolfram normalize their own shapes", async () => {
+	await withFixture(async (fixture) => {
+		const guardian = await SEARCH_PROVIDERS.guardian.search("tibet", contextFor(fixture, { apiKey: "gk" }));
+		assert.equal(guardian[0].title, "A Guardian Headline");
+		// The standfirst arrives as HTML and a snippet field holds plain text.
+		assert.equal(guardian[0].content, 'The standfirst, with markup.');
+		assert.equal(guardian[0].publishedAt, "2026-07-01T08:00:00Z");
+
+		const nyt = await SEARCH_PROVIDERS.nyt.search("tibet", contextFor(fixture, { apiKey: "nk" }));
+		assert.equal(nyt[0].title, "A Headline");
+		assert.equal(nyt[0].url, "https://www.nytimes.com/2026/07/01/a.html");
+
+		const marginalia = await SEARCH_PROVIDERS.marginalia.search("small web", contextFor(fixture, { apiKey: "mk" }));
+		assert.equal(marginalia[0].url, "https://small.example/page");
+		assert.equal(marginalia[0].score, 3.5);
+		// Marginalia takes its key in a header, so it never touches the URL.
+		const marginaliaRequest = fixture.requests.find((entry) => entry.path.startsWith("/search?query="));
+		assert.equal(marginaliaRequest.headers["api-key"], "mk");
+
+		const wolfram = await SEARCH_PROVIDERS.wolfram.search("2+2", contextFor(fixture, { apiKey: "wk" }));
+		// Pods with no plaintext are plots, not answers.
+		assert.deepEqual(wolfram.map((row) => row.title), ["Input", "Result"]);
+		assert.equal(wolfram[1].content, "4");
+		// There is no page to cite, so every pod carries the query's permalink.
+		assert.ok(wolfram[0].url.startsWith("https://www.wolframalpha.com/input?i="));
+	});
+});
+
+test("exa and tavily are POST, and their keys stay in headers", async () => {
+	await withFixture(async (fixture) => {
+		const exa = await SEARCH_PROVIDERS.exa.search("neural search", contextFor(fixture, { apiKey: "ek" }));
+		assert.equal(exa[0].url, "https://exa.example/a");
+		assert.equal(exa[0].content, "Extracted page text.");
+
+		const tavily = await SEARCH_PROVIDERS.tavily.search("agent search", contextFor(fixture, { apiKey: "tk" }));
+		assert.equal(tavily[0].url, "https://tavily.example/a");
+
+		const posts = fixture.requests.filter((entry) => entry.method === "POST");
+		assert.equal(posts.length, 2, "both are POST-only; Exa answers `Cannot GET /search`");
+		assert.equal(posts[0].headers["x-api-key"], "ek");
+		assert.equal(posts[1].headers.authorization, "Bearer tk");
+		// A key in a body is not a key in a URL, which is what gets archived.
+		for (const entry of posts) assert.equal(entry.path.includes("ek") || entry.path.includes("tk"), false);
+	});
+});
+
+test("a keyed general provider joins the fallback ahead of SearXNG", () => {
+	const keyless = routeQuery("how do I fix a leaky tap", { apiKeys: {} });
+	assert.deepEqual(keyless.providers, ["wikipedia", "searxng"]);
+
+	const keyed = routeQuery("how do I fix a leaky tap", { apiKeys: { marginalia: "k", exa: "k" } });
+	// Authority order among the fallbacks: marginalia 90, exa 92, searxng 99.
+	assert.deepEqual(keyed.providers, ["wikipedia", "marginalia", "exa", "searxng"]);
+});
+
+// --- The budget ledger -----------------------------------------------------
+
+test("an exhausted budget is skipped with a reason, exactly like a missing key", () => {
+	const budget = { nyt: { exhausted: true, reason: "nyt has used its 500/day budget (500 calls)" } };
+	const availability = searchProviderAvailability("nyt", { apiKeys: { nyt: "k" }, budget });
+	assert.equal(availability.available, false);
+	assert.match(availability.reason, /500\/day/);
+	// A provider with no declared budget is unaffected by the ledger.
+	assert.equal(searchProviderAvailability("wikipedia", { budget }).available, true);
+
+	const routed = routeQuery("latest news about Tibet", { apiKeys: { nyt: "k" }, budget });
+	assert.equal(routed.providers.includes("nyt"), false);
+	assert.match(routed.decisions.find((entry) => entry.provider === "nyt").reason, /500\/day/);
+});
+
+test("every declared budget names a provider that exists", async () => {
+	const { DECLARED_BUDGETS } = await import(join(scriptsDirectory, "provider-budget.mjs"));
+	for (const [id, declared] of Object.entries(DECLARED_BUDGETS)) {
+		const known = Boolean(SEARCH_PROVIDERS[id]) || id === "openalex";
+		assert.ok(known, `budget declared for unknown provider ${id}`);
+		assert.ok(declared.calls || declared.monthlyCalls || declared.usd, `${id} declares no allowance`);
+	}
+});
+
+// --- Reference candidates --------------------------------------------------
+
+test("reference candidates come back unranked, from each source's own name lookup", async () => {
+	await withFixture(async (fixture) => {
+		const { referenceCandidates } = await import(join(scriptsDirectory, "search-providers.mjs"));
+
+		// Wikipedia answers by opensearch -- a title lookup -- not by full-text
+		// search, because "find the article named X" is a different question.
+		const wikipedia = await referenceCandidates("wikipedia", "Anapanasati", contextFor(fixture));
+		assert.deepEqual(
+			wikipedia.map((entry) => entry.title),
+			["Anapanasati", "Anapanasati Sutta"],
+		);
+		const opensearch = fixture.requests.filter((entry) => entry.path.includes("action=opensearch"));
+		assert.equal(opensearch.length, 1, "opensearch, not list=search");
+
+		// The SEP hands back its whole published index, so the caller's matcher
+		// sees every candidate rather than a shortlist chosen by another rule --
+		// including the second title a cross-filed entry is listed under, which
+		// is the one a subject might actually match.
+		const sep = await referenceCandidates("sep", "Phenomenology", contextFor(fixture));
+		assert.equal(sep.length, 4);
+		assert.equal(new Set(sep.map((entry) => entry.url)).size, 3);
+		assert.ok(sep.some((entry) => entry.title === "Zen Buddhism in Japanese Philosophy"));
+		assert.ok(sep.every((entry) => entry.url.startsWith("https://plato.stanford.edu/entries/")));
+
+		// IEP's own `resolve()` takes the first hit on trust; candidates must not.
+		const iep = await referenceCandidates("iep", "Phenomenology", contextFor(fixture));
+		assert.equal(iep.length, 2);
+		assert.equal(iep[0].title, "Cognitive Phenomenology");
+	});
+});
+
+test("a provider with no name lookup falls back to its search results", async () => {
+	await withFixture(async (fixture) => {
+		const { referenceCandidates } = await import(join(scriptsDirectory, "search-providers.mjs"));
+		const candidates = await referenceCandidates("openlibrary", "The Dhammapada", contextFor(fixture));
+		assert.equal(candidates[0].title, "The Dhammapada");
+		assert.ok(candidates[0].url.endsWith("/works/OL18935815W"));
+	});
 });

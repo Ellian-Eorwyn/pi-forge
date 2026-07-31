@@ -27,10 +27,27 @@
 //     single-page app's own route and returns the app shell. Resource lookup by
 //     ID does work, so bdrc below is lookup-only. Internet Archive indexes a
 //     good deal of BDRC's scanned material and covers part of the gap.
+//   - PhilPapers answers HTTP 403 to any non-browser client. Cloudflare blocks
+//     /help/api, /philpapers/raw/api and philarchive.org alike, so the "key on
+//     request" the plan recorded cannot be exercised even if one were granted.
+//     vault-wiki still reaches philpapers.org through site-restricted search,
+//     because SearXNG's upstream engines are browsers as far as Cloudflare is
+//     concerned.
+//
+// Six providers here need a key. They are declared `authRequired` and skipped
+// with a logged reason when none is configured, which is what keeps the no-key
+// tier working on a machine nobody has set up. Marginalia publishes a shared
+// `public` key for integration work; it is documented rather than used, because
+// its own API page says that key "often hits a rate limit" and a provider that
+// intermittently fails is worse than one that is honestly absent.
 
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { CONFIGURED_ENDPOINT_RULES, httpJson, httpText } from "../../../lib/http-fetch.mjs";
+import { atomicWriteFile } from "../../../lib/run-state.mjs";
 import { DEFAULT_SEARCH_TIMEOUT_MS, pingSearxng, searchLimiter, searchSearxng } from "../../../lib/searxng.mjs";
-import { normalizeUrl } from "./acquisition.mjs";
+import { defaultCacheDirectory, normalizeUrl } from "./acquisition.mjs";
 
 // Re-exported so web-research has one import for everything search-shaped, even
 // though the SearXNG client itself lives in lib/ because web-collection uses it
@@ -127,6 +144,14 @@ export const PROVIDER_SPACING_MS = {
 	openlibrary: 1000,
 	loc: 1000,
 	internetarchive: 1000,
+	// The keyed tier publishes exact rates rather than asking for restraint.
+	// NYT's is the tightest by an order of magnitude: five requests a minute.
+	guardian: 100,
+	nyt: 12_000,
+	marginalia: 2000,
+	wolfram: 1000,
+	exa: 500,
+	tavily: 500,
 };
 
 function spacingFor(id, options) {
@@ -136,6 +161,25 @@ function spacingFor(id, options) {
 async function providerJson(url, context, options = {}) {
 	const { json } = await httpJson(url, {
 		headers: { "user-agent": context.userAgent, ...(options.headers ?? {}) },
+		timeoutMs: context.timeoutMs ?? DEFAULT_SEARCH_TIMEOUT_MS,
+		attempts: options.attempts ?? 3,
+		hostRules: CONFIGURED_ENDPOINT_RULES,
+		limiter: context.limiter ?? searchLimiter,
+		spacingMs: spacingFor(context.providerId, options),
+	});
+	return json;
+}
+
+/**
+ * The same call with a JSON request body. Exa and Tavily are POST-only -- Exa
+ * answers `Cannot GET /search` -- and both take their key in a header, so
+ * nothing here needs redacting.
+ */
+async function providerPostJson(url, body, context, options = {}) {
+	const { json } = await httpJson(url, {
+		method: "POST",
+		body: JSON.stringify(body),
+		headers: { "user-agent": context.userAgent, "content-type": "application/json", ...(options.headers ?? {}) },
 		timeoutMs: context.timeoutMs ?? DEFAULT_SEARCH_TIMEOUT_MS,
 		attempts: options.attempts ?? 3,
 		hostRules: CONFIGURED_ENDPOINT_RULES,
@@ -208,6 +252,32 @@ function mediaWikiProvider({ id, label, base, site, topics, authority, kinds, st
 				context,
 				id,
 			);
+		},
+		/**
+		 * Entry candidates for a name, via `opensearch` rather than `list=search`.
+		 *
+		 * The two are different questions. `list=search` is full text and ranks by
+		 * relevance across article bodies; `opensearch` is a title/prefix lookup,
+		 * which is what "find the article named X" means and what vault-wiki's own
+		 * resolver has always asked for. Callers score these themselves, so no
+		 * ranking judgement is made here.
+		 */
+		async referenceCandidates(subject, context) {
+			const url = `${context.base}/w/api.php?${new URLSearchParams({
+				action: "opensearch",
+				search: subject,
+				limit: String(context.limit ?? 6),
+				format: "json",
+			})}`;
+			const payload = await providerJson(url, context);
+			if (!Array.isArray(payload) || payload.length < 4) return [];
+			const [, titles, descriptions, urls] = payload;
+			if (!Array.isArray(titles) || !Array.isArray(urls)) return [];
+			return titles.map((title, index) => ({
+				title,
+				url: urls[index] ?? null,
+				snippet: Array.isArray(descriptions) ? descriptions[index] || null : null,
+			}));
 		},
 		/**
 		 * The REST summary endpoint, which returns the lead extract rather than
@@ -348,6 +418,20 @@ export const SEARCH_PROVIDERS = {
 				"sep",
 			);
 		},
+		/**
+		 * The whole published index, unranked and unfiltered.
+		 *
+		 * Deliberately not `search()`, which scores with this module's own matcher.
+		 * vault-wiki's matcher is calibrated against failures this one has never
+		 * seen -- it is what keeps "The Theory of Two Truths in India" while
+		 * rejecting the entry on *truth* for a note about the two truths doctrine --
+		 * so it must see the same 2,511 candidates its `anchor_pairs` gave it, not
+		 * a shortlist chosen by a different rule.
+		 */
+		async referenceCandidates(_subject, context) {
+			const entries = await sepIndexPairs(context);
+			return entries.map((entry) => ({ title: entry.title, url: `https://plato.stanford.edu/entries/${entry.slug}/`, snippet: null }));
+		},
 		async resolve(topic, context) {
 			const [best] = await this.search(topic, { ...context, limit: 1 });
 			return best ?? null;
@@ -419,6 +503,18 @@ export const SEARCH_PROVIDERS = {
 				context,
 				"iep",
 			);
+		},
+		/**
+		 * WordPress returns its own relevance order and no score. `resolve()` above
+		 * takes the first hit on trust, which is exactly what a caller with a real
+		 * matcher must not do -- so this hands back the page of hits unjudged.
+		 */
+		async referenceCandidates(subject, context) {
+			const url = `${context.base}/wp-json/wp/v2/search?search=${encodeURIComponent(subject)}&per_page=${Math.min(context.limit ?? 6, 20)}`;
+			const payload = await providerJson(url, context);
+			return (Array.isArray(payload) ? payload : [])
+				.filter((hit) => hit?.url)
+				.map((hit) => ({ title: stripHtml(hit.title) || null, url: hit.url, snippet: null }));
 		},
 		async resolve(topic, context) {
 			const [best] = await this.search(topic, { ...context, limit: 1 });
@@ -868,6 +964,253 @@ export const SEARCH_PROVIDERS = {
 		},
 	},
 
+	// --- The keyed tier ------------------------------------------------------
+	//
+	// Everything below needs a credential. `authRequired` is what makes the
+	// router skip it with a reason rather than fail, so adding one of these can
+	// never break a machine that has no keys at all.
+
+	guardian: {
+		id: "guardian",
+		label: "The Guardian",
+		kind: "news",
+		base: "https://content.guardianapis.com",
+		site: "theguardian.com",
+		topics: ["*"],
+		authority: 3,
+		capabilities: () => ({
+			authRequired: true,
+			optionalAuth: false,
+			rateLimit: "5,000 requests/day, 12/s; the key is emailed instantly with no approval wait",
+			dailyBudget: { calls: 5000 },
+			fields: ["webTitle", "webUrl", "sectionName", "webPublicationDate", "trailText"],
+			strengths: ["full article text back to 1999", "an editorial archive rather than a headline feed"],
+			limits: ["one publication's view", "UK and Australia weighted"],
+		}),
+		async search(query, context) {
+			const params = new URLSearchParams({
+				q: query,
+				"page-size": String(Math.min(context.limit ?? 10, 50)),
+				"show-fields": "trailText",
+				"order-by": context.params?.timeRange ? "newest" : "relevance",
+			});
+			params.set("api-key", context.apiKey);
+			const payload = await providerJson(`${context.base}/search?${params}`, context);
+			return records(
+				(payload?.response?.results ?? []).map((article) => ({
+					title: article.webTitle,
+					url: article.webUrl,
+					content: stripHtml(article.fields?.trailText) || article.sectionName || null,
+					publishedAt: article.webPublicationDate ?? null,
+					engine: "guardian",
+				})),
+				query,
+				context,
+				"guardian",
+			);
+		},
+	},
+
+	nyt: {
+		id: "nyt",
+		label: "The New York Times",
+		kind: "news",
+		base: "https://api.nytimes.com/svc",
+		site: "nytimes.com",
+		topics: ["*"],
+		authority: 3,
+		capabilities: () => ({
+			authRequired: true,
+			optionalAuth: false,
+			// The tightest budget in the registry, and the reason the ledger exists:
+			// spacing alone cannot express "and then stop for the day".
+			rateLimit: "500 requests/day and 5/minute for most APIs; the Article API allows 4,000/day and 10/minute",
+			dailyBudget: { calls: 500 },
+			fields: ["headline", "web_url", "abstract", "pub_date", "section_name"],
+			strengths: ["archive back to 1851", "abstracts written by the paper"],
+			limits: ["one publication's view", "US weighted", "the smallest daily allowance here"],
+		}),
+		async search(query, context) {
+			const params = new URLSearchParams({ q: query, sort: "relevance" });
+			params.set("api-key", context.apiKey);
+			const payload = await providerJson(`${context.base}/search/v2/articlesearch.json?${params}`, context);
+			return records(
+				(payload?.response?.docs ?? []).map((doc) => ({
+					title: doc.headline?.main ?? doc.abstract ?? null,
+					url: doc.web_url,
+					content: truncate(doc.abstract ?? doc.snippet ?? doc.lead_paragraph) || null,
+					publishedAt: doc.pub_date ?? null,
+					engine: "nyt",
+				})),
+				query,
+				context,
+				"nyt",
+			);
+		},
+	},
+
+	marginalia: {
+		id: "marginalia",
+		label: "Marginalia Search",
+		kind: "general",
+		base: "https://api2.marginalia-search.com",
+		site: "marginalia-search.com",
+		topics: [],
+		// Ahead of SearXNG, behind everything authoritative. With a key, an
+		// open-ended query stops depending on a scraper of other people's engines.
+		authority: 90,
+		capabilities: () => ({
+			authRequired: true,
+			optionalAuth: false,
+			rateLimit: "free non-commercial key by emailing contact@marginalia-search.com",
+			fields: ["url", "title", "description", "quality"],
+			strengths: ["an independent index, not a reseller of Google's", "finds small and old sites nothing else surfaces"],
+			limits: ["small index", "poor for news and for anything commercial"],
+		}),
+		async search(query, context) {
+			const params = new URLSearchParams({ query, count: String(Math.min(context.limit ?? 10, 100)) });
+			const payload = await providerJson(`${context.base}/search?${params}`, context, {
+				headers: { "api-key": context.apiKey },
+			});
+			return records(
+				(payload?.results ?? []).map((result) => ({
+					title: result.title,
+					url: result.url,
+					content: truncate(stripHtml(result.description)) || null,
+					score: result.quality ?? null,
+					engine: "marginalia",
+				})),
+				query,
+				context,
+				"marginalia",
+			);
+		},
+	},
+
+	wolfram: {
+		id: "wolfram",
+		label: "Wolfram|Alpha",
+		kind: "reference",
+		base: "https://api.wolframalpha.com/v2",
+		site: "wolframalpha.com",
+		topics: ["mathematics"],
+		authority: 4,
+		capabilities: () => ({
+			authRequired: true,
+			optionalAuth: false,
+			rateLimit: "2,000 calls/month on the free non-commercial AppID",
+			monthlyBudget: { calls: 2000 },
+			fields: ["pods", "subpods", "plaintext"],
+			strengths: ["computes rather than retrieves", "units, constants, conversions and closed-form results"],
+			limits: ["answers are pods of text, not documents with URLs", "no citation to give"],
+		}),
+		/**
+		 * Wolfram answers with computed pods rather than pages, so there is no URL
+		 * to cite; the result carries the query's own permalink so a reader can
+		 * reproduce it. That is why it is a reference provider and not a search one.
+		 */
+		async search(query, context) {
+			const params = new URLSearchParams({ input: query, output: "json", format: "plaintext" });
+			params.set("appid", context.apiKey);
+			const payload = await providerJson(`${context.base}/query?${params}`, context);
+			const pods = payload?.queryresult?.pods ?? [];
+			const permalink = `https://www.wolframalpha.com/input?i=${encodeURIComponent(query)}`;
+			return records(
+				pods
+					.filter((pod) => pod.error !== true)
+					.map((pod) => ({
+						title: pod.title,
+						url: permalink,
+						content: truncate((pod.subpods ?? []).map((subpod) => subpod.plaintext).filter(Boolean).join(" · ")) || null,
+						score: pod.primary === true ? 1 : null,
+						engine: "wolfram",
+					}))
+					.filter((row) => row.content),
+				query,
+				context,
+				"wolfram",
+			);
+		},
+	},
+
+	exa: {
+		id: "exa",
+		label: "Exa",
+		kind: "general",
+		base: "https://api.exa.ai",
+		site: "exa.ai",
+		topics: [],
+		authority: 92,
+		capabilities: () => ({
+			authRequired: true,
+			optionalAuth: false,
+			rateLimit: "20,000 requests/month free",
+			fields: ["title", "url", "text", "publishedDate", "score"],
+			strengths: ["embedding search, so a description of a page finds it without its keywords"],
+			limits: ["its own crawl, not the open web", "ranking is opaque"],
+		}),
+		async search(query, context) {
+			const payload = await providerPostJson(
+				`${context.base}/search`,
+				{ query, numResults: Math.min(context.limit ?? 10, 100), contents: { text: { maxCharacters: 500 } } },
+				context,
+				{ headers: { "x-api-key": context.apiKey } },
+			);
+			return records(
+				(payload?.results ?? []).map((result) => ({
+					title: result.title,
+					url: result.url,
+					content: truncate(stripHtml(result.text ?? result.summary)) || null,
+					score: result.score ?? null,
+					publishedAt: result.publishedDate ?? null,
+					engine: "exa",
+				})),
+				query,
+				context,
+				"exa",
+			);
+		},
+	},
+
+	tavily: {
+		id: "tavily",
+		label: "Tavily",
+		kind: "general",
+		base: "https://api.tavily.com",
+		site: "tavily.com",
+		topics: [],
+		authority: 93,
+		capabilities: () => ({
+			authRequired: true,
+			optionalAuth: false,
+			rateLimit: "1,000 credits/month free, no card",
+			fields: ["title", "url", "content", "score", "published_date"],
+			strengths: ["returns extracted page text alongside the ranking, so one call answers what two would"],
+			limits: ["credits are spent per call regardless of result quality"],
+		}),
+		async search(query, context) {
+			const payload = await providerPostJson(
+				`${context.base}/search`,
+				{ query, max_results: Math.min(context.limit ?? 10, 20), search_depth: "basic" },
+				context,
+				{ headers: { authorization: `Bearer ${context.apiKey}` } },
+			);
+			return records(
+				(payload?.results ?? []).map((result) => ({
+					title: result.title,
+					url: result.url,
+					content: truncate(stripHtml(result.content)) || null,
+					score: result.score ?? null,
+					publishedAt: result.published_date ?? null,
+					engine: "tavily",
+				})),
+				query,
+				context,
+				"tavily",
+			);
+		},
+	},
+
 	searxng: {
 		id: "searxng",
 		label: "SearXNG",
@@ -898,25 +1241,83 @@ export const SEARCH_PROVIDERS = {
 
 // --- Provider helpers ------------------------------------------------------
 
+// A published index changes on the order of weeks, and the SEP's is 305 KB.
+// Seven days is the figure vault-wiki settled on and it moves here unchanged.
+export const INDEX_MAX_AGE_MS = 7 * 24 * 3600 * 1000;
+
+function indexCachePath(key) {
+	return join(defaultCacheDirectory(), "index", `${createHash("sha256").update(key).digest("hex").slice(0, 16)}.txt`);
+}
+
+/**
+ * A source's own published index, cached on disk across processes.
+ *
+ * On disk rather than in memory because the caller may be a subprocess: vault-wiki
+ * resolves one subject per invocation, and a per-process cache would refetch the
+ * whole SEP contents page for every note in a 466-note run.
+ *
+ * A stale copy beats nothing. An index a week old still resolves every entry
+ * that existed a week ago, whereas a failed fetch resolves none of them -- and
+ * "no source" is the most misleading thing this pipeline can report.
+ */
+async function cachedIndex(key, context, load) {
+	const path = indexCachePath(key);
+	if (existsSync(path)) {
+		try {
+			if (Date.now() - statSync(path).mtimeMs < INDEX_MAX_AGE_MS) return readFileSync(path, "utf8");
+		} catch {
+			// An unreadable cache entry is refetched, not fatal.
+		}
+	}
+	try {
+		const fetched = await load();
+		atomicWriteFile(path, fetched);
+		return fetched;
+	} catch (error) {
+		if (existsSync(path)) {
+			context.staleIndexes?.push({ key, error: error instanceof Error ? error.message : String(error) });
+			return readFileSync(path, "utf8");
+		}
+		throw error;
+	}
+}
+
 let sepIndexCache = null;
 
 /**
- * The SEP table of contents, fetched once per process. The page is a flat list
- * of `<a href="entries/SLUG/">Title</a>`, which is stable enough to read with a
+ * The SEP table of contents. The page is a flat list of
+ * `<a href="entries/SLUG/">Title</a>`, which is stable enough to read with a
  * pattern; vault-wiki has parsed it the same way since it was written.
  */
-async function sepIndex(context) {
+async function sepIndexPairs(context) {
 	if (sepIndexCache) return sepIndexCache;
-	const html = await providerText(`${context.base}/contents.html`, context);
+	const html = await cachedIndex(`${context.base}/contents.html`, context, () => providerText(`${context.base}/contents.html`, context));
 	const entries = [];
-	const seen = new Set();
-	for (const match of html.matchAll(/<a\s+href="entries\/([^"/]+)\/?"[^>]*>([\s\S]*?)<\/a>/gi)) {
-		const slug = match[1];
-		if (seen.has(slug)) continue;
-		seen.add(slug);
-		entries.push({ slug, title: stripHtml(match[2]) });
+	for (const match of html.matchAll(/<a\s[^>]*href="entries\/([^"#?/]+)\/?"[^>]*>([\s\S]*?)<\/a>/gi)) {
+		const title = stripHtml(match[2]);
+		if (title) entries.push({ slug: match[1], title });
 	}
 	sepIndexCache = entries;
+	return entries;
+}
+
+/**
+ * SEP entries, one per slug, for ranked search.
+ *
+ * The contents page lists an entry more than once when it is cross-filed
+ * alphabetically -- `shared-agency` appears as "agency: shared" and again as
+ * "shared" -- so 2,511 anchors describe 1,862 entries. Search wants one row per
+ * entry; `sepIndexPairs` keeps every listing, because a caller matching titles
+ * should see every name an entry is published under.
+ */
+async function sepIndex(context) {
+	const seen = new Set();
+	const entries = [];
+	for (const entry of await sepIndexPairs(context)) {
+		if (seen.has(entry.slug)) continue;
+		seen.add(entry.slug);
+		entries.push(entry);
+	}
 	return entries;
 }
 
@@ -1017,20 +1418,50 @@ export function searchProviderList() {
 	return Object.keys(SEARCH_PROVIDERS);
 }
 
+/**
+ * Entry candidates for a subject name, for a caller that will score them itself.
+ *
+ * This is the second half of the split `resolve()` does not make. `search()`
+ * answers "what pages are relevant to this query" and ranks them; a reference
+ * lookup asks "which entry is *about* this thing", and the answer depends on
+ * editorial judgement the registry does not hold -- vault-wiki's does. So a
+ * provider that has a native name lookup exposes it here unranked, and anything
+ * else falls back to its search results with the ranking left intact but no
+ * claim made about it.
+ */
+export async function referenceCandidates(id, subject, context) {
+	const provider = SEARCH_PROVIDERS[id];
+	if (!provider) throw new Error(`unknown provider: ${id}`);
+	if (provider.referenceCandidates) return provider.referenceCandidates(subject, context);
+	if (!provider.search) return [];
+	const results = await provider.search(subject, context);
+	return results.map((result) => ({ title: result.title, url: result.url, snippet: result.content ?? null }));
+}
+
 export function searchProviderCapabilities(id) {
 	return SEARCH_PROVIDERS[id]?.capabilities?.() ?? null;
 }
 
 /**
- * Whether a provider can run right now. A provider that needs a key and has none
- * is unavailable, never an error: the caller skips it and records why, so the
- * no-key tier keeps working on a machine nobody has configured.
+ * Whether a provider can run right now. A provider that needs a key and has
+ * none, or that has spent its allowance for the day, is unavailable -- never an
+ * error: the caller skips it and records why, so the no-key tier keeps working
+ * on a machine nobody has configured.
+ *
+ * Deliberately a pure function of its options. The budget state is passed in
+ * rather than read from disk here, so a test states the case instead of staging
+ * a ledger file for it.
  */
 export function searchProviderAvailability(id, options = {}) {
 	const provider = SEARCH_PROVIDERS[id];
 	if (!provider) return { available: false, reason: `unknown provider: ${id}` };
 	const capabilities = provider.capabilities?.() ?? {};
-	if (!capabilities.authRequired) return { available: true, reason: null };
-	const key = options.apiKeys?.[id] ?? null;
-	return key ? { available: true, reason: null } : { available: false, reason: `no API key configured for ${id}` };
+	if (capabilities.authRequired && !options.apiKeys?.[id]) {
+		return { available: false, reason: `no API key configured for ${id}` };
+	}
+	// An exhausted budget is skipped rather than retried. Asking again only
+	// spends the retry ladder on an answer the service has already given.
+	const budget = options.budget?.[id];
+	if (budget?.exhausted) return { available: false, reason: budget.reason ?? `${id} has spent its daily budget` };
+	return { available: true, reason: null };
 }

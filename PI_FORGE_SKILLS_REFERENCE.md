@@ -91,10 +91,11 @@ The current extension/tool surfaces outside skill-local scripts are:
 - `forge/extensions/pi-vault-client.ts`: provides `pi_vault_submit_artifact` for
   pending pi-vault proposal handoff.
 - `forge/extensions/web-research.ts`: provides `forge_web_search`,
-  `forge_web_read`, `forge_deep_web_research`, `forge_web_discover`, and
-  `forge_academic_web_research` for search, page extraction, iterative research
-  with source provenance and validation artifacts, endpoint discovery, and
-  scholarly metadata search.
+  `forge_web_read`, `forge_deep_web_research`, `forge_web_discover`,
+  `forge_academic_web_research`, and `forge_reference_lookup` for search, page
+  extraction, iterative research with source provenance and validation
+  artifacts, endpoint discovery, scholarly metadata search, and resolving a
+  subject name to one reference source's entries.
 - `pi-forge-mcp`: exposes deterministic MCP tools `forge_transcribe` and
   `forge_convert_files`.
 

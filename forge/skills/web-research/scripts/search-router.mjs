@@ -10,7 +10,28 @@
 // on purpose because it is the source most likely to be right and least likely
 // to be citable.
 
+import { DECLARED_BUDGETS, loadBudget, providerBudgetState, recordProviderSpend } from "./provider-budget.mjs";
 import { SEARCH_PROVIDERS, bookIdentifier, findSuttaReference, searchProviderAvailability } from "./search-providers.mjs";
+
+/**
+ * Budget state for every provider that declares one, in the shape
+ * `searchProviderAvailability` expects.
+ *
+ * The ledger is read once and the providers that declare no budget are not
+ * consulted at all. vault-wiki calls into here once per note per source, so a
+ * file read per provider per lookup would be hundreds of reads for one run.
+ */
+export function searchProviderBudgets(options = {}) {
+	const declared = Object.keys(SEARCH_PROVIDERS).filter((id) => DECLARED_BUDGETS[id]);
+	if (declared.length === 0) return {};
+	const ledger = options.ledger ?? loadBudget(options);
+	const budgets = {};
+	for (const id of declared) {
+		const state = providerBudgetState(id, { ...options, ledger });
+		if (state.exhausted) budgets[id] = state;
+	}
+	return budgets;
+}
 
 // The topic vocabulary is shared with vault-wiki's canonical-sources.json so the
 // editorial registry and the transport registry can be described in one
@@ -129,7 +150,14 @@ export function routeQuery(query, options = {}) {
 		if (providerMatchesTopic(provider, topics)) selected.add(id);
 	}
 
-	if (intents.includes("news")) selected.add("gdelt");
+	// GDELT indexes everyone's headlines and nobody's article text; the two
+	// papers carry their own. They are skipped without a key, so on an
+	// unconfigured machine this stays exactly what it was.
+	if (intents.includes("news")) {
+		selected.add("gdelt");
+		selected.add("guardian");
+		selected.add("nyt");
+	}
 	if (intents.includes("books")) {
 		selected.add("openlibrary");
 		selected.add("internetarchive");
@@ -174,11 +202,23 @@ function finalize(ids, classification, decisions, options, { explicit }) {
 		return (SEARCH_PROVIDERS[left].authority ?? 50) - (SEARCH_PROVIDERS[right].authority ?? 50);
 	});
 
-	if (!explicit && options.includeFallback !== false && !available.includes("searxng")) {
-		const fallback = searchProviderAvailability("searxng", options);
-		if (fallback.available) {
-			available.push("searxng");
-			decisions.push({ provider: "searxng", selected: true, reason: "general fallback" });
+	// The general fallback, for the part of a question no authoritative source
+	// covers. Every general-kind provider gets a turn in authority order, so an
+	// operator with a Marginalia or Exa key stops depending on a scraper -- and
+	// an operator with neither gets exactly what they got before, SearXNG alone.
+	if (!explicit && options.includeFallback !== false) {
+		const fallbacks = Object.values(SEARCH_PROVIDERS)
+			.filter((provider) => provider.kind === "general")
+			.sort((left, right) => (left.authority ?? 50) - (right.authority ?? 50));
+		for (const provider of fallbacks) {
+			if (available.includes(provider.id)) continue;
+			const availability = searchProviderAvailability(provider.id, options);
+			if (availability.available) {
+				available.push(provider.id);
+				decisions.push({ provider: provider.id, selected: true, reason: "general fallback" });
+			} else {
+				decisions.push({ provider: provider.id, selected: false, reason: availability.reason });
+			}
 		}
 	}
 
@@ -230,6 +270,9 @@ export async function runRoutedSearch(query, providers, contextFor, options = {}
 				if (entry) results = [entry];
 			}
 			if (results === null) results = provider.search ? await provider.search(providerQuery, context) : [];
+			// Spend is recorded per call, not per result: a query that matched
+			// nothing still cost NYT one of its five hundred.
+			recordProviderSpend(id, { options: options.budgetOptions ?? {} });
 			perProvider.push({ provider: id, results: results.length, skipped: null });
 			// Dedupe across providers only. A provider's own result set is its own
 			// judgement -- SearXNG returning the same page twice under different
@@ -246,6 +289,9 @@ export async function runRoutedSearch(query, providers, contextFor, options = {}
 			for (const key of contributed) seen.set(key, id);
 			if (options.stopWhenSatisfied && merged.length >= (options.limit ?? Number.POSITIVE_INFINITY)) break;
 		} catch (error) {
+			// A refused or failed request is still a request as far as a metered
+			// service is concerned, so it is recorded here too.
+			recordProviderSpend(id, { options: options.budgetOptions ?? {} });
 			const message = error instanceof Error ? error.message : String(error);
 			errors.push({ provider: id, error: message, transient: error?.transient === true });
 			perProvider.push({ provider: id, results: 0, skipped: message });
