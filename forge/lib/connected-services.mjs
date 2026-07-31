@@ -59,6 +59,14 @@ export const DEFAULT_CONNECTED_SERVICES = Object.freeze({
 		url: "http://llms:8005/v1/embeddings",
 		model: "embed",
 	}),
+	// Optional credentials for search and reference providers, keyed by provider
+	// id. Empty by default and it stays that way for anyone who never sets one:
+	// every provider in the no-key tier works without this block, and a provider
+	// that needs a key and has none is skipped by the router with a logged
+	// reason rather than failing the run.
+	//
+	// Only free-tier keys belong here. Nothing in forge requires a paid plan.
+	apiKeys: Object.freeze({}),
 });
 
 // The pre-split defaults. A persisted chat service byte-equal to these was
@@ -128,8 +136,33 @@ export function seedConnectedServicesSettings(settings) {
 			url: normalizeHttpBaseUrl(embeddings.url) ?? DEFAULT_CONNECTED_SERVICES.embeddings.url,
 			model: normalizeServiceName(embeddings.model) ?? DEFAULT_CONNECTED_SERVICES.embeddings.model,
 		},
+		apiKeys: normalizeApiKeys(current.apiKeys),
 	};
 	return settings.connectedServices;
+}
+
+/**
+ * Keep only non-empty string values. A key persisted as null, a number, or the
+ * empty string is a half-finished edit, and treating it as configured would make
+ * a provider send `Authorization: Bearer undefined` and read the resulting 401
+ * as the provider refusing us.
+ */
+function normalizeApiKeys(current) {
+	if (!current || typeof current !== "object" || Array.isArray(current)) return {};
+	const keys = {};
+	for (const [provider, value] of Object.entries(current)) {
+		const normalized = normalizeServiceName(value);
+		if (normalized) keys[provider] = normalized;
+	}
+	return keys;
+}
+
+/**
+ * The env var that overrides a provider's persisted key. `semantic-scholar`
+ * becomes FORGE_API_KEY_SEMANTIC_SCHOLAR.
+ */
+export function apiKeyEnvName(provider) {
+	return `FORGE_API_KEY_${String(provider).toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`;
 }
 
 function seedInferenceService(current, defaults) {
@@ -206,7 +239,39 @@ export function resolveConnectedServices(options = {}) {
 			url: explicitEmbeddings ?? envEmbeddings ?? seeded.embeddings.url,
 			model: explicitEmbeddingsModel ?? envEmbeddingsModel ?? seeded.embeddings.model,
 		},
+		apiKeys: resolveApiKeys(seeded.apiKeys, env, options.apiKeys),
 	};
+}
+
+/**
+ * Same precedence as every other service: explicit option, then environment,
+ * then persisted settings. Env vars are also merged in for providers that have
+ * no persisted entry at all, so `FORGE_API_KEY_OPENALEX=... forge ...` works on
+ * a machine whose settings.json has never been touched.
+ */
+function resolveApiKeys(seeded, env, explicit) {
+	const keys = { ...normalizeApiKeys(seeded) };
+	const prefix = "FORGE_API_KEY_";
+	for (const [name, value] of Object.entries(env)) {
+		if (!name.startsWith(prefix)) continue;
+		const normalized = normalizeServiceName(value);
+		const provider = name.slice(prefix.length).toLowerCase().replace(/_/g, "-");
+		// An env var set to the empty string turns a persisted key off for this
+		// process, matching how FORGE_SEARXNG_URL="" disables search.
+		if (normalized) keys[provider] = normalized;
+		else delete keys[provider];
+	}
+	for (const [provider, value] of Object.entries(normalizeApiKeys(explicit))) keys[provider] = value;
+	return keys;
+}
+
+/**
+ * The key for one provider, or null. Callers treat null as "this provider is
+ * not available right now", never as an error.
+ */
+export function resolveApiKey(provider, options = {}) {
+	const services = options.services ?? resolveConnectedServices(options);
+	return services.apiKeys?.[provider] ?? null;
 }
 
 /**

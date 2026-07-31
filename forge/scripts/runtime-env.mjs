@@ -15,7 +15,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveConnectedServices } from "../lib/connected-services.mjs";
+import { apiKeyEnvName, resolveConnectedServices } from "../lib/connected-services.mjs";
 
 export const PACKAGE_NAME = "@ellian-eorwyn/pi-forge";
 export const PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
@@ -52,6 +52,13 @@ export function applyRuntimeEnvironment() {
 	}
 	if (process.env.FORGE_PLAYWRIGHT_WS_ENDPOINT === undefined) {
 		process.env.FORGE_PLAYWRIGHT_WS_ENDPOINT = services.playwright.enabled ? services.playwright.wsEndpoint : "";
+	}
+	// Skills run as child processes, so a persisted provider key has to reach
+	// them the same way the SearXNG URL does. An already-set variable wins, which
+	// is what lets a single run override one provider without editing settings.
+	for (const [provider, key] of Object.entries(services.apiKeys ?? {})) {
+		const name = apiKeyEnvName(provider);
+		if (process.env[name] === undefined) process.env[name] = key;
 	}
 	return paths;
 }

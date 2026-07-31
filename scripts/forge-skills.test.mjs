@@ -4083,6 +4083,8 @@ test("web-research deep creates validated provenance-backed artifacts", async ()
 						deepRun,
 						"--searxng",
 						fixture.searxng,
+						"--providers",
+						"searxng",
 						"--max-iterations",
 						"2",
 						"--limit",
@@ -4162,6 +4164,8 @@ test("web-research deep reviews its own evidence and claims on the thinking serv
 						deepRun,
 						"--searxng",
 						fixture.searxng,
+						"--providers",
+						"searxng",
 						"--max-iterations",
 						"2",
 						"--limit",
@@ -4226,6 +4230,8 @@ test("web-research deep reports an unreachable reviewer instead of implying appr
 					deepRun,
 					"--searxng",
 					fixture.searxng,
+					"--providers",
+					"searxng",
 					"--max-iterations",
 					"1",
 					"--limit",
@@ -4275,6 +4281,8 @@ test("web-research deep applies whole-run budgets and records budget gaps", asyn
 						deepRun,
 						"--searxng",
 						fixture.searxng,
+						"--providers",
+						"searxng",
 						"--no-render",
 					],
 					{
@@ -4321,6 +4329,8 @@ test("web-research deep batches local model work and records local-first schedul
 						firstRun,
 						"--searxng",
 						fixture.searxng,
+						"--providers",
+						"searxng",
 						"--limit",
 						"5",
 						"--read-count",
@@ -4376,6 +4386,8 @@ test("web-research deep batches local model work and records local-first schedul
 						secondRun,
 						"--searxng",
 						fixture.searxng,
+						"--providers",
+						"searxng",
 						"--limit",
 						"5",
 						"--read-count",
@@ -4429,6 +4441,8 @@ test("web-research deep repairs invalid direct quote candidates and skips checkp
 						deepRun,
 						"--searxng",
 						fixture.searxng,
+						"--providers",
+						"searxng",
 						"--max-iterations",
 						"1",
 						"--limit",
@@ -4515,6 +4529,8 @@ test("web-research quick search and read produce report artifacts", async () => 
 						searchRun,
 						"--searxng",
 						fixture.searxng,
+						"--providers",
+						"searxng",
 						"--limit",
 						"2",
 						"--categories",
@@ -4531,7 +4547,7 @@ test("web-research quick search and read produce report artifacts", async () => 
 			const searchAgain = jsonOutput(
 				await runAsyncWithEnvironment(
 					"node",
-					[script("web-research", "web-research.mjs"), "search", "seed alpha", "--output", searchRun, "--searxng", fixture.searxng, "--limit", "2", "--categories", "general"],
+					[script("web-research", "web-research.mjs"), "search", "seed alpha", "--output", searchRun, "--searxng", fixture.searxng, "--providers", "searxng", "--limit", "2", "--categories", "general"],
 					{},
 				),
 			);
@@ -4599,6 +4615,8 @@ test("web-research acquisition writes stage artifacts, cache records, and discov
 						searchRun,
 						"--searxng",
 						fixture.searxng,
+						"--providers",
+						"searxng",
 						"--limit",
 						"2",
 					],
@@ -4733,6 +4751,8 @@ test("web-research deep records unsafe result URLs as failed sources", async () 
 						deepRun,
 						"--searxng",
 						fixture.searxng,
+						"--providers",
+						"searxng",
 						"--max-iterations",
 						"1",
 						"--limit",
@@ -5895,6 +5915,9 @@ test("profile configuration installs local service defaults without dropping use
 				url: "http://llms:8005/v1/embeddings",
 				model: "embed",
 			},
+			// Seeded empty. Every no-key provider works without it, so an install
+			// nobody has configured still searches.
+			apiKeys: {},
 		});
 		assert.deepEqual(settings.packages, [join(repositoryRoot, "forge"), "/user/package"]);
 
@@ -5966,6 +5989,9 @@ test("profile configuration preserves connected service overrides", () => {
 				url: "http://llms:8005/v1/embeddings",
 				model: "embed",
 			},
+			// Seeded empty. Every no-key provider works without it, so an install
+			// nobody has configured still searches.
+			apiKeys: {},
 		});
 	});
 });

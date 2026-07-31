@@ -27,6 +27,7 @@ import {
 	DEFAULT_TIMEOUT_MS as ACQUISITION_DEFAULT_TIMEOUT_MS,
 	DEFAULT_USER_AGENT as ACQUISITION_DEFAULT_USER_AGENT,
 	acquireUrl,
+	assertFetchableUrl,
 	closeAcquisitionContext,
 	createAcquisitionContext,
 	discoverUrl,
@@ -35,6 +36,17 @@ import {
 	sourceIdForUrl as acquisitionSourceIdForUrl,
 	writeAcquisitionArtifacts,
 } from "./acquisition.mjs";
+import {
+	pingSearxng,
+	searchLimiter,
+	searchProviderAvailability,
+	searchProviderBase,
+	searchProviderCapabilities,
+	searchProviderList,
+	searchResultRecord,
+	searchSearxng,
+} from "./search-providers.mjs";
+import { routeQuery, runRoutedSearch } from "./search-router.mjs";
 
 const DEFAULT_USER_AGENT = ACQUISITION_DEFAULT_USER_AGENT;
 const DEFAULT_TIMEOUT_MS = ACQUISITION_DEFAULT_TIMEOUT_MS;
@@ -280,7 +292,55 @@ async function processUrlQueue(runDirectory, options, acquisitionContext) {
 		.map((item) => JSON.parse(readFileSync(item.resultPath, "utf8")));
 }
 
-async function processSearchItem(runDirectory, base, query, searchParams, limit, readCount = 0) {
+/**
+ * Run one search across the routed providers.
+ *
+ * The routing decisions are returned alongside the results so a run can explain
+ * why it asked what it asked -- and, when a provider was skipped for want of an
+ * API key or because it was down, say so rather than silently returning less.
+ */
+async function routedSearch(query, base, searchParams, limit, flags) {
+	const services = resolveConnectedServices({ searxngUrl: flags?.searxng });
+	const routed = routeQuery(query, { providers: flags?.providers, apiKeys: services.apiKeys });
+	const context = (id) => ({
+		base: id === "searxng" ? base : searchProviderBase(id, flags ?? {}),
+		userAgent: searchParams.userAgent ?? DEFAULT_USER_AGENT,
+		timeoutMs: searchParams.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+		limit,
+		limiter: searchLimiter,
+		apiKey: services.apiKeys?.[id] ?? null,
+		params: searchParams,
+		retrievedAt: nowIso(),
+	});
+	// A provider with no base cannot run. In practice this is SearXNG when the
+	// instance is disabled, which is no longer fatal: it is one provider of many.
+	const runnable = routed.providers.filter((id) => Boolean(context(id).base));
+	const skipped = routed.providers.filter((id) => !runnable.includes(id));
+	// Providers selected by an identifier get the identifier, not the sentence
+	// it was embedded in.
+	const { identifiers, term } = routed.classification;
+	const resolveWith = {};
+	if (identifiers.suttaUid) resolveWith.suttacentral = identifiers.suttaUid;
+	if (identifiers.bookIdentifier) resolveWith.hathitrust = identifiers.bookIdentifier;
+	// Reference sources want the subject, not the sentence that framed it.
+	const queryOverrides = {};
+	if (term && term !== query) {
+		for (const id of ["wiktionary", "wikipedia", "wikidata", "sep", "iep", "inpho"]) queryOverrides[id] = term;
+	}
+	const outcome = await runRoutedSearch(query, runnable, context, { limit, resolveWith, queryOverrides });
+	return {
+		retrievedAt: nowIso(),
+		results: outcome.results,
+		routing: {
+			classification: routed.classification,
+			decisions: [...routed.decisions, ...skipped.map((id) => ({ provider: id, selected: false, reason: "no base URL configured" }))],
+			perProvider: outcome.perProvider,
+			errors: outcome.errors,
+		},
+	};
+}
+
+async function processSearchItem(runDirectory, base, query, searchParams, limit, readCount = 0, flags = {}) {
 	const resultPath = join(runDirectory, "search_results.json");
 	return withRunLock(runDirectory, async () => {
 		let state = loadRunState(runDirectory, "web-research");
@@ -290,12 +350,14 @@ async function processSearchItem(runDirectory, base, query, searchParams, limit,
 			state = updateRunState(runDirectory, (draft) => startResearchItem(draft, item.id), { type: "item_started", itemId: item.id, attempt: item.attempts + 1 });
 			item = state.items.find((candidate) => candidate.id === item.id);
 			try {
-				const payload = await searchSearxng(base, query, searchParams);
-				const retrievedAt = nowIso();
-				const results = (Array.isArray(payload.results) ? payload.results : [])
-					.slice(0, limit)
-					.map((result, index) => searchResultRecord(result, index, query, retrievedAt));
-				writeJson(resultPath, { retrievedAt, results });
+				const { retrievedAt, results, routing } = await routedSearch(query, base, searchParams, limit, flags);
+				// Every provider failing is a failed search, not an empty one.
+				if (results.length === 0 && routing.errors.length > 0 && routing.errors.length >= routing.perProvider.length) {
+					const error = new Error(`every provider failed: ${routing.errors.map((entry) => `${entry.provider}: ${entry.error}`).join("; ")}`);
+					error.transient = routing.errors.some((entry) => entry.transient);
+					throw error;
+				}
+				writeJson(resultPath, { retrievedAt, results, routing });
 				state = updateRunState(
 					runDirectory,
 					(draft) => {
@@ -309,7 +371,7 @@ async function processSearchItem(runDirectory, base, query, searchParams, limit,
 					},
 					{ type: "item_completed", itemId: item.id, attempt: item.attempts },
 				);
-				return { retrievedAt, results };
+				return { retrievedAt, results, routing };
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				const transient = isTransientFailure(error);
@@ -396,33 +458,6 @@ function safeStem(value) {
 
 function normalizeUrl(url) {
 	return normalizeAcquisitionUrl(url);
-}
-
-function isLoopbackOrMetadataHost(hostname) {
-	const host = hostname.toLowerCase();
-	if (process.env.FORGE_WEB_RESEARCH_ALLOW_UNSAFE === "1") return false;
-	if (host === "localhost" || host.endsWith(".localhost")) return true;
-	if (host === "127.0.0.1" || host.startsWith("127.")) return true;
-	if (host === "::1" || host === "0.0.0.0") return true;
-	if (host === "169.254.169.254" || host.startsWith("169.254.")) return true;
-	if (host === "metadata" || host === "metadata.google.internal") return true;
-	return false;
-}
-
-function assertFetchableUrl(url) {
-	let parsed;
-	try {
-		parsed = new URL(url);
-	} catch {
-		throw new Error(`invalid URL: ${url}`);
-	}
-	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-		throw new Error(`unsupported URL scheme (only http/https): ${url}`);
-	}
-	if (isLoopbackOrMetadataHost(parsed.hostname)) {
-		throw new Error(`refused loopback or metadata host: ${parsed.hostname}`);
-	}
-	return parsed;
 }
 
 function csvValue(value) {
@@ -1704,48 +1739,6 @@ function searxngBase(explicit) {
 	return services.searxng.enabled ? services.searxng.baseUrl : "";
 }
 
-async function pingSearxng(base, userAgent, timeoutMs) {
-	if (!base) return { configured: false, reachable: false, detail: "no SearXNG URL configured" };
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), timeoutMs);
-	try {
-		const response = await fetch(`${base}/search?q=ping&format=json`, {
-			signal: controller.signal,
-			headers: { "user-agent": userAgent, accept: "application/json" },
-		});
-		return { configured: true, reachable: response.ok, detail: `${base} responded with HTTP ${response.status}` };
-	} catch (error) {
-		return { configured: true, reachable: false, detail: `${base} unreachable: ${error.message}` };
-	} finally {
-		clearTimeout(timer);
-	}
-}
-
-async function searchSearxng(base, query, options) {
-	const params = new URLSearchParams({ q: query, format: "json" });
-	if (options.categories) params.set("categories", options.categories);
-	if (options.engines) params.set("engines", options.engines);
-	if (options.language) params.set("language", options.language);
-	if (options.safesearch !== undefined) params.set("safesearch", String(options.safesearch));
-	if (options.timeRange) params.set("time_range", options.timeRange);
-	if (options.pageNo) params.set("pageno", String(options.pageNo));
-
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), options.timeoutMs);
-	try {
-		const response = await fetch(`${base}/search?${params.toString()}`, {
-			signal: controller.signal,
-			headers: { "user-agent": options.userAgent, accept: "application/json" },
-		});
-		if (!response.ok) throw new Error(`SearXNG returned HTTP ${response.status}`);
-		return await response.json();
-	} catch (error) {
-		throw new Error(`SearXNG request failed: ${error.message}`);
-	} finally {
-		clearTimeout(timer);
-	}
-}
-
 function searchCacheKey(base, query, options) {
 	const params = {
 		base,
@@ -1768,35 +1761,11 @@ async function cachedSearchSearxng(base, query, options, context) {
 		return JSON.parse(readFileSync(cachePath, "utf8"));
 	}
 	context.searchCacheLog.push({ key, query, status: "miss", path: cachePath, recordedAt: nowIso() });
-	const payload = await context.searchQueue.run("searxng", () => searchSearxng(base, query, options), { query });
+	const payload = await context.searchQueue.run("searxng", () => searchSearxng(base, query, { ...options, limiter: searchLimiter }), {
+		query,
+	});
 	writeJson(cachePath, payload);
 	return payload;
-}
-
-function domainFromUrl(url) {
-	try {
-		return new URL(url).hostname.toLowerCase();
-	} catch {
-		return null;
-	}
-}
-
-function searchResultRecord(result, index, query, retrievedAt) {
-	const url = result.url ?? null;
-	return {
-		query,
-		rank: index + 1,
-		title: result.title ?? null,
-		url,
-		canonicalUrl: url ? normalizeUrl(url) : null,
-		domain: url ? domainFromUrl(url) : null,
-		content: result.content ?? null,
-		snippet: result.content ?? null,
-		engine: result.engine ?? (Array.isArray(result.engines) ? result.engines.join(",") : null),
-		score: result.score ?? null,
-		publishedAt: result.publishedDate ?? result.published_at ?? result.publishedAt ?? null,
-		retrievedAt,
-	};
 }
 
 function recordSearchNormalizedUrls(context, results) {
@@ -3120,6 +3089,9 @@ async function commandDoctor(options) {
 		embeddings: { available: Boolean(embeddings.enabled && embeddings.url), version: embeddings.model },
 	};
 	const capabilities = {
+		// SearXNG specifically. General search survives without it now -- see the
+		// `providers` block below for what a query can actually reach.
+		searxng: searxng.configured && searxng.reachable,
 		search: searxng.configured && searxng.reachable,
 		extraction: tools.playwright.available && tools.playwrightEndpoint.available,
 		httpFallback: tools.fetch.available,
@@ -3127,7 +3099,9 @@ async function commandDoctor(options) {
 		embeddings: tools.embeddings.available,
 	};
 	const remediation = [];
-	if (!searxng.configured) remediation.push("Set connectedServices.searxng.baseUrl, FORGE_SEARXNG_URL, or --searxng to enable search.");
+	if (!searxng.configured) {
+		remediation.push("Set connectedServices.searxng.baseUrl, FORGE_SEARXNG_URL, or --searxng to enable open-ended web search; the direct providers work without it.");
+	}
 	else if (!searxng.reachable) remediation.push(`SearXNG unreachable: ${searxng.detail}`);
 	if (!tools.playwright.available) remediation.push("Install Playwright for rendered page extraction.");
 	if (tools.playwright.available && !tools.playwrightEndpoint.available) {
@@ -3154,7 +3128,25 @@ async function commandDoctor(options) {
 	} else {
 		remediation.push("no thinking service is configured; deep runs would not be verified");
 	}
-	const report = { tools, capabilities, searxng, chat, chatProbe, think, thinkProbe, embeddings, remediation };
+	// Which providers a query could actually reach right now. Reports whether a
+	// key is *present*, never its value.
+	const services = resolveConnectedServices({ searxngUrl: options.searxng });
+	const providers = searchProviderList().map((id) => {
+		const availability = searchProviderAvailability(id, { apiKeys: services.apiKeys });
+		const capability = searchProviderCapabilities(id) ?? {};
+		return {
+			id,
+			available: id === "searxng" ? capabilities.search : availability.available,
+			reason: availability.reason,
+			authRequired: capability.authRequired === true,
+			keyConfigured: Boolean(services.apiKeys?.[id]),
+		};
+	});
+	const keyed = providers.filter((provider) => provider.authRequired && !provider.keyConfigured);
+	if (keyed.length > 0) {
+		remediation.push(`optional provider keys not set (${keyed.map((provider) => provider.id).join(", ")}); those providers are skipped`);
+	}
+	const report = { tools, capabilities, searxng, providers, chat, chatProbe, think, thinkProbe, embeddings, remediation };
 	if (options.json) {
 		process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 		return;
@@ -3162,11 +3154,13 @@ async function commandDoctor(options) {
 	for (const [name, info] of Object.entries(tools)) {
 		process.stdout.write(`${name}: ${info.available ? info.version || "available" : "missing"}\n`);
 	}
-	process.stdout.write(`Search: ${capabilities.search ? "available" : `unavailable (${searxng.detail})`}
+	process.stdout.write(`SearXNG (open-ended search): ${capabilities.searxng ? "available" : `unavailable (${searxng.detail})`}
 `);
 	process.stdout.write(`Page extraction: ${capabilities.extraction ? "available (Playwright)" : capabilities.httpFallback ? "available (HTTP fallback)" : "unavailable"}
 `);
-	process.stdout.write(`SearXNG URL: ${searxngBase(options.searxng)}
+	process.stdout.write(`SearXNG URL: ${searxngBase(options.searxng) || "(disabled)"}
+`);
+	process.stdout.write(`Search providers: ${providers.filter((provider) => provider.available).length}/${providers.length} available
 `);
 	process.stdout.write(`Chat URL: ${chat.baseUrl} (${chat.model})
 `);
@@ -3179,8 +3173,11 @@ async function commandSearch(positionals, flags) {
 	if (positionals.length === 0) fail("search requires a query");
 	if (!flags.output) fail("search requires --output <new-directory>");
 	const query = positionals.join(" ");
+	// SearXNG is no longer required. It is one provider among many and the last
+	// one tried, so a disabled or unreachable instance costs open-ended web
+	// results rather than the whole search -- which was the point of the
+	// registry. Only a query that routes to nothing but SearXNG needs it.
 	const base = searxngBase(flags.searxng);
-	if (!base) fail("search requires a SearXNG instance; set connectedServices.searxng.baseUrl, FORGE_SEARXNG_URL, or --searxng <url>");
 
 	const autoParams = autoSelectParams(query);
 	const searchParams = {
@@ -3203,7 +3200,7 @@ async function commandSearch(positionals, flags) {
 	}
 	let searchResult;
 	try {
-		searchResult = await processSearchItem(runDirectory, base, query, searchParams, limit);
+		searchResult = await processSearchItem(runDirectory, base, query, searchParams, limit, 0, flags);
 	} catch (error) {
 		fail(error instanceof Error ? error.message : String(error));
 	}
@@ -3347,7 +3344,7 @@ async function commandResearch(positionals, flags) {
 	}
 	let searchResult;
 	try {
-		searchResult = await processSearchItem(runDirectory, base, query, searchParams, limit, readCount);
+		searchResult = await processSearchItem(runDirectory, base, query, searchParams, limit, readCount, flags);
 	} catch (error) {
 		fail(error instanceof Error ? error.message : String(error));
 	}

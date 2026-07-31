@@ -157,9 +157,33 @@ local embeddings endpoint ranks chunks before evidence extraction.
    `evidence_items.jsonl`; cite claim ids, evidence ids, and source ids. Always
    attribute claims to source URLs and mark uncertainty explicitly.
 
+### Search Providers
+
+`search` routes a query to the sources that can answer it and merges the
+results; SearXNG is tried last, as the fallback for open-ended questions. The
+routing is automatic — pass `--providers` only to override it.
+
+- **Reference**: `wikipedia`, `wiktionary`, `wikidata`, `sep` (Stanford
+  Encyclopedia of Philosophy), `inpho`, `iep`
+- **Buddhist canon**: `suttacentral` (Pali), `cbeta` (Chinese/Taishō), `bdrc`
+  (Tibetan, lookup by BDRC id only)
+- **Books**: `openlibrary`, `gutendex`, `internetarchive`, `loc`, `hathitrust`
+  (lookup by ISBN/OCLC/LCCN only)
+- **News**: `gdelt` · **Technical**: `stackexchange`, `hackernews`
+- **General**: `searxng`
+
+An identifier in the query is decisive and is looked up rather than searched:
+a sutta reference (`MN 118`, `SN 56.11`), a Taishō number (`T. 262`), or an
+ISBN. `search_results.json` records the routing decisions, so a run can say why
+it asked what it asked and which providers were skipped.
+
+None of these require credentials. Providers that offer a free key read it from
+`connectedServices.apiKeys` or `FORGE_API_KEY_<PROVIDER>`; without one they are
+skipped and the rest still run. Run `doctor` to see what is reachable.
+
 ### SearXNG Parameters
 
-All commands that query SearXNG accept these optional parameters. If omitted,
+Commands that query SearXNG accept these optional parameters. If omitted,
 the script auto-selects based on query content:
 
 - **`--categories`** (comma-separated): `general` (default), `news`,

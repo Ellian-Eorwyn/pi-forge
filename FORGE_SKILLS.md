@@ -10,12 +10,12 @@
 
 | Launch context block | Tokens |
 |---|---:|
-| Base system prompt (intro, tools list, guidelines, connected services) | 390 |
-| Tool JSON schemas (13 tools) | 2760 |
+| Base system prompt (intro, tools list, guidelines, connected services) | 389 |
+| Tool JSON schemas (13 tools) | 2858 |
 | Managed instructions (`AGENTS.md` with its `<project_context>` wrapper) | 1336 |
 | Skills menu (metadata for all model-visible skills) | 3259 |
-| **Total launch context (always processed)** | **7744** |
-| Maximum if every `SKILL.md` body is also loaded at once | 57928 |
+| **Total launch context (always processed)** | **7841** |
+| Maximum if every `SKILL.md` body is also loaded at once | 58324 |
 
 Of that total, the forge profile itself owns 4594 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
 
@@ -34,9 +34,9 @@ Sorted by launch cost. `Prompt lines` counts a tool's `promptSnippet` and `promp
 | Tool | Source | Parameters | Schema tokens | Prompt lines |
 |---|---|---:|---:|---:|
 | `forge_deep_web_research` | forge extension | 10 | 397 | 19 |
+| `forge_web_search` | forge extension | 11 | 373 | 41 |
 | `edit` | built-in | 2 | 302 | 153 |
 | `forge_web_read` | forge extension | 6 | 281 | 12 |
-| `forge_web_search` | forge extension | 10 | 275 | 41 |
 | `forge_web_discover` | forge extension | 5 | 254 | 18 |
 | `forge_academic_web_research` | forge extension | 6 | 253 | 19 |
 | `grep` | built-in | 7 | 253 | 16 |
@@ -73,7 +73,7 @@ Sorted by launch cost. `Prompt lines` counts a tool's `promptSnippet` and `promp
 | [`vault-transcripts`](forge/skills/vault-transcripts/SKILL.md) | Process raw voice-note and meeting transcripts in an Obsidian vault inbox - give each recordi... | 151 | 3661 | 3785 | Model-visible |
 | [`vault-wiki`](forge/skills/vault-wiki/SKILL.md) | Install the seven wiki entry templates and expand wiki entity notes into complete, cited refe... | 143 | 2277 | 2395 | Model-visible |
 | [`web-collection`](forge/skills/web-collection/SKILL.md) | Archive and organize web sources | 138 | 2017 | 2129 | Model-visible |
-| [`web-research`](forge/skills/web-research/SKILL.md) | Quick web search and page reading for information lookup. | 146 | 3942 | 4063 | Model-visible |
+| [`web-research`](forge/skills/web-research/SKILL.md) | Quick web search and page reading for information lookup. | 146 | 4241 | 4362 | Model-visible |
 
 ## Counting Method
 

@@ -12,6 +12,14 @@ import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { resolveConnectedServices } from "../../../lib/connected-services.mjs";
+import {
+	DEFAULT_BREAKER_THRESHOLD as CIRCUIT_BREAKER_THRESHOLD,
+	HostLimiter,
+	assertFetchableUrl,
+	isRefusalStatus,
+	parseRetryAfterMs,
+	readCappedBody,
+} from "../../../lib/http-fetch.mjs";
 import { ToolInputError, okResult, optionalInteger, requiredString, runTool } from "../../../lib/tool_contract.mjs";
 
 const UNPAYWALL_BASE = "https://api.unpaywall.org/v2";
@@ -26,11 +34,6 @@ const DEFAULT_MAX_BYTES = 50 * 1024 * 1024;
 const DEFAULT_HOST_DELAY_MS = 3000;
 const DEFAULT_INSTITUTIONAL_HOST_DELAY_MS = 4000;
 
-// Three consecutive refusals from one host means that host has decided about us.
-// Continuing to ask is what turns a slow run into a blocked institution.
-const CIRCUIT_BREAKER_THRESHOLD = 3;
-const REFUSAL_STATUSES = new Set([401, 402, 403, 429]);
-
 // A PDF is identified by its magic number, never by Content-Type. Publishers
 // routinely serve an HTML paywall interstitial labeled application/pdf.
 const PDF_MAGIC = Buffer.from("%PDF-", "ascii");
@@ -42,7 +45,10 @@ function userAgent(contactEmail) {
 	return `pi-forge-literature-library/1 (+https://github.com/pi-forge; mailto:${contactEmail})`;
 }
 
-const hostState = new Map();
+// One limiter for the whole invocation. This tool processes a batch in a single
+// process, and "that host refused us three times earlier in this run" is exactly
+// the judgement the breaker is meant to carry across records.
+const limiter = new HostLimiter({ breakerThreshold: CIRCUIT_BREAKER_THRESHOLD });
 
 function hostFor(url) {
 	try {
@@ -52,84 +58,14 @@ function hostFor(url) {
 	}
 }
 
-function stateFor(host) {
-	let state = hostState.get(host);
-	if (!state) {
-		state = { lastRequestAt: 0, consecutiveRefusals: 0, tripped: false, requests: 0, retryAfterUntil: 0 };
-		hostState.set(host, state);
-	}
-	return state;
-}
-
-const sleep = (milliseconds) => new Promise((done) => setTimeout(done, milliseconds));
-
-async function waitForHost(host, delayMs) {
-	const state = stateFor(host);
-	const now = Date.now();
-	const earliest = Math.max(state.lastRequestAt + delayMs, state.retryAfterUntil);
-	if (earliest > now) await sleep(earliest - now);
-	state.lastRequestAt = Date.now();
-	state.requests += 1;
-}
-
-function isPrivateOrMetadataHost(host) {
-	return (
-		host === "localhost" ||
-		host.endsWith(".localhost") ||
-		host === "169.254.169.254" ||
-		host.startsWith("169.254.") ||
-		host === "metadata" ||
-		host === "metadata.google.internal" ||
-		host === "0.0.0.0" ||
-		host === "::1" ||
-		host === "[::1]" ||
-		/^127\./.test(host) ||
-		/^10\./.test(host) ||
-		/^192\.168\./.test(host) ||
-		/^172\.(1[6-9]|2\d|3[01])\./.test(host)
-	);
-}
-
-function assertFetchableUrl(rawUrl, options) {
-	let parsed;
-	try {
-		parsed = new URL(rawUrl);
-	} catch {
-		throw new ToolInputError("invalid_url", `not a URL: ${rawUrl}`);
-	}
-	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-		throw new ToolInputError("unsupported_scheme", `only http/https is fetchable: ${rawUrl}`);
-	}
-	const host = parsed.hostname.toLowerCase();
-	// Candidate URLs come from a citation file and from publisher HTML, so they
-	// are outside data: refuse loopback, private, and cloud-metadata addresses.
-	// `allowPrivateHosts` exists so the test suite can serve fixtures from
-	// 127.0.0.1 without contacting a real publisher. literature-library.py never
-	// sets it, so the production path always enforces the guard.
-	if (!options?.allowPrivateHosts && isPrivateOrMetadataHost(host)) {
-		throw new ToolInputError("refused_host", `refused loopback, private, or metadata host: ${host}`);
-	}
-	return parsed;
-}
-
-async function readCappedBody(response, maxBytes) {
-	if (!response.body) return { buffer: Buffer.alloc(0), truncated: false };
-	const reader = response.body.getReader();
-	const chunks = [];
-	let total = 0;
-	for (;;) {
-		const { done, value } = await reader.read();
-		if (done) break;
-		total += value.length;
-		if (total > maxBytes) {
-			await reader.cancel();
-			// Refuse rather than keep a partial file: a truncated PDF that opens
-			// is worse than no PDF, because nothing downstream can tell.
-			return { buffer: Buffer.concat(chunks), truncated: true };
-		}
-		chunks.push(Buffer.from(value));
-	}
-	return { buffer: Buffer.concat(chunks), truncated: false };
+// Candidate URLs come from a citation file and from publisher HTML, so they are
+// outside data: refuse loopback, private, and cloud-metadata addresses. This
+// uses the strict default in ../../../lib/http-fetch.mjs. `allowPrivateHosts`
+// exists so the test suite can serve fixtures from 127.0.0.1 without contacting
+// a real publisher; literature-library.py never sets it, so the production path
+// always enforces the guard.
+function assertFetchable(rawUrl, options) {
+	return assertFetchableUrl(rawUrl, { allow: Boolean(options?.allowPrivateHosts) });
 }
 
 async function fetchFollowing(url, options) {
@@ -137,15 +73,14 @@ async function fetchFollowing(url, options) {
 	const visited = new Set();
 	let current = url;
 	for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
-		const parsed = assertFetchableUrl(current, options);
+		const parsed = assertFetchable(current, options);
 		const host = parsed.hostname.toLowerCase();
-		const state = stateFor(host);
-		if (state.tripped) {
+		if (limiter.isTripped(host)) {
 			const error = new Error(`host tripped the circuit breaker earlier in this run: ${host}`);
 			error.code = "host_tripped";
 			throw error;
 		}
-		await waitForHost(host, options.hostDelayMs);
+		await limiter.wait(host, options.hostDelayMs);
 
 		const controller = new AbortController();
 		const timer = setTimeout(() => controller.abort(), options.timeoutMs);
@@ -168,16 +103,12 @@ async function fetchFollowing(url, options) {
 			clearTimeout(timer);
 		}
 
-		if (REFUSAL_STATUSES.has(response.status)) {
-			state.consecutiveRefusals += 1;
-			const retryAfter = Number.parseInt(response.headers.get("retry-after") ?? "", 10);
-			if (Number.isInteger(retryAfter) && retryAfter > 0) {
-				state.retryAfterUntil = Date.now() + Math.min(retryAfter, 300) * 1000;
-			}
-			if (state.consecutiveRefusals >= CIRCUIT_BREAKER_THRESHOLD) state.tripped = true;
-			return { response, finalUrl: current, chain, body: null, refused: true, tripped: state.tripped };
+		if (isRefusalStatus(response.status)) {
+			limiter.defer(host, parseRetryAfterMs(response.headers.get("retry-after")));
+			const tripped = limiter.noteRefusal(host);
+			return { response, finalUrl: current, chain, body: null, refused: true, tripped };
 		}
-		state.consecutiveRefusals = 0;
+		limiter.noteSuccess(host);
 
 		if (REDIRECT_STATUSES.has(response.status) && response.headers.get("location")) {
 			const next = new URL(response.headers.get("location"), current).toString();
@@ -281,8 +212,8 @@ async function acquireViaBrowser(record, candidates, options, attempts) {
 	try {
 		for (const candidate of candidates.slice(0, options.maxCandidates)) {
 			const host = hostFor(candidate.url);
-			if (!host || stateFor(host).tripped) continue;
-			await waitForHost(host, options.hostDelayMs);
+			if (!host || limiter.isTripped(host)) continue;
+			await limiter.wait(host, options.hostDelayMs);
 
 			const page = await context.newPage();
 			try {
@@ -344,8 +275,8 @@ async function acquireViaBrowser(record, candidates, options, attempts) {
 
 				for (const link of links.slice(0, options.maxDiscoveredLinks)) {
 					const linkHost = hostFor(link);
-					if (!linkHost || stateFor(linkHost).tripped) continue;
-					await waitForHost(linkHost, options.hostDelayMs);
+					if (!linkHost || limiter.isTripped(linkHost)) continue;
+					await limiter.wait(linkHost, options.hostDelayMs);
 					let fetched;
 					try {
 						fetched = await context.request.get(link, { timeout: options.browserNavigationTimeoutMs, maxRedirects: 5 });
@@ -377,7 +308,7 @@ async function acquireViaBrowser(record, candidates, options, attempts) {
 
 async function resolveOpenAccess(doi, options) {
 	const url = `${UNPAYWALL_BASE}/${encodeURIComponent(doi)}?email=${encodeURIComponent(options.contactEmail)}`;
-	await waitForHost("api.unpaywall.org", 1000);
+	await limiter.wait("api.unpaywall.org", 1000);
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), options.timeoutMs);
 	try {
@@ -689,12 +620,12 @@ await runTool(async (input) => {
 		results.push(await acquireOne(record, options));
 	}
 
-	const trippedHosts = [...hostState.entries()].filter(([, state]) => state.tripped).map(([host]) => host);
+	const trippedHosts = [...limiter.hosts.entries()].filter(([, state]) => state.tripped).map(([host]) => host);
 	return okResult({
 		warnings: trippedHosts.map((host) => `Stopped requesting ${host} after ${CIRCUIT_BREAKER_THRESHOLD} consecutive refusals.`),
 		data: {
 			results,
-			hosts: [...hostState.entries()].map(([host, state]) => ({
+			hosts: [...limiter.hosts.entries()].map(([host, state]) => ({
 				host,
 				requests: state.requests,
 				tripped: state.tripped,

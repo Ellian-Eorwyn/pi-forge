@@ -167,6 +167,12 @@ export function inputDrift(snapshot, current) {
 }
 
 export function isTransientFailure(error) {
+	// An error raised by http-fetch.mjs says so itself. The string matching below
+	// is a fallback for errors from everywhere else, and it has a blind spot the
+	// flag exists to cover: it looks for "timeout", while a timed-out fetch says
+	// "request timed out after 30000ms" and carries no code, so retryable
+	// timeouts were being recorded as permanent failures.
+	if (error?.transient === true) return true;
 	const code = String(error?.code ?? "").toLowerCase();
 	const message = String(error instanceof Error ? error.message : error).toLowerCase();
 	return ["econnreset", "econnrefused", "etimedout", "timeout", "interrupted", "aborted"].some((value) => code.includes(value) || message.includes(value)) || /http\s+5\d\d/.test(message);

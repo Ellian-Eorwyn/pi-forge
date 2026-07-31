@@ -8,6 +8,8 @@ import * as readline from "node:readline/promises";
 import { resolveConnectedServices } from "../../../lib/connected-services.mjs";
 import { callJsonWithRetry, resolveService } from "../../../lib/forge-llm.mjs";
 import { htmlToCleanMarkdown } from "../../../lib/html-cleaner.mjs";
+import { readCappedBody } from "../../../lib/http-fetch.mjs";
+import { pingSearxng, searchLimiter, searchSearxng } from "../../../lib/searxng.mjs";
 import {
 	DEFAULT_MAX_ATTEMPTS,
 	assertCompatibleRun,
@@ -211,24 +213,6 @@ function extractLinks(html, baseUrl) {
 	return [...links];
 }
 
-async function readCappedBody(response, maxBytes) {
-	if (!response.body) return { buffer: Buffer.alloc(0), truncated: false };
-	const reader = response.body.getReader();
-	const chunks = [];
-	let total = 0;
-	for (;;) {
-		const { done, value } = await reader.read();
-		if (done) break;
-		total += value.length;
-		if (total > maxBytes) {
-			await reader.cancel();
-			return { buffer: Buffer.concat(chunks), truncated: true };
-		}
-		chunks.push(Buffer.from(value));
-	}
-	return { buffer: Buffer.concat(chunks), truncated: false };
-}
-
 async function fetchWithRedirects(url, options) {
 	const chain = [];
 	const visited = new Set();
@@ -335,23 +319,6 @@ async function connectPlaywrightBrowser(playwright, timeoutMs, explicitEndpoint)
 function searxngBase(explicit) {
 	const services = resolveConnectedServices({ searxngUrl: explicit });
 	return services.searxng.enabled ? services.searxng.baseUrl : "";
-}
-
-async function pingSearxng(base, userAgent, timeoutMs) {
-	if (!base) return { configured: false, reachable: false, detail: "no SearXNG URL configured" };
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), timeoutMs);
-	try {
-		const response = await fetch(`${base}/search?q=ping&format=json`, {
-			signal: controller.signal,
-			headers: { "user-agent": userAgent, accept: "application/json" },
-		});
-		return { configured: true, reachable: response.ok, detail: `${base} responded with HTTP ${response.status}` };
-	} catch (error) {
-		return { configured: true, reachable: false, detail: `${base} unreachable: ${error.message}` };
-	} finally {
-		clearTimeout(timer);
-	}
 }
 
 async function doctor(options) {
@@ -1044,14 +1011,6 @@ async function commandSearch(positionals, flags) {
 	const options = commonOptions(flags);
 	const limit = flags.limit ?? 25;
 
-	// Build SearXNG query parameters
-	const params = new URLSearchParams({ q: query, format: "json" });
-	if (flags.categories) params.set("categories", flags.categories);
-	if (flags.engines) params.set("engines", flags.engines);
-	if (flags.language) params.set("language", flags.language);
-	if (flags.safesearch !== undefined) params.set("safesearch", String(flags.safesearch));
-	if (flags.timeRange) params.set("time_range", flags.timeRange);
-	if (flags.pageNo) params.set("pageno", String(flags.pageNo));
 	const searchMeta = {
 		categories: flags.categories ?? null,
 		engines: flags.engines ?? null,
@@ -1073,20 +1032,16 @@ async function commandSearch(positionals, flags) {
 		return;
 	}
 
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), options.timeoutMs);
 	let payload;
 	try {
-		const response = await fetch(`${base}/search?${params.toString()}`, {
-			signal: controller.signal,
-			headers: { "user-agent": options.userAgent, accept: "application/json" },
+		payload = await searchSearxng(base, query, {
+			...searchMeta,
+			userAgent: options.userAgent,
+			timeoutMs: options.timeoutMs,
+			limiter: searchLimiter,
 		});
-		if (!response.ok) fail(`SearXNG returned HTTP ${response.status}`);
-		payload = await response.json();
 	} catch (error) {
-		fail(`SearXNG request failed: ${error instanceof Error ? error.message : String(error)}`);
-	} finally {
-		clearTimeout(timer);
+		fail(error instanceof Error ? error.message : String(error));
 	}
 	const results = (Array.isArray(payload.results) ? payload.results : []).slice(0, limit).map((result, index) => ({
 		rank: index + 1,

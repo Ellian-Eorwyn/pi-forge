@@ -140,6 +140,62 @@ test("a customized chat endpoint survives configuration", () => {
 	});
 });
 
+test("an install with no provider keys seeds an empty block", () => {
+	withAgentDirectory(undefined, (agentDirectory) => {
+		// The no-key provider tier has to work on a machine nobody has configured.
+		assert.deepEqual(configure(agentDirectory).connectedServices.apiKeys, {});
+	});
+});
+
+test("persisted provider keys survive configuration, half-finished ones are dropped", () => {
+	const existing = {
+		connectedServices: {
+			apiKeys: { openalex: "live-key", core: "  spaced  ", guardian: "", nyt: null, wolfram: 42 },
+		},
+	};
+	withAgentDirectory(existing, (agentDirectory) => {
+		const { apiKeys } = configure(agentDirectory).connectedServices;
+		assert.equal(apiKeys.openalex, "live-key");
+		assert.equal(apiKeys.core, "spaced");
+		// An empty, null or non-string value is a half-finished edit. Keeping it
+		// would make the provider send a malformed credential and read the 401 as
+		// the provider refusing us rather than as our own bad config.
+		assert.equal("guardian" in apiKeys, false);
+		assert.equal("nyt" in apiKeys, false);
+		assert.equal("wolfram" in apiKeys, false);
+	});
+});
+
+test("provider keys resolve explicit over env over persisted", async () => {
+	const { apiKeyEnvName, resolveApiKey, resolveConnectedServices } = await import(
+		join(repositoryRoot, "forge", "lib", "connected-services.mjs")
+	);
+	assert.equal(apiKeyEnvName("semantic-scholar"), "FORGE_API_KEY_SEMANTIC_SCHOLAR");
+
+	const settings = { connectedServices: { apiKeys: { openalex: "from-settings", core: "from-settings" } } };
+	const persisted = resolveConnectedServices({ settings, env: {} });
+	assert.equal(persisted.apiKeys.openalex, "from-settings");
+
+	const env = { FORGE_API_KEY_OPENALEX: "from-env", FORGE_API_KEY_SEMANTIC_SCHOLAR: "env-only" };
+	const withEnv = resolveConnectedServices({ settings, env });
+	assert.equal(withEnv.apiKeys.openalex, "from-env");
+	// An env var alone configures a provider that settings.json never mentioned.
+	assert.equal(withEnv.apiKeys["semantic-scholar"], "env-only");
+	assert.equal(withEnv.apiKeys.core, "from-settings");
+
+	const explicit = resolveConnectedServices({ settings, env, apiKeys: { openalex: "from-option" } });
+	assert.equal(explicit.apiKeys.openalex, "from-option");
+
+	// An empty env var turns a persisted key off for this process, matching how
+	// FORGE_SEARXNG_URL="" disables search.
+	const disabled = resolveConnectedServices({ settings, env: { FORGE_API_KEY_OPENALEX: "" } });
+	assert.equal("openalex" in disabled.apiKeys, false);
+
+	assert.equal(resolveApiKey("core", { settings, env: {} }), "from-settings");
+	// A provider with no key is absent, not an error: the router skips it.
+	assert.equal(resolveApiKey("guardian", { settings, env: {} }), null);
+});
+
 function installedProfile(agentDirectory) {
 	return readFileSync(join(agentDirectory, "AGENTS.md"), "utf8");
 }

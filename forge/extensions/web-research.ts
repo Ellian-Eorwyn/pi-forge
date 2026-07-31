@@ -11,6 +11,7 @@ interface WebSearchParams {
 	query: string;
 	output?: string;
 	limit?: number;
+	providers?: string[];
 	searxng?: string;
 	categories?: string;
 	engines?: string;
@@ -157,13 +158,19 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 		name: "forge_web_search",
 		label: "Forge web search",
 		description:
-			"Run a quick SearXNG web search and return ranked result metadata. Categories, engines, and time range are auto-selected from the query when omitted.",
-		promptSnippet: "Quick SearXNG web search",
+			"Run a quick web search and return ranked result metadata. The query is routed to the sources that can answer it -- encyclopedias and philosophy references, the Buddhist canon, book catalogues, news, technical Q&A -- falling back to SearXNG for open-ended questions. Categories, engines, and time range are auto-selected when omitted.",
+		promptSnippet: "Quick routed web search",
 		promptGuidelines: ["Reach for the forge web tools directly for quick lookups; load the web-research skill only for full research runs."],
 		parameters: Type.Object({
 			query: Type.String({ description: "Search query." }),
 			output: Type.Optional(Type.String({ description: "Optional new output directory. Defaults under forge-output/web-research." })),
 			limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum ranked results to return." })),
+			providers: Type.Optional(
+				Type.Array(Type.String(), {
+					description:
+						"Pin specific providers instead of letting the query be routed, e.g. suttacentral, cbeta, sep, wikipedia, gdelt, openlibrary, searxng.",
+				}),
+			),
 			searxng: Type.Optional(Type.String({ description: "One-run SearXNG base URL override." })),
 			categories: Type.Optional(Type.String({ description: "Comma-separated SearXNG categories." })),
 			engines: Type.Optional(Type.String({ description: "Comma-separated SearXNG engines." })),
@@ -312,6 +319,7 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 function buildWebSearchArgs(input: WebSearchParams & { output: string }): string[] {
 	const args = [webResearchScript, "search", input.query, "--output", input.output];
 	if (input.limit !== undefined) args.push("--limit", String(input.limit));
+	if (input.providers && input.providers.length > 0) args.push("--providers", input.providers.join(","));
 	if (input.searxng) args.push("--searxng", input.searxng);
 	if (input.categories) args.push("--categories", input.categories);
 	if (input.engines) args.push("--engines", input.engines);

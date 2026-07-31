@@ -6,6 +6,11 @@ import { JSDOM, VirtualConsole } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import * as playwright from "playwright";
 import { resolveConnectedServices } from "../../../lib/connected-services.mjs";
+import {
+	assertFetchableUrl as assertFetchableUrlWithRules,
+	readCappedBody,
+	WEB_RESEARCH_HOST_RULES,
+} from "../../../lib/http-fetch.mjs";
 import { atomicWriteFile, atomicWriteJson } from "../../../lib/run-state.mjs";
 
 export const DEFAULT_USER_AGENT = "pi-forge-web-research/1 (+https://github.com/pi-forge)";
@@ -110,31 +115,14 @@ function looksBinaryLike(text) {
 	return replacementRatio > 0.01 || controlRatio > 0.01;
 }
 
-function isLoopbackOrMetadataHost(hostname) {
-	const host = hostname.toLowerCase();
-	if (process.env.FORGE_WEB_RESEARCH_ALLOW_UNSAFE === "1") return false;
-	if (host === "localhost" || host.endsWith(".localhost")) return true;
-	if (host === "127.0.0.1" || host.startsWith("127.")) return true;
-	if (host === "::1" || host === "0.0.0.0") return true;
-	if (host === "169.254.169.254" || host.startsWith("169.254.")) return true;
-	if (host === "metadata" || host === "metadata.google.internal") return true;
-	return false;
-}
-
+/**
+ * A research run fetches URLs that came out of a search engine, so the guard is
+ * about data we did not author. The rule set is web-research's rather than the
+ * stricter default because the LLM stack and the SearXNG instance live on the
+ * LAN; see WEB_RESEARCH_HOST_RULES in ../../../lib/http-fetch.mjs.
+ */
 export function assertFetchableUrl(url) {
-	let parsed;
-	try {
-		parsed = new URL(url);
-	} catch {
-		throw new Error(`invalid URL: ${url}`);
-	}
-	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-		throw new Error(`unsupported URL scheme (only http/https): ${url}`);
-	}
-	if (isLoopbackOrMetadataHost(parsed.hostname)) {
-		throw new Error(`refused loopback or metadata host: ${parsed.hostname}`);
-	}
-	return parsed;
+	return assertFetchableUrlWithRules(url, WEB_RESEARCH_HOST_RULES);
 }
 
 export function normalizeUrl(url) {
@@ -454,24 +442,6 @@ async function queuedDirectHttpAcquire(url, context, domainRule) {
 			),
 		{ domain: host, url },
 	);
-}
-
-async function readCappedBody(response, maxBytes) {
-	if (!response.body) return { buffer: Buffer.alloc(0), truncated: false };
-	const reader = response.body.getReader();
-	const chunks = [];
-	let total = 0;
-	for (;;) {
-		const { done, value } = await reader.read();
-		if (done) break;
-		total += value.length;
-		if (total > maxBytes) {
-			await reader.cancel();
-			return { buffer: Buffer.concat(chunks), truncated: true };
-		}
-		chunks.push(Buffer.from(value));
-	}
-	return { buffer: Buffer.concat(chunks), truncated: false };
 }
 
 async function directHttpAcquire(url, context) {
