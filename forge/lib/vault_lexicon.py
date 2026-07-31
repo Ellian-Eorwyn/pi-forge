@@ -627,7 +627,8 @@ def _present_verbatim(text, term):
     parts = [re.escape(part) for part in _tokens(term)]
     if not parts:
         return False
-    pattern = rf"(?<!\w){r'\s+'.join(parts)}(?!\w)"
+    spacing = r"\s+"
+    pattern = rf"(?<!\w){spacing.join(parts)}(?!\w)"
     return re.search(pattern, _strip_accents(text), re.IGNORECASE) is not None
 
 
