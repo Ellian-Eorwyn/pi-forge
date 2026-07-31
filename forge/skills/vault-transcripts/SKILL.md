@@ -1,6 +1,6 @@
 ---
 name: vault-transcripts
-description: Process raw voice-note and meeting transcripts sitting in an Obsidian vault inbox - give each recording a real title, clean the speech-to-text artifacts without rewriting the speaker's meaning, write a summary, and keep the recording as its own linked source note. Use before vault-organizer processes the inbox, so the organizer classifies a named, cleaned note; use split to move the recording out of notes processed before the pair existed. For recordings not yet transcribed use transcription; for transcripts outside a vault use transcript-cleanup.
+description: Process raw voice-note and meeting transcripts in an Obsidian vault inbox - give each recording a real title, clean speech-to-text artifacts without rewriting the speaker's meaning, summarize, and keep the recording as its own linked source note. Use before vault-organizer processes the inbox; use split to separate recordings from notes processed earlier. For untranscribed recordings use transcription; outside a vault use transcript-cleanup.
 ---
 
 # Vault Transcripts

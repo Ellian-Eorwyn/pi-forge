@@ -1,6 +1,6 @@
 ---
 name: vault-organizer
-description: Organize an Obsidian vault or vault inbox from a human-maintained schema note - classify Markdown notes, file them into schema folders (including a per-kind sources tree when the schema declares one), normalize frontmatter, and find duplicates. Use to process the inbox, file loose notes, de-duplicate, or check the vault against its schema. Dry-runs by default and needs explicit approval before applying. Run vault-transcripts first on raw voice notes; use vault-connections for meaning-based search and linking.
+description: Organize an Obsidian vault or its inbox from a human-maintained schema note - classify notes, file them into schema folders (with a per-kind sources tree when declared), normalize frontmatter, and find duplicates. Use to process the inbox, file loose notes, de-duplicate, or check the vault against its schema. Dry-runs by default; applying needs approval. Run vault-transcripts first on voice notes; use vault-connections for meaning-based search.
 ---
 
 # Vault Organizer
