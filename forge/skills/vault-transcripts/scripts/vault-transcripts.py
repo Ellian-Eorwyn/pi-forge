@@ -2185,12 +2185,15 @@ def reflect_note(args, service, record, cleaned, candidates, sources=()):
     background = vault_profile.profile_prefix(profile, site)
     if background:
         system += "\n\n" + background
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    allowed_wikilinks = {entry["wikilink"] for entry in candidates}
+    allowed_urls = {entry["url"] for entry in payload["outsideSources"]}
     value, _call = forge_llm.call_json_with_retry(
         service,
-        [
-            {"role": "system", "content": system},
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-        ],
+        messages,
         temperature=0,
         cache_prompt=args.cache_prompt,
         response_format={"type": "json_object"},
@@ -2198,12 +2201,31 @@ def reflect_note(args, service, record, cleaned, candidates, sources=()):
         api_key=args.api_key,
         task=f"reflect-{recording_type}",
     )
-    return validate_reflection(
-        value,
-        recording_type,
-        {entry["wikilink"] for entry in candidates},
-        {entry["url"] for entry in payload["outsideSources"]},
-    )
+    try:
+        return validate_reflection(value, recording_type, allowed_wikilinks, allowed_urls)
+    except UserError as error:
+        # The reasoning validate_reflection already gives for a single bad
+        # connection applies harder to a malformed section: this costs the note
+        # its summary too, which is far too much for one line the model got
+        # wrong in shape rather than substance. One more ask, as classification
+        # and cleanup both get.
+        repair = messages + [
+            {
+                "role": "user",
+                "content": f"That response was unusable: {error}. Return corrected JSON only, following the schema exactly.",
+            }
+        ]
+        value, _call = forge_llm.call_json_with_retry(
+            service,
+            repair,
+            temperature=0,
+            cache_prompt=args.cache_prompt,
+            response_format={"type": "json_object"},
+            timeout=args.request_timeout,
+            api_key=args.api_key,
+            task=f"reflect-{recording_type}-repair",
+        )
+        return validate_reflection(value, recording_type, allowed_wikilinks, allowed_urls)
 
 
 def check_summary(summary):

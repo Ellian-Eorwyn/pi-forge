@@ -10,6 +10,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "vault-transcripts.py"
 sys.dont_write_bytecode = True
@@ -296,6 +297,9 @@ class StubChatHandler(BaseHTTPRequestHandler):
             return "clean"
         if system.startswith("You write the one-paragraph summary"):
             return "summarize"
+        # Both reflection prompts open this way, and nothing else does.
+        if system.startswith("You add a"):
+            return "reflect"
         return "unknown"
 
     def default_for(self, stage, payload):
@@ -408,6 +412,8 @@ class StubServer:
             elif stage == "clean" and system.startswith("You are a meticulous transcript editor"):
                 counted.append(payload)
             elif stage == "summarize" and system.startswith("You write the one-paragraph summary"):
+                counted.append(payload)
+            elif stage == "reflect" and system.startswith("You add a"):
                 counted.append(payload)
         return counted
 
@@ -1983,6 +1989,46 @@ class ReflectionTests(unittest.TestCase):
             self.render(["not", "an", "object"])
         with self.assertRaises(vt.UserError):
             self.render({"context": ["fine"], "connections": [{"not": "a string"}]})
+
+    def reflect(self, server, record=None):
+        args = SimpleNamespace(
+            cache_prompt=True, request_timeout=60, api_key=None, compiled_voice=None, compiled_profile=None
+        )
+        service = {
+            "name": "chat",
+            "enabled": True,
+            "url": server.url,
+            "model": "chat",
+            "scheduling": vt.forge_llm.DEFAULT_SERVICES["chat"]["scheduling"],
+        }
+        record = record or {
+            "recording_type": "memo",
+            "title": "Espresso Machine Repairs",
+            "material_role": "owner-authored",
+        }
+        return vt.reflect_note(args, service, record, "Cleaned memo text.", [])
+
+    def test_a_malformed_section_is_asked_for_again(self):
+        # A section arriving as a bare string held the whole note, costing it its
+        # summary as well as its reflection. One more ask, as every other
+        # validated call in this pipeline gets.
+        bad = {"context": "Continues the repair thread.", "connections": []}
+        good = {"context": ["Continues the repair thread."], "connections": []}
+        with StubServer(scripted={"reflect": [bad, good]}) as server:
+            markdown, dropped = self.reflect(server)
+            asked = server.stage_requests("reflect")
+        self.assertEqual(len(asked), 2)
+        self.assertIn("must be an array of strings", asked[1]["messages"][-1]["content"])
+        self.assertIn("Return corrected JSON only", asked[1]["messages"][-1]["content"])
+        self.assertIn("> [!reflection]- Context\n> - Continues the repair thread.", markdown)
+        self.assertEqual(dropped, [])
+
+    def test_a_reflection_that_stays_malformed_is_still_fatal(self):
+        bad = {"context": "Continues the repair thread.", "connections": []}
+        with StubServer(scripted={"reflect": [bad, bad]}) as server:
+            with self.assertRaises(vt.UserError):
+                self.reflect(server)
+            self.assertEqual(len(server.stage_requests("reflect")), 2)
 
 
 class OutsideSourceTests(unittest.TestCase):
