@@ -2583,7 +2583,7 @@ def parse_args(argv):
     parser.add_argument(
         "--only-sources",
         action="store_true",
-        help="vault mode: consider only notes their own frontmatter calls sources, leaving every other note alone",
+        help="vault mode: consider only notes their own frontmatter calls sources, leaving every other note alone (--limit still counts notes scanned, not sources kept)",
     )
     parser.add_argument(
         "--reuse-frontmatter",

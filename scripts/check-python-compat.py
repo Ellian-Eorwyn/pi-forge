@@ -7,12 +7,16 @@ raised while the module is being parsed, which means every skill importing it
 dies before its first line runs, with an error naming a library the user never
 called.
 
-The check runs under whatever ``python3`` resolves to, so it works from two
-directions. Parsing each file catches any too-new syntax when this happens to
-run on an old interpreter. Walking the f-strings then catches the one
-construct a *new* interpreter would otherwise wave through: PEP 701 (3.12)
-allowed backslashes inside an f-string expression, and nothing about such a
-line looks wrong until it reaches an older Python.
+The check runs under whatever ``python3`` resolves to -- 3.12 in CI, newer on a
+developer's machine -- so it must not depend on the interpreter refusing
+anything itself. Each file is parsed at the floor's ``feature_version``, which
+rejects syntax added after it (a ``match`` statement, say) no matter how new the
+interpreter running this is.
+
+Walking the f-strings afterwards catches the one construct ``feature_version``
+cannot: PEP 701 (3.12) *relaxed* a rule rather than adding syntax, allowing
+backslashes inside an f-string expression, and ``ast`` models added syntax only.
+Nothing about such a line looks wrong until it reaches an older Python.
 """
 
 import ast
@@ -20,6 +24,9 @@ import sys
 from pathlib import Path
 
 MINIMUM_VERSION = "3.9"
+# What ``ast.parse`` wants: (3, 9) rather than a second hand-written copy of the
+# floor that could drift from the one in the messages.
+MINIMUM_FEATURE_VERSION = tuple(int(part) for part in MINIMUM_VERSION.split("."))
 SKIPPED_DIRECTORIES = {
     ".claude",
     ".git",
@@ -57,7 +64,7 @@ def _backslash_in_fstring(source, tree):
 def failures_for(path):
     source = path.read_text(encoding="utf-8")
     try:
-        tree = ast.parse(source)
+        tree = ast.parse(source, feature_version=MINIMUM_FEATURE_VERSION)
     except SyntaxError as error:
         return [(error.lineno or 0, "does not parse: {}".format(error.msg))]
     return sorted(_backslash_in_fstring(source, tree))

@@ -4093,9 +4093,11 @@ def plan_split(vault, schema, path, taken_casefold):
 
     Entirely deterministic: the recording is the bytes after the marker and the
     note keeps everything before it, so the two halves put back together are the
-    note that was there. No model reads either half -- what the recording is
-    about was already decided when the note was first processed, and re-deciding
-    it now would be a second opinion nobody asked for.
+    note that was there. Nothing can be lost between them because of how the two
+    slices are taken -- they are the body split at one index -- so the guarantee
+    is in the construction rather than in a check. No model reads either half:
+    what the recording is about was already decided when the note was first
+    processed, and re-deciding it now would be a second opinion nobody asked for.
     """
     data = path.read_bytes()
     split = split_frontmatter(data)
@@ -4106,9 +4108,6 @@ def plan_split(vault, schema, path, taken_casefold):
         return None
     head = split["body"][: match.end()]
     raw_body = split["body"][match.end():]
-    # Nothing may be lost: the note's body is exactly the head plus the recording.
-    if head + raw_body != split["body"]:
-        return {"path": path, "skip": "the note does not reconstruct from its two halves"}
     if transcript_link_target(raw_body) is not None:
         return None  # already split
     if not raw_body.strip():
