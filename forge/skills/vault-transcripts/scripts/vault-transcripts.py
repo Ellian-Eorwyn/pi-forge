@@ -1018,9 +1018,17 @@ describes someone other than whoever is recording. Only ever use a name spelled
 as "knownSpeakers" gives it. If two entries fit one voice equally well, name
 neither.
 
+A cue that places someone in a kind of recording — "the second voice in home
+recordings", "the other voice in therapy" — tells you which voice is theirs when
+a second voice is there. It is not evidence that one is. Work out how many people
+are talking first, then ask the roster who they are.
+
 effective_speakers - how many people are really talking. This transcriber splits
 one voice into several labels, so labels are an upper bound, not an answer. If
-every label reads as the same person, answer 1.
+every label reads as the same person, answer 1. Settle this from the transcript
+alone, before you look at knownSpeakers: the roster says who a voice belongs to,
+never that a second voice is there. A solo memo that trails off into "um, yeah,
+that's pretty much it" under a new label is still one person talking.
 
 spoken_date - fill this in only when someone says the date out loud, and quote
 the sentence in "evidence" exactly as it appears. Otherwise both are null.
@@ -1214,6 +1222,62 @@ def derive_speaker_map(labels, speakers, effective, policy, owner, lexicon=None)
     return mapping, False
 
 
+def roster_may_have_split_one_voice(classification):
+    """Whether this reads as a solo recording the roster talked into being two.
+
+    Owner authorship and a memo or journal reading are the model's own answers,
+    and they agree that one person is talking. Only the count dissents, which is
+    the shape a roster promise leaves behind.
+    """
+    return (
+        classification["material_role"] == "owner-authored"
+        and classification["recording_type"] in {"memo", "journal"}
+        and classification["effective_speakers"] != 1
+    )
+
+
+def classify_without_roster(service, args, item, parsed):
+    """Ask again with the roster withheld, for a recording it may have split.
+
+    An `always` entry whose cue reads "the second voice in home recordings" says
+    which voice is theirs when there is one; the model takes it as a promise that
+    there is one, and files a solo memo's trailing "um, yeah, that's pretty much
+    it" under their name. Removing the roster asks the same question without that
+    pressure. On this corpus every note held for the inconsistency answered one
+    speaker when no roster was offered.
+
+    Returns `(classification, warnings)` when the answer is a clean solo
+    recording, or None to keep the answer we already have. A second voice the
+    model finds unprompted is a real disagreement and stays held.
+    """
+    payload = classify_payload(item, parsed)
+    messages = [
+        {"role": "system", "content": CLASSIFY_SYSTEM},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    try:
+        value, _call = forge_llm.call_json_with_retry(
+            service,
+            messages,
+            temperature=0,
+            cache_prompt=args.cache_prompt,
+            response_format={"type": "json_object"},
+            timeout=args.request_timeout,
+            api_key=args.api_key,
+            task="classify-transcript-no-roster",
+        )
+        classification, warnings = validate_classification(value, item, parsed)
+    except (forge_llm.ChatError, UserError, ValueError):
+        # The first answer is still usable; a failed second look just leaves it.
+        return None
+    # Owner-authored and unheld already implies a memo or journal: any other
+    # reading of one voice would have been held on the way out of validation.
+    solo = classification["material_role"] == "owner-authored" and classification["effective_speakers"] == 1
+    if classification["needs_review"] or not solo:
+        return None
+    return classification, warnings
+
+
 def classify_items(args, vault, items, run_dir, skip):
     """One non-thinking call per transcript. Journaled so a resumed run pays for
     nothing it already bought."""
@@ -1271,6 +1335,18 @@ def classify_items(args, vault, items, run_dir, skip):
                     task="classify-transcript-repair",
                 )
                 classification, record_warnings = validate_classification(value, item, parsed, roster_names)
+            if roster_names and roster_may_have_split_one_voice(classification):
+                # Without a roster there is nothing to withhold, and the same
+                # question at temperature 0 would only buy the same answer.
+                second = classify_without_roster(service, args, item, parsed)
+                if second is not None:
+                    split = classification["effective_speakers"]
+                    classification, retry_warnings = second
+                    record_warnings = [
+                        *record_warnings,
+                        f"re-read without the roster: {split} speakers became 1",
+                        *retry_warnings,
+                    ]
             record = {
                 "path": item["path"],
                 "sha256": item["sha256"],

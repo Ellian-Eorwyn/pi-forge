@@ -237,7 +237,16 @@ answer. A 56-minute meeting in this corpus carries 640 speaker lines.
    The source knew something the model would only be guessing at.
 6. A name is never inferred from subject matter. Speaking about Gillian is not
    evidence that Gillian is speaking. **The roster does not weaken this rule.**
-   It is a source of *identity* — who this voice is — never a source of *topic*.
+   It is a source of *identity* — who this voice is — never a source of *topic*,
+   and never a source of *count*. A cue that places someone in a kind of
+   recording ("the second voice in home recordings") says which voice is theirs
+   when a second voice is there; it is not evidence that one is. How many people
+   are talking is settled from the transcript before the roster is consulted.
+   Left unguarded this is the corpus's largest source of held notes: an `always`
+   entry promises a second voice, the model files a solo memo's trailing "um,
+   yeah, that's pretty much it" under that name, and the recording is held for
+   owner-authored material with two speakers. A classification that trips that
+   check is asked once more with the roster withheld.
 7. Under `names`, the roster is a third source of justification alongside the
    transcript, offered as `knownSpeakers` and used two ways:
    - **Spelling.** A name the transcript does state, in whatever form the

@@ -203,6 +203,76 @@ DIALOGUE_BLOCKS = [
     block("Good. Did the reporting dashboards come back up cleanly?", 18, "Speaker 1"),
     block("They did, although the nightly aggregation ran twice and duplicated some counters.", 24, "Speaker 2"),
 ]
+# One person the transcriber split in two: the same memo, with the trailing
+# sign-off landing under a new label. Measured across the corpus this lands at a
+# 3.9%-14.3% minority share, which is exactly where real conversations sit too --
+# the shape is not what distinguishes it, so nothing may key off the ratio.
+SPLIT_LABEL_BLOCKS = [
+    block("Okay so I need to remember to order the replacement gasket for the espresso machine.", 0, "Speaker 1"),
+    block("The old one is cracked around the rim and it leaks whenever I pull a double shot.", 6, "Speaker 1"),
+    block("Also the grinder needs descaling, probably this weekend if I have time.", 14, "Speaker 1"),
+    block("And I should measure the counter before buying anything else for that corner.", 22, "Speaker 1"),
+    block("The other thing is the shelving unit in the pantry, which never got anchored properly.", 30, "Speaker 1"),
+    block("I keep meaning to buy the right brackets but I always forget the stud spacing.", 38, "Speaker 1"),
+    block("Probably worth photographing the wall before the hardware store trip this time.", 46, "Speaker 1"),
+    block("Then there is the question of whether we replace the kettle or just descale it too.", 54, "Speaker 1"),
+    block("Gillian thinks the kettle is fine, and honestly she is probably right about that.", 62, "Speaker 1"),
+    block("Last thing, I should check whether the warranty on the machine covers the gasket.", 70, "Speaker 1"),
+    block("If it does then none of this costs anything except the trip and the afternoon.", 78, "Speaker 1"),
+    block("Um yeah. That's pretty much it.", 86, "Speaker 2"),
+]
+
+# A roster whose `always` cue promises a second voice on every personal
+# recording. The template offers this cue shape as a good one, so the pipeline
+# has to stay right in spite of it rather than ask for it to be rewritten.
+ROSTER_NOTE = """---
+type: system
+status: active
+domain: meta
+subdomain: schemas
+capture_type: manual
+---
+
+# Speakers and Terms
+
+## Speakers
+
+| Person | Appears | Aliases | Cue |
+| --- | --- | --- | --- |
+| `[[Gillian Eorwyn]]` | `always` | `Gillian` | my spouse; the second voice in home recordings and personal voice notes |
+"""
+
+
+def classified(recording_type, effective, speakers=None, title="Espresso Machine Repairs"):
+    """A classify response in the shape validate_classification accepts."""
+    return {
+        "recording_type": recording_type,
+        "material_role": "owner-authored",
+        "title": title,
+        "speakers": speakers or {},
+        "effective_speakers": effective,
+        "spoken_date": None,
+        "evidence": None,
+        "needs_review": False,
+        "review_reason": None,
+    }
+
+
+# What the roster talks the model into: the sign-off becomes the spouse.
+SPLIT_BY_ROSTER = classified(
+    "memo",
+    2,
+    {
+        "Speaker 1": {"who": "unknown", "kind": "unknown", "confidence": "low", "source": "transcript"},
+        "Speaker 2": {
+            "who": "Gillian Eorwyn",
+            "kind": "name",
+            "confidence": "medium",
+            "source": "roster",
+            "evidence": "Um yeah. That's pretty much it.",
+        },
+    },
+)
 
 
 class StubChatHandler(BaseHTTPRequestHandler):
@@ -968,6 +1038,45 @@ class VoiceBoundaryTests(unittest.TestCase):
         self.assertIn("inconsistent", record["review_reason"])
         self.assertTrue(any("inconsistent" in warning for warning in warnings))
 
+    def test_a_memo_with_two_speakers_is_held_like_any_other_inconsistency(self):
+        # The corpus shape: the type and the role are right and agree with each
+        # other, and only the count dissents. It is still held, and the roster-free
+        # second look is what has to rescue it -- never a softening of this check.
+        parsed = vt.parse_transcript(transcript(SPLIT_LABEL_BLOCKS))
+        record, _warnings = vt.validate_classification(SPLIT_BY_ROSTER, {"path": "00 Inbox/x.md"}, parsed)
+        self.assertTrue(record["needs_review"])
+        self.assertIn("inconsistent", record["review_reason"])
+
+    def test_only_an_owner_authored_memo_or_journal_gets_a_second_look(self):
+        cases = [
+            (("memo", "owner-authored", 2), True, "the shape the roster leaves behind"),
+            (("journal", "owner-authored", 3), True, "same, with more labels"),
+            (("memo", "owner-authored", 1), False, "already consistent, nothing to re-ask"),
+            (("conversation", "personal-exchange", 2), False, "two voices are the point"),
+            (("lecture", "external-source", 2), False, "not owner-authored"),
+            (("conversation", "owner-authored", 2), False, "inconsistent on the type, not the count"),
+        ]
+        for (recording_type, material_role, effective), expected, why in cases:
+            classification = {
+                "recording_type": recording_type,
+                "material_role": material_role,
+                "effective_speakers": effective,
+            }
+            self.assertEqual(vt.roster_may_have_split_one_voice(classification), expected, why)
+
+    def test_the_payload_carries_the_roster_only_when_one_is_offered(self):
+        # The second look withholds the roster by passing no lexicon, so the
+        # difference between those two payloads is the whole mechanism.
+        parsed = vt.parse_transcript(transcript(SPLIT_LABEL_BLOCKS))
+        item = {"path": "00 Inbox/x.md", "filename_hint": None,
+                "stats": {"blocks": 12, "words": 160, "duration_seconds": 92}}
+        roster = {"terms": [], "speakers": [
+            {"name": "Gillian Eorwyn", "link": "[[Gillian Eorwyn]]", "appears": "always",
+             "aliases": ["Gillian"], "cue": "the second voice in personal voice notes", "role": ""}
+        ]}
+        self.assertIn("knownSpeakers", vt.classify_payload(item, parsed, roster))
+        self.assertNotIn("knownSpeakers", vt.classify_payload(item, parsed))
+
     def test_external_source_payload_requests_structured_full_content(self):
         voice = vt.vault_voice.parse_voice_note(
             "## Global voice\n\n### Source-derived\n\n- Describe source claims analytically.\n"
@@ -999,6 +1108,11 @@ class PipelineTests(unittest.TestCase):
         path = self.vault / "00 Inbox" / name
         path.write_text(text, encoding="utf-8")
         return path
+
+    def roster(self):
+        (self.vault / "99 Meta" / "99.02 Schemas" / "0.02 Speakers and Terms.md").write_text(
+            ROSTER_NOTE, encoding="utf-8"
+        )
 
     def process(self, url, *extra):
         return run_script("process", "--vault", str(self.vault), "--base-url", url, "--model", "chat", *extra)
@@ -1156,6 +1270,57 @@ class PipelineTests(unittest.TestCase):
             for line in (run_dir_of(result) / "review-queue.jsonl").read_text(encoding="utf-8").splitlines()
         ]
         self.assertEqual(queue[0]["source"], "00 Inbox/20260724 131748-9788991C.md")
+
+    def test_a_voice_the_roster_split_in_two_is_re_read_without_it(self):
+        # Measured on the corpus: an `always` roster entry promising "the second
+        # voice in personal voice notes" turned every one of these into a held
+        # note. The same recordings answered one speaker when no roster was
+        # offered, which is what the second call reproduces.
+        self.roster()
+        self.write("20260724 131748-9788991C.md", transcript(SPLIT_LABEL_BLOCKS))
+        with StubServer(scripted={"classify": [SPLIT_BY_ROSTER, classified("memo", 1)]}) as server:
+            result = self.result_of(self.process(server.url, "--apply"))
+            asked = server.stage_requests("classify")
+        self.assertEqual(result["data"]["counts"]["review_required"], 0)
+        self.assertEqual(result["data"]["counts"]["processed"], 1)
+        self.assertProcessed("2026-07-24 - Memo - Espresso Machine Repairs.md")
+        self.assertEqual(len(asked), 2)
+        # The roster is present the first time and withheld the second: that
+        # difference is the entire mechanism.
+        payloads = [json.loads(request["messages"][1]["content"]) for request in asked]
+        self.assertIn("knownSpeakers", payloads[0])
+        self.assertNotIn("knownSpeakers", payloads[1])
+
+    def test_a_second_voice_found_without_the_roster_keeps_the_note_held(self):
+        # Nothing prompted this one, so the disagreement is real and the safety
+        # net stands. The reason string is what the review queue is grouped by.
+        self.roster()
+        self.write("20260724 131748-9788991C.md", transcript(SPLIT_LABEL_BLOCKS))
+        with StubServer(scripted={"classify": [SPLIT_BY_ROSTER, classified("memo", 2)]}) as server:
+            result = self.result_of(self.process(server.url, "--apply"))
+            asked = server.stage_requests("classify")
+        self.assertEqual(self.inbox(), ["20260724 131748-9788991C.md"])
+        self.assertEqual(result["data"]["counts"]["review_required"], 1)
+        self.assertEqual(len(asked), 2)
+        queue = [
+            json.loads(line)
+            for line in (run_dir_of(result) / "review-queue.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(
+            queue[0]["reason"],
+            "owner-authored classification is inconsistent with a single-speaker memo or journal",
+        )
+
+    def test_with_no_roster_offered_there_is_no_second_look(self):
+        # Asking the identical question again at temperature 0 buys the same
+        # answer, so the note is held on the first one.
+        self.write("20260724 131748-9788991C.md", transcript(SPLIT_LABEL_BLOCKS))
+        with StubServer(scripted={"classify": [classified("memo", 2)]}) as server:
+            result = self.result_of(self.process(server.url, "--no-lexicon", "--apply"))
+            asked = server.stage_requests("classify")
+        self.assertEqual(len(asked), 1)
+        self.assertEqual(result["data"]["counts"]["review_required"], 1)
+        self.assertEqual(self.inbox(), ["20260724 131748-9788991C.md"])
 
     def test_a_banal_title_is_rejected_then_repaired(self):
         self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
@@ -2176,6 +2341,21 @@ class ReprocessTests(unittest.TestCase):
         completed = run_script("reprocess", "--vault", str(self.vault), "--base-url", url, "--model", "chat", *extra)
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         return json.loads(completed.stdout)
+
+    def test_a_voice_the_roster_split_in_two_is_reprocessed_not_held(self):
+        # The path the corpus was measured on: filed notes, a roster in the
+        # vault, and 19% of the owner-authored ones held for a speaker count of
+        # two. The name already says Memo and the classifier already agrees --
+        # only the count dissented, and the second look settles it.
+        (self.vault / "99 Meta" / "99.02 Schemas" / "0.02 Speakers and Terms.md").write_text(
+            ROSTER_NOTE, encoding="utf-8"
+        )
+        self.filed(tail=transcript(SPLIT_LABEL_BLOCKS))
+        with StubServer(scripted={"classify": [SPLIT_BY_ROSTER, classified("memo", 1)]}) as server:
+            result = self.reprocess(server.url, "--apply")
+            asked = server.stage_requests("classify")
+        self.assertEqual(result["data"]["counts"]["reprocessed"], 1)
+        self.assertEqual(len(asked), 2)
 
     def test_the_head_is_regenerated_and_the_recording_is_untouched(self):
         note = self.filed()

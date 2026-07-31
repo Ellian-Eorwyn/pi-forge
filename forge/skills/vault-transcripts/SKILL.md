@@ -203,6 +203,12 @@ note — either lands where the next run will find it.
   sessions. Apply source-derived policy to lectures and confidently identified
   podcasts, videos, webinars, and other external sources. Hold ambiguous
   classification for review rather than guessing owner authorship.
+- The roster names voices; it never counts them. An `always` cue reading "the
+  second voice in home recordings" says who a second voice is when there is one,
+  and the model otherwise reads it as a promise that there is one — splitting a
+  solo memo's sign-off off under that name and holding the note. An owner-authored
+  memo or journal that comes back with two speakers is therefore classified once
+  more with the roster withheld, and only a second voice found unprompted holds it.
 - Clean external sources as structured full content: remove filler and
   redundancy, regroup related passages, and add headings while preserving every
   substantive claim, example, qualification, and disagreement.
