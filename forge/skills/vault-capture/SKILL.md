@@ -170,6 +170,11 @@ byte-identical under `# Braindump`.
 - Every note carries `capture_type: generated`. This is forced in code, not
   suggested to the model. If the vault's schema note does not define
   `generated`, the run fails rather than writing an unmarked note.
+- Every note carries `date`, the day it was captured, when the schema approves
+  the property. `date` is human-owned, so classification is never shown it and
+  can never fill it later — a note that leaves this skill without one keeps an
+  empty `date` forever. Filing carries the value forward untouched, and a note
+  that already has a date is never overwritten.
 - Held notes are reported, not written. Relay them to the user with their
   reasons; do not rerun with different options to make them go away.
 - Leave verification on. `--no-verify` is for when the thinking backend is down,

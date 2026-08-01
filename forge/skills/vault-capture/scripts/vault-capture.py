@@ -985,7 +985,7 @@ def note_type_for(kind, schema):
     raise UserError(f"schema does not define note type {proposed!r} or {FALLBACK_NOTE_TYPE!r}")
 
 
-def frontmatter_metadata(schema, kind, related=None):
+def frontmatter_metadata(schema, kind, related=None, date=None):
     """Minimal and forced.
 
     `vault-organizer` replaces this block when it files the note and reads it as
@@ -993,8 +993,15 @@ def frontmatter_metadata(schema, kind, related=None):
     project, and people are its judgment, not this skill's. `capture_type` is
     not a hint. This note was written by a model, and no run of this skill can
     produce one that says otherwise.
+
+    `date` is the day the capture happened, which for a braindump is the day its
+    content is about. It is written here rather than left to filing because
+    `date` is human-owned: classification is never shown it and cannot fill it,
+    so a note that leaves this skill without one never gets one. Filing carries
+    it forward untouched, and a `date` already on the note is never replaced.
     """
     metadata = {"type": note_type_for(kind, schema), "status": "raw", "capture_type": "generated"}
+    metadata["date"] = date or datetime.date.today().isoformat()
     if related and schema["properties"].get("related", {}).get("shape") == "list":
         metadata["related"] = related
     metadata = {key: value for key, value in metadata.items() if key in schema["properties"]}

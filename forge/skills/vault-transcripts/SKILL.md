@@ -15,6 +15,12 @@ Run it **before** `vault-organizer` inbox processing. This skill decides what a
 recording is called and how it reads; the organizer decides where it belongs and
 replaces the frontmatter with its own classification.
 
+Both the processed note and the recording's own note carry `date` — the day of
+the recording, taken from the filename or the spoken date, not the day the
+transcript was processed. Today's date is used only when neither is known.
+`date` is human-owned, so the organizer carries it forward but can never supply
+it; a note that leaves this skill without one never gets one.
+
 Everything runs on the local LAN endpoints. Nothing is sent anywhere. That is a
 requirement, not a detail — this inbox contains therapy sessions and private
 conversations.

@@ -359,6 +359,29 @@ class UnitTests(unittest.TestCase):
         with self.assertRaisesRegex(vc.UserError, "generated"):
             vc.frontmatter_metadata(without, "idea")
 
+    def test_a_captured_note_carries_the_day_it_was_captured(self):
+        import datetime
+        import vault_schema
+
+        with_date = vault_schema.parse_schema_note(
+            SCHEMA.replace(
+                "| `capture_type` | no | controlled scalar | Capture type. |",
+                "| `capture_type` | no | controlled scalar | Capture type. |\n"
+                "| `date` | no | scalar, human-owned | What the note is about. |",
+            )
+        )
+        today = datetime.date.today().isoformat()
+        for kind in vc.CAPTURE_KINDS:
+            self.assertEqual(vc.frontmatter_metadata(with_date, kind)["date"], today)
+        # An explicit date wins, so a caller that knows better is not overridden.
+        self.assertEqual(vc.frontmatter_metadata(with_date, "idea", date="2020-02-02")["date"], "2020-02-02")
+
+    def test_a_schema_without_date_gets_no_date(self):
+        # `date` is optional everywhere; a vault whose schema predates it must
+        # not gain an unapproved key that the next filing run would strip.
+        for kind in vc.CAPTURE_KINDS:
+            self.assertNotIn("date", vc.frontmatter_metadata(self.schema, kind))
+
     def test_unknown_kind_falls_back_to_note(self):
         import vault_schema
 

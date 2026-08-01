@@ -2517,13 +2517,16 @@ def raw_supported(schema):
     return "source" in schema["types"] and RAW_SOURCE_KIND in schema["source_kinds"]
 
 
-def raw_metadata(schema, recording_type, processed_stem):
+def raw_metadata(schema, recording_type, processed_stem, date=None):
     """Frontmatter for the recording's own note.
 
     Deliberately not ``processed_by``: nothing processed this note, that is the
     whole point of it. ``parent`` is the only tie back to the note that was made
     from it, and filing replaces frontmatter wholesale, so the organizer carries
     it forward with ``type`` and ``source_kind``.
+
+    ``date`` is the day of the recording, which for a recording is unambiguously
+    both when it was made and what it is about.
     """
     metadata = {
         "type": "source",
@@ -2531,6 +2534,7 @@ def raw_metadata(schema, recording_type, processed_stem):
         "source_kind": RAW_SOURCE_KIND,
         "capture_type": TYPE_TO_CAPTURE[recording_type],
         "parent": f"[[{processed_stem}]]",
+        "date": date or datetime.date.today().isoformat(),
     }
     if metadata["status"] not in schema["statuses"]:
         metadata["status"] = "raw" if "raw" in schema["statuses"] else next(iter(schema["statuses"]))
@@ -2583,12 +2587,17 @@ def build_note(schema, metadata, summary, style, preamble, cleaned, raw_body, re
     return head + f"[[{raw_stem}]]\n", head
 
 
-def frontmatter_metadata(schema, recording_type):
+def frontmatter_metadata(schema, recording_type, date=None):
     metadata = {
         "type": TYPE_TO_NOTE_TYPE[recording_type],
         "status": "raw",
         "capture_type": TYPE_TO_CAPTURE[recording_type],
     }
+    # The recording's own date, not today's: a transcript processed a week late
+    # is still about the day it was spoken. Falls back to today only when the
+    # filename carried no date and the speaker named none. Written here because
+    # `date` is human-owned, so filing can carry it forward but never supply it.
+    metadata["date"] = date or datetime.date.today().isoformat()
     # capture_type stays the recording's own channel: this note did enter the
     # vault as voice or as a meeting, and that stays true however much cleanup
     # ran. What the pipeline did to it is a separate fact, and a separate
@@ -2815,7 +2824,7 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
                 continue
             raw_body = transcript_source(split_frontmatter(data)["body"], vault)
             parsed = parse_transcript(raw_body)
-            metadata = frontmatter_metadata(schema, record["recording_type"])
+            metadata = frontmatter_metadata(schema, record["recording_type"], date)
             note_text, head = build_note(
                 schema,
                 metadata,
@@ -2829,7 +2838,7 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
             )
             raw_text = (
                 build_raw_note(
-                    schema, raw_metadata(schema, record["recording_type"], Path(destination).stem), raw_body
+                    schema, raw_metadata(schema, record["recording_type"], Path(destination).stem, date), raw_body
                 )
                 if raw_stem
                 else None
@@ -3311,7 +3320,7 @@ def reassemble_escalated(args, vault, schema, items_by_path, clean_results, reco
             raw_destination = assign_raw_name(vault, INBOX_DIR, raw_stem, taken) if raw_stem else None
             raw_body = transcript_source(split_frontmatter((vault / path).read_bytes())["body"], vault)
             parsed = parse_transcript(raw_body)
-            metadata = frontmatter_metadata(schema, record["recording_type"])
+            metadata = frontmatter_metadata(schema, record["recording_type"], record.get("date"))
             note_text, head = build_note(
                 schema,
                 metadata,
@@ -3325,7 +3334,9 @@ def reassemble_escalated(args, vault, schema, items_by_path, clean_results, reco
             )
             raw_text = (
                 build_raw_note(
-                    schema, raw_metadata(schema, record["recording_type"], Path(destination).stem), raw_body
+                    schema,
+                    raw_metadata(schema, record["recording_type"], Path(destination).stem, record.get("date")),
+                    raw_body,
                 )
                 if raw_stem
                 else None
@@ -4185,7 +4196,7 @@ def plan_split(vault, schema, path, taken_casefold):
 
     stem = path.stem
     raw_stem = raw_note_stem(path.name)
-    raw = raw_metadata(schema, "other", stem)
+    raw = raw_metadata(schema, "other", stem, previous.get("date"))
     raw["capture_type"] = previous.get("capture_type") if "capture_type" in schema["properties"] else None
     if raw["capture_type"] not in schema["capture_types"]:
         raw.pop("capture_type", None)
