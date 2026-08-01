@@ -338,13 +338,81 @@ build_source_runtime_packages() {
 	rm -f "$source/packages/coding-agent/npm-shrinkwrap.json"
 }
 
+# Upstream keeps splitting the CLI into new workspace packages (pi-client, pi-protocol)
+# that are not published to npm, so packing a fixed list leaves nested dependencies to
+# resolve from the registry and 404. Print the whole workspace closure instead.
+source_runtime_package_dirs() {
+	local source="$1"
+	node -e '
+const { existsSync, readdirSync, readFileSync } = require("node:fs");
+const { join } = require("node:path");
+const sourceRoot = process.argv[1];
+const scope = "@earendil-works/";
+const rootPackageName = "@earendil-works/pi-coding-agent";
+const fallbackPackageDirs = ["packages/ai", "packages/agent", "packages/tui", "packages/coding-agent"];
+let patterns = [];
+try {
+	const rootManifest = JSON.parse(readFileSync(join(sourceRoot, "package.json"), "utf8"));
+	patterns = Array.isArray(rootManifest.workspaces)
+		? rootManifest.workspaces
+		: (rootManifest.workspaces && rootManifest.workspaces.packages) || [];
+} catch {}
+const packageDirs = [];
+for (const pattern of patterns) {
+	const wildcard = pattern.indexOf("*");
+	if (wildcard === -1) {
+		packageDirs.push(pattern);
+		continue;
+	}
+	const base = pattern.slice(0, wildcard).replace(/\/$/, "");
+	const baseDir = join(sourceRoot, base);
+	if (!existsSync(baseDir)) continue;
+	for (const entry of readdirSync(baseDir, { withFileTypes: true })) {
+		if (entry.isDirectory()) packageDirs.push(base ? base + "/" + entry.name : entry.name);
+	}
+}
+const workspaces = new Map();
+for (const packageDir of packageDirs) {
+	const manifestPath = join(sourceRoot, packageDir, "package.json");
+	if (!existsSync(manifestPath)) continue;
+	const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+	if (!manifest.name || !manifest.name.startsWith(scope) || workspaces.has(manifest.name)) continue;
+	workspaces.set(manifest.name, { packageDir, dependencies: Object.keys(manifest.dependencies || {}) });
+}
+if (!workspaces.has(rootPackageName)) {
+	for (const packageDir of fallbackPackageDirs) {
+		if (existsSync(join(sourceRoot, packageDir, "package.json"))) console.log(packageDir);
+	}
+	process.exit(0);
+}
+const visited = new Set();
+const visit = (packageName) => {
+	const workspace = workspaces.get(packageName);
+	if (!workspace || visited.has(packageName)) return;
+	visited.add(packageName);
+	for (const dependency of workspace.dependencies) visit(dependency);
+	console.log(workspace.packageDir);
+};
+visit(rootPackageName);
+' "$source"
+}
+
 pack_source_runtime_package_specs() {
 	local source="$1"
 	build_source_runtime_packages "$source"
+	local package_dirs_output
+	package_dirs_output="$(source_runtime_package_dirs "$source")"
+	local packed_count=0
 	local package_dir
-	for package_dir in packages/ai packages/agent packages/tui packages/coding-agent; do
+	while IFS= read -r package_dir; do
+		[[ -n "$package_dir" ]] || continue
 		pack_local_package_spec "$source/$package_dir"
-	done
+		packed_count=$((packed_count + 1))
+	done <<<"$package_dirs_output"
+	if [[ "$packed_count" -eq 0 ]]; then
+		echo "No Pi runtime packages were found in $source." >&2
+		return 1
+	fi
 }
 
 install_pi_runtime_packages() {

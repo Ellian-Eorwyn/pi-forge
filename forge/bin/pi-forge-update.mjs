@@ -1,17 +1,26 @@
 #!/usr/bin/env node
 
+import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import {
 	DEFAULT_PI_PACKAGE_SPEC,
 	DEFAULT_SOURCE_ARCHIVE_URL,
 	DEFAULT_UPSTREAM_SOURCE_ARCHIVE_URL,
 	configurePackage,
+	exitWithResult,
 	getForgePaths,
 	installConfiguredPackage,
 	installConfiguredPiPackage,
-	packSourceArchivePackageSpecs,
+	packSourceArchivePackageSpec,
 	packSourceArchivePiPackageSpecs,
 	refreshLaunchers,
+	resolveInstalledPackageRoot,
 } from "../scripts/runtime-env.mjs";
+
+// Set on the handoff below. An older pi-forge simply ignores it and repeats the whole
+// update, which an unknown command line flag would not survive.
+const REEXEC_ENV_NAME = "PI_FORGE_UPDATE_REEXEC";
 
 function usage() {
 	process.stdout.write(`Usage: pi-forge-update [--resources-only]
@@ -39,32 +48,22 @@ for (const arg of args) {
 	process.exit(2);
 }
 
-try {
-	let packageRoot;
+function installForgePackage() {
+	if (process.env.PI_FORGE_PACKAGE_SPEC) return installConfiguredPackage();
+	const sourceArchiveUrl = process.env.PI_FORGE_SOURCE_ARCHIVE_URL || DEFAULT_SOURCE_ARCHIVE_URL;
+	process.stderr.write(`pi-forge-update: installing pi-forge from ${sourceArchiveUrl}.\n`);
+	return installConfiguredPackage(packSourceArchivePackageSpec(sourceArchiveUrl));
+}
+
+function finishUpdate(packageRoot) {
 	let piPackageLabel = process.env.PI_FORGE_PI_PACKAGE_SPEC || DEFAULT_PI_PACKAGE_SPEC;
-	if (process.env.PI_FORGE_PACKAGE_SPEC) {
-		packageRoot = installConfiguredPackage();
-		if (process.env.PI_FORGE_PI_PACKAGE_SPEC) {
-			installConfiguredPiPackage();
-		} else {
-			const upstreamArchiveUrl = process.env.PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL || DEFAULT_UPSTREAM_SOURCE_ARCHIVE_URL;
-			process.stderr.write(`pi-forge-update: installing Pi runtime from ${upstreamArchiveUrl}.\n`);
-			installConfiguredPiPackage(packSourceArchivePiPackageSpecs(upstreamArchiveUrl));
-			piPackageLabel = `runtime packages from ${upstreamArchiveUrl}`;
-		}
+	if (process.env.PI_FORGE_PI_PACKAGE_SPEC) {
+		installConfiguredPiPackage();
 	} else {
-		const sourceArchiveUrl = process.env.PI_FORGE_SOURCE_ARCHIVE_URL || DEFAULT_SOURCE_ARCHIVE_URL;
 		const upstreamArchiveUrl = process.env.PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL || DEFAULT_UPSTREAM_SOURCE_ARCHIVE_URL;
-		process.stderr.write(`pi-forge-update: installing pi-forge from ${sourceArchiveUrl}.\n`);
 		process.stderr.write(`pi-forge-update: installing Pi runtime from ${upstreamArchiveUrl}.\n`);
-		const packageSpecs = packSourceArchivePackageSpecs(sourceArchiveUrl, upstreamArchiveUrl);
-		packageRoot = installConfiguredPackage(packageSpecs.forgePackageSpec);
-		if (process.env.PI_FORGE_PI_PACKAGE_SPEC) {
-			installConfiguredPiPackage();
-		} else {
-			installConfiguredPiPackage(packageSpecs.piPackageSpecs);
-			piPackageLabel = `runtime packages from ${upstreamArchiveUrl}`;
-		}
+		installConfiguredPiPackage(packSourceArchivePiPackageSpecs(upstreamArchiveUrl));
+		piPackageLabel = `runtime packages from ${upstreamArchiveUrl}`;
 	}
 	const paths = configurePackage(packageRoot);
 	refreshLaunchers(paths);
@@ -73,6 +72,28 @@ try {
 	process.stdout.write(`  Pi package: ${piPackageLabel}\n`);
 	process.stdout.write(`  CLI: ${getForgePaths().binDir}/pi-forge\n`);
 	process.stdout.write(`  State: ${paths.agentDir}\n`);
+}
+
+try {
+	if (process.env[REEXEC_ENV_NAME]) {
+		// Second phase: pi-forge is already up to date, so this is the freshly installed
+		// updater finishing the runtime install with its own packaging rules.
+		finishUpdate(resolveInstalledPackageRoot(getForgePaths().appDir));
+	} else {
+		const packageRoot = installForgePackage();
+		const installedUpdater = join(packageRoot, "bin", "pi-forge-update.mjs");
+		if (existsSync(installedUpdater)) {
+			// Hand the rest of the update to the pi-forge that was just installed, so a change
+			// to how runtime packages are packed applies to this run rather than the next one.
+			exitWithResult(
+				spawnSync(process.execPath, [installedUpdater, ...args], {
+					env: { ...process.env, [REEXEC_ENV_NAME]: "1" },
+					stdio: "inherit",
+				}),
+			);
+		}
+		finishUpdate(packageRoot);
+	}
 } catch (error) {
 	process.stderr.write(`pi-forge-update: ${error.message}\n`);
 	process.exit(1);

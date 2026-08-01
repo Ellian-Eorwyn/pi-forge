@@ -22,7 +22,10 @@ export const PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
 export const DEFAULT_PI_PACKAGE_SPEC = "GitHub source archive runtime packages";
 export const DEFAULT_SOURCE_ARCHIVE_URL = "https://github.com/Ellian-Eorwyn/pi-forge/archive/refs/heads/main.tar.gz";
 export const DEFAULT_UPSTREAM_SOURCE_ARCHIVE_URL = "https://github.com/earendil-works/pi/archive/refs/heads/main.tar.gz";
-const SOURCE_RUNTIME_PACKAGE_DIRS = ["packages/ai", "packages/agent", "packages/tui", "packages/coding-agent"];
+const RUNTIME_PACKAGE_SCOPE = `${PI_PACKAGE_NAME.split("/")[0]}/`;
+// Used only for source trees that do not declare npm workspaces; the packed set is
+// otherwise derived from the tree itself by resolveSourceRuntimePackageDirs.
+const SOURCE_RUNTIME_FALLBACK_PACKAGE_DIRS = ["packages/ai", "packages/agent", "packages/tui", "packages/coding-agent"];
 
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 export const PACKAGE_ROOT = resolve(SCRIPT_DIRECTORY, "..");
@@ -169,22 +172,6 @@ export function packSourceArchivePackageSpec(sourceArchiveUrl = process.env.PI_F
 	return withSourceArchive(sourceArchiveUrl, (sourceRoot) => packPackageDirectory(join(sourceRoot, "forge")));
 }
 
-export function packSourceArchivePackageSpecs(
-	sourceArchiveUrl = process.env.PI_FORGE_SOURCE_ARCHIVE_URL || DEFAULT_SOURCE_ARCHIVE_URL,
-	upstreamArchiveUrl = process.env.PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL || DEFAULT_UPSTREAM_SOURCE_ARCHIVE_URL
-) {
-	if (sourceArchiveUrl === upstreamArchiveUrl) {
-		return withSourceArchive(sourceArchiveUrl, (sourceRoot) => ({
-			forgePackageSpec: packPackageDirectory(join(sourceRoot, "forge")),
-			piPackageSpecs: packSourceRuntimePackageSpecs(sourceRoot),
-		}));
-	}
-	return {
-		forgePackageSpec: packSourceArchivePackageSpec(sourceArchiveUrl),
-		piPackageSpecs: packSourceArchivePiPackageSpecs(upstreamArchiveUrl),
-	};
-}
-
 export function packSourceArchivePiPackageSpecs(sourceArchiveUrl = process.env.PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL || DEFAULT_UPSTREAM_SOURCE_ARCHIVE_URL) {
 	return withSourceArchive(sourceArchiveUrl, (sourceRoot) => packSourceRuntimePackageSpecs(sourceRoot));
 }
@@ -215,6 +202,59 @@ function findSourceRoot(extractDir, sourceArchiveUrl) {
 	return sourceRoot;
 }
 
+function listWorkspacePackageDirs(sourceRoot) {
+	let rootManifest;
+	try {
+		rootManifest = JSON.parse(readFileSync(join(sourceRoot, "package.json"), "utf8"));
+	} catch {
+		return [];
+	}
+	const patterns = Array.isArray(rootManifest.workspaces) ? rootManifest.workspaces : (rootManifest.workspaces?.packages ?? []);
+	const packageDirs = [];
+	for (const pattern of patterns) {
+		const wildcard = pattern.indexOf("*");
+		if (wildcard === -1) {
+			packageDirs.push(pattern);
+			continue;
+		}
+		// Pi only uses trailing "/*" patterns ("packages/*", "packages/storage/*").
+		const base = pattern.slice(0, wildcard).replace(/\/$/, "");
+		const baseDir = join(sourceRoot, base);
+		if (!existsSync(baseDir)) continue;
+		for (const entry of readdirSync(baseDir, { withFileTypes: true })) {
+			if (entry.isDirectory()) packageDirs.push(base ? `${base}/${entry.name}` : entry.name);
+		}
+	}
+	return packageDirs.filter((packageDir) => existsSync(join(sourceRoot, packageDir, "package.json")));
+}
+
+// Upstream keeps splitting the CLI into new workspace packages (pi-client, pi-protocol)
+// that are not published to npm, so packing a fixed list leaves nested dependencies to
+// resolve from the registry and 404. Pack the whole workspace closure instead.
+function resolveSourceRuntimePackageDirs(sourceRoot) {
+	const workspaces = new Map();
+	for (const packageDir of listWorkspacePackageDirs(sourceRoot)) {
+		const manifest = JSON.parse(readFileSync(join(sourceRoot, packageDir, "package.json"), "utf8"));
+		if (!manifest.name?.startsWith(RUNTIME_PACKAGE_SCOPE) || workspaces.has(manifest.name)) continue;
+		workspaces.set(manifest.name, { packageDir, dependencies: Object.keys(manifest.dependencies ?? {}) });
+	}
+	if (!workspaces.has(PI_PACKAGE_NAME)) {
+		return SOURCE_RUNTIME_FALLBACK_PACKAGE_DIRS.filter((packageDir) => existsSync(join(sourceRoot, packageDir, "package.json")));
+	}
+	const packageDirs = [];
+	const visited = new Set();
+	const visit = (packageName) => {
+		const workspace = workspaces.get(packageName);
+		if (!workspace || visited.has(packageName)) return;
+		visited.add(packageName);
+		// Depth-first post-order, so dependencies are packed before their dependents.
+		for (const dependency of workspace.dependencies) visit(dependency);
+		packageDirs.push(workspace.packageDir);
+	};
+	visit(PI_PACKAGE_NAME);
+	return packageDirs;
+}
+
 function packSourceRuntimePackageSpecs(sourceRoot) {
 	const paths = getForgePaths();
 	mkdirSync(paths.npmCacheDir, { recursive: true });
@@ -232,7 +272,11 @@ function packSourceRuntimePackageSpecs(sourceRoot) {
 	// Keeping the published shrinkwrap would force nested @earendil-works packages
 	// back to the npm registry and bypass the freshly built source packages.
 	rmSync(join(sourceRoot, "packages", "coding-agent", "npm-shrinkwrap.json"), { force: true });
-	return SOURCE_RUNTIME_PACKAGE_DIRS.map((packageDir) => packPackageDirectory(join(sourceRoot, packageDir)));
+	const packageDirs = resolveSourceRuntimePackageDirs(sourceRoot);
+	if (packageDirs.length === 0) {
+		throw new Error(`Source archive did not contain any Pi runtime packages: ${sourceRoot}`);
+	}
+	return packageDirs.map((packageDir) => packPackageDirectory(join(sourceRoot, packageDir)));
 }
 
 export function packPackageDirectory(packageRoot) {

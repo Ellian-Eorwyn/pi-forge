@@ -309,7 +309,7 @@ function makeFakeInstallSource(source, version = "0.0.0-test") {
 	mkdirSync(join(source, "forge", "lib"), { recursive: true });
 	mkdirSync(join(source, "forge", "scripts"), { recursive: true });
 	mkdirSync(join(source, "forge", "skills", "document-ingest"), { recursive: true });
-	for (const packageDir of ["ai", "agent", "tui", "coding-agent"]) {
+	for (const packageDir of ["ai", "agent", "tui", "protocol", "coding-agent", "storage/sqlite-node"]) {
 		mkdirSync(join(source, "packages", packageDir, "dist"), { recursive: true });
 	}
 	for (const script of ["pi-forge-install.sh", "pi-forge-run.sh", "pi-forge-mcp-run.sh"]) {
@@ -345,6 +345,12 @@ function makeFakeInstallSource(source, version = "0.0.0-test") {
 		join(source, "forge", "scripts", "configure-pi-forge.mjs"),
 		readFileSync(join(repositoryRoot, "forge", "scripts", "configure-pi-forge.mjs"), "utf8"),
 	);
+	// The updater re-execs whichever copy of itself this source installs, so the fixture
+	// ships the real updater and the runtime helpers it imports rather than a stub.
+	writeFileSync(
+		join(source, "forge", "scripts", "runtime-env.mjs"),
+		readFileSync(join(repositoryRoot, "forge", "scripts", "runtime-env.mjs"), "utf8"),
+	);
 	writeFileSync(
 		join(source, "forge", "bin", "pi-forge.mjs"),
 		"#!/usr/bin/env node\nimport { join } from 'node:path';\nconst home = process.env.PI_FORGE_HOME || join(process.env.HOME, '.pi-forge');\nconst agent = process.env.PI_CODING_AGENT_DIR || process.env.PI_FORGE_AGENT_DIR || join(home, 'agent');\nif (process.argv.includes('--print-agent-dir')) console.log(agent);\n",
@@ -353,12 +359,15 @@ function makeFakeInstallSource(source, version = "0.0.0-test") {
 		join(source, "forge", "bin", "pi-forge-mcp.mjs"),
 		"#!/usr/bin/env node\nif (process.argv.includes('--help')) console.log('Usage: pi-forge-mcp');\n",
 	);
-	writeFileSync(join(source, "forge", "bin", "pi-forge-update.mjs"), "#!/usr/bin/env node\nconsole.log('updated');\n");
+	writeFileSync(
+		join(source, "forge", "bin", "pi-forge-update.mjs"),
+		readFileSync(join(repositoryRoot, "forge", "bin", "pi-forge-update.mjs"), "utf8"),
+	);
 	writeFileSync(
 		join(source, "package.json"),
 		`${JSON.stringify({
 			private: true,
-			workspaces: ["packages/*", "forge"],
+			workspaces: ["packages/*", "packages/storage/*", "forge"],
 			scripts: {
 				build: "node scripts/build.mjs",
 				"build:install": "node scripts/build-install.mjs",
@@ -425,6 +434,39 @@ function makeFakeInstallSource(source, version = "0.0.0-test") {
 			},
 		},
 		{
+			// Stands in for the packages upstream splits out of the CLI over time. It is not
+			// published to npm, so leaving it unpacked makes the runtime install 404.
+			directory: "protocol",
+			json: {
+				name: "@earendil-works/pi-protocol",
+				version,
+				type: "module",
+				main: "./dist/index.js",
+				files: ["dist"],
+			},
+			files: {
+				"dist/index.js": "export const version = '0.0.0-source-runtime';\n",
+			},
+		},
+		{
+			// Reached by the "packages/storage/*" workspace glob but not by the coding agent's
+			// dependencies, so it must stay out of the packed set.
+			directory: "storage/sqlite-node",
+			json: {
+				name: "@earendil-works/pi-storage-sqlite-node",
+				version,
+				type: "module",
+				main: "./dist/index.js",
+				files: ["dist"],
+				dependencies: {
+					"@earendil-works/pi-agent-core": version,
+				},
+			},
+			files: {
+				"dist/index.js": "export const version = '0.0.0-source-runtime';\n",
+			},
+		},
+		{
 			directory: "coding-agent",
 			json: {
 				name: "@earendil-works/pi-coding-agent",
@@ -441,6 +483,7 @@ function makeFakeInstallSource(source, version = "0.0.0-test") {
 				dependencies: {
 					"@earendil-works/pi-agent-core": version,
 					"@earendil-works/pi-ai": version,
+					"@earendil-works/pi-protocol": version,
 					"@earendil-works/pi-tui": version,
 				},
 			},
@@ -774,10 +817,14 @@ test("installer packs Pi runtime packages from the upstream source archive by de
 		"@earendil-works/pi-ai",
 		"@earendil-works/pi-agent-core",
 		"@earendil-works/pi-tui",
+		"@earendil-works/pi-protocol",
 		"@earendil-works/pi-coding-agent",
 	]) {
 		assert.match(appPackage.dependencies[packageName], /^file:/);
 	}
+	// Only the coding agent's own dependency closure is packed.
+	assert.equal(appPackage.dependencies["@earendil-works/pi-storage-sqlite-node"], undefined);
+	assert.equal(existsSync(join(appRoot, "node_modules", "@earendil-works", "pi-storage-sqlite-node")), false);
 	const installedPiPackage = JSON.parse(
 		readFileSync(join(appRoot, "node_modules", "@earendil-works", "pi-coding-agent", "package.json"), "utf8"),
 	);
@@ -791,6 +838,7 @@ test("installer packs Pi runtime packages from the upstream source archive by de
 	assert.match(npmCalls, /ci --ignore-scripts/);
 	assert.match(npmCalls, /run build:install/);
 	assert.doesNotMatch(npmCalls, /@earendil-works\/pi-coding-agent@latest/);
+	assert.doesNotMatch(npmCalls, /@earendil-works\/pi-protocol@/);
 });
 
 test("packaged updater refreshes pi-forge from the GitHub source archive by default", () => {
@@ -840,6 +888,8 @@ test("packaged updater refreshes pi-forge from the GitHub source archive by defa
 		update.stderr,
 		new RegExp(`pi-forge-update: installing Pi runtime from file://${upstreamSourceArchive.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
 	);
+	// The updater hands off to the copy of itself it just installed, exactly once.
+	assert.equal(update.stderr.match(/pi-forge-update: installing Pi runtime from/g)?.length, 1);
 	assert.match(update.stdout, /Pi package: runtime packages from file:/);
 	const packageJson = JSON.parse(
 		readFileSync(join(root, ".pi-forge", "app", "node_modules", "@ellian-eorwyn", "pi-forge", "package.json"), "utf8"),
@@ -848,6 +898,8 @@ test("packaged updater refreshes pi-forge from the GitHub source archive by defa
 	const appRoot = join(root, ".pi-forge", "app");
 	const appPackage = JSON.parse(readFileSync(join(appRoot, "package.json"), "utf8"));
 	assert.match(appPackage.dependencies["@earendil-works/pi-coding-agent"], /^file:/);
+	assert.match(appPackage.dependencies["@earendil-works/pi-protocol"], /^file:/);
+	assert.equal(appPackage.dependencies["@earendil-works/pi-storage-sqlite-node"], undefined);
 	const installedPiPackage = JSON.parse(
 		readFileSync(join(appRoot, "node_modules", "@earendil-works", "pi-coding-agent", "package.json"), "utf8"),
 	);
@@ -859,6 +911,7 @@ test("packaged updater refreshes pi-forge from the GitHub source archive by defa
 	const npmCalls = readFileSync(npmLog, "utf8");
 	assert.match(npmCalls, /ci --ignore-scripts/);
 	assert.doesNotMatch(npmCalls, /@earendil-works\/pi-coding-agent@latest/);
+	assert.doesNotMatch(npmCalls, /@earendil-works\/pi-protocol@/);
 });
 
 test("installer uses package install unless dev-link is explicit", () => {
