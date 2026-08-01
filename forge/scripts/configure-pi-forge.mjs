@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
 import {
 	LEGACY_CHAT_SCHEDULING,
 	LEGACY_CHAT_SERVICE,
@@ -24,6 +25,10 @@ const CONTEXT_BUDGET_VERBATIM_RECENT_TOKENS = 20000;
 // Matches `MAX_OWNER_FIELD_CHARS` in forge/lib/vault_profile.py and the same
 // constant in forge/extensions/vault-context.ts: a name, not a biography.
 const MAX_IDENTITY_FIELD_CHARS = 40;
+// Matches `INBOX_DIR` in forge/lib/vault_schema.py, where it is a constant
+// rather than a schema registry row: the inbox is the one route a vault cannot
+// renumber. Stated here so the profile can name an absolute path.
+const INBOX_DIR = "00 Inbox";
 
 const [agentDirectoryArgument, profileDirectoryArgument] = process.argv.slice(2);
 if (!agentDirectoryArgument || !profileDirectoryArgument) {
@@ -68,7 +73,8 @@ const retainedPackages = packages.filter((entry) => {
 	return typeof entry?.source !== "string" || resolve(entry.source) !== previousProfileDirectory;
 });
 
-const profileInstructions = readFileSync(sourceAgentsPath, "utf8") + identityBlock(settings.forgeUser);
+const profileInstructions =
+	readFileSync(sourceAgentsPath, "utf8") + identityBlock(settings.forgeUser) + vaultBlock(settings.forgeVault);
 settings.packages = [profileDirectory, ...retainedPackages];
 settings.defaultProvider = "forge-local";
 settings.defaultModel = "code";
@@ -213,6 +219,75 @@ function identityBlock(forgeUser) {
 		`You are working with ${who}. Address them by name; do not call them "the user"`,
 		"or \"the owner\". Inside an Obsidian vault, that vault's own owner record wins",
 		"over this one.",
+		"",
+	].join("\n");
+}
+
+/** `forgeVault` as an absolute path, expanding a leading `~`, or "" if unusable. */
+function vaultPath(forgeVault) {
+	if (typeof forgeVault !== "string") return "";
+	const text = forgeVault.trim();
+	if (!text) return "";
+	// A bare `~` is left unexpanded on purpose: the home directory is not a vault,
+	// and it fails the absolute-path check below with a message naming the fix.
+	const expanded = text.startsWith("~/") ? join(homedir(), text.slice(2)) : text;
+	// A relative vault path would resolve against whatever directory the installer
+	// happened to run from, which is never what the declaration meant.
+	return isAbsolute(expanded) ? resolve(expanded) : "";
+}
+
+/**
+ * Where this install's vault is, as a block appended to the profile instructions.
+ *
+ * Inside a vault the `vault-context` extension injects the coordinates it
+ * detects by walking up for `.obsidian/`. That walk is the whole mechanism, so a
+ * session started anywhere else — a code checkout, a downloads folder — has no
+ * way to know the vault exists, and asking is the only honest thing left. This
+ * covers that case, and lives in `settings.json` for the same reason `forgeUser`
+ * does: the installed `AGENTS.md` is rewritten from the packaged profile on
+ * every install and every `pi-forge-update`, so a path added to it by hand would
+ * not survive the next one.
+ *
+ * Obsidian's own vault registry is deliberately not consulted. It records every
+ * vault ever opened, marks more than one of them `open`, and orders them by last
+ * use — on a machine with a scratch vault and a real one, every available signal
+ * points at the wrong vault. A declaration is the only reliable answer.
+ *
+ * An install that declares no `forgeVault` appends nothing, which is the path
+ * every install took before this existed.
+ */
+function vaultBlock(forgeVault) {
+	if (forgeVault === undefined) return "";
+	const root = vaultPath(forgeVault);
+	if (!root) {
+		process.stderr.write(`forgeVault must be an absolute path; ignoring ${JSON.stringify(forgeVault)}\n`);
+		return "";
+	}
+	// A path that is not there is worse than no path: it sends every "put this in
+	// my vault" request at a directory the write would silently create.
+	try {
+		if (!statSync(root).isDirectory()) throw new Error("not a directory");
+	} catch {
+		process.stderr.write(`forgeVault is not a directory; ignoring ${root}\n`);
+		return "";
+	}
+	const inbox = join(root, INBOX_DIR);
+	try {
+		statSync(inbox);
+	} catch {
+		process.stderr.write(`forgeVault has no ${INBOX_DIR} yet; it will be created on first use: ${inbox}\n`);
+	}
+	return [
+		"",
+		"## Your Vault",
+		"",
+		`- Vault root: ${root}`,
+		`- Inbox: ${inbox}`,
+		"",
+		"Use those paths when a session outside the vault is asked to put something into",
+		"it, and when a vault skill needs `--vault`. Never ask where the vault is, and",
+		"never guess a different one. Inside an Obsidian vault, the vault detected there",
+		"wins over this one.",
 		"",
 	].join("\n");
 }
