@@ -20,7 +20,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, delimiter, dirname, join, relative, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const CONTEXT_CUSTOM_TYPE = "vault-context";
@@ -54,6 +54,17 @@ interface VaultOwner {
 	pronouns?: string;
 }
 
+/** What the Obsidian CLI can do for this vault, as far as the filesystem shows. */
+interface ObsidianCli {
+	binary: string;
+	/** The name `vault=` accepts. Undefined when unregistered or when two vaults share a basename. */
+	vaultName?: string;
+	/** Settings -> General -> Command line interface. */
+	enabled: boolean;
+	/** Settings -> Files and links -> Automatically update internal links. */
+	linkUpdates: "always" | "unset" | "off";
+}
+
 interface VaultInfo {
 	root: string;
 	name: string;
@@ -67,6 +78,91 @@ interface VaultInfo {
 	indexedNotes?: number;
 	/** Vault-relative folder holding generated run directories, when resolvable. */
 	workflowsFolder?: string;
+	/** Present only when an `obsidian` binary is on PATH. */
+	obsidianCli?: ObsidianCli;
+}
+
+/**
+ * Obsidian's own registry of vaults, read rather than asked for.
+ *
+ * The CLI's `vault=` takes a registered vault *name*, and naming an unopened
+ * vault opens its window and switches the user's active vault — far too much to
+ * do at session start just to learn a name. The registry is a JSON file holding
+ * the same information, and the name is simply the registered path's basename.
+ * So detection here stays what this file promises: filesystem-only and cheap.
+ */
+function obsidianConfigDirectory(): string | undefined {
+	const override = process.env.FORGE_OBSIDIAN_CONFIG_DIR;
+	if (override) return override;
+	const home = process.env.HOME || process.env.USERPROFILE;
+	if (process.platform === "darwin") {
+		return home ? join(home, "Library", "Application Support", "obsidian") : undefined;
+	}
+	if (process.platform === "win32") {
+		const appData = process.env.APPDATA;
+		return appData ? join(appData, "obsidian") : home ? join(home, "AppData", "Roaming", "obsidian") : undefined;
+	}
+	const configHome = process.env.XDG_CONFIG_HOME;
+	if (configHome) return join(configHome, "obsidian");
+	return home ? join(home, ".config", "obsidian") : undefined;
+}
+
+function findObsidianBinary(): string | undefined {
+	if ((process.env.FORGE_OBSIDIAN_CLI || "").trim().toLowerCase() === "off") return undefined;
+	const explicit = process.env.FORGE_OBSIDIAN_CLI;
+	if (explicit) return existsSync(explicit) ? explicit : undefined;
+	const names = process.platform === "win32" ? ["obsidian.exe", "obsidian"] : ["obsidian"];
+	for (const directory of (process.env.PATH || "").split(delimiter)) {
+		if (!directory) continue;
+		for (const name of names) {
+			const candidate = join(directory, name);
+			try {
+				if (statSync(candidate).isFile()) return candidate;
+			} catch {
+				// keep looking
+			}
+		}
+	}
+	return undefined;
+}
+
+function readJsonFile(path: string): Record<string, unknown> | undefined {
+	try {
+		const parsed = JSON.parse(readFileSync(path, "utf8"));
+		return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function inspectObsidianCli(root: string): ObsidianCli | undefined {
+	const binary = findObsidianBinary();
+	if (!binary) return undefined;
+	const configDirectory = obsidianConfigDirectory();
+	const registry = configDirectory ? readJsonFile(join(configDirectory, "obsidian.json")) : undefined;
+	const vaults = (registry?.vaults ?? {}) as Record<string, { path?: unknown }>;
+	const names = new Map<string, string>();
+	for (const entry of Object.values(vaults)) {
+		if (typeof entry?.path !== "string" || !entry.path) continue;
+		names.set(resolve(entry.path), basename(entry.path));
+	}
+	const name = names.get(resolve(root));
+	// Two registered vaults with the same folder name make `vault=` ambiguous,
+	// and guessing which one Obsidian picks is not a guess to make about notes.
+	const ambiguous = name !== undefined && [...names.values()].filter((value) => value === name).length > 1;
+	const app = readJsonFile(join(root, ".obsidian", "app.json"));
+	const linkUpdates =
+		app === undefined || !("alwaysUpdateLinks" in app)
+			? "unset"
+			: app.alwaysUpdateLinks === true
+				? "always"
+				: "off";
+	return {
+		binary,
+		vaultName: ambiguous ? undefined : name,
+		enabled: registry?.cli !== false,
+		linkUpdates,
+	};
 }
 
 /** Nearest ancestor of `from` (inclusive) that contains a `.obsidian` directory. */
@@ -341,7 +437,39 @@ export function inspectVault(cwd: string): VaultInfo | undefined {
 		organizerState: existsSync(join(root, ".vault-organizer")),
 		indexedNotes: readIndexedNoteCount(root),
 		workflowsFolder: findWorkflowsFolder(root, schemaNote),
+		obsidianCli: inspectObsidianCli(root),
 	};
+}
+
+/**
+ * What to say about the Obsidian CLI, which is usually nothing.
+ *
+ * This message is injected once per session and every line costs tokens, so an
+ * absent accelerator does not get a line explaining that it is absent. Two cases
+ * do earn one: the CLI is in use, which the model needs warning about; and the
+ * CLI is one setting away from working, which is worth fixing.
+ */
+function obsidianCliLines(cli: ObsidianCli | undefined): string[] {
+	if (!cli) return [];
+	if (!cli.enabled) {
+		return [
+			"- Obsidian is installed but its command line interface is turned off (Settings -> General). Turning it on lets the vault skills verify their own work and move notes without breaking links.",
+		];
+	}
+	if (!cli.vaultName) {
+		return [
+			"- Obsidian's CLI is installed but this vault is not registered with it under a unique name, so the skills cannot use it. Everything still works; link-safe moves and the property-vocabulary check do not.",
+		];
+	}
+	if (cli.linkUpdates !== "always") {
+		return [
+			`- Obsidian's CLI is available for vault \`${cli.vaultName}\`, but "Automatically update internal links" is off (Settings -> Files and links), so renames fall back to a plain rename and inbound links are left behind. Turning it on is the single change that makes moves link-safe.`,
+		];
+	}
+	return [
+		`- Obsidian CLI: available (vault name \`${cli.vaultName}\`). The vault skills use it as an optional verifier and for link-safe moves. It is never required; every skill works without it.`,
+		"- Do not run mutating `obsidian` subcommands yourself — rename, move, delete, property:set, create, append, eval. It exits 0 whether it succeeded or failed, has no dry run, and rewrites links across the whole vault. The skills own those calls: they back up every affected note, verify hashes, and journal what they did.",
+	];
 }
 
 export function vaultContextMessage(vault: VaultInfo): string {
@@ -381,6 +509,7 @@ export function vaultContextMessage(vault: VaultInfo): string {
 	if (vault.schemaNote && !vault.organizerState) {
 		lines.push("- vault-organizer has never run here, so notes are not yet guaranteed to match the schema. Dry-run before proposing any apply.");
 	}
+	lines.push(...obsidianCliLines(vault.obsidianCli));
 
 	if (vault.workflowsFolder) {
 		lines.push(
@@ -416,6 +545,7 @@ function summaryLine(vault: VaultInfo): string {
 	const parts = [`${vault.truncated ? `${vault.noteCount}+` : vault.noteCount} notes`];
 	parts.push(vault.schemaNote ? "schema ok" : "no schema note");
 	parts.push(vault.indexedNotes === undefined ? "not indexed" : `${vault.indexedNotes} indexed`);
+	if (vault.obsidianCli?.vaultName && vault.obsidianCli.enabled) parts.push("cli");
 	return `Obsidian vault: ${vault.name} (${parts.join(", ")})`;
 }
 

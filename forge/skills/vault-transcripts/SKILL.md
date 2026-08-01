@@ -180,6 +180,17 @@ note — either lands where the next run will find it.
 - Nothing is ever deleted. Duplicates go to `.vault-transcripts/duplicates/`,
   every rewritten note is copied into the run's `backup/` first, and renames are
   journaled to `renames.jsonl`.
+- A processed note is written in place first and renamed afterwards, in two
+  journalled steps, because a rename can rewrite links inside other notes and
+  would otherwise invalidate their planning hashes. This is the rename that
+  matters: a recording arrives named for when it happened and leaves named for
+  what it says, and a changed basename is exactly what Obsidian's basename
+  resolution cannot paper over. When Obsidian 1.12.7+ is running and
+  "Automatically update internal links" is on, the rename goes through its CLI so
+  every inbound link follows the note — each linking note backed up first,
+  verified after, restored if anything but a link line changed. Otherwise the old
+  name is left behind in whatever pointed at it, exactly as before, and the run
+  says so. `--link-rewrite {auto,off,require}` chooses; see `docs/obsidian-cli.md`.
 - The original transcription is always preserved verbatim under `# Transcript`.
   If a check cannot prove that, the note is held rather than written.
 - The register is spoken-to-written: filler, false starts, repeated phrases, and

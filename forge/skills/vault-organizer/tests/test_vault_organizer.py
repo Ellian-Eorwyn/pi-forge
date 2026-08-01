@@ -21,6 +21,13 @@ spec = importlib.util.spec_from_file_location("vault_organizer", SCRIPT)
 vault_organizer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(vault_organizer)
 
+_shim_spec = importlib.util.spec_from_file_location(
+    "obsidian_shim", Path(__file__).resolve().parents[3] / "lib" / "tests" / "obsidian_shim.py"
+)
+_obsidian_shim = importlib.util.module_from_spec(_shim_spec)
+_shim_spec.loader.exec_module(_obsidian_shim)
+ShimEnvironment = _obsidian_shim.ShimEnvironment
+
 
 SCHEMA = """---
 type: system
@@ -1086,7 +1093,14 @@ class VaultOrganizerV2Tests(unittest.TestCase):
             json.loads(line)
             for line in (Path(run_dir) / "apply-log.jsonl").read_text(encoding="utf-8").splitlines()
         ]
-        self.assertEqual(len([row for row in log_rows if row["status"] == "ok"]), 1)
+        # Filing this note is two journalled steps — the frontmatter is rewritten
+        # at the old path, then the note moves — because a move can rewrite links
+        # inside other notes and would invalidate their planning hashes. The
+        # resume must repeat neither, so each step appears exactly once.
+        self.assertEqual(
+            [row["op"] for row in log_rows if row["status"] == "ok"],
+            ["rewrite", "rewrite_move"],
+        )
 
 
 class PersonalContextTests(unittest.TestCase):
@@ -1435,6 +1449,241 @@ class SourcesTreeTests(unittest.TestCase):
     def test_the_classifier_is_never_shown_a_folder_number(self):
         compact = vault_organizer.compact_schema_for_prompt(self.schema())
         self.assertEqual(compact["source_kinds"]["book"], "Book.")
+
+
+class LinkSafeMoveTests(unittest.TestCase):
+    """Filing a note moves it; the notes pointing at it should come along.
+
+    Without Obsidian, pi-forge renames the file and leaves inbound `[[links]]`
+    to basename resolution — fine for a folder-only move, silently wrong when
+    the filename changes too. With Obsidian, the CLI rewrites those links across
+    the vault, which is a much wider blast radius than `os.rename`. These tests
+    are mostly about the price of that: backups before the call, hashes checked
+    after it, and a full restore the moment a rewrite touches a line that never
+    had a link on it.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        self.vault = self.root / "vault"
+        (self.vault / "99 Meta").mkdir(parents=True)
+        (self.vault / "00 Inbox").mkdir()
+        (self.vault / "99 Meta" / "0.00 Vault Schema.md").write_text(SCHEMA, encoding="utf-8")
+        self.filed = self.vault / "04 Technology" / "4.03 Obsidian" / "Move.md"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write_note(self, relative, text):
+        path = self.vault / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def shim(self, script=None, **kwargs):
+        env = ShimEnvironment(script, vault_path=self.vault, vault_name="vault", **kwargs)
+        self.addCleanup(env.cleanup)
+        return env
+
+    def linked_pair(self):
+        """One note to file, and an already-filed note that links to it.
+
+        The Markdown link is the one that actually moves here. Filing keeps a
+        note's basename, so `[[Move]]` resolves before and after; a Markdown link
+        carrying an explicit path does not, and repairing it is what pi-forge has
+        never been able to do on its own.
+        """
+        self.write_note("00 Inbox/Move.md", "# Move\n\nBody to file.\n")
+        return self.write_note(
+            "04 Technology/4.02 Software Development/Refers.md",
+            '---\ntype: note\nrelated:\n  - "[[Move]]"\n---\n\n'
+            "The prose line.\n\nSee [[Move]] and [Move](../../00 Inbox/Move.md).\n",
+        )
+
+    def organize(self, *extra, responses=None):
+        with StubServer(responses or [ok_response()]) as server:
+            result = run_script(
+                "inbox", "--vault", str(self.vault), "--base-url", server.url,
+                "--no-embeddings", "--apply", *extra,
+            )
+        return result
+
+    def test_inbound_links_follow_the_note_and_the_move_is_journalled(self):
+        refers = self.linked_pair()
+        env = self.shim()
+        payload = json.loads(self.organize().stdout)
+        self.assertEqual(payload["status"], "ok", payload)
+        self.assertTrue(self.filed.is_file())
+        self.assertEqual(payload["data"]["link_rewrite"]["mode"], "obsidian-cli")
+
+        text = refers.read_text(encoding="utf-8")
+        self.assertNotIn("../../00 Inbox/Move.md", text, "the stale path is gone")
+        self.assertIn("[[Move]]", text, "the wikilink still resolves by basename and is left alone")
+        run_dir = Path(payload["data"]["run_directory"])
+        rows = [json.loads(line) for line in (run_dir / "apply-log.jsonl").read_text(encoding="utf-8").splitlines()]
+        move = [row for row in rows if row["op"] == "rewrite_move"][0]
+        self.assertEqual(move["status"], "ok", move)
+        self.assertEqual(move["linkRewrite"], "obsidian-cli")
+        self.assertEqual(move["inboundBefore"], 1)
+        self.assertEqual(move["linksRewrittenIn"], ["04 Technology/4.02 Software Development/Refers.md"])
+        self.assertTrue(any("vault=vault" in argv for argv in env.calls()))
+
+    def test_an_obsidian_only_link_form_is_reported_not_swallowed(self):
+        # Obsidian rewrites a Markdown target to the shortest path unique in the
+        # vault and resolves that like a wikilink. From another folder the result
+        # is correct in Obsidian and broken everywhere else, which a vault that
+        # promises to be plain Markdown needs to hear about.
+        self.linked_pair()
+        self.shim()
+        payload = json.loads(self.organize().stdout)
+        self.assertTrue(
+            any("only Obsidian resolves" in warning for warning in payload["warnings"]),
+            payload["warnings"],
+        )
+
+    def test_every_note_the_move_rewrites_is_backed_up_first(self):
+        self.linked_pair()
+        self.shim()
+        payload = json.loads(self.organize().stdout)
+        run_dir = Path(payload["data"]["run_directory"])
+        backup = run_dir / "backup" / "04 Technology" / "4.02 Software Development" / "Refers.md"
+        self.assertTrue(backup.is_file(), "the linking note is backed up before the CLI touches it")
+        self.assertIn(
+            "../../00 Inbox/Move.md", backup.read_text(encoding="utf-8"), "the backup predates the rewrite"
+        )
+
+    def test_a_rewrite_that_touches_prose_is_restored_and_fails(self):
+        refers = self.linked_pair()
+        original = refers.read_text(encoding="utf-8")
+        env = self.shim()
+        env.set_env(SHIM_MANGLE="1")
+        payload = json.loads(self.organize().stdout)
+
+        self.assertEqual(refers.read_text(encoding="utf-8"), original, "restored byte for byte")
+        run_dir = Path(payload["data"]["run_directory"])
+        rows = [json.loads(line) for line in (run_dir / "apply-log.jsonl").read_text(encoding="utf-8").splitlines()]
+        move = [row for row in rows if row["op"] == "rewrite_move"][0]
+        self.assertEqual(move["status"], "error")
+        self.assertIn("more than links", move["error"])
+        self.assertEqual(payload["data"]["counts"]["failed"], 1)
+
+    def test_one_strike_disables_the_cli_for_the_rest_of_the_run(self):
+        self.write_note("00 Inbox/First.md", "# First\n\nBody one.\n")
+        self.write_note("00 Inbox/Second.md", "# Second\n\nBody two.\n")
+        self.write_note(
+            "04 Technology/4.02 Software Development/Refers.md",
+            "---\ntype: note\n---\n\nThe prose line.\n\n"
+            "See [First](../../00 Inbox/First.md) and [Second](../../00 Inbox/Second.md).\n",
+        )
+        env = self.shim()
+        env.set_env(SHIM_MANGLE="1")
+        payload = json.loads(self.organize(responses=[ok_response(), ok_response()]).stdout)
+
+        run_dir = Path(payload["data"]["run_directory"])
+        rows = [json.loads(line) for line in (run_dir / "apply-log.jsonl").read_text(encoding="utf-8").splitlines()]
+        moves = [row for row in rows if row["op"] == "rewrite_move"]
+        self.assertEqual(len(moves), 2)
+        self.assertEqual(moves[0]["status"], "error")
+        # The second move still happens — it just stops asking Obsidian to do it.
+        self.assertEqual(moves[1]["status"], "ok", moves[1])
+        self.assertEqual(moves[1]["linkRewrite"], "rename")
+
+    def test_link_rewrite_off_never_calls_the_cli(self):
+        refers = self.linked_pair()
+        env = self.shim()
+        payload = json.loads(self.organize("--link-rewrite", "off").stdout)
+
+        self.assertTrue(self.filed.is_file())
+        self.assertEqual(payload["data"]["link_rewrite"]["mode"], "rename")
+        self.assertFalse(any("move" in argv for argv in env.calls()), env.calls())
+        self.assertIn(
+            "../../00 Inbox/Move.md", refers.read_text(encoding="utf-8"), "links are left exactly as they were"
+        )
+
+    def test_link_rewrite_require_fails_when_links_would_not_be_updated(self):
+        self.linked_pair()
+        self.shim(link_updates="unset")
+        result = self.organize("--link-rewrite", "require")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        message = json.loads(result.stdout)["errors"][0]["message"]
+        self.assertIn("link-safe moves are unavailable", message)
+
+    def test_without_obsidian_the_result_is_exactly_what_it_always_was(self):
+        refers = self.linked_pair()
+        payload = json.loads(self.organize().stdout)
+        self.assertTrue(self.filed.is_file())
+        self.assertEqual(payload["data"]["link_rewrite"]["mode"], "rename")
+        self.assertIn("../../00 Inbox/Move.md", refers.read_text(encoding="utf-8"))
+        report = Path(payload["data"]["run_directory"], "report.md").read_text(encoding="utf-8")
+        self.assertIn("Moves use a plain rename", report)
+
+    def test_quarantine_never_goes_through_the_cli(self):
+        # A duplicate is moved into a dot-directory Obsidian does not index.
+        # Rewriting inbound links to chase it there would point them at nothing.
+        body = "# Twin\n\nExactly the same body.\n"
+        self.write_note("00 Inbox/Twin A.md", body)
+        self.write_note("00 Inbox/Twin B.md", body)
+        env = self.shim()
+        payload = json.loads(self.organize(responses=[ok_response()]).stdout)
+        run_dir = Path(payload["data"]["run_directory"])
+        rows = [json.loads(line) for line in (run_dir / "apply-log.jsonl").read_text(encoding="utf-8").splitlines()]
+        quarantines = [row for row in rows if row["op"] == "quarantine"]
+        self.assertTrue(quarantines)
+        for row in quarantines:
+            self.assertEqual(row["linkRewrite"], "rename")
+        quarantined = {row["destination"] for row in quarantines}
+        moved = {
+            argv[argv.index("move") + 2].split("=", 1)[1]
+            for argv in env.calls()
+            if "move" in argv
+        }
+        self.assertFalse(moved & quarantined, "no quarantine destination was handed to the CLI")
+
+    def test_a_base_is_evaluated_rather_than_string_matched(self):
+        """A base selects notes by property, so its text is the wrong thing to grep.
+
+        It can hold a note whose path appears nowhere in the file, and mention a
+        path in a filter it never matches. Running the view answers the question
+        the report is actually asking.
+        """
+        self.write_note("00 Inbox/Move.md", "# Move\n\nBody to file.\n")
+        (self.vault / "99 Meta").mkdir(parents=True, exist_ok=True)
+        (self.vault / "99 Meta" / "Dash.base").write_text(
+            "filters:\n  and:\n    - type == \"note\"\n", encoding="utf-8"
+        )
+        self.shim({
+            "bases": "99 Meta/Dash.base\n",
+            "base:query": "00 Inbox/Move.md\n01 Personal/Other.md\n",
+        })
+        payload = json.loads(self.organize().stdout)
+        plan = json.loads(Path(payload["data"]["run_directory"], "plan.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            plan["base_references"],
+            [{
+                "base": "99 Meta/Dash.base",
+                "references": ["00 Inbox/Move.md"],
+                "returned": 2,
+                "source": "base:query",
+            }],
+        )
+        report = Path(payload["data"]["run_directory"], "report.md").read_text(encoding="utf-8")
+        self.assertIn("returns 2 note(s), 1 of which this run moves", report)
+        self.assertEqual(
+            (self.vault / "99 Meta" / "Dash.base").read_text(encoding="utf-8"),
+            'filters:\n  and:\n    - type == "note"\n',
+            "a base file is never rewritten",
+        )
+
+    def test_without_obsidian_a_base_is_still_text_matched(self):
+        self.write_note("00 Inbox/Move.md", "# Move\n\nBody to file.\n")
+        (self.vault / "99 Meta").mkdir(parents=True, exist_ok=True)
+        (self.vault / "99 Meta" / "Dash.base").write_text("note: 00 Inbox/Move.md\n", encoding="utf-8")
+        payload = json.loads(self.organize().stdout)
+        plan = json.loads(Path(payload["data"]["run_directory"], "plan.json").read_text(encoding="utf-8"))
+        self.assertEqual(plan["base_references"], [{"base": "99 Meta/Dash.base", "references": ["00 Inbox/Move.md"]}])
+        report = Path(payload["data"]["run_directory"], "report.md").read_text(encoding="utf-8")
+        self.assertIn("text match; Obsidian was not running", report)
 
 
 if __name__ == "__main__":

@@ -19,6 +19,13 @@ spec = importlib.util.spec_from_file_location("vault_connections", SCRIPT)
 vault_connections = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(vault_connections)
 
+_shim_spec = importlib.util.spec_from_file_location(
+    "obsidian_shim", Path(__file__).resolve().parents[3] / "lib" / "tests" / "obsidian_shim.py"
+)
+_obsidian_shim = importlib.util.module_from_spec(_shim_spec)
+_shim_spec.loader.exec_module(_obsidian_shim)
+ShimEnvironment = _obsidian_shim.ShimEnvironment
+
 
 SCHEMA = """---
 type: system
@@ -358,23 +365,25 @@ class VaultConnectionsTest(unittest.TestCase):
         )
         return root
 
-    def run_command(self, *argv):
+    def run_command(self, *argv, env_extra=None):
         # Review talks to a second endpoint. Tests that are not about it opt
         # out, so they neither reach a real server nor add stub traffic.
         arguments = list(argv)
         if not {"--no-verify", "--think-url"} & set(arguments):
             arguments.append("--no-verify")
+        environment = {
+            "FORGE_EMBEDDINGS_URL": f"{self.base}/v1/embeddings",
+            "FORGE_EMBEDDINGS_MODEL": "stub-embed",
+            "PATH": "/usr/bin:/bin",
+            # Never resolve endpoints from the settings of whoever runs the tests.
+            "PI_FORGE_AGENT_DIR": "/nonexistent-agent-directory",
+        }
+        environment.update(env_extra or {})
         process = subprocess.run(
             [sys.executable, str(SCRIPT), *arguments, "--vault", str(self.vault), "--base-url", f"{self.base}/v1/chat/completions"],
             capture_output=True,
             text=True,
-            env={
-                "FORGE_EMBEDDINGS_URL": f"{self.base}/v1/embeddings",
-                "FORGE_EMBEDDINGS_MODEL": "stub-embed",
-                "PATH": "/usr/bin:/bin",
-                # Never resolve endpoints from the settings of whoever runs the tests.
-                "PI_FORGE_AGENT_DIR": "/nonexistent-agent-directory",
-            },
+            env=environment,
         )
         self.assertTrue(process.stdout.strip(), f"no stdout; stderr={process.stderr[-2000:]}")
         return json.loads(process.stdout), process
@@ -536,6 +545,32 @@ class VaultConnectionsTest(unittest.TestCase):
         self.assertNotIn("verified", result["data"]["proposals"][0])
         self.assertTrue(any("review skipped" in warning for warning in result["warnings"]))
 
+    def test_propose_lists_the_notes_nothing_links_to(self):
+        """A capability this skill has never had.
+
+        The note index records outgoing links only, so nothing here can answer
+        "what points at this?" without building a reverse index over the whole
+        vault. Obsidian keeps one in memory. It is advisory — a note nobody links
+        to is the best place to start looking for connections, not a fault.
+        """
+        self.seed_pair()
+        _, env_extra = self.shim_env({"orphans": "01 Personal/Meditation Log.md\n01 Personal/Stray.md\n"})
+        result, _ = self.run_command("propose", env_extra=env_extra)
+        self.assertEqual(
+            result["data"]["unlinkedNotes"], ["01 Personal/Meditation Log.md", "01 Personal/Stray.md"]
+        )
+        self.assertEqual(result["data"]["counts"]["unlinked_notes"], 2)
+        report = Path(result["data"]["runDirectory"], "report.md").read_text(encoding="utf-8")
+        self.assertIn("## Notes nothing links to (2)", report)
+
+    def test_propose_without_obsidian_says_nothing_about_orphans(self):
+        self.seed_pair()
+        result, _ = self.run_command("propose")
+        self.assertEqual(result["data"]["unlinkedNotes"], [])
+        self.assertNotIn("unlinked_notes", result["data"]["counts"])
+        report = Path(result["data"]["runDirectory"], "report.md").read_text(encoding="utf-8")
+        self.assertNotIn("Notes nothing links to", report)
+
     def test_pair_judgments_use_the_non_thinking_model(self):
         self.seed_pair()
         self.run_command("propose")
@@ -661,6 +696,71 @@ class VaultConnectionsTest(unittest.TestCase):
         self.assertIn("subdomain: concepts\n", text)
         self.assertIn('  - "[[Alpha]]"', text)
         self.assertIn("## Mentioned in", text)
+
+    def shim_env(self, script=None, **kwargs):
+        """Fake Obsidian CLI, plus the env vars a subprocess needs to find it."""
+        env = ShimEnvironment(script, vault_path=self.vault, vault_name="vault", **kwargs)
+        self.addCleanup(env.cleanup)
+        import os
+
+        return env, {
+            "PATH": str(env.bin) + os.pathsep + "/usr/bin:/bin",
+            "FORGE_OBSIDIAN_CONFIG_DIR": str(env.config),
+            "SHIM_SCRIPT": str(env.script_path),
+            "SHIM_LOG": str(env.log),
+            "SHIM_STATE": str(env.state),
+            "SHIM_VAULT": str(env.vault),
+        }
+
+    def test_wiki_does_not_stub_a_note_the_vault_already_has_under_an_alias(self):
+        """Obsidian leaves a bare `[[Alias]]` unresolved, and so do we.
+
+        That agreement is the point: the link really is unresolved. But an
+        unresolved target that an existing note already answers to is not a
+        missing note, it is a link written the short way — and stubbing it would
+        leave the vault with two notes for one thing.
+        """
+        self.write(
+            "02 Craft/Emptiness.md",
+            "---\ntype: note\nstatus: active\ndomain: craft\naliases:\n  - Sunyata\n---\n"
+            "# Emptiness\n\nAn existing note about emptiness.\n",
+        )
+        self.seed_unresolved()
+        result, _ = self.run_command("wiki", "--min-mentions", "2")
+        self.assertEqual(result["data"]["counts"]["stubs_proposed"], 0)
+        reason = result["data"]["blocked"][0]["reason"]
+        self.assertIn("already declares `Sunyata` as an alias", reason)
+        self.assertIn("[[Emptiness|Sunyata]]", reason)
+        self.assertFalse((self.vault / "09 Wiki/9.01 Concepts/Sunyata.md").exists())
+
+    def test_the_alias_guard_needs_no_obsidian(self):
+        # Deliberately unconditional: it is a fix to our own resolution, not a
+        # capability borrowed from the app.
+        self.write(
+            "02 Craft/Emptiness.md",
+            "---\ntype: note\nstatus: active\ndomain: craft\naliases:\n  - Sunyata\n---\n# Emptiness\n\nBody.\n",
+        )
+        self.seed_unresolved()
+        result, _ = self.run_command("wiki", "--min-mentions", "2", env_extra={"FORGE_OBSIDIAN_CLI": "off"})
+        self.assertEqual(result["data"]["counts"]["stubs_proposed"], 0)
+        self.assertEqual(result["data"]["counts"]["blocked_by_collision"], 1)
+
+    def test_wiki_reports_where_our_unresolved_set_disagrees_with_obsidians(self):
+        self.seed_unresolved()
+        _, env_extra = self.shim_env({"unresolved": json.dumps([{"link": "Ghost", "count": "3"}])})
+        result, _ = self.run_command("wiki", "--min-mentions", "2", env_extra=env_extra)
+        check = result["data"]["unresolvedCrossCheck"]
+        self.assertTrue(check["ok"])
+        self.assertIn("sunyata", check["oursOnly"])
+        self.assertIn("ghost", check["theirsOnly"])
+        self.assertTrue(any("missing a rule Obsidian has" in warning for warning in result["warnings"]))
+        self.assertTrue(any("index is probably stale" in warning for warning in result["warnings"]))
+
+    def test_the_cross_check_is_absent_without_obsidian(self):
+        self.seed_unresolved()
+        result, _ = self.run_command("wiki", "--min-mentions", "2")
+        self.assertFalse(result["data"]["unresolvedCrossCheck"]["ok"])
+        self.assertEqual(result["warnings"], [])
 
     def test_wiki_blocks_a_stub_that_collides_with_an_existing_basename(self):
         self.write(

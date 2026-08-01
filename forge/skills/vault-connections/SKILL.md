@@ -152,6 +152,12 @@ Nothing is written without the user naming the proposal ids they approve.
 - A wiki stub is never created when a note with that basename already exists
   anywhere in the vault; Obsidian would resolve the link ambiguously. The
   collision is reported so the user can link to the existing note instead.
+- A wiki stub is never created for a target an existing note already declares in
+  its `aliases`. Obsidian does not resolve a bare `[[Alias]]` — its autocomplete
+  writes `[[Real Name|Alias]]` — so such a link genuinely is unresolved, but the
+  note is not missing, and stubbing it would leave the vault with two notes for
+  one thing. The existing note is named, with the piped link to use instead. This
+  needs no Obsidian: it reads the vault's own frontmatter.
 - People and organizations found among unresolved links are reported as
   `08 Directory` candidates and never created here. A link matching a registered
   project is reported as a missing project note, never turned into a wiki note.
@@ -161,6 +167,16 @@ Nothing is written without the user naming the proposal ids they approve.
   research imports are additionally bound to the vault used to generate them.
 - Accepted and rejected pairs and source-run-scoped import proposals are recorded
   in `.vault-connections/decisions.jsonl`.
+- When the Obsidian CLI is available, two read-only extras appear and nothing
+  else changes. `propose` lists the notes nothing links to — a reverse link index
+  this skill has never had, since its own index records outgoing links only — as
+  advisory context for where to look for connections. `wiki` compares its
+  unresolved-link set against Obsidian's and reports disagreements in both
+  directions: targets only we call unresolved mean our resolution is missing a
+  rule, targets only Obsidian calls unresolved mean the cached index is stale and
+  `index` should be run. Neither affects which proposals are made, because a
+  proposal must not depend on whether an app happened to be running. Without the
+  CLI both sections are simply absent.
 
 ## Rules
 

@@ -17,8 +17,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import forge_embeddings
 import forge_llm
 import forge_verify
+import obsidian_cli
 import run_state
 import vault_profile
+from vault_moves import PlainMover, backup_once, resolve_mover
 import vault_voice
 from vault_classification import (  # noqa: F401  (re-exported for callers and tests)
     DEFAULT_BASE_URL,
@@ -44,6 +46,7 @@ from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
     REQUIRED_SECTIONS,
     RESERVED_WINDOWS_NAMES,
     SCHEMA_BASENAME,
+    DRIFT_SEVERITY_ORDER,
     UserError,
     check_schema_drift,
     compile_destination,
@@ -51,6 +54,7 @@ from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
     compiled_schema_for,
     domain_folder,
     drift_counts,
+    drift_finding_id,
     first_nonempty_line,
     has_control_character,
     heading_index,
@@ -1221,7 +1225,9 @@ def route_records(args, vault, items, losers, class_records, warnings, done_map=
         record = dict(journaled)
         done = done_map.get(rel)
         if done:
-            if done["op"] == "rewrite" and record["status"] == "ok" and not record["needs_review"] and done["destination"] == record["destination"]:
+            # `rewrite_move` is the second half of a rewrite that also relocates:
+            # content is written at the old path first, then the note is moved.
+            if done["op"] in {"rewrite", "rewrite_move"} and record["status"] == "ok" and not record["needs_review"] and done["destination"] == record["destination"]:
                 record["already_applied"] = True
             elif done["op"] == "move_only" and (record["needs_review"] or record["status"] != "ok"):
                 record["destination"] = done["destination"]
@@ -1360,7 +1366,18 @@ def write_review_queue(run_dir, records):
     return review_queue
 
 
-def scan_base_references(vault, records):
+def scan_base_references(vault, records, session=None):
+    """Which Bases dashboards this run's moves will disturb.
+
+    Text matching is the fallback, and it is a poor one: a base selects notes by
+    property, so it can hold a note whose path appears nowhere in the file, and
+    it can mention a path in a filter it never actually matches. When Obsidian is
+    running the base is evaluated instead, which answers the real question —
+    which notes does this view return, and how many of them are about to move.
+
+    Read-only in both directions. Bases YAML is a moving format and nothing here
+    will ever rewrite one.
+    """
     moved_sources = [
         record["source"]
         for record in records
@@ -1369,6 +1386,10 @@ def scan_base_references(vault, records):
     ]
     if not moved_sources:
         return []
+    if session is not None and session.get("available"):
+        evaluated = evaluate_base_views(vault, session, moved_sources)
+        if evaluated is not None:
+            return evaluated
     references = []
     for directory, dirnames, filenames in os.walk(vault, followlinks=False):
         dirpath = Path(directory)
@@ -1390,6 +1411,29 @@ def scan_base_references(vault, records):
             hits = [source for source in moved_sources if source in text]
             if hits:
                 references.append({"base": relative_path(vault, path), "references": hits})
+    return references
+
+
+def evaluate_base_views(vault, session, moved_sources):
+    """Run each base's view and report which of its results this run moves.
+
+    Returns None when the CLI cannot answer, so the caller falls back to text
+    matching rather than silently reporting nothing.
+    """
+    listing = obsidian_cli.run(session, "bases")
+    if not listing["ok"]:
+        return None
+    bases = [line.strip() for line in listing["output"].splitlines() if line.strip().endswith(".base")]
+    moving = set(moved_sources)
+    references = []
+    for base in sorted(bases):
+        result = obsidian_cli.run(session, "base:query", path=base, format="paths")
+        if not result["ok"]:
+            continue
+        returned = [line.strip() for line in result["output"].splitlines() if line.strip()]
+        hits = [path for path in returned if path in moving]
+        if hits:
+            references.append({"base": base, "references": hits, "returned": len(returned), "source": "base:query"})
     return references
 
 
@@ -1485,11 +1529,12 @@ def drift_report_lines(findings):
 
 def write_plan(
     run_dir, records, counts, dedupe, base_references, mode, dry_run, vault, schema_hash, warnings,
-    verification=None, schema_drift=None,
+    verification=None, schema_drift=None, link_rewrite=("rename", None),
 ):
     plan_path = run_dir / "plan.json"
     report_path = run_dir / "report.md"
     schema_drift = schema_drift or []
+    link_mode, link_reason = link_rewrite
     data = {
         "mode": mode,
         "dry_run": dry_run,
@@ -1501,6 +1546,7 @@ def write_plan(
         "verification": verification,
         "base_references": base_references,
         "schema_drift": schema_drift,
+        "link_rewrite": {"mode": link_mode, "reason": link_reason},
         "records": plan_for_json(records),
         "warnings": warnings,
     }
@@ -1585,13 +1631,34 @@ def write_plan(
     append_report_listing(
         report,
         base_references,
-        lambda entry: f"- `{entry['base']}` references moved notes: {', '.join('`' + hit + '`' for hit in entry['references'][:5])}",
+        lambda entry: (
+            f"- `{entry['base']}` returns {entry['returned']} note(s), {len(entry['references'])} of which "
+            f"this run moves: {', '.join('`' + hit + '`' for hit in entry['references'][:5])}"
+            if entry.get("source") == "base:query"
+            else f"- `{entry['base']}` mentions moved notes: "
+            f"{', '.join('`' + hit + '`' for hit in entry['references'][:5])} (text match; Obsidian was not "
+            f"running, so the view itself was not evaluated)"
+        ),
     )
+    report.extend(["", "## Link Safety", ""])
+    if link_mode == "obsidian-cli":
+        report.append(
+            "Moves go through the Obsidian CLI, which rewrites every inbound wikilink — in prose and in "
+            "frontmatter — to follow the note. Each note that links to a moved note is backed up first, and "
+            "any rewrite touching a line without a link is restored from that backup and fails the operation."
+        )
+    else:
+        report.append(
+            "Moves use a plain rename"
+            + (f" ({link_reason})" if link_reason else "")
+            + ". Basename-style Obsidian wikilinks are generally independent of folders, so a folder-only "
+            "move is invisible to them; a move that also changes the filename is not, and inbound links to "
+            "the old name are left as they were."
+        )
     report.extend([
         "",
-        "## Link Safety",
-        "",
-        "Basename-style Obsidian wikilinks are generally independent of folders. Relative Markdown links containing explicit paths may be affected by moves. This run records moves but does not rewrite embeds; run `attachments` mode afterwards to repair asset links that moves left dangling.",
+        "Relative Markdown links containing explicit paths may be affected by moves either way. Run "
+        "`attachments` mode afterwards to repair asset links that moves left dangling.",
         "",
         "## Warnings",
         "",
@@ -1608,96 +1675,142 @@ def write_plan(
     return plan_path, report_path
 
 
-def apply_move_operation(vault, run_dir, record):
-    source = vault / record["source"]
-    destination = vault / record["destination"]
-    data = source.read_bytes()
-    if sha256_bytes(data) != record["source_hash"]:
-        raise UserError("source changed since planning")
-    if destination.exists():
-        raise UserError("destination collision")
-    backup = run_dir / "backup" / record["source"]
-    backup.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, backup)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    os.rename(source, destination)
-    return backup
-
-
-def apply_rewrite_operation(vault, run_dir, record, schema):
-    source = vault / record["source"]
-    destination = vault / record["destination"]
-    data = source.read_bytes()
-    if sha256_bytes(data) != record["source_hash"]:
-        raise UserError("source changed since planning")
-    frontmatter = split_frontmatter(data)
-    if frontmatter["malformed"]:
-        raise UserError("frontmatter became malformed since planning")
-    revised = revised_note_text(record["metadata"], schema, frontmatter["body"])
-    backup = run_dir / "backup" / record["source"]
-    backup.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, backup)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists() and destination.resolve() != source.resolve():
-        raise UserError("destination collision")
-    fd, temp_name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=str(destination.parent))
+def atomic_write_note(path, text):
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(revised)
+            handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp_name, destination)
+        os.replace(temp_name, path)
     except Exception:
         try:
             os.unlink(temp_name)
         except OSError:
             pass
         raise
-    if destination.resolve() != source.resolve() and source.exists():
-        source.unlink()
+
+
+def apply_rewrite_content(vault, run_dir, record, schema, expected):
+    """Write revised frontmatter at the note's current path. Never moves it.
+
+    Content and location are two steps now, and every content write happens
+    before any move. That is what keeps the planning hashes valid: a move can
+    rewrite links inside other notes, so once moves start, no other note's
+    planning hash can be trusted.
+    """
+    source = vault / record["source"]
+    data = source.read_bytes()
+    if sha256_bytes(data) != expected[record["source"]]:
+        raise UserError("source changed since planning")
+    frontmatter = split_frontmatter(data)
+    if frontmatter["malformed"]:
+        raise UserError("frontmatter became malformed since planning")
+    revised = revised_note_text(record["metadata"], schema, frontmatter["body"])
+    backup = backup_once(run_dir, record["source"], source)
+    atomic_write_note(source, revised)
+    expected[record["source"]] = sha256_bytes(source.read_bytes())
     return backup
 
 
-def apply_records(args, vault, run_dir, records, counts, schema):
+def apply_move_operation(vault, run_dir, record, expected, mover):
+    source = vault / record["source"]
+    destination = vault / record["destination"]
+    data = source.read_bytes()
+    if sha256_bytes(data) != expected[record["source"]]:
+        raise UserError("source changed since planning")
+    if destination.exists() and destination.resolve() != source.resolve():
+        raise UserError("destination collision")
+    backup = backup_once(run_dir, record["source"], source)
+    # The CLI's `move` will not create the destination folder for us.
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    detail = mover.move(vault, run_dir, record["source"], record["destination"], expected)
+    return backup, detail
+
+
+# The journal op each action writes in the move phase. A `rewrite` that also
+# relocates journals twice — `rewrite` for the content, `rewrite_move` for the
+# move — so a resumed run can tell which half already landed.
+MOVE_OPS = {"quarantine": "quarantine", "move_only": "move_only", "rewrite": "rewrite_move"}
+
+
+def apply_records(args, vault, run_dir, records, counts, schema, mover=None):
     log_path = run_dir / "apply-log.jsonl"
     prior, _ = run_state.read_jsonl_recover_tail(log_path, repair=True)
     done = {(entry.get("op"), entry.get("source")) for entry in prior if entry.get("status") == "ok"}
-    order = {"quarantine": 0, "move_only": 1, "rewrite": 2}
-    actionable = sorted(
-        (record for record in records if record["action"] in order and record["status"] != "failed"),
-        key=lambda record: (order[record["action"]], record["source"]),
-    )
+    if mover is None:
+        mover = PlainMover()
+    fallback = PlainMover()
+    actionable = [
+        record for record in records if record["action"] in {"quarantine", "move_only", "rewrite"}
+        and record["status"] != "failed"
+    ]
     for record in records:
         if record["action"] == "none" and (record["needs_review"] or record["status"] == "failed"):
             counts["skipped"] += 1
-    for record in actionable:
-        op = record["action"]
+
+    expected = {record["source"]: record["source_hash"] for record in actionable}
+    # Content first, then locations. Within each phase, source order.
+    content = sorted(
+        (record for record in actionable if record["action"] == "rewrite"), key=lambda record: record["source"]
+    )
+    moves = sorted(
+        (
+            record
+            for record in actionable
+            if record["action"] in {"quarantine", "move_only"}
+            or (record["action"] == "rewrite" and record["destination"] != record["source"])
+        ),
+        key=lambda record: ({"quarantine": 0}.get(record["action"], 1), record["source"]),
+    )
+
+    def journal(op, record, status, **extra):
+        entry = {"op": op, "status": status, "source": record["source"], "destination": record["destination"]}
+        entry.update(extra)
+        run_state.append_jsonl_fsync(log_path, entry)
+
+    for record in content:
+        if ("rewrite", record["source"]) in done:
+            # Re-derive the hash so a resumed run's later move still verifies.
+            path = vault / record["source"]
+            if path.is_file():
+                expected[record["source"]] = sha256_bytes(path.read_bytes())
+            continue
+        try:
+            backup = apply_rewrite_content(vault, run_dir, record, schema, expected)
+            journal("rewrite", record, "ok", backup=str(backup))
+        except Exception as error:
+            record["apply_failed"] = True
+            counts["failed"] += 1
+            journal("rewrite", record, "error", error=str(error))
+
+    for record in moves:
+        op = MOVE_OPS[record["action"]]
+        if record.get("apply_failed"):
+            continue
         if (op, record["source"]) in done:
             counts["applied"] += 1
             continue
+        # Quarantine always uses a plain rename. It moves a duplicate into a
+        # dot-directory Obsidian does not index, so rewriting inbound links to
+        # chase it there would point them at something the app cannot resolve.
+        if op == "quarantine" or getattr(mover, "disabled", False):
+            active = fallback
+        else:
+            active = mover
         try:
-            if op == "rewrite":
-                backup = apply_rewrite_operation(vault, run_dir, record, schema)
-            else:
-                backup = apply_move_operation(vault, run_dir, record)
+            backup, detail = apply_move_operation(vault, run_dir, record, expected, active)
             counts["applied"] += 1
-            entry = {
-                "op": op,
-                "status": "ok",
-                "source": record["source"],
-                "destination": record["destination"],
-                "backup": str(backup),
-            }
+            journal(op, record, "ok", backup=str(backup), **detail)
         except Exception as error:
             counts["failed"] += 1
-            entry = {
-                "op": op,
-                "status": "error",
-                "source": record["source"],
-                "destination": record["destination"],
-                "error": str(error),
-            }
-        run_state.append_jsonl_fsync(log_path, entry)
+            journal(op, record, "error", error=str(error))
+
+    # A rewrite that did not need to move still counts as applied; one that did
+    # was counted by its move above.
+    for record in content:
+        if not record.get("apply_failed") and record["destination"] == record["source"]:
+            counts["applied"] += 1
 
 
 def resolved_options(args):
@@ -1802,7 +1915,11 @@ def organize(args):
     # Before the lock and before any classification: a route naming a folder that
     # does not exist makes filing create a second one, so nothing should be spent
     # on a run that must not apply.
-    schema_drift = check_schema_drift(vault, schema)
+    # Property-vocabulary findings ride along at medium and below, so they inform
+    # the report and the warnings without ever reaching the `high` block below.
+    schema_drift = merge_drift_findings(
+        check_schema_drift(vault, schema), check_property_drift(obsidian_cli.probe(vault), schema)
+    )
     # Only what the user must act on becomes a warning. Reserved slots are
     # correct behavior, and a run that warns about them every time trains the
     # reader to skip the section where the real collisions appear. Every
@@ -1922,10 +2039,16 @@ def organize(args):
         records = route_records(args, vault, items, losers, class_records, warnings, done_map=done_map)
         counts = recompute_counts(records, dedupe, items)
         write_review_queue(run_dir, records)
-        base_references = scan_base_references(vault, records)
+        base_references = scan_base_references(vault, records, session=obsidian_cli.probe(vault))
 
+        # Resolved even for a dry run, so the plan says which move strategy the
+        # apply will use rather than leaving it to be discovered afterwards.
+        mover, mover_reason = resolve_mover(args.link_rewrite, vault)
         if args.apply:
-            apply_records(args, vault, run_dir, records, counts, schema)
+            if mover_reason:
+                warnings.append(f"moves use a plain rename: {mover_reason}")
+            apply_records(args, vault, run_dir, records, counts, schema, mover=mover)
+            warnings.extend(mover.warnings)
             _, index_warnings = refresh_vault_index(vault, schema_path)
             warnings.extend(index_warnings)
             final_phase = "complete"
@@ -1933,7 +2056,7 @@ def organize(args):
             final_phase = "planned"
         plan_path, report_path = write_plan(
             run_dir, records, counts, dedupe, base_references, args.mode, not args.apply, vault, schema_hash, warnings,
-            verification, schema_drift,
+            verification, schema_drift, link_rewrite=(mover.mode, mover_reason),
         )
         run_state.update_run_state(
             run_dir,
@@ -1956,6 +2079,7 @@ def organize(args):
             "run_directory": str(run_dir),
             "counts": counts,
             "schema_drift": drift_counts(schema_drift),
+            "link_rewrite": {"mode": mover.mode, "reason": mover_reason},
         },
     )
 
@@ -2260,7 +2384,140 @@ def attachments(args):
     )
 
 
-def render_drift_report(vault, schema_path, schema, findings):
+# Obsidian owns these three regardless of what the schema says, so a vault using
+# one without declaring it is a smaller thing than an invented key.
+OBSIDIAN_BUILTIN_PROPERTIES = frozenset({"aliases", "cssclasses", "tags"})
+
+# Obsidian's registered property types, mapped to the shape the schema speaks in.
+OBSIDIAN_LIST_TYPES = frozenset({"aliases", "multitext", "tags"})
+OBSIDIAN_SCALAR_TYPES = frozenset({"checkbox", "date", "datetime", "number", "text"})
+
+
+def check_property_drift(session, schema):
+    """Drift between the schema's approved properties and what the vault holds.
+
+    ``check_schema_drift`` compares compiled routes against folders; this compares
+    the approved-property vocabulary against the properties actually in use. That
+    question needs an index of every note's frontmatter, which Obsidian already
+    keeps in memory, so the check exists only when the CLI is available and
+    returns nothing at all when it is not.
+
+    Nothing here rises above `medium`. An unapproved property is a conversation
+    about vocabulary, not a filing hazard, so it must never block an apply.
+    """
+    if not session.get("available"):
+        return []
+    result = obsidian_cli.run_json(session, "properties", format="json", counts=True)
+    if not result["ok"] or not isinstance(result.get("data"), list):
+        return []
+
+    approved = schema["property_order"]
+    approved_set = set(approved)
+    findings = []
+    seen = set()
+    for row in result["data"]:
+        if not isinstance(row, dict):
+            continue
+        name = row.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        seen.add(name)
+        try:
+            count = int(row.get("count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        registered_type = row.get("type") if isinstance(row.get("type"), str) else None
+
+        if name not in approved_set:
+            if count == 0:
+                # Registered as a type but written nowhere. Obsidian keeps these
+                # around after the last note using them is cleaned up.
+                continue
+            builtin = name in OBSIDIAN_BUILTIN_PROPERTIES
+            kind = "property_obsidian_builtin" if builtin else "property_unapproved"
+            findings.append({
+                "id": drift_finding_id(kind, name, ""),
+                "severity": "low" if builtin else "medium",
+                "kind": kind,
+                "path": name,
+                "route": None,
+                "note_count": count,
+                "property_type": registered_type,
+                "detail": (
+                    f"`{name}` is one of Obsidian's own properties and appears on {count} note(s), but the "
+                    f"schema's **Approved properties** table does not list it."
+                    if builtin
+                    else f"`{name}` appears on {count} note(s) and is not in the schema's **Approved "
+                    f"properties** table. A rewrite strips unapproved keys, so those values are one "
+                    f"normalization away from being dropped."
+                ),
+                "suggestion": (
+                    f"Add `{name}` to **Approved properties**, or remove it from the {count} note(s) that "
+                    f"carry it. Nothing here is filed differently either way."
+                ),
+                "fix_side": "manual",
+                "schema_row": None,
+            })
+            continue
+
+        if count == 0 or registered_type is None:
+            continue
+        shape = schema["properties"][name]["shape"]
+        registered_shape = (
+            "list" if registered_type in OBSIDIAN_LIST_TYPES
+            else "scalar" if registered_type in OBSIDIAN_SCALAR_TYPES
+            else None
+        )
+        if registered_shape is None or registered_shape == shape:
+            continue
+        findings.append({
+            "id": drift_finding_id("property_type_mismatch", name, ""),
+            "severity": "medium",
+            "kind": "property_type_mismatch",
+            "path": name,
+            "route": None,
+            "note_count": count,
+            "property_type": registered_type,
+            "detail": (
+                f"The schema gives `{name}` the shape `{shape}`, but Obsidian has it registered as "
+                f"`{registered_type}` ({registered_shape}) across {count} note(s). Obsidian registers the "
+                f"shape it actually finds, so some note writes this property the other way."
+            ),
+            "suggestion": (
+                f"Find the notes writing `{name}` as a {registered_shape} and normalize them, or change the "
+                f"schema's Shape cell. Until they agree, a merge into `{name}` can read a value it did not "
+                f"expect."
+            ),
+            "fix_side": "manual",
+            "schema_row": None,
+        })
+
+    for name in approved:
+        if name in seen:
+            continue
+        findings.append({
+            "id": drift_finding_id("property_unused", name, ""),
+            "severity": "info",
+            "kind": "property_unused",
+            "path": name,
+            "route": None,
+            "note_count": 0,
+            "property_type": None,
+            "detail": f"`{name}` is approved by the schema but no note in the vault uses it.",
+            "suggestion": f"Keep `{name}` if it is aspirational, or drop the row to keep the table honest.",
+            "fix_side": "manual",
+            "schema_row": None,
+        })
+    return findings
+
+
+def merge_drift_findings(*groups):
+    """Combine drift finding lists back into one severity-ordered list."""
+    findings = [finding for group in groups for finding in group]
+    return sorted(findings, key=lambda entry: (DRIFT_SEVERITY_ORDER[entry["severity"]], entry["path"]))
+
+
+def render_drift_report(vault, schema_path, schema, findings, property_check=True):
     lines = [
         "# Schema drift report",
         "",
@@ -2275,6 +2532,13 @@ def render_drift_report(vault, schema_path, schema, findings):
         "Structure *below* a declared route is legitimate detail and is never reported.",
         "",
     ]
+    if not property_check:
+        lines.extend([
+            "Property vocabulary was not checked: that needs an index of every note's frontmatter,",
+            "which the Obsidian CLI supplies and nothing else here does. Folder routes below are",
+            "checked the same way regardless.",
+            "",
+        ])
     lines.extend(drift_report_lines(findings))
     lines.extend([
         "## Fixing",
@@ -2358,7 +2622,8 @@ def drift(args):
         raise UserError(f"vault root does not exist: {vault}")
     schema_path = resolve_schema_path(vault, args.schema)
     schema, _ = compiled_schema_for(vault, schema_path)
-    findings = check_schema_drift(vault, schema)
+    cli_session = obsidian_cli.probe(vault)
+    findings = merge_drift_findings(check_schema_drift(vault, schema), check_property_drift(cli_session, schema))
 
     run_dir = unique_run_directory(vault)
     # Written before any edit, as with attachments: the report is the record of
@@ -2368,7 +2633,8 @@ def drift(args):
         encoding="utf-8",
     )
     (run_dir / "drift_report.md").write_text(
-        render_drift_report(vault, schema_path, schema, findings), encoding="utf-8"
+        render_drift_report(vault, schema_path, schema, findings, property_check=cli_session["available"]),
+        encoding="utf-8",
     )
 
     requested = [part.strip() for part in (args.fix_schema or "").split(",") if part.strip()]
@@ -2497,8 +2763,11 @@ def doctor(args):
         }
     warnings.extend(getattr(args, "profile_warnings", []) or [])
 
+    cli_session = obsidian_cli.probe(vault)
     if schema_check["ok"]:
-        findings = check_schema_drift(vault, schema)
+        findings = merge_drift_findings(
+            check_schema_drift(vault, schema), check_property_drift(cli_session, schema)
+        )
         counts = drift_counts(findings)
         checks["drift"] = {"ok": counts["high"] == 0, "counts": counts, "findings": findings}
         for finding in findings:
@@ -2540,7 +2809,50 @@ def doctor(args):
             "detail": embeddings_probe["detail"],
         }
         ok = ok and embeddings_probe["reachable"]
+    # An optional accelerator, so it never touches `ok`: a vault with no Obsidian
+    # running is a normal vault, not a broken one. It only reports, and warns when
+    # the CLI is one setting away from being usable.
+    cli_report = obsidian_cli.doctor(vault, session=cli_session)
+    if cli_report["available"] and schema_check["ok"]:
+        cli_report["frontmatter"] = frontmatter_oracle(cli_session, vault, schema_path)
+        for note in cli_report["frontmatter"]["disagreements"]:
+            warnings.append(
+                "frontmatter parse disagreement in {0}: Obsidian sees keys we miss ({1}); "
+                "we see keys it does not ({2}); shape differs on ({3})".format(
+                    note["path"],
+                    ", ".join(note["missing"]) or "none",
+                    ", ".join(note["extra"]) or "none",
+                    ", ".join(note["shape"]) or "none",
+                )
+            )
+    checks["obsidianCli"] = cli_report
+    warnings.extend(cli_report.pop("warnings", []))
     return structured("ok" if ok else "error", warnings=warnings, data={"checks": checks})
+
+
+# How many notes the parser oracle samples. Enough to catch a systematic miss,
+# few enough that doctor stays a fast command.
+FRONTMATTER_ORACLE_SAMPLE = 25
+
+
+def frontmatter_oracle(session, vault, schema_path):
+    """Compare our frontmatter parser against Obsidian's on a sample of notes."""
+    try:
+        notes = selected_notes(vault, schema_path, "vault", FRONTMATTER_ORACLE_SAMPLE)
+    except UserError:
+        return {"checked": 0, "disagreements": []}
+
+    def parse(path):
+        try:
+            frontmatter = split_frontmatter(path.read_bytes())
+        except OSError:
+            return None
+        if frontmatter["malformed"] or not frontmatter["had_frontmatter"]:
+            return None
+        return parse_frontmatter(frontmatter["frontmatter_text"])
+
+    relatives = [str(note.relative_to(vault)) for note in notes]
+    return obsidian_cli.compare_frontmatter(session, vault, relatives, parse)
 
 
 class TrackingAction(argparse.Action):
@@ -2561,6 +2873,15 @@ def parse_args(argv):
         "--allow-schema-drift",
         action="store_true",
         help="apply even though the schema and the folders on disk disagree",
+    )
+    parser.add_argument(
+        "--link-rewrite",
+        choices=["auto", "off", "require"],
+        default="auto",
+        help=(
+            "how moves handle inbound links: auto uses the Obsidian CLI when it can and falls back to a "
+            "plain rename otherwise, off always renames, require fails when link-safe moves are unavailable"
+        ),
     )
     parser.add_argument("--fix-schema", help="drift mode: comma-separated finding ids to correct in the schema note")
     parser.add_argument("--run", help="existing run directory to resume")

@@ -94,6 +94,10 @@ Finding kinds, in severity order:
 | `undeclared_with_notes` | medium | A folder no route names, holding `.md` files |
 | `undeclared_empty` | low | The same, holding none |
 | `declared_absent` | info | A compiled route with no folder — a reserved slot, created on first use |
+| `property_unapproved` | medium | A property in use that **Approved properties** does not list |
+| `property_obsidian_builtin` | low | `tags`, `aliases`, or `cssclasses` in use but undeclared |
+| `property_type_mismatch` | medium | Obsidian's registered property type contradicts the schema's `shape` |
+| `property_unused` | info | An approved property no note uses |
 
 Two rules keep the output usable. **Substructure is never a finding**: any
 folder whose ancestor chain reaches a compiled route is legitimate detail below
@@ -106,6 +110,19 @@ checker nobody reads is how a live collision survives.
 
 Ids are derived from the finding's content, not its position, so an id copied
 out of a report cannot come to address something else before it is applied.
+
+The four `property_*` kinds are the exception to "pure filesystem". Comparing the
+**Approved properties** table against the properties a vault actually holds needs
+an index of every note's frontmatter, which Obsidian keeps in memory and pi-forge
+would have to build by walking and parsing the whole vault. So
+`check_property_drift` lives in the skill script rather than in
+`forge/lib/vault_schema.py` — whose docstring commits to determinism and the
+standard library, and which both skills depend on staying that way — and it
+returns an empty list when the Obsidian CLI is unavailable. Everything else in
+this section is checked identically with or without it; the report says which
+happened. None of the four exceeds `medium`, by construction, so the `high`-only
+gate on `--apply` cannot be tripped by vocabulary, and all four are
+`fix_side: manual`, which `apply_schema_fixes` already refuses by name.
 
 Each `high` finding names the cheaper side to change: **count the notes under
 the existing folder and under the compiled route, and change whichever holds
@@ -352,16 +369,47 @@ under "Filename and collision rules" in the vault's schema note.
 
 ## Apply
 
-Dry run is the default. With `--apply`, the script executes quarantines, then
-inbox review moves, then rewrites. For every operation it re-reads the
-source, verifies the recorded SHA-256, backs up the original under the run
-directory, and either renames (moves) or writes through a temporary file with
-fsync (rewrites). Every operation is journaled in `apply-log.jsonl`, which is
-never truncated; on resume, operations already logged `ok` are skipped. It
-never overwrites existing files and does not delete backups automatically.
-After a successful apply the vault content index is refreshed. `.base` files
-are never modified; the report lists `.base` files that reference moved
-notes.
+Dry run is the default. With `--apply`, the script does **all content writes
+first, then all moves**: quarantines, then every rewrite at the note's existing
+path, then every relocation. The order is load-bearing. A move can rewrite links
+inside other notes, so once moves begin no other note's planning hash can be
+trusted; doing every content write beforehand means each one still verifies
+against the hash the plan was built on.
+
+A `rewrite` that also relocates is therefore two journalled steps — `rewrite` for
+the content and `rewrite_move` for the move — so a resumed run can tell which
+half already landed. Quarantines journal `quarantine`, plain moves `move_only`.
+For every operation the script re-reads the source, verifies its expected
+SHA-256, backs up the original under the run directory, and either renames or
+writes through a temporary file with fsync. A live `expected_hash` map carries
+each note's current hash forward, updated after each content write and after each
+move's link rewriting, so a later operation verifies against reality rather than
+against planning time. `apply-log.jsonl` is never truncated; on resume,
+operations already logged `ok` are skipped. It never overwrites existing files
+and does not delete backups automatically. After a successful apply the vault
+content index is refreshed.
+
+Backups use `backup_once`: the first copy of a file wins, because a note can now
+be backed up twice in one run — once as a move source and once as a note some
+other move is about to rewrite.
+
+Moves themselves go through a mover (`forge/lib/vault_moves.py`). `PlainMover` is
+`os.rename` and is what this workflow has always done. `ObsidianMover` routes the
+move through the Obsidian CLI so inbound links follow the note, and pays for that
+reach: it backs up every inbound linker before the call, verifies the moved
+file's bytes, requires every rewritten note to differ only on lines carrying
+links, restores everything from backup otherwise, and disables itself for the
+rest of the run after one failure. `--link-rewrite {auto,off,require}` selects
+the policy; `auto` falls back to `PlainMover` silently. A quarantine is always a
+plain rename — it moves into a dot-directory Obsidian does not index, so
+rewriting links to chase it there would point them at nothing.
+
+`.base` files are never modified. The report lists the bases a run disturbs: when
+the CLI is available each base's view is evaluated with `base:query` and reported
+as "returns N notes, M of which this run moves"; otherwise the base file's text
+is substring-matched against the moved paths, which is the weaker check it has
+always been — a base selects by property, so it can hold a note whose path
+appears nowhere in the file.
 
 ## Attachment Links
 

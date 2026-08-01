@@ -75,6 +75,37 @@ section.
 
 9. Report the final structured counts and run directory.
 
+## Link-safe moves
+
+Obsidian resolves `[[Note]]` by basename regardless of folder, so filing a note
+into a different folder is invisible to wikilinks. Two things are not: a move
+that also changes the filename, and any Markdown link carrying an explicit path.
+Historically this run recorded such moves and left those links alone.
+
+When Obsidian 1.12.7+ is running and the vault is registered with it, moves go
+through its CLI instead, which rewrites every inbound link — prose, Markdown
+links, and frontmatter — to follow the note. That is a vault-wide side effect, so
+each move backs up every note that links to the source, verifies the moved file's
+bytes against the hash the plan was built on, and requires that each rewritten
+note differ only on lines carrying links. Anything else and the operation is
+restored from backup and fails, and the CLI is not used again for that run.
+
+`--link-rewrite` chooses the policy:
+
+- `auto` (default) — use the CLI when it can, plain rename when it cannot.
+- `off` — never call the CLI for a move.
+- `require` — fail the run rather than move without link rewriting.
+
+Nothing about this is required. With no Obsidian, or with
+`Settings → Files and links → Automatically update internal links` turned off,
+moves are a plain rename and the run says so in its report and warnings. Report
+that line to the user rather than presenting a plain-rename run as link-safe.
+
+One caveat worth passing on when it appears: Obsidian rewrites a Markdown link
+target to the shortest path unique in the vault, which it resolves like a
+wikilink and a plain Markdown renderer does not. The run warns per note when that
+happens. See `docs/obsidian-cli.md`.
+
 ## Attachment links
 
 Moving notes leaves their relative image and PDF paths pointing at the old
@@ -142,6 +173,27 @@ moves, or deletes a folder and never adds a row, so folder-side corrections and
 new registrations are reported for the user to make. The note is backed up, and
 an edit that fails to re-parse or introduces new high-severity drift is rolled
 back.
+
+### Property vocabulary
+
+Folder routes are half the schema; the **Approved properties** table is the
+other half, and checking it needs an index of every note's frontmatter. Obsidian
+keeps one, so when its CLI is available `drift` also reports:
+
+- `property_unapproved` (**medium**) — a key in use that the table does not list.
+  A normalization strips unapproved keys, so those values are one rewrite from
+  being dropped.
+- `property_obsidian_builtin` (**low**) — `tags`, `aliases`, or `cssclasses` in
+  use but undeclared. Obsidian's own, so a smaller thing than an invented key.
+- `property_type_mismatch` (**medium**) — Obsidian registered a shape the schema
+  disagrees with, meaning some note writes the property the other way.
+- `property_unused` (**info**) — approved, and no note uses it.
+
+Nothing here rises above `medium`, so property drift never blocks an apply: an
+undeclared key is a conversation about vocabulary, not a filing hazard. Every
+finding is `fix_side: manual` — `--fix-schema` will not touch them. Without the
+CLI the check is absent and the report says so; folder routes are checked
+identically either way.
 
 ## The sources tree
 

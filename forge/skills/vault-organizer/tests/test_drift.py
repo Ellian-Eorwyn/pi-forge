@@ -12,6 +12,7 @@ corrections, ids nobody asked for, and any edit that leaves the note worse than
 it found it.
 """
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -21,6 +22,12 @@ import unittest
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "vault-organizer.py"
+_shim_spec = importlib.util.spec_from_file_location(
+    "obsidian_shim", Path(__file__).resolve().parents[3] / "lib" / "tests" / "obsidian_shim.py"
+)
+_obsidian_shim = importlib.util.module_from_spec(_shim_spec)
+_shim_spec.loader.exec_module(_obsidian_shim)
+ShimEnvironment = _obsidian_shim.ShimEnvironment
 SCHEMA_RELATIVE = "99 Meta/99.02 Schemas/0.00 Vault Schema.md"
 sys.dont_write_bytecode = True
 
@@ -357,6 +364,123 @@ class OrganizeBlockingTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertFalse(payload["data"]["dry_run"])
         self.assertTrue(any("schema drift [high]" in warning for warning in payload["warnings"]))
+
+
+class PropertyDriftTests(unittest.TestCase):
+    """The property-vocabulary half of drift, which only exists with the CLI.
+
+    Comparing the schema's approved properties against what the vault actually
+    holds needs an index of every note's frontmatter. Obsidian keeps one in
+    memory; pi-forge would have to walk and parse the whole vault to build it. So
+    this check is present when Obsidian is and simply absent when it is not —
+    and the "absent" case has to leave every other finding untouched, which is
+    what the second test here is for.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.vault = Path(self.tmp.name).resolve() / "vault"
+        for folder in CLEAN:
+            (self.vault / folder).mkdir(parents=True, exist_ok=True)
+        (self.vault / SCHEMA_RELATIVE).write_text(SCHEMA, encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def shim(self, properties, **kwargs):
+        env = ShimEnvironment(
+            {"properties": json.dumps(properties)}, vault_path=self.vault, vault_name="vault", **kwargs
+        )
+        self.addCleanup(env.cleanup)
+        return env
+
+    def audit(self):
+        result = run_script("drift", "--vault", str(self.vault))
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        return json.loads(result.stdout)
+
+    def findings_of(self, payload, kind):
+        return [finding for finding in payload["data"]["findings"] if finding["kind"] == kind]
+
+    def test_unapproved_properties_are_reported_at_medium(self):
+        self.shim([
+            {"name": "type", "type": "text", "count": 12},
+            {"name": "extraction_quality", "type": "text", "count": 16},
+            {"name": "repository_slug", "type": "text", "count": 16},
+        ])
+        payload = self.audit()
+        unapproved = self.findings_of(payload, "property_unapproved")
+        self.assertEqual(sorted(finding["path"] for finding in unapproved), ["extraction_quality", "repository_slug"])
+        self.assertTrue(all(finding["severity"] == "medium" for finding in unapproved))
+        self.assertEqual(unapproved[0]["note_count"], 16)
+        self.assertTrue(all(finding["fix_side"] == "manual" for finding in unapproved))
+
+    def test_obsidian_builtins_are_a_smaller_finding(self):
+        self.shim([
+            {"name": "type", "type": "text", "count": 12},
+            {"name": "tags", "type": "tags", "count": 102},
+            {"name": "invented", "type": "text", "count": 3},
+        ])
+        payload = self.audit()
+        builtin = self.findings_of(payload, "property_obsidian_builtin")
+        self.assertEqual([finding["path"] for finding in builtin], ["tags"])
+        self.assertEqual(builtin[0]["severity"], "low")
+        self.assertEqual([finding["severity"] for finding in self.findings_of(payload, "property_unapproved")], ["medium"])
+
+    def test_registered_but_unused_properties_are_not_reported(self):
+        # Obsidian keeps a property registered after the last note using it is
+        # cleaned up. A type with no notes behind it is not drift.
+        self.shim([{"name": "type", "type": "text", "count": 12}, {"name": "ghost", "type": "text", "count": 0}])
+        self.assertEqual(self.findings_of(self.audit(), "property_unapproved"), [])
+
+    def test_shape_disagreement_is_reported(self):
+        # The schema calls `subdomain` a scalar; Obsidian registering it as
+        # multitext means some note writes it as a list.
+        self.shim([
+            {"name": "type", "type": "text", "count": 12},
+            {"name": "subdomain", "type": "multitext", "count": 4},
+        ])
+        mismatch = self.findings_of(self.audit(), "property_type_mismatch")
+        self.assertEqual([finding["path"] for finding in mismatch], ["subdomain"])
+        self.assertEqual(mismatch[0]["severity"], "medium")
+        self.assertIn("multitext", mismatch[0]["detail"])
+
+    def test_approved_but_absent_properties_are_info_only(self):
+        self.shim([{"name": "type", "type": "text", "count": 12}])
+        unused = self.findings_of(self.audit(), "property_unused")
+        self.assertEqual(sorted(finding["path"] for finding in unused), ["domain", "status", "subdomain"])
+        self.assertTrue(all(finding["severity"] == "info" for finding in unused))
+
+    def test_property_drift_never_blocks_an_apply(self):
+        # Every property finding is medium or below by construction, so the
+        # `high`-only gate in organize --apply cannot be tripped by vocabulary.
+        self.shim([
+            {"name": "type", "type": "text", "count": 12},
+            {"name": "invented", "type": "text", "count": 40},
+        ])
+        payload = self.audit()
+        severities = {finding["severity"] for finding in payload["data"]["findings"] if finding["kind"].startswith("property")}
+        self.assertFalse(severities & {"high"})
+
+    def test_without_the_cli_the_report_is_exactly_what_it_was(self):
+        before = self.audit()
+        env = self.shim([{"name": "type", "type": "text", "count": 12}, {"name": "invented", "type": "text", "count": 5}])
+        with_cli = self.audit()
+        env.set_env(FORGE_OBSIDIAN_CLI="off")
+        after = self.audit()
+
+        self.assertTrue(any(finding["kind"].startswith("property") for finding in with_cli["data"]["findings"]))
+        self.assertEqual(
+            [finding["id"] for finding in after["data"]["findings"]],
+            [finding["id"] for finding in before["data"]["findings"]],
+            "no CLI means no property findings and no change to the folder ones",
+        )
+        report = Path(after["data"]["runDirectory"], "drift_report.md").read_text(encoding="utf-8")
+        self.assertIn("Property vocabulary was not checked", report)
+        self.assertNotIn(
+            "Property vocabulary was not checked",
+            Path(with_cli["data"]["runDirectory"], "drift_report.md").read_text(encoding="utf-8"),
+        )
 
 
 if __name__ == "__main__":

@@ -463,6 +463,110 @@ test("outside a vault the extension injects nothing and sets no status", async (
 	}
 });
 
+/**
+ * A fake `obsidian` binary and registry, plus the env pointing at them.
+ *
+ * Detection here must never spawn anything — naming an unopened vault opens its
+ * window — so the shim binary exists only to be found on PATH, and the test
+ * asserts it is never executed.
+ */
+function withObsidian(
+	root: string,
+	options: { register?: boolean; cli?: boolean; linkUpdates?: "always" | "off" | "unset"; twin?: boolean } = {},
+) {
+	const home = mkdtempSync(join(tmpdir(), "obsidian-cli-"));
+	const bin = join(home, "bin");
+	mkdirSync(bin, { recursive: true });
+	// Executable that would fail loudly if anything ever ran it.
+	writeFileSync(join(bin, "obsidian"), "#!/bin/sh\nexit 99\n", { mode: 0o755 });
+
+	const config = join(home, "config");
+	mkdirSync(config, { recursive: true });
+	const vaults: Record<string, { path: string }> = {};
+	if (options.register !== false) vaults.a = { path: root };
+	if (options.twin) {
+		const twin = join(home, "twin", root.split("/").pop() as string);
+		mkdirSync(twin, { recursive: true });
+		vaults.b = { path: twin };
+	}
+	const registry: Record<string, unknown> = { vaults };
+	if (options.cli !== undefined) registry.cli = options.cli;
+	writeFileSync(join(config, "obsidian.json"), JSON.stringify(registry));
+
+	const linkUpdates = options.linkUpdates ?? "always";
+	writeFileSync(
+		join(root, ".obsidian", "app.json"),
+		JSON.stringify(linkUpdates === "unset" ? {} : { alwaysUpdateLinks: linkUpdates === "always" }),
+	);
+
+	const saved = { PATH: process.env.PATH, dir: process.env.FORGE_OBSIDIAN_CONFIG_DIR };
+	process.env.PATH = `${bin}:${process.env.PATH ?? ""}`;
+	process.env.FORGE_OBSIDIAN_CONFIG_DIR = config;
+	return () => {
+		process.env.PATH = saved.PATH;
+		if (saved.dir === undefined) delete process.env.FORGE_OBSIDIAN_CONFIG_DIR;
+		else process.env.FORGE_OBSIDIAN_CONFIG_DIR = saved.dir;
+		rmSync(home, { recursive: true, force: true });
+	};
+}
+
+test("an available Obsidian CLI is announced with its vault name and a warning", () => {
+	const root = makeVault({ schema: SCHEMA_WITH_WIKI, notes: ["A.md"] });
+	const restore = withObsidian(root);
+	try {
+		const vault = inspectVault(root);
+		assert.ok(vault);
+		assert.equal(vault.obsidianCli?.vaultName, root.split("/").pop());
+		assert.equal(vault.obsidianCli?.linkUpdates, "always");
+		const message = vaultContextMessage(vault);
+		assert.match(message, /Obsidian CLI: available/);
+		assert.match(message, /never required/);
+		assert.match(message, /Do not run mutating `obsidian` subcommands yourself/);
+	} finally {
+		restore();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("no Obsidian CLI costs no tokens at all", () => {
+	const root = makeVault({ schema: SCHEMA_WITH_WIKI, notes: ["A.md"] });
+	const saved = process.env.FORGE_OBSIDIAN_CLI;
+	process.env.FORGE_OBSIDIAN_CLI = "off";
+	try {
+		const vault = inspectVault(root);
+		assert.ok(vault);
+		assert.equal(vault.obsidianCli, undefined);
+		assert.doesNotMatch(vaultContextMessage(vault), /Obsidian CLI/);
+	} finally {
+		if (saved === undefined) delete process.env.FORGE_OBSIDIAN_CLI;
+		else process.env.FORGE_OBSIDIAN_CLI = saved;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("the near-miss cases each get exactly one actionable line", () => {
+	const cases: [Parameters<typeof withObsidian>[1], RegExp][] = [
+		[{ linkUpdates: "unset" }, /Automatically update internal links/],
+		[{ register: false }, /not registered with it under a unique name/],
+		[{ twin: true }, /not registered with it under a unique name/],
+		[{ cli: false }, /command line interface is turned off/],
+	];
+	for (const [options, expected] of cases) {
+		const root = makeVault({ schema: SCHEMA_WITH_WIKI, notes: ["A.md"] });
+		const restore = withObsidian(root, options);
+		try {
+			const vault = inspectVault(root);
+			assert.ok(vault);
+			const message = vaultContextMessage(vault);
+			assert.match(message, expected);
+			assert.doesNotMatch(message, /Obsidian CLI: available/);
+		} finally {
+			restore();
+			rmSync(root, { recursive: true, force: true });
+		}
+	}
+});
+
 test("the status line shows the vault name and /vault reports a summary", async () => {
 	const root = makeVault({ schema: SCHEMA_WITH_WIKI, notes: ["A.md", "B.md"], indexed: 2 });
 	try {

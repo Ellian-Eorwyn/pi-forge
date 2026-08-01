@@ -37,8 +37,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import forge_llm
 import forge_verify
+import obsidian_cli
 import run_state
 import vault_lexicon
+from vault_moves import PlainMover, resolve_mover
 import vault_profile
 import vault_reflection
 import vault_voice
@@ -3678,25 +3680,29 @@ def write_atomic(path, text):
 
 
 def apply_process(vault, run_dir, record):
-    """Rename and rewrite one note, atomically and recoverably.
+    """Write one processed note's content, in place, without moving it.
 
-    The original is copied to the run's backup directory before anything moves,
-    the new content lands through a temporary file in the same directory, and the
-    old name is only unlinked once the new one exists.
+    The original is copied to the run's backup directory first, and the new
+    content lands through a temporary file in the same directory.
 
     The recording's own note is written first, so an interruption between the two
     writes leaves the recording duplicated rather than lost: the original note
     still holds it, and resuming finds the recording note already there with the
     planned bytes and finishes the rewrite.
+
+    Content and location are separate steps. This one keeps the note where it is;
+    the rename that gives it its real title follows, and follows *after* every
+    note in the run has been rewritten, because a rename can rewrite links inside
+    other notes and would invalidate their planning hashes.
     """
     source = vault / record["source"]
-    destination = vault / record["destination"]
     data = source.read_bytes()
     if sha256_bytes(data) != record["source_hash"]:
         raise UserError("source changed since planning")
     note_text = (run_dir / "assembled" / record["artifact"]).read_text(encoding="utf-8")
     if sha256_text(note_text) != record["final_hash"]:
         raise UserError("assembled note changed since planning")
+    destination = vault / record["destination"]
     if destination.exists() and destination.resolve() != source.resolve():
         raise UserError("destination collision")
     raw_text = None
@@ -3713,56 +3719,103 @@ def apply_process(vault, run_dir, record):
             raw_text = None  # already written by an interrupted run
     backup = run_dir / "backup" / record["source"]
     backup.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, backup)
+    if not backup.exists():
+        shutil.copy2(source, backup)
     if raw_text is not None:
         write_atomic(raw_destination, raw_text)
-    write_atomic(destination, note_text)
-    if destination.resolve() != source.resolve() and source.exists():
-        source.unlink()
+    write_atomic(source, note_text)
     return backup
 
 
-def apply_records(vault, run_dir, records, counts):
+def apply_process_move(vault, run_dir, record, mover):
+    """Give a processed note its real filename, taking inbound links with it.
+
+    This is the rename that matters. A transcript arrives named for when it was
+    recorded and leaves named for what it says, so the basename changes — and a
+    changed basename is exactly what Obsidian's wikilink resolution cannot paper
+    over. Without the CLI this is a plain rename and inbound `[[links]]` to the
+    old name are left behind, which is what has always happened here.
+    """
+    source = vault / record["source"]
+    destination = vault / record["destination"]
+    if destination.exists() and destination.resolve() != source.resolve():
+        raise UserError("destination collision")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    expected = {record["source"]: sha256_bytes(source.read_bytes())}
+    return mover.move(vault, run_dir, record["source"], record["destination"], expected)
+
+
+def apply_records(vault, run_dir, records, counts, mover=None):
     log_path = run_dir / "apply-log.jsonl"
     renames_path = run_dir / "renames.jsonl"
     prior, _ = run_state.read_jsonl_recover_tail(log_path, repair=True)
     done = {(entry.get("op"), entry.get("source")) for entry in prior if entry.get("status") == "ok"}
-    order = {"quarantine": 0, "process": 1}
+    if mover is None:
+        mover = PlainMover()
+    fallback = PlainMover()
     actionable = sorted(
-        (record for record in records if record["action"] in order and record["status"] not in {"failed", "review"}),
-        key=lambda record: (order[record["action"]], record["source"]),
+        (
+            record
+            for record in records
+            if record["action"] in {"quarantine", "process"} and record["status"] not in {"failed", "review"}
+        ),
+        key=lambda record: ({"quarantine": 0}.get(record["action"], 1), record["source"]),
     )
+
+    def journal(op, record, status, **extra):
+        entry = {"op": op, "status": status, "source": record["source"], "destination": record["destination"]}
+        entry.update(extra)
+        run_state.append_jsonl_fsync(log_path, entry)
+
+    # Quarantine and content first; every rename afterwards.
     for record in actionable:
         op = record["action"]
         if (op, record["source"]) in done:
-            counts["applied"] += 1
+            if op == "quarantine":
+                counts["applied"] += 1
             continue
         try:
-            backup = apply_quarantine(vault, run_dir, record) if op == "quarantine" else apply_process(vault, run_dir, record)
-            counts["applied"] += 1
-            entry = {
-                "op": op,
-                "status": "ok",
-                "source": record["source"],
-                "destination": record["destination"],
-                "backup": str(backup),
-            }
-            if op == "process":
-                run_state.append_jsonl_fsync(
-                    renames_path,
-                    {"at": run_state.utc_now(), "old": record["source"], "new": record["destination"]},
-                )
+            backup = (
+                apply_quarantine(vault, run_dir, record)
+                if op == "quarantine"
+                else apply_process(vault, run_dir, record)
+            )
+            if op == "quarantine":
+                counts["applied"] += 1
+            journal(op, record, "ok", backup=str(backup))
         except Exception as error:  # noqa: BLE001 - every failure is reported, never silent
+            record["apply_failed"] = True
             counts["apply_failed"] += 1
             record["warnings"].append(f"apply failed: {error}")
-            entry = {
-                "op": op,
-                "status": "error",
-                "source": record["source"],
-                "destination": record["destination"],
-                "error": str(error),
-            }
-        run_state.append_jsonl_fsync(log_path, entry)
+            journal(op, record, "error", error=str(error))
+
+    for record in actionable:
+        if record["action"] != "process" or record.get("apply_failed"):
+            continue
+        if ("process_move", record["source"]) in done:
+            counts["applied"] += 1
+            continue
+        if record["destination"] == record["source"]:
+            counts["applied"] += 1
+            continue
+        active = fallback if getattr(mover, "disabled", False) else mover
+        try:
+            detail = apply_process_move(vault, run_dir, record, active)
+            counts["applied"] += 1
+            journal("process_move", record, "ok", **detail)
+            run_state.append_jsonl_fsync(
+                renames_path,
+                {
+                    "at": run_state.utc_now(),
+                    "old": record["source"],
+                    "new": record["destination"],
+                    **detail,
+                },
+            )
+        except Exception as error:  # noqa: BLE001 - every failure is reported, never silent
+            counts["apply_failed"] += 1
+            record["warnings"].append(f"rename failed: {error}")
+            journal("process_move", record, "error", error=str(error))
 
 
 # --------------------------------------------------------------------------
@@ -4034,8 +4087,14 @@ def process(args):
         counts = recompute_counts(records, dedupe, items)
         counts["applied"] = sum(1 for record in records if record.get("already_applied") and not record["needs_review"])
         write_review_queue(run_dir, records)
+        # Resolved even for a dry run, so the plan says whether the renames will
+        # take inbound links with them rather than leaving it to be found out.
+        mover, mover_reason = resolve_mover(args.link_rewrite, vault)
         if args.apply:
-            apply_records(vault, run_dir, records, counts)
+            if mover_reason:
+                warnings.append(f"renames use a plain rename: {mover_reason}")
+            apply_records(vault, run_dir, records, counts, mover=mover)
+            warnings.extend(mover.warnings)
             final_phase = "complete"
         else:
             final_phase = "planned"
@@ -5054,6 +5113,15 @@ def parse_args(argv):
     parser.add_argument("--profile", action=TrackingAction, help="personal-context register note (default: the vault's, when present)")
     parser.add_argument("--no-profile", action="store_true", help="disable personal context for this run")
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument(
+        "--link-rewrite",
+        choices=["auto", "off", "require"],
+        default="auto",
+        help=(
+            "how renames handle inbound links: auto uses the Obsidian CLI when it can and falls back to a "
+            "plain rename otherwise, off always renames, require fails when link-safe renames are unavailable"
+        ),
+    )
     parser.add_argument("--run", help="existing run directory to resume")
     parser.add_argument("--limit", type=int, action=TrackingAction)
     parser.add_argument("--filename-pattern", choices=FILENAME_PATTERNS, action=TrackingAction)

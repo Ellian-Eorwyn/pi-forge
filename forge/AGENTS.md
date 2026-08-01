@@ -31,6 +31,12 @@ owner". Given no name, use none rather than guess; given no pronouns, they/them.
   never guess it, and never write a run directory into a domain folder.
 - Use working copies for transformations that could alter source content.
 - Keep sensitive material local and avoid unnecessary copies.
+- Never issue a mutating `obsidian` command yourself — `rename`, `move`,
+  `delete`, `property:set`, `create`, `append`, `eval`. It exits 0 whether it
+  succeeded or failed, has no dry run, and a single rename rewrites links across
+  the whole vault. The vault skills own those calls: they back up every affected
+  note, verify hashes, journal what they did, and restore from backup when the
+  app touches anything but a link. Read-only `obsidian` queries are fine.
 
 ## Provenance and Interpretation
 

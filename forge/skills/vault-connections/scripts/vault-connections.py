@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import forge_embeddings
 import forge_llm
 import forge_verify
+import obsidian_cli
 import run_state
 import vault_profile
 import vault_voice
@@ -82,7 +83,9 @@ EMBED_BODY_CHARS = 2000
 EMBED_HEADING_CHARS = 600
 SEARCH_TEXT_CHARS = 2000
 JUDGE_EXCERPT_CHARS = 1200
-NOTES_INDEX_VERSION = 1
+# 2 added `aliases`, so that a wikilink naming an existing note's alias stops
+# looking like a missing note worth stubbing.
+NOTES_INDEX_VERSION = 2
 VECTOR_STORE_VERSION = 1
 COMPACT_LIVE_RATIO = 0.8
 
@@ -264,6 +267,24 @@ def link_targets_in(text):
     return targets
 
 
+def note_aliases(values):
+    """Declared `aliases`, normalized to a list of non-empty strings.
+
+    Obsidian does not resolve a bare `[[Alias]]` to the note declaring it — the
+    autocomplete inserts `[[Real Name|Alias]]` instead — so an alias link really
+    is unresolved, and pi-forge agrees with Obsidian there. What the aliases buy
+    is knowing the difference between a genuinely missing note and one the vault
+    already has under another name, which is the difference between a useful
+    stub and a duplicate entity.
+    """
+    raw = values.get("aliases")
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    return sorted({item.strip() for item in raw if isinstance(item, str) and item.strip()})
+
+
 def frontmatter_link_targets(values):
     """Every wikilink target mentioned anywhere in the parsed frontmatter."""
     targets = set()
@@ -417,6 +438,7 @@ def read_note(vault, path):
         "domain": values.get("domain") if isinstance(values.get("domain"), str) else None,
         "subdomain": values.get("subdomain") if isinstance(values.get("subdomain"), str) else None,
         "headings": outline,
+        "aliases": note_aliases(values),
         "links": sorted(frontmatter_link_targets(values) | link_targets_in(body)),
         "search_text": normalized[:SEARCH_TEXT_CHARS],
         "embed_text": f"{note_title(path, body)}\n{outline}\n{normalized[:EMBED_BODY_CHARS]}",
@@ -427,17 +449,28 @@ def notes_index_path(vault):
     return cache_dir(vault) / "notes.json"
 
 
+def read_notes_index(vault):
+    """Cached index entries without rebuilding. Empty when there is no cache yet.
+
+    Read-only commands use this so that asking a question never has the side
+    effect of re-walking the vault.
+    """
+    path = notes_index_path(vault)
+    if not path.is_file():
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(loaded, dict) or loaded.get("version") != NOTES_INDEX_VERSION:
+        return {}
+    return loaded.get("entries") or {}
+
+
 def refresh_notes_index(vault, schema_path, limit=None):
     """Rebuild the note index, reusing unchanged entries by size and mtime."""
     path = notes_index_path(vault)
-    previous = {}
-    if path.is_file():
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict) and loaded.get("version") == NOTES_INDEX_VERSION:
-                previous = loaded.get("entries") or {}
-        except (OSError, json.JSONDecodeError):
-            previous = {}
+    previous = read_notes_index(vault)
     entries = {}
     warnings = []
     for note in selected_notes(vault, schema_path, "vault", limit):
@@ -1014,6 +1047,55 @@ def unresolved_targets(entries, min_mentions):
             if rel not in record["sources"]:
                 record["sources"].append(rel)
     return {key: record for key, record in mentions.items() if len(record["sources"]) >= min_mentions}
+
+
+def unresolved_cross_check(session, entries, min_mentions):
+    """Compare our unresolved-link set against Obsidian's, when it is running.
+
+    The two lists are derived completely differently — ours from the cached note
+    index, Obsidian's from its live metadata cache — so a disagreement names a
+    specific bug. Targets only we report mean we are missing a resolution rule
+    Obsidian has; targets only Obsidian reports mean our index is stale. Neither
+    changes what the skill does; both are worth saying out loud.
+
+    ``min_mentions`` filters our side, so only targets at or above that threshold
+    are compared in the "ours only" direction.
+    """
+    result = obsidian_cli.run_json(session, "unresolved", format="json", verbose=True, counts=True)
+    if not result["ok"] or not isinstance(result.get("data"), list):
+        return {"ok": False, "detail": result.get("reason") or "unresolved returned no list", "warnings": []}
+
+    theirs = {
+        str(row.get("link", "")).casefold()
+        for row in result["data"]
+        if isinstance(row, dict) and row.get("link")
+    }
+    ours = set(unresolved_targets(entries, min_mentions))
+    ours_only = sorted(ours - theirs)
+    theirs_only = sorted(theirs - ours)
+    warnings = []
+    if ours_only:
+        warnings.append(
+            "unresolved-link disagreement: {0} target(s) we call unresolved that Obsidian resolves "
+            "({1}). Our link resolution is missing a rule Obsidian has.".format(
+                len(ours_only), ", ".join(ours_only[:5])
+            )
+        )
+    if theirs_only:
+        warnings.append(
+            "unresolved-link disagreement: {0} target(s) Obsidian calls unresolved that we do not "
+            "({1}). The cached note index is probably stale; run `index`.".format(
+                len(theirs_only), ", ".join(theirs_only[:5])
+            )
+        )
+    return {
+        "ok": True,
+        "ours": len(ours),
+        "theirs": len(theirs),
+        "oursOnly": ours_only,
+        "theirsOnly": theirs_only,
+        "warnings": warnings,
+    }
 
 
 def classify_target(args, target, mention_lines):
@@ -2443,13 +2525,41 @@ def command_propose(args):
     }
     if verification:
         counts["verification_flagged"] = verification["flagged"]
-    finish_run(run_dir, proposals, counts, histogram, warnings, vault, "connection proposals")
+    orphans = unlinked_notes(obsidian_cli.probe(vault))
+    if orphans:
+        counts["unlinked_notes"] = len(orphans)
+    extra = [(
+        "Notes nothing links to",
+        orphans[:ORPHAN_REPORT_LIMIT],
+        lambda row: f"- `{row}`",
+    )]
+    finish_run(run_dir, proposals, counts, histogram, warnings, vault, "connection proposals", extra=extra)
     return structured(
         "ok",
         artifacts=[str(run_dir / "report.md"), str(run_dir / "proposals.jsonl")],
         warnings=warnings,
-        data={"runDirectory": str(run_dir), "counts": counts, "proposals": proposals},
+        data={"runDirectory": str(run_dir), "counts": counts, "proposals": proposals, "unlinkedNotes": orphans},
     )
+
+
+# Enough to act on in one sitting. The count is in `counts` either way.
+ORPHAN_REPORT_LIMIT = 40
+
+
+def unlinked_notes(session):
+    """Notes with no incoming links, per Obsidian's own link graph.
+
+    Genuinely new: the note index here records outgoing links only, so nothing in
+    this skill can answer "what points at this?" without building a reverse index
+    over the whole vault. Obsidian keeps one in memory. Advisory — a note nobody
+    links to is the best place to start looking for connections, not a problem.
+    """
+    if not session.get("available"):
+        return []
+    result = obsidian_cli.run(session, "orphans")
+    if not result["ok"]:
+        return []
+    return [line.strip() for line in result["output"].splitlines() if line.strip().endswith(".md")]
 
 
 ANNOTATE_SYSTEM = (
@@ -2526,6 +2636,13 @@ def command_wiki(args):
 
     started = time.time()
     known_stems = {Path(rel).stem.casefold(): rel for rel in entries}
+    # A note the vault already has under another name. Obsidian leaves such a
+    # link unresolved, so it reaches this point looking exactly like a missing
+    # note — and stubbing it would create a second note for one thing.
+    known_aliases = {}
+    for rel, entry in sorted(entries.items()):
+        for alias in entry.get("aliases") or []:
+            known_aliases.setdefault(alias.casefold(), rel)
     # A registered project's wikilink is not a wiki entity. If its note is missing,
     # that is a gap in the project tree for vault-organizer, not a concept stub.
     registered_projects = {project_name(value).casefold(): value for value in schema["projects"]}
@@ -2540,6 +2657,19 @@ def command_wiki(args):
         if args.limit and len(proposals) >= args.limit:
             break
         display, sources = record["display"], record["sources"]
+        aliased = known_aliases.get(display.casefold())
+        if aliased:
+            blocked.append(
+                {
+                    "action": "blocked",
+                    "title": display,
+                    "reason": (
+                        f"`{aliased}` already declares `{display}` as an alias — link to it as "
+                        f"`[[{Path(aliased).stem}|{display}]]` instead of creating a second note"
+                    ),
+                }
+            )
+            continue
         if display.casefold() in registered_projects:
             project_candidates.append(
                 {"title": display, "project": registered_projects[display.casefold()], "mentions": len(sources)}
@@ -2589,6 +2719,13 @@ def command_wiki(args):
     backfill, backfill_warnings = backfill_proposals(args, vault, schema, entries, store, len(proposals))
     warnings.extend(backfill_warnings)
     proposals.extend(backfill)
+
+    # Obsidian derives its unresolved-link set from a live metadata cache; this
+    # one comes from the cached note index. A disagreement is a bug in one of
+    # them, and stubbing notes off a list that disagrees with the app is worth
+    # hearing about before ten stubs are accepted.
+    cross_check = unresolved_cross_check(obsidian_cli.probe(vault), entries, args.min_mentions)
+    warnings.extend(cross_check.pop("warnings", []))
 
     counts = {
         "notes_indexed": len(entries),
@@ -2652,6 +2789,7 @@ def command_wiki(args):
             "blocked": blocked,
             "directoryCandidates": directory_candidates,
             "registeredProjectsMissingNotes": project_candidates,
+            "unresolvedCrossCheck": cross_check,
         },
     )
 
@@ -3147,6 +3285,18 @@ def command_doctor(args):
 
     store = load_vectors(vault, args.embeddings_model)
     checks["vectorStore"] = {"ok": True, "cachedVectors": len(store["rows"]), "dimensions": store["dims"]}
+
+    # Optional, so it never touches `ok`. When Obsidian is running it is asked
+    # the same question the index answers, and the two are compared.
+    cli_session = obsidian_cli.probe(vault)
+    cli_report = obsidian_cli.doctor(vault, session=cli_session)
+    if cli_report["available"]:
+        entries = read_notes_index(vault)
+        if entries:
+            cli_report["unresolved"] = unresolved_cross_check(cli_session, entries, args.min_mentions)
+            warnings.extend(cli_report["unresolved"].pop("warnings", []))
+    checks["obsidianCli"] = cli_report
+    warnings.extend(cli_report.pop("warnings", []))
     return structured("ok" if ok else "error", warnings=warnings, data={"checks": checks})
 
 

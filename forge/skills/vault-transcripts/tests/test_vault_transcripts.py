@@ -19,6 +19,13 @@ vault_transcripts = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(vault_transcripts)
 vt = vault_transcripts
 
+_shim_spec = importlib.util.spec_from_file_location(
+    "obsidian_shim", Path(__file__).resolve().parents[3] / "lib" / "tests" / "obsidian_shim.py"
+)
+_obsidian_shim = importlib.util.module_from_spec(_shim_spec)
+_shim_spec.loader.exec_module(_obsidian_shim)
+ShimEnvironment = _obsidian_shim.ShimEnvironment
+
 
 SCHEMA = """---
 type: system
@@ -1198,6 +1205,61 @@ class PipelineTests(unittest.TestCase):
         renames = [json.loads(line) for line in (run_dir / "renames.jsonl").read_text(encoding="utf-8").splitlines()]
         self.assertEqual(renames[0]["old"], "00 Inbox/20260724 131748-9788991C.md")
         self.assertEqual(renames[0]["new"], "00 Inbox/2026-07-24 - Memo - Espresso Machine Repairs.md")
+        self.assertEqual(renames[0]["linkRewrite"], "rename")
+
+    def test_a_rename_takes_inbound_links_with_it_when_obsidian_can(self):
+        """The rename this skill performs is the one that actually breaks links.
+
+        A transcript arrives named for when it was recorded and leaves named for
+        what it says, so the basename changes — and a changed basename is exactly
+        what Obsidian's basename resolution cannot paper over. Without the CLI
+        the old name is simply left behind in whatever pointed at it.
+        """
+        self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
+        pointer = self.vault / "00 Inbox" / "Pointer.md"
+        pointer.write_text(
+            "---\ntype: note\n---\n\nRecorded in [[20260724 131748-9788991C]].\n", encoding="utf-8"
+        )
+        env = ShimEnvironment(vault_path=self.vault, vault_name="vault")
+        self.addCleanup(env.cleanup)
+
+        with StubServer() as server:
+            result = self.result_of(self.process(server.url, "--apply"))
+
+        self.assertIn(
+            "[[2026-07-24 - Memo - Espresso Machine Repairs]]",
+            pointer.read_text(encoding="utf-8"),
+            "the note pointing at the transcript followed the rename",
+        )
+        run_dir = Path(result["data"]["run_directory"])
+        renames = [json.loads(line) for line in (run_dir / "renames.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(renames[0]["linkRewrite"], "obsidian-cli")
+        self.assertEqual(renames[0]["linksRewrittenIn"], ["00 Inbox/Pointer.md"])
+        backup = run_dir / "backup" / "00 Inbox" / "Pointer.md"
+        self.assertIn(
+            "[[20260724 131748-9788991C]]", backup.read_text(encoding="utf-8"), "backed up before the rewrite"
+        )
+
+    def test_without_obsidian_the_old_name_is_left_behind(self):
+        # The behaviour this skill has always had. Stated as a test so that a
+        # change to it is a decision rather than an accident.
+        self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
+        pointer = self.vault / "00 Inbox" / "Pointer.md"
+        pointer.write_text(
+            "---\ntype: note\n---\n\nRecorded in [[20260724 131748-9788991C]].\n", encoding="utf-8"
+        )
+        with StubServer() as server:
+            self.result_of(self.process(server.url, "--apply"))
+        self.assertIn("[[20260724 131748-9788991C]]", pointer.read_text(encoding="utf-8"))
+
+    def test_link_rewrite_require_fails_when_links_would_not_follow(self):
+        self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
+        env = ShimEnvironment(vault_path=self.vault, vault_name="vault", link_updates="unset")
+        self.addCleanup(env.cleanup)
+        with StubServer() as server:
+            completed = self.process(server.url, "--apply", "--link-rewrite", "require")
+        self.assertNotEqual(completed.returncode, 0, completed.stdout)
+        self.assertIn("link-safe moves are unavailable", json.loads(completed.stdout)["errors"][0]["message"])
 
     def test_processed_notes_are_skipped_on_a_second_pass(self):
         self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
