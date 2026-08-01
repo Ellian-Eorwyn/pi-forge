@@ -87,6 +87,12 @@ research to Obsidian", or "turn these extraction outputs into concept notes" to
 `vault-connections import-run`: it never mutates the source run, and nothing
 enters the vault until the user accepts exact proposal ids.
 
+Loose files brought into the vault from outside it go to `00 Inbox` at the vault
+root and no further: never classify, rename, or file them into a domain folder by
+hand. `vault-organizer` does that later, on demand or on a schedule. Only
+Markdown is filed from the inbox, so convert other formats with `file-conversion`
+or `document-ingest` first, or say plainly that the file will sit there untouched.
+
 Route "review my article", "be reviewer 2 on this", or "peer review this draft"
 to `reviewer-2`. It reviews substance only and never modifies the article.
 

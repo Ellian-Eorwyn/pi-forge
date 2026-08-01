@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
@@ -238,4 +238,98 @@ test("an unusable forgeUser is ignored rather than half-rendered", () => {
 			assert.doesNotMatch(installedProfile(agentDirectory), /Who You Are Working With/);
 		});
 	}
+});
+
+/** A vault is a directory that exists; `.obsidian/` is not required, because the vault skills do not require it. */
+function withVault(body, { inbox = true } = {}) {
+	const root = mkdtempSync(join(tmpdir(), "pi-forge-vault-"));
+	if (inbox) mkdirSync(join(root, "00 Inbox"));
+	try {
+		body(root);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+}
+
+test("a declared forgeVault is rendered into the installed profile with its inbox", () => {
+	withVault((vault) => {
+		withAgentDirectory({ forgeVault: vault }, (agentDirectory) => {
+			const settings = configure(agentDirectory);
+			const profile = installedProfile(agentDirectory);
+			assert.match(profile, /## Your Vault/);
+			assert.ok(profile.includes(`- Vault root: ${vault}`));
+			assert.ok(profile.includes(`- Inbox: ${join(vault, "00 Inbox")}`));
+			// The setting itself is preserved, or the next update would lose the path.
+			assert.equal(settings.forgeVault, vault);
+		});
+	});
+});
+
+test("configuring twice regenerates the vault block rather than stacking it", () => {
+	withVault((vault) => {
+		withAgentDirectory({ forgeVault: vault }, (agentDirectory) => {
+			configure(agentDirectory);
+			configure(agentDirectory);
+			assert.equal(installedProfile(agentDirectory).match(/## Your Vault/g)?.length, 1);
+		});
+	});
+});
+
+test("a forgeVault whose inbox does not exist yet is still declared", () => {
+	withVault(
+		(vault) => {
+			withAgentDirectory({ forgeVault: vault }, (agentDirectory) => {
+				configure(agentDirectory);
+				assert.match(installedProfile(agentDirectory), /## Your Vault/);
+			});
+		},
+		{ inbox: false },
+	);
+});
+
+test("a forgeVault that is not a usable absolute directory is ignored rather than declared", () => {
+	for (const forgeVault of ["", "   ", "relative/vault", "~", join(tmpdir(), "pi-forge-absent-vault"), 7, ["/tmp"]]) {
+		withAgentDirectory({ forgeVault }, (agentDirectory) => {
+			configure(agentDirectory);
+			assert.doesNotMatch(installedProfile(agentDirectory), /Your Vault/);
+		});
+	}
+});
+
+test("a forgeVault written with a leading ~ is expanded to the real home path", () => {
+	// `~/Documents/…` is how a person writes this by hand, and nothing expands it
+	// for us: the shell never sees the value, and `resolve` treats it as a literal.
+	const root = mkdtempSync(join(homedir(), ".pi-forge-vault-test-"));
+	try {
+		mkdirSync(join(root, "00 Inbox"));
+		withAgentDirectory({ forgeVault: `~/${basename(root)}` }, (agentDirectory) => {
+			configure(agentDirectory);
+			assert.ok(installedProfile(agentDirectory).includes(`- Vault root: ${root}`));
+		});
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a forgeVault pointing at a file is ignored rather than declared", () => {
+	withVault((vault) => {
+		const file = join(vault, "note.md");
+		writeFileSync(file, "not a vault\n");
+		withAgentDirectory({ forgeVault: file }, (agentDirectory) => {
+			configure(agentDirectory);
+			assert.doesNotMatch(installedProfile(agentDirectory), /Your Vault/);
+		});
+	});
+});
+
+test("identity and vault blocks coexist without either swallowing the other", () => {
+	withVault((vault) => {
+		withAgentDirectory({ forgeUser: { name: "Ellie", pronouns: "they/them" }, forgeVault: vault }, (agentDirectory) => {
+			configure(agentDirectory);
+			const profile = installedProfile(agentDirectory);
+			assert.match(profile, /## Who You Are Working With/);
+			assert.match(profile, /## Your Vault/);
+			assert.ok(profile.indexOf("## Who You Are Working With") < profile.indexOf("## Your Vault"));
+		});
+	});
 });
