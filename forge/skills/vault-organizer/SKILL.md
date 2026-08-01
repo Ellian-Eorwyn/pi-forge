@@ -174,6 +174,47 @@ new registrations are reported for the user to make. The note is backed up, and
 an edit that fails to re-parse or introduces new high-severity drift is rolled
 back.
 
+## Renumbering
+
+Making room for a new domain in the middle of a Johnny Decimal scheme is a chain
+of swaps, and `--fix-schema` refuses those on purpose: no single row edit
+expresses one, so drift correctly reports that the folders are the only side that
+can move, and then declines to move them. `renumber` is the mode that moves them.
+
+```bash
+python3 <skill-directory>/scripts/vault-organizer.py renumber --vault <vault> --insert 3
+python3 <skill-directory>/scripts/vault-organizer.py renumber --vault <vault> --insert 3 --apply
+```
+
+`--insert <n>` frees a number by shifting the contiguous block that starts at it
+up by one. **The cascade stops at the first free number**, so inserting at 3 in a
+vault numbered 1–7, 98, 99 moves 3–7 and leaves `98 Archive` and `99 Meta` alone
+without anyone naming them. `--set craft=9,writing=4` does arbitrary moves
+instead. Dry run is the default.
+
+It never adds the new row — registering a domain is the user's edit, as
+everywhere else. `renumber` makes the slot; they fill it.
+
+What the user should be told before applying:
+
+- **No note changes.** Frontmatter names a domain by value, never by number, and
+  Obsidian resolves a wikilink by basename, so nothing is refiled, reclassified,
+  or relinked. This is why a renumbering is cheap.
+- **Subfolders follow for free.** A subdomain folder renders as
+  `<domain number>.<subdomain number>`, so one `Domains` cell moves the whole
+  tree beneath it and no other row is touched.
+- **What does not follow is listed in the plan.** `references` names every file
+  mentioning a folder path that is about to move — Markdown links with explicit
+  paths, `.base` views filtering on `file.path`, and `.obsidian` bookmarks and
+  workspace state, which break silently. They are reported and never rewritten:
+  a path inside a code fence may be documentation that should change, and one in
+  `workspace.json` is a cache that heals itself. Deciding is the user's.
+
+Folders move first and the schema note is written last, once every rename has
+landed. A rename that cannot proceed rolls back every earlier one and leaves the
+note untouched, so a failure costs nothing rather than leaving a half-renumbered
+vault against an edited schema.
+
 ### Property vocabulary
 
 Folder routes are half the schema; the **Approved properties** table is the

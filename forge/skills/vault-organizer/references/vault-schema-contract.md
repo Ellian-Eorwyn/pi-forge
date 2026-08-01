@@ -325,6 +325,50 @@ a later pass read it as prose. Vaults whose schema note does not define
 `processed_by` as a list property simply never carry the key, and the report
 warns when an existing value has to be dropped for that reason.
 
+## Renumbering
+
+`--fix-schema` cannot express a cascade — `schema_side_fix` returns `None` when
+the wanted number belongs to a sibling row, and `cheapest_fix_side` then reports
+`folder` with "the registry cannot express this as a single row edit". `renumber`
+is that folder-side move, done deliberately rather than as a drift repair.
+
+`renumber_cascade` shifts the contiguous run of occupied numbers starting at the
+requested one and **stops at the first gap**, which is what leaves a distant
+`98 Archive` and `99 Meta` alone without a flag naming them. `renumber_mapping`
+validates the *result* rather than each step: a transient collision is fine
+because the rename order prevents it on disk, but two domains ending on one
+number is refused before anything is touched. Neither adds a row; registering a
+domain stays the owner's edit.
+
+Only the `Domains` numbers move. `subdomain_folder` renders
+`<domain.number>.<pad2(subdomain.number)>`, so every folder beneath a moved
+domain follows from that one substitution and the Subdomains and Project registry
+tables are not edited at all.
+
+Two orderings in `renumber_folder_moves` point opposite ways and both are
+load-bearing. *Between* domains, descending by destination: shifting a block up
+by one means each target is the next domain's current folder, so `07 → 08`
+precedes `06 → 07`. *Within* a domain, shallowest first, because renaming
+`03 Craft` carries its children along under their old names. The function tracks
+a live location per route rather than substituting over the original paths, since
+by the time a project is renamed both its domain and its subdomain have moved out
+from under it. `prune_renumber_moves` replays the same way when testing which
+sources exist, so a nested route is not mistaken for a missing one.
+
+Notes are not touched. Frontmatter names a domain by value and Obsidian resolves
+a wikilink by basename, so nothing is refiled, reclassified, or relinked. What
+does not follow a rename is reported by `find_path_references`: Markdown links
+with explicit paths, `.base` views filtering on `file.path`, and `.obsidian`
+bookmarks and workspace state. It searches the percent-encoded form too, and it
+is the one walk in this module that opts `.obsidian` back in. Those references
+are reported and never rewritten.
+
+Apply order is folders first, schema note last, because the renames are the
+reversible half and the note is the small atomic one. A failed rename rolls back
+every earlier one and the note is never written; the note itself lands through
+the same rails as `--fix-schema` — backup, surgical single-cell edits, and a temp
+file that must re-parse and re-check clean before `os.replace`.
+
 ## Property Ownership
 
 The `Shape` cell of an **Approved properties** row carries two optional markers,

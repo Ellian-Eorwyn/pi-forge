@@ -1312,6 +1312,227 @@ def check_schema_drift(vault, schema):
     return sorted(findings, key=lambda entry: (DRIFT_SEVERITY_ORDER[entry["severity"]], entry["path"]))
 
 
+def occupied_domain_numbers(schema):
+    return {domain["number"] for domain in schema["domains"].values()}
+
+
+def renumber_cascade(schema, number):
+    """The domains that must shift up by one to free ``number``, lowest first.
+
+    The run stops at the first free number, which is what makes "insert a domain
+    at 3" leave a distant `98 Archive` and `99 Meta` alone without anyone having
+    to say so: the cascade only pushes as far as the occupied block it starts in.
+
+    Returns an empty list when ``number`` is already free -- there is nothing to
+    move and the caller has only a row to add.
+    """
+    occupied = occupied_domain_numbers(schema)
+    if number not in occupied:
+        return []
+    run = []
+    candidate = number
+    while candidate in occupied:
+        run.append(candidate)
+        candidate += 1
+    if candidate > 99:
+        raise UserError(
+            f"cannot make room at {number}: numbers {run[0]}-{run[-1]} are contiguous "
+            "and shifting them would pass 99"
+        )
+    by_number = {domain["number"]: value for value, domain in schema["domains"].items()}
+    return [by_number[occupied_number] for occupied_number in run]
+
+
+def renumber_mapping(schema, insert=None, moves=None):
+    """``{domain value: new number}`` for a renumbering, or a refusal.
+
+    ``insert`` is ``number`` -- make room at it by cascading. ``moves`` is an
+    explicit ``{value: number}``. Exactly one is given.
+
+    Validation is deliberately about the *result*: a set of moves that transiently
+    collides is fine, because the folder renames are ordered so it never happens
+    on disk, but a set that leaves two domains sharing a number is refused before
+    anything is touched.
+    """
+    if (insert is None) == (moves is None):
+        raise UserError("renumber takes either a number to insert at or an explicit set of moves, not both")
+
+    if insert is not None:
+        mapping = {value: schema["domains"][value]["number"] + 1 for value in renumber_cascade(schema, insert)}
+    else:
+        mapping = {}
+        for value, number in moves.items():
+            if value not in schema["domains"]:
+                known = ", ".join(sorted(schema["domains"]))
+                raise UserError(f"unknown domain {value}; this schema declares: {known}")
+            if not 1 <= number <= 99:
+                raise UserError(f"{value}: number must be from 1 through 99")
+            if number != schema["domains"][value]["number"]:
+                mapping[value] = number
+
+    root = schema.get("sources_root")
+    final = {
+        value: mapping.get(value, domain["number"])
+        for value, domain in schema["domains"].items()
+    }
+    seen = {}
+    for value, number in sorted(final.items()):
+        if number in seen:
+            raise UserError(f"renumbering would give {seen[number]} and {value} the same number {number}")
+        if root and number == root["number"]:
+            raise UserError(f"renumbering would give {value} number {number}, reserved for the {SOURCES_ROOT_SECTION}")
+        seen[number] = value
+    return mapping
+
+
+def renumbered_schema(schema, mapping):
+    """A copy of the compiled schema with the domain numbers replaced.
+
+    Only the ``Domains`` numbers move. Subdomain and project numbers are relative
+    to their domain -- ``subdomain_folder`` renders ``4.02`` from a domain at 4
+    and a subdomain row that still says 2 -- so every folder beneath a moved
+    domain follows from this one substitution and no other row is touched.
+    """
+    revised = json.loads(json.dumps(schema))
+    for value, number in mapping.items():
+        revised["domains"][value]["number"] = number
+    return revised
+
+
+def renumber_folder_moves(schema, mapping):
+    """``[(old, new), ...]`` vault-relative, in an order where each target is free.
+
+    Two orderings are load-bearing and they point opposite ways.
+
+    *Between* domains, descending by destination number: shifting a contiguous
+    block up by one means every target is the next domain's current folder, so
+    ``07 -> 08`` has to happen before ``06 -> 07``.
+
+    *Within* a domain, shallowest first: renaming ``03 Craft`` to ``04 Craft``
+    carries its children along under their old names, and the subdomain rename
+    that follows is expressed relative to the parent's new path. A deeper rename
+    done first would be invalidated by the shallower one.
+    """
+    if not mapping:
+        return []
+    revised = renumbered_schema(schema, mapping)
+    old_origins = route_origins(schema)
+    new_origins = route_origins(revised)
+    by_key = {}
+    for path, origin in old_origins.items():
+        by_key[(origin["kind"], origin["table"], origin["value"])] = path
+    pairs = []
+    for path, origin in new_origins.items():
+        key = (origin["kind"], origin["table"], origin["value"])
+        old = by_key.get(key)
+        if old is not None and old != path:
+            pairs.append((old, path))
+    pairs.sort(key=lambda pair: (-_leading_number(pair[1]), pair[0].count("/"), pair[0]))
+
+    # Each rename is expressed against the tree as the previous ones left it.
+    # Renaming `03 Craft` to `04 Craft` carries `3.01 Games` along unrenamed, so
+    # the move that fixes it starts from `04 Craft/3.01 Games` -- a plan built
+    # only from the compiled paths would name a source that no longer exists.
+    # The bookkeeping is a live location per route rather than a substitution
+    # over the original paths, because by the time a project is renamed both its
+    # domain and its subdomain have already moved out from under it.
+    live = {old: old for old, _ in pairs}
+    moves = []
+    for old, new in pairs:
+        source = live[old]
+        if source != new:
+            moves.append((source, new))
+        for route, at in list(live.items()):
+            if at == source or at.startswith(source + "/"):
+                live[route] = new + at[len(source):]
+    return moves
+
+
+def _leading_number(path):
+    match = FOLDER_NUMBER_RE.match(path.split("/", 1)[0])
+    return int(match.group("number").split(".")[0]) if match else 0
+
+
+def prune_renumber_moves(moves, existing):
+    """Drop the moves whose source is not on disk, replaying the ones that are.
+
+    A declared route with no folder is an ordinary reserved slot, not an error,
+    so it is skipped rather than failing the run. The replay is what makes the
+    test meaningful: after `04 Technology` becomes `05 Technology`, its
+    subdomain's source path is `05 Technology/4.02 …`, which is nowhere in a
+    listing of the tree as it stands now. Checking against that listing directly
+    would call every nested route missing and quietly renumber only the top level.
+    """
+    live = set(existing)
+    kept, skipped = [], []
+    for old, new in moves:
+        if old not in live:
+            skipped.append(old)
+            continue
+        kept.append((old, new))
+        moved = {path for path in live if path == old or path.startswith(old + "/")}
+        live -= moved
+        live |= {new + path[len(old):] for path in moved}
+    return kept, skipped
+
+
+# Files that can hold a literal folder path and silently stop working when it
+# moves. Notes are included because a Markdown link with an explicit path is not
+# a wikilink and does not follow a rename; `.base` files because a view can
+# filter on `file.path`; and `.obsidian` config because bookmarks and the saved
+# workspace store paths and fail without saying anything at all.
+PATH_REFERENCE_SUFFIXES = (".md", ".base", ".canvas", ".json")
+
+
+def find_path_references(vault, paths, limit_per_path=25):
+    """Where each folder path appears literally, so a rename's blast radius is visible.
+
+    Reported, never rewritten. A path inside a code fence may be documentation
+    that should change, and one in `.obsidian/workspace.json` is a cache that
+    will heal itself; deciding between them is the owner's, and a tool that
+    guessed would be editing prose to fix a filesystem move.
+
+    Both the raw path and its percent-encoded form are searched, because a
+    Markdown link to a folder with a space in its name is written `03%20Craft`.
+    """
+    vault = Path(vault).resolve()
+    wanted = {}
+    for path in paths:
+        wanted[path] = [path, path.replace(" ", "%20")]
+    found = {path: [] for path in paths}
+
+    def scan(file_path):
+        try:
+            text = file_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return
+        for path, needles in wanted.items():
+            if len(found[path]) >= limit_per_path:
+                continue
+            for needle in needles:
+                if needle in text:
+                    found[path].append(relative_path(vault, file_path))
+                    break
+
+    for directory, dirnames, filenames in os.walk(vault, followlinks=False):
+        dirpath = Path(directory)
+        kept = []
+        for name in sorted(dirnames):
+            child = dirpath / name
+            if child.is_symlink() or name in PROTECTED_DIRS - {".obsidian"}:
+                continue
+            if name.startswith(".") and name != ".obsidian":
+                continue
+            if is_workspace_dir(child):
+                continue
+            kept.append(name)
+        dirnames[:] = kept
+        for name in sorted(filenames):
+            if name.endswith(PATH_REFERENCE_SUFFIXES):
+                scan(dirpath / name)
+    return {path: hits for path, hits in found.items() if hits}
+
+
 def drift_counts(findings):
     counts = {severity: 0 for severity in DRIFT_SEVERITY_ORDER}
     for finding in findings:

@@ -58,6 +58,9 @@ from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
     derived_properties,
     domain_folder,
     drift_counts,
+    existing_folders,
+    find_path_references,
+    prune_renumber_moves,
     drift_finding_id,
     first_nonempty_line,
     has_control_character,
@@ -86,6 +89,8 @@ from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
     property_shape,
     property_value_mode,
     relative_path,
+    renumber_folder_moves,
+    renumber_mapping,
     replace_schema_row_number,
     require_number,
     require_safe_label,
@@ -2743,6 +2748,206 @@ def drift(args):
     )
 
 
+def parse_renumber_moves(raw):
+    """``craft=4,writing=5`` -> ``{"craft": 4, "writing": 5}``."""
+    moves = {}
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            raise UserError(f"--set takes domain=number pairs: {part}")
+        value, number = part.split("=", 1)
+        value = value.strip()
+        try:
+            moves[value] = int(number.strip())
+        except ValueError:
+            raise UserError(f"--set number must be an integer: {part}") from None
+    if not moves:
+        raise UserError("--set needs at least one domain=number pair")
+    return moves
+
+
+def rename_folders(vault, moves):
+    """Apply the rename plan, undoing everything already done if any step fails.
+
+    Renames are the reversible half of this operation and the schema note is the
+    small atomic half, so the folders move first and the note is written only
+    once every one of them has landed. A failure partway leaves the vault exactly
+    as it was rather than half-renumbered against a schema that still says the
+    old thing.
+    """
+    done = []
+    try:
+        for old, new in moves:
+            source = vault / old
+            target = vault / new
+            if not source.is_dir():
+                raise UserError(f"cannot rename {old}: it is not a directory")
+            if target.exists():
+                raise UserError(f"cannot rename {old} to {new}: the destination already exists")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(source, target)
+            done.append((old, new))
+    except BaseException:
+        for old, new in reversed(done):
+            try:
+                os.rename(vault / new, vault / old)
+            except OSError:
+                raise UserError(
+                    f"renumbering failed and the rollback could not restore {new} to {old}; "
+                    f"the vault is partly renumbered and the schema note was not written. "
+                    f"Renames applied: {done}"
+                ) from None
+        raise
+    return done
+
+
+def write_renumbered_schema(vault, schema_path, schema, mapping, run_dir):
+    """Rewrite only the Number cell of each moved Domains row.
+
+    The same rails as ``--fix-schema``: backup first, surgical single-cell edits
+    that preserve each row's prose and spacing, and a temp file that has to
+    re-parse and re-check clean before it replaces anything.
+    """
+    original = schema_path.read_text(encoding="utf-8")
+    backup = run_dir / "backup" / relative_path(vault, schema_path)
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(schema_path, backup)
+
+    revised = original
+    changes = []
+    for value in sorted(mapping, key=lambda key: schema["domains"][key]["number"]):
+        revised, before_line, after_line = replace_schema_row_number(
+            revised,
+            {
+                "table": "Domains",
+                "match_column": "Value",
+                "value": value,
+                "field": "Number",
+                "from": schema["domains"][value]["number"],
+                "to": mapping[value],
+            },
+        )
+        changes.append({"domain": value, "before": before_line, "after": after_line})
+
+    handle, temp_name = tempfile.mkstemp(prefix=f".{schema_path.name}.", suffix=".tmp", dir=str(schema_path.parent))
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(revised)
+            stream.flush()
+            os.fsync(stream.fileno())
+        candidate = Path(temp_name).read_text(encoding="utf-8-sig")
+        try:
+            new_schema = parse_schema_note(candidate)
+            validate_derived_paths(new_schema)
+        except UserError as error:
+            raise UserError(
+                f"renumber rejected: the edited schema does not parse ({error}); nothing was written"
+            ) from error
+        introduced = [
+            finding for finding in check_schema_drift(vault, new_schema) if finding["severity"] == "high"
+        ]
+        if introduced:
+            listed = "; ".join(f"{finding['id']} {finding['path']}" for finding in introduced)
+            raise UserError(
+                f"renumber rejected: the folders and the edited schema still disagree ({listed}); "
+                "nothing was written"
+            )
+        os.replace(temp_name, schema_path)
+    except BaseException:
+        Path(temp_name).unlink(missing_ok=True)
+        raise
+    return changes, new_schema
+
+
+def renumber(args):
+    """Shift domain numbers, and every folder whose name is derived from them.
+
+    A cascade is a chain of swaps, and ``--fix-schema`` refuses those by design:
+    ``schema_side_fix`` returns None when the wanted number belongs to a sibling
+    row, so drift correctly says the folders are the only side that can move and
+    then declines to move them. This is the mode that moves them.
+
+    Nothing about a note changes. Frontmatter names a domain by value, never by
+    number, and Obsidian resolves a wikilink by basename, so no note is refiled,
+    reclassified, or relinked -- which is what makes a renumbering cheap enough
+    to be worth doing.
+    """
+    vault = Path(args.vault).expanduser().resolve()
+    if not vault.is_dir():
+        raise UserError(f"vault root does not exist: {vault}")
+    schema_path = resolve_schema_path(vault, args.schema)
+    schema, _ = compiled_schema_for(vault, schema_path)
+
+    if args.insert is not None:
+        mapping = renumber_mapping(schema, insert=args.insert)
+    else:
+        mapping = renumber_mapping(schema, moves=parse_renumber_moves(args.set_numbers))
+
+    warnings = []
+    if not mapping:
+        return structured(
+            "ok",
+            warnings=[f"number {args.insert} is already free; nothing has to move"] if args.insert else [],
+            data={"vault": str(vault), "dryRun": True, "mapping": {}, "moves": [], "references": {}},
+        )
+
+    moves = renumber_folder_moves(schema, mapping)
+    plan, absent = prune_renumber_moves(moves, existing_folders(vault))
+    if absent:
+        warnings.append(
+            f"{len(absent)} declared routes have no folder on disk and were skipped: {', '.join(absent)}"
+        )
+
+    references = find_path_references(vault, sorted({old for old, _ in moves}))
+    if references:
+        warnings.append(
+            f"{sum(len(hits) for hits in references.values())} files mention a folder path that is about to move; "
+            "wikilinks follow a rename but explicit paths, base filters, and Obsidian bookmarks do not"
+        )
+
+    run_dir = unique_run_directory(vault)
+    report = {
+        "mapping": mapping,
+        "moves": [{"from": old, "to": new} for old, new in plan],
+        "skipped": absent,
+        "references": references,
+    }
+    (run_dir / "renumber_plan.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    applied = []
+    schema_changes = []
+    if args.apply:
+        applied = rename_folders(vault, plan)
+        run_state.append_jsonl_fsync(run_dir / "apply-log.jsonl", {"kind": "renumber", "moves": applied})
+        try:
+            schema_changes, _new_schema = write_renumbered_schema(vault, schema_path, schema, mapping, run_dir)
+        except BaseException:
+            for old, new in reversed(applied):
+                os.rename(vault / new, vault / old)
+            raise
+        refresh_vault_index(vault, schema_path)
+
+    return structured(
+        "ok",
+        artifacts=[str(run_dir / "renumber_plan.json")],
+        warnings=warnings,
+        data={
+            "vault": str(vault),
+            "schema": str(schema_path),
+            "runDirectory": str(run_dir),
+            "dryRun": not args.apply,
+            "mapping": mapping,
+            "moves": report["moves"],
+            "skipped": absent,
+            "references": references,
+            "schemaChanges": schema_changes,
+            "applied": len(applied),
+        },
+    )
+
+
 def status(args):
     run_dir = Path(args.run).expanduser().resolve()
     state = run_state.load_run_state(run_dir, workflow=WORKFLOW)
@@ -2943,7 +3148,9 @@ class TrackingAction(argparse.Action):
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(description="Classify, dedupe, and organize Obsidian vault notes.")
-    parser.add_argument("mode", choices=["inbox", "vault", "attachments", "drift", "status", "doctor"])
+    parser.add_argument(
+        "mode", choices=["inbox", "vault", "attachments", "drift", "renumber", "status", "doctor"]
+    )
     parser.add_argument("--vault")
     parser.add_argument("--schema", action=TrackingAction)
     parser.add_argument("--apply", action="store_true")
@@ -2964,6 +3171,20 @@ def parse_args(argv):
         ),
     )
     parser.add_argument("--fix-schema", help="drift mode: comma-separated finding ids to correct in the schema note")
+    parser.add_argument(
+        "--insert",
+        type=int,
+        help=(
+            "renumber mode: free this domain number by shifting the contiguous block that starts at it "
+            "up by one. The cascade stops at the first free number, so distant domains never move. "
+            "The new row itself is yours to add."
+        ),
+    )
+    parser.add_argument(
+        "--set",
+        dest="set_numbers",
+        help="renumber mode: explicit comma-separated domain=number moves, e.g. craft=4,writing=5",
+    )
     parser.add_argument("--run", help="existing run directory to resume")
     parser.add_argument("--limit", type=int, action=TrackingAction)
     parser.add_argument("--base-url", action=TrackingAction)
@@ -3009,7 +3230,14 @@ def parse_args(argv):
     args.schema = args.schema or os.environ.get("VAULT_ORGANIZER_SCHEMA") or None
     if args.fix_schema and args.mode != "drift":
         raise UserError("--fix-schema belongs to drift mode")
-    if args.mode in {"attachments", "drift"}:
+    if (args.insert is not None or args.set_numbers) and args.mode != "renumber":
+        raise UserError("--insert and --set belong to renumber mode")
+    if args.mode == "renumber":
+        if (args.insert is None) == (not args.set_numbers):
+            raise UserError("renumber takes exactly one of --insert <number> or --set <domain=number,...>")
+        if args.insert is not None and not 1 <= args.insert <= 99:
+            raise UserError("--insert must be a domain number from 1 through 99")
+    if args.mode in {"attachments", "drift", "renumber"}:
         # Deterministic filesystem work: no classification, so no model or
         # embeddings service is resolved and these run with every endpoint down.
         return args
@@ -3046,6 +3274,8 @@ def run(argv):
         result = attachments(args)
     elif args.mode == "drift":
         result = drift(args)
+    elif args.mode == "renumber":
+        result = renumber(args)
     else:
         result = organize(args)
     print_json(result)

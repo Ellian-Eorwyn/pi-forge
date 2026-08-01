@@ -23,6 +23,33 @@ Two different collisions, with two different failures:
 The first is the reason to read the table before pasting. The second is the
 reason to run `drift` afterwards.
 
+### Wanting a number that is already taken
+
+If you want `nature` at a number some other domain holds — say `03`, with
+everything from `03` upward shifting one place — that is a cascade, and
+`renumber` does it:
+
+```bash
+# Dry run. Shows the folder renames and every file that mentions one of them.
+python3 forge/skills/vault-organizer/scripts/vault-organizer.py renumber \
+    --vault ~/Documents/Obsidian/Loom --insert 3
+
+python3 forge/skills/vault-organizer/scripts/vault-organizer.py renumber \
+    --vault ~/Documents/Obsidian/Loom --insert 3 --apply
+```
+
+**The cascade stops at the first free number.** In a vault numbered 1–7 with
+`98 Archive` and `99 Meta` above, inserting at 3 shifts 3–7 up by one and stops
+at the gap — Archive and Meta never move, and you do not have to say so.
+
+No note changes: frontmatter names a domain by value, never a number, and
+wikilinks resolve by basename. Subfolders follow automatically, because a
+subdomain folder renders as `<domain number>.<subdomain number>` and only the
+domain number moves.
+
+`renumber` frees the slot; adding the `nature` row is still your edit. Run it
+first, then paste the row below into the gap it made.
+
 ---
 
 ## 1. `created`
