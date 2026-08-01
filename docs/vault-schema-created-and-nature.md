@@ -5,10 +5,23 @@ edits to `99 Meta/99.02 Schemas/0.00 Vault Schema.md`, which is the owner's file
 no skill in this repo writes it, and every code path here fails closed until the
 rows exist.
 
-**Numbers below are placeholders.** `nature` is written as `6` and the three wiki
-subdomains as `8`, `9`, `10`; substitute whatever is free in your vault. Numbers
-are 1–99, `0` is reserved for `00 Inbox`, and a collision is what
-`vault-organizer drift` reports as `number_collision` at severity `high`.
+**Every number below is written as `<N>` because none of them can be chosen from
+outside your vault.** Read the **Domains** table in the schema note and pick free
+values. Numbers are 1–99, `0` is reserved for `00 Inbox`, and the sources root
+reserves its own.
+
+Two different collisions, with two different failures:
+
+- **A number already held by another row in the same table** is a parse error --
+  `Domains: duplicate or reserved number 6`. The schema note stops parsing and
+  every vault skill fails closed on the next run. Nothing is moved, merged, or
+  renamed; the existing domain keeps its number, its folder, and its notes.
+- **A number no row holds but a folder on disk carries** compiles fine and is
+  caught later, by `vault-organizer drift`, as `number_collision` at severity
+  `high` -- which blocks `--apply` until it is resolved.
+
+The first is the reason to read the table before pasting. The second is the
+reason to run `drift` afterwards.
 
 ---
 
@@ -97,7 +110,7 @@ All three species kinds file as `organism`, the way `concept`, `practice` and
 One row in **Domains**:
 
 ```markdown
-| `nature` | `6` | `Nature` | Field records: what was seen, where, and when. |
+| `nature` | `<N>` | `Nature` | Field records: what was seen, where, and when. |
 ```
 
 ### Subdomains
@@ -105,9 +118,9 @@ One row in **Domains**:
 Three rows under `### wiki`:
 
 ```markdown
-| `animals` | `8` | `Animals` | Animal reference cards. |
-| `plants` | `9` | `Plants` | Plant reference cards. |
-| `fungi` | `10` | `Fungi` | Fungus reference cards. |
+| `animals` | `<N>` | `Animals` | Animal reference cards. |
+| `plants` | `<N+1>` | `Plants` | Plant reference cards. |
+| `fungi` | `<N+2>` | `Fungi` | Fungus reference cards. |
 ```
 
 And a new `### nature` subsection:
@@ -117,9 +130,9 @@ And a new `### nature` subsection:
 
 | Value | Number | Label | Definition |
 | --- | --- | --- | --- |
-| `observations` | `1` | `Observations` | One sighting each: species, date, place. |
-| `field-notes` | `2` | `Field Notes` | Longer accounts of an outing. |
-| `weather` | `3` | `Weather` | Station rollups and summaries. |
+| `observations` | `<N>` | `Observations` | One sighting each: species, date, place. |
+| `field-notes` | `<N+1>` | `Field Notes` | Longer accounts of an outing. |
+| `weather` | `<N+2>` | `Weather` | Station rollups and summaries. |
 ```
 
 `weather` is declared now so the slot is reserved; it stays empty until the
