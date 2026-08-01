@@ -10,7 +10,7 @@
 	"tools": [
 		{
 			"name": "vault_organizer",
-			"description": "Classify Obsidian notes against the vault schema, de-duplicate exact and near-duplicate notes into a recoverable quarantine, produce a dry-run plan, and apply approved frontmatter/move changes; runs are resumable with --run and inspectable with status/doctor; renumber shifts domain numbers and every folder whose name derives from them, without touching a note.",
+			"description": "Classify Obsidian notes against the vault schema, de-duplicate exact and near-duplicate notes into a recoverable quarantine, backfill human-owned dates from older copies of notes, produce a dry-run plan, and apply approved frontmatter/move changes; runs are resumable with --run and inspectable with status/doctor; renumber shifts domain numbers and every folder whose name derives from them, without touching a note.",
 			"command": "python3 scripts/vault-organizer.py",
 			"destructive": true
 		}

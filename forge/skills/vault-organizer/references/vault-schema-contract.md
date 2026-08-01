@@ -173,6 +173,110 @@ always block lists. Wikilinks are quoted. Empty optional values are omitted.
 Malformed opening frontmatter delimiters without a closing `---` are not guessed
 or repaired. The note is left unchanged and added to the review queue.
 
+## Date Backfill
+
+`dates` fills a scalar human-owned property from evidence the notes and older
+copies of them already carry. The extraction, matching, and write live in
+`forge/lib/vault_dates.py`, which is pure standard library: no model, and no
+embeddings unless `--near-match` is passed. A date written into a note is not a
+proposal a later run revisits, so it has to be reproducible from the files
+alone.
+
+The property is read from the schema at runtime and refused if the schema does
+not approve it, so the mode is correct whichever properties a given vault
+declares. It is refused outright for a list-shaped property, and warns when the
+property is not marked human-owned — filing replaces frontmatter wholesale, so
+a value written to a classifier-owned property is gone on the next run.
+
+### The two axes
+
+Confidence is the weaker of them, and only `high` is written without a human
+naming the proposal's id.
+
+| Evidence | Meaning |
+| --- | --- |
+| `explicit` | A machine wrote it somewhere structural: a `created`/`date-created`/`createdAt`/`ctime` frontmatter key, a filename date, an Obsidian unique-note id, or a `YYYY/MM/DD.md` daily-note path |
+| `stated` | A person typed it under a label in the first 20 lines, or linked a daily note there |
+| `weak` | A bare date somewhere in the body, or a filesystem timestamp under `--include-file-times` |
+
+| Match | Rule |
+| --- | --- |
+| `self` | The vault note's own evidence — there is no matching step to get wrong |
+| `identical` | Equal body hash, the dedupe identity from De-duplication above |
+| `named` | Equal normalized basename stem, unique on both sides |
+| `titled` | Equal H1, unique on both sides |
+| `similar` | `--near-match` only: cosine at or above `--near-dupe-auto` with line containment at or above 0.90 |
+
+`high` is `explicit` evidence on a `self`, `identical`, `named`, or `titled`
+match. `weak` evidence is `low` and never auto-applies whatever the match.
+Everything between is `medium`.
+
+Two demotions from `high` to `medium`. A `type: source` or `type: wiki` note,
+because its subject date is the work's rather than the day the note was made.
+And a file whose own filename and frontmatter give different explicit dates,
+which means one of them is not describing that file.
+
+### Calibrating Finder creation dates
+
+`st_birthtime` is what Finder shows as Date Created. Whether an archive's copies
+still carry a real one depends entirely on how the archive was made — a Finder
+move preserves it, a copy resets it — and that is not guessable from the file,
+so `calibrate_birthtime` measures it rather than assuming either way.
+
+Files carrying both a creation date and an `explicit` date from their name or
+frontmatter are labelled examples. The share of those where the two agree
+estimates the accuracy of the creation date on the files that state nothing.
+Reported alongside it is the largest single-day cluster: when a big share of the
+archive was created on one day, that day is the copy, and the agreement rate is
+being measured on the survivors of a different history.
+
+The measurement is always computed and always reported. `--trust-birthtime`
+acts on it by promoting a creation date from `weak` to `explicit`, which is what
+makes it auto-appliable. A modification time is never promotable — nothing makes
+it a creation date — so `--include-file-times` only ever adds `weak` evidence.
+
+### Choosing between candidates
+
+Evidence tier decides first; inside it the earliest date wins. Several archive
+copies of one note is the normal case, not a conflict — the oldest copy is the
+one that dates the note's creation, and a revision saved later under a newer
+name must not overwrite it. Every candidate considered is listed in the report
+with the exact substring it came from.
+
+Ambiguity is dropped rather than resolved. `11-04-2023` is read only when one of
+the two positions cannot be a month; where both readings are dates, no candidate
+is produced. Name and title matching requires uniqueness on *both* sides, so an
+archive holding two files called `Notes.md` contributes neither.
+
+### Writing
+
+Ids are derived from the note path and the chosen date, so an id copied out of a
+report cannot come to address something else before it is applied. `--ids`
+accepts only ids the current run proposes; an unknown one is refused with the
+ids on offer.
+
+The write is an additive frontmatter merge: the key is placed by the schema's
+property order and exactly one line is added. Body, delimiters, BOM, line
+endings, and every other property are preserved byte-for-byte, which is why it
+goes through a bytes-level atomic write rather than a text one — text mode
+would rewrite line endings on Windows. A note with malformed or absent
+frontmatter is refused with a reason and never repaired, and an existing value
+is never overwritten.
+
+Dry run is the default. `date_report.md` and `date_report.json` are written
+before any edit. Each note is re-read at apply, verified against the SHA-256 the
+report was built on, and copied to `backup/` under the run directory before it
+is touched. Archive roots are opened read-only; an archive kept inside the vault
+is a source and is excluded from the notes being filled.
+
+### Ordering against the schema
+
+`parse_schema_note` refuses a human-owned property that is not `Required: no`,
+because nothing could satisfy it: the classifier is never shown the property, so
+it cannot supply one for a note that lacks it. The backfill therefore runs
+*before* the property is made required, and warns when the requirement has
+already landed.
+
 ## Run State and Resume
 
 Every invocation is a durable run under `.vault-organizer/runs/<timestamp>/`

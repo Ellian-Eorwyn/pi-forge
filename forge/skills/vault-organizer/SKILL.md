@@ -1,6 +1,6 @@
 ---
 name: vault-organizer
-description: Organize an Obsidian vault or its inbox from a human-maintained schema note - classify notes, file them into schema folders (with a per-kind sources tree when declared), normalize frontmatter, and find duplicates. Use to process the inbox, file loose notes, de-duplicate, or check the vault against its schema. Dry-runs by default; applying needs approval. Run vault-transcripts first on voice notes; use vault-connections for meaning-based search.
+description: Organize an Obsidian vault or its inbox from a human-maintained schema note - classify notes, file them into schema folders (per-kind sources tree when declared), normalize frontmatter, and find duplicates. Use to process the inbox, file loose notes, de-duplicate, backfill dates, or check it against its schema. Dry-runs by default; applying needs approval. Run vault-transcripts first on voice notes; use vault-connections for meaning-based search.
 ---
 
 # Vault Organizer
@@ -135,6 +135,85 @@ irreversible in the note, so the run directory's `attachment_report.json` and
 `attachment_report.md` record every embed *before* any edit, and every rewritten
 note is copied to `backup/` under the run directory. Report ambiguous and
 missing links to the user rather than presenting the run as a clean repair.
+
+## Backfilling dates
+
+A human-owned property cannot be filled by the classifier — that is what makes
+it human-owned — so a vault adopting one starts with it empty everywhere. The
+`dates` mode fills it from evidence the notes and their older copies already
+carry. It is deterministic: no model, and no embeddings unless `--near-match`
+asks for them.
+
+```bash
+python3 <skill-directory>/scripts/vault-organizer.py dates --vault <vault> --archive <folder>
+python3 <skill-directory>/scripts/vault-organizer.py dates --vault <vault> --archive <folder> --apply
+```
+
+`--archive` is repeatable, may point inside or outside the vault, and is only
+ever read. An archive path inside the vault is treated as a source and excluded
+from the notes being filled. `--self-only` runs with no archive at all, using
+just each note's own name, path, and text.
+
+Confidence is the weaker of two independent things: how sure we are that an
+archive file is an older copy of the note (`identical` body, unique `named`,
+unique `titled`, or `similar` under `--near-match`), and how explicitly that
+file states a date (`explicit` in a filename, path, or frontmatter key;
+`stated` under a label in the opening lines; `weak` otherwise). Only
+`high` — an exact match on an explicitly dated file — is written by `--apply`.
+
+Everything else is listed in `date_report.md` with an id, and written only when
+the user names it:
+
+```bash
+python3 <skill-directory>/scripts/vault-organizer.py dates --vault <vault> --archive <folder> --apply --ids <id>,<id>
+```
+
+**Relay the report's counts and hold the reviewable ones for the user. Never
+pass an id they have not seen and named.** Two things are worth telling them
+explicitly: how many notes still have no evidence anywhere and need a date
+typed by hand, and that `type: source` and `type: wiki` notes are held back even
+on perfect evidence, because a source's subject date is the work's and not the
+day the note was made.
+
+### Finder creation dates
+
+macOS records a creation time (`st_birthtime`) that Finder shows as Date
+Created, and on an archive it is often the best evidence there is. It is also
+often worthless: a Finder *move* preserves it, but a *copy* resets it to the day
+of the copy, and most archive tools reset it too. Which happened is not
+guessable from the file, so the report measures it instead of assuming.
+
+Every run prints a `## Finder creation dates` section. Files carrying both a
+creation date *and* a date stated in their name or frontmatter are labelled
+examples: how often those two agree estimates how often the creation date is
+right on the files that state nothing. The largest single-day cluster is the
+counter-signal — a big one is the day the archive was copied, and every file in
+it lost its original date.
+
+Creation dates start as `weak` evidence, which is never written unattended. When
+the calibration justifies it, promote them:
+
+```bash
+python3 <skill-directory>/scripts/vault-organizer.py dates --vault <vault> --archive <folder> --trust-birthtime
+```
+
+That makes a creation date count as explicit evidence, so an exact match on one
+becomes auto-appliable. **Read the calibration to the user and let them make
+that call.** `--include-file-times` adds both creation and modification times as
+`weak` evidence for the report without promoting anything; a modification time
+is never eligible for promotion, since nothing makes it a creation date.
+
+Guarantees: dry run is the default, the report is written before any edit, an
+existing value is never overwritten, each note is backed up under the run
+directory and re-verified against its planning hash before it is touched, and
+the write adds exactly one line — body, delimiters, BOM, line endings, and every
+other property survive byte-for-byte. A note with malformed or absent
+frontmatter is refused with a reason rather than repaired.
+
+Run this **before** making the property `Required: yes` in the schema. The
+schema note refuses a required human-owned property for a reason — nothing could
+satisfy it — so the fill has to come first, and the run warns if the requirement
+already landed.
 
 ## Schema drift
 

@@ -818,6 +818,29 @@ class NoteBuildingTests(unittest.TestCase):
         for recording_type in vt.RECORDING_TYPES:
             self.assertEqual(set(vt.frontmatter_metadata(self.schema, recording_type)) - set(self.schema["properties"]), set())
 
+    def test_a_transcript_is_dated_by_its_recording_not_by_today(self):
+        import datetime
+        import vault_schema
+
+        with_date = vault_schema.parse_schema_note(
+            SCHEMA.replace(
+                "| `capture_type` | no | controlled scalar | Capture type. |",
+                "| `capture_type` | no | controlled scalar | Capture type. |\n"
+                "| `date` | no | scalar, human-owned | What the note is about. |",
+            )
+        )
+        # A recording processed a week late is still about the day it was made.
+        self.assertEqual(vt.frontmatter_metadata(with_date, "journal", "2026-07-30")["date"], "2026-07-30")
+        self.assertEqual(vt.raw_metadata(with_date, "journal", "Some Note", "2026-07-30")["date"], "2026-07-30")
+        # Only an undated recording falls back to today.
+        today = datetime.date.today().isoformat()
+        self.assertEqual(vt.frontmatter_metadata(with_date, "journal")["date"], today)
+
+    def test_a_schema_without_date_gets_no_date(self):
+        for recording_type in vt.RECORDING_TYPES:
+            self.assertNotIn("date", vt.frontmatter_metadata(self.schema, recording_type))
+            self.assertNotIn("date", vt.raw_metadata(self.schema, recording_type, "Some Note"))
+
     def test_capture_type_records_the_channel_and_processed_by_records_the_pipeline(self):
         # A cleaned recording is model-transformed but still arrived as voice.
         # Losing either fact would make a transcript unfindable as a recording

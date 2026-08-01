@@ -19,6 +19,7 @@ import forge_llm
 import forge_verify
 import obsidian_cli
 import run_state
+import vault_dates
 import vault_profile
 from vault_moves import PlainMover, backup_once, resolve_mover
 import vault_voice
@@ -2469,6 +2470,419 @@ def attachments(args):
     )
 
 
+# --------------------------------------------------------------------------- #
+# Date backfill
+# --------------------------------------------------------------------------- #
+
+
+# For these the note's creation date and its subject date are routinely
+# different things — a wiki entry on a 1920 event was written last year — so a
+# derived date is never written to one without a human naming its id.
+SUBJECT_DATE_REVIEW_TYPES = frozenset({"wiki", "source"})
+
+
+def atomic_write_bytes(path, data):
+    """Replace a note's bytes exactly. Text mode would rewrite line endings."""
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
+def archive_fingerprints(roots, args, warnings):
+    """Read every Markdown file under the archive roots, once.
+
+    Nothing is assumed of an archive: no schema, no folder meaning, no
+    frontmatter. Files are opened read-only, and this mode never writes to one.
+    """
+    entries = []
+    seen = set()
+    for base in roots:
+        if not base.is_dir():
+            raise UserError(f"archive root does not exist: {base}")
+        label = base.name or "archive"
+        for directory, dirnames, filenames in os.walk(base, followlinks=False):
+            dirpath = Path(directory)
+            dirnames[:] = [
+                name
+                for name in sorted(dirnames)
+                if not (dirpath / name).is_symlink() and name not in PROTECTED_DIRS and not name.startswith(".")
+            ]
+            for filename in sorted(filenames):
+                path = dirpath / filename
+                if path.is_symlink() or path.suffix.lower() != ".md":
+                    continue
+                resolved = path.resolve()
+                if str(resolved) in seen:
+                    continue
+                seen.add(str(resolved))
+                relative = f"{label}/{resolved.relative_to(base).as_posix()}"
+                try:
+                    entries.append(
+                        vault_dates.note_fingerprint(
+                            resolved,
+                            relative,
+                            resolved.read_bytes(),
+                            include_file_times=args.include_file_times,
+                            trust_birthtime=args.trust_birthtime,
+                        )
+                    )
+                except (OSError, UnicodeDecodeError) as error:
+                    warnings.append(f"archive file skipped: {relative} ({error})")
+    return entries
+
+
+def near_match_archive(args, pending, archive, warnings):
+    """Pair by meaning what name and hash could not place.
+
+    Reuses the thresholds the dedupe path already trusts — cosine at or above
+    ``--near-dupe-auto`` with line containment at or above 0.90. Anything below
+    is not proposed at all, and an unreachable endpoint costs the run nothing
+    but the deterministic tiers it already has.
+    """
+    pool = [entry for entry in archive if len(entry["normalized"]) >= MIN_NEAR_DUPE_CHARS]
+    pending = [note for note in pending if len(note["normalized"]) >= MIN_NEAR_DUPE_CHARS]
+    if not pending or not pool:
+        return {}
+    texts = [embedding_text(entry["title"], entry["normalized"]) for entry in pool + pending]
+    response = forge_embeddings.embed_texts(texts, url=args.embeddings_url, model=args.embeddings_model)
+    if not response["ok"]:
+        warnings.append(f"embeddings unavailable, near matching skipped: {response['reason']}")
+        return {}
+    vectors = [forge_embeddings.normalize(vector) for vector in response["vectors"]]
+    archive_vectors = vectors[: len(pool)]
+    note_vectors = vectors[len(pool) :]
+    found = {}
+    for index, note in enumerate(pending):
+        best = None
+        for position, entry in enumerate(pool):
+            score = forge_embeddings.cosine(note_vectors[index], archive_vectors[position])
+            if score < args.near_dupe_auto or (best is not None and score <= best[1]):
+                continue
+            shorter, longer = sorted((note["normalized"], entry["normalized"]), key=len)
+            if line_containment(shorter, longer) < CONTAINMENT_MIN:
+                continue
+            best = (entry, score)
+        if best is not None:
+            found[note["relative"]] = best[0]
+    return found
+
+
+def render_calibration(calibration, trusted):
+    """The birthtime accuracy measurement, in the terms the decision needs."""
+    if not calibration["with_birthtime"]:
+        return ["## Finder creation dates", "", "No file carries one; this filesystem does not record them.", ""]
+    lines = [
+        "## Finder creation dates",
+        "",
+        f"- Archive files carrying one: {calibration['with_birthtime']} of {calibration['files']}",
+        f"- Of those, also stating a date in their name or frontmatter: {calibration['labelled']}",
+    ]
+    if calibration["labelled"]:
+        lines += [
+            f"- Creation date matches that stated date exactly: {calibration['same_day']}"
+            f" ({calibration['agreement']:.0%})",
+            f"- Within a day of it: {calibration['within_a_day']} ({calibration['loose_agreement']:.0%})",
+        ]
+    if calibration["largest_cluster"]:
+        day, count = calibration["largest_cluster"]
+        lines.append(f"- Largest single-day cluster: {count} files created {day} ({calibration['clustered']:.0%})")
+    lines += [
+        "",
+        "The files that state a date *and* carry a creation date are the labelled",
+        "examples: how often those two agree is roughly how often the creation date",
+        "is right on the files that state nothing. A large single-day cluster is the",
+        "opposite signal — that day is when the archive was copied, and every file in",
+        "it lost its original date.",
+        "",
+    ]
+    if trusted:
+        lines += ["Creation dates were **trusted** for this run: they count as explicit evidence.", ""]
+    else:
+        lines += [
+            "Creation dates are currently **weak** evidence and are never written",
+            "unattended. If the agreement above is high and the clustering low, re-run",
+            "with `--trust-birthtime` to promote them.",
+            "",
+        ]
+    return lines
+
+
+def render_date_report(rows, skipped, counts, property_key, dry_run, calibration=None, trusted=False):
+    lines = [
+        f"# Date backfill report ({property_key})",
+        "",
+        f"- Notes scanned: {counts['notes']}",
+        f"- Already carrying {property_key}: {counts['already_dated']}",
+        f"- Needing one: {counts['needing']}",
+        f"- Archive files read: {counts['archive_files']}",
+        f"- Dated with confidence (applied by `--apply`): {counts['high']}",
+        f"- Held for review (applied by `--apply --ids`): {counts['medium'] + counts['low']}",
+        f"- No evidence anywhere: {counts['no_evidence']}",
+        "",
+        "Confidence is the weaker of two things: how sure we are that an archive",
+        "file is an older copy of the note, and how explicitly that file states a",
+        "date. Only `high` is written without you naming its id.",
+        "",
+    ]
+    if dry_run:
+        lines += ["This was a dry run. Nothing has been written.", ""]
+    if calibration is not None:
+        lines += render_calibration(calibration, trusted)
+
+    groups = (
+        ("Ready to apply", "high", "Exact match on an explicitly dated file."),
+        ("Held for review", "medium", "Name it with `--ids` to write it."),
+        ("Weak evidence", "low", "Nothing structural said this; read before naming it."),
+    )
+    for title, level, blurb in groups:
+        chosen = [row for row in rows if row["confidence"] == level]
+        if not chosen:
+            continue
+        lines += [f"## {title} ({len(chosen)})", "", blurb, ""]
+        for row in chosen:
+            lines.append(f"- `{row['id']}` **{row['date']}** — {row['note']}")
+            lines.append(f"    - {row['match']} match on `{row['source']}`, {row['evidence']} evidence: `{row['quote']}`")
+            if row["contradicted"]:
+                lines.append("    - that file dates itself two different ways; both are listed below")
+            if row["review_reason"]:
+                lines.append(f"    - held because: {row['review_reason']}")
+            for other in row["considered"][1:]:
+                lines.append(
+                    f"    - also considered {other['date']} from `{other['source']}` "
+                    f"({other['match']} match, {other['evidence']}, {other['why']})"
+                )
+        lines.append("")
+
+    if skipped:
+        lines += [f"## No evidence ({len(skipped)})", "", "These need a date typed by hand.", ""]
+        for entry in skipped:
+            lines.append(f"- {entry['note']}" + (f" — {entry['reason']}" if entry["reason"] else ""))
+        lines.append("")
+    return "\n".join(lines)
+
+
+def dates(args):
+    """Backfill a human-owned date property from older copies of the notes.
+
+    Deterministic by default: no model, and no embeddings unless ``--near-match``
+    asks for them. Dry run is the default, and the report is written before any
+    note is touched.
+    """
+    vault = Path(args.vault).expanduser().resolve()
+    if not vault.is_dir():
+        raise UserError(f"vault root does not exist: {vault}")
+    if not args.archive and not args.self_only:
+        raise UserError("dates requires --archive <path> (repeatable), or --self-only to use each note's own evidence")
+    schema_path = resolve_schema_path(vault, args.schema)
+    schema, _ = compiled_schema_for(vault, schema_path)
+
+    property_key = args.date_property
+    prop = schema["properties"].get(property_key)
+    if prop is None:
+        approved = ", ".join(schema["property_order"])
+        raise UserError(f"{property_key} is not an approved property; the schema approves: {approved}")
+    if prop["shape"] != "scalar":
+        raise UserError(f"{property_key} is a list property; this mode writes scalars only")
+
+    warnings = []
+    if not prop["human_owned"]:
+        warnings.append(
+            f"{property_key} is not marked human-owned in the schema, so the next filing run will "
+            "replace whatever this writes; mark it human-owned first"
+        )
+
+    archive_roots = [Path(raw).expanduser().resolve() for raw in args.archive]
+    archive = archive_fingerprints(archive_roots, args, warnings)
+
+    notes = []
+    for path in selected_notes(vault, schema_path, "vault", args.limit):
+        # An archive kept inside the vault is a source here, never a target.
+        if any(path_is_inside(root, path) for root in archive_roots):
+            continue
+        relative = relative_path(vault, path)
+        try:
+            notes.append(
+                vault_dates.note_fingerprint(
+                    path,
+                    relative,
+                    path.read_bytes(),
+                    include_file_times=args.include_file_times,
+                    trust_birthtime=args.trust_birthtime,
+                )
+            )
+        except (OSError, UnicodeDecodeError) as error:
+            warnings.append(f"note skipped: {relative} ({error})")
+
+    counts = {
+        "notes": len(notes),
+        "already_dated": 0,
+        "needing": 0,
+        "archive_files": len(archive),
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+        "no_evidence": 0,
+    }
+
+    pending = []
+    skipped = []
+    for note in notes:
+        if note["malformed"]:
+            skipped.append({"note": note["relative"], "reason": "frontmatter has no closing delimiter"})
+            continue
+        existing = parse_frontmatter(note["frontmatter_text"]).get(property_key)
+        if isinstance(existing, str) and existing.strip():
+            counts["already_dated"] += 1
+            continue
+        pending.append(note)
+    counts["needing"] = len(pending)
+
+    indexes = vault_dates.build_indexes(archive, notes)
+    matched = {note["relative"]: vault_dates.match_archive(note, indexes) for note in pending}
+    if args.near_match:
+        unplaced = [note for note in pending if not matched[note["relative"]]]
+        for relative, entry in near_match_archive(args, unplaced, archive, warnings).items():
+            matched[relative] = [(entry, vault_dates.SIMILAR)]
+
+    rows = []
+    for note in pending:
+        decision = vault_dates.decide(note, matched[note["relative"]])
+        if decision is None:
+            counts["no_evidence"] += 1
+            skipped.append({"note": note["relative"], "reason": ""})
+            continue
+        note_type = parse_frontmatter(note["frontmatter_text"]).get("type")
+        review_reason = ""
+        if isinstance(note_type, str) and note_type.strip() in SUBJECT_DATE_REVIEW_TYPES:
+            review_reason = f"a {note_type.strip()} note's subject date is not usually the day it was written"
+        confidence = decision["confidence"]
+        if review_reason and confidence == "high":
+            confidence = "medium"
+        counts[confidence] += 1
+        rows.append(
+            {
+                "id": vault_dates.decision_id(note["relative"], decision["date"]),
+                "note": note["relative"],
+                "path": note["path"],
+                "hash": note["data_hash"],
+                "date": decision["date"],
+                "match": decision["match"],
+                "evidence": decision["evidence"],
+                "source": decision["source"],
+                "quote": decision["quote"],
+                "contradicted": decision["contradicted"],
+                "confidence": confidence,
+                "review_reason": review_reason,
+                "considered": decision["considered"],
+            }
+        )
+
+    rows.sort(key=lambda row: (row["confidence"] != "high", row["date"], row["note"]))
+    by_id = {row["id"]: row for row in rows}
+    requested = [value.strip() for value in (args.ids or "").split(",") if value.strip()]
+    for value in requested:
+        if value not in by_id:
+            offered = ", ".join(sorted(by_id)) or "none"
+            raise UserError(f"unknown id {value}; this run proposes: {offered}")
+
+    calibration = vault_dates.calibrate_birthtime(archive or notes)
+    run_dir = unique_run_directory(vault)
+    report = render_date_report(rows, skipped, counts, property_key, not args.apply, calibration, args.trust_birthtime)
+    # Written before any edit, so the evidence behind every date outlives the run.
+    (run_dir / "date_report.md").write_text(report, encoding="utf-8")
+    (run_dir / "date_report.json").write_text(
+        json.dumps(
+            {
+                "property": property_key,
+                "counts": counts,
+                "birthtimeCalibration": calibration,
+                "proposals": [{key: row[key] for key in row if key != "path"} for row in rows],
+                "noEvidence": skipped,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    targets = [by_id[value] for value in requested] if requested else [row for row in rows if row["confidence"] == "high"]
+    applied = []
+    refused = []
+    if args.apply:
+        for row in targets:
+            source = Path(row["path"])
+            try:
+                data = source.read_bytes()
+            except OSError as error:
+                refused.append({"note": row["note"], "reason": str(error)})
+                continue
+            if sha256_bytes(data) != row["hash"]:
+                refused.append({"note": row["note"], "reason": "changed since the report was written"})
+                continue
+            revised, reason = vault_dates.insert_scalar_property(data, property_key, row["date"], schema["property_order"])
+            if revised is None:
+                refused.append({"note": row["note"], "reason": reason})
+                continue
+            backup = run_dir / "backup" / row["note"]
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, backup)
+            atomic_write_bytes(source, revised)
+            applied.append({"id": row["id"], "note": row["note"], "date": row["date"]})
+
+    if counts["no_evidence"]:
+        warnings.append(f"{counts['no_evidence']} note(s) offered no date evidence and need one by hand")
+    if refused:
+        warnings.append(f"{len(refused)} note(s) were refused at apply; see the result for each reason")
+    if prop["required"] != "no":
+        warnings.append(
+            f"the schema already requires {property_key}; back the vault fill before requiring it, "
+            "not after, or every undated note fails validation in the meantime"
+        )
+
+    return structured(
+        "ok",
+        artifacts=[str(run_dir / "date_report.md"), str(run_dir / "date_report.json")],
+        warnings=warnings,
+        data={
+            "vault": str(vault),
+            "archive": [str(root) for root in archive_roots],
+            "property": property_key,
+            "runDirectory": str(run_dir),
+            "dryRun": not args.apply,
+            "counts": counts,
+            "birthtimeCalibration": calibration,
+            "trustBirthtime": args.trust_birthtime,
+            "proposed": len(rows),
+            "wouldApply": len(targets),
+            "applied": applied,
+            "refused": refused,
+            "plan": [
+                {
+                    "id": row["id"],
+                    "note": row["note"],
+                    "date": row["date"],
+                    "confidence": row["confidence"],
+                    "match": row["match"],
+                    "evidence": row["evidence"],
+                    "source": row["source"],
+                }
+                for row in rows
+            ],
+        },
+    )
+
+
 # Obsidian owns these three regardless of what the schema says, so a vault using
 # one without declaring it is a smaller thing than an invented key.
 OBSIDIAN_BUILTIN_PROPERTIES = frozenset({"aliases", "cssclasses", "tags"})
@@ -3149,7 +3563,8 @@ class TrackingAction(argparse.Action):
 def parse_args(argv):
     parser = argparse.ArgumentParser(description="Classify, dedupe, and organize Obsidian vault notes.")
     parser.add_argument(
-        "mode", choices=["inbox", "vault", "attachments", "drift", "renumber", "status", "doctor"]
+        "mode",
+        choices=["inbox", "vault", "attachments", "dates", "drift", "renumber", "status", "doctor"],
     )
     parser.add_argument("--vault")
     parser.add_argument("--schema", action=TrackingAction)
@@ -3185,6 +3600,33 @@ def parse_args(argv):
         dest="set_numbers",
         help="renumber mode: explicit comma-separated domain=number moves, e.g. craft=4,writing=5",
     )
+    parser.add_argument(
+        "--archive",
+        action="append",
+        help="dates mode: a folder of older note copies to mine for dates, repeatable; read-only",
+    )
+    parser.add_argument(
+        "--self-only",
+        action="store_true",
+        help="dates mode: derive from each note's own name, path, and text without an archive",
+    )
+    parser.add_argument("--date-property", default="date", help="dates mode: the scalar property to fill (default: date)")
+    parser.add_argument(
+        "--include-file-times",
+        action="store_true",
+        help="dates mode: offer Finder creation and modification times as weak evidence, never auto-applied",
+    )
+    parser.add_argument(
+        "--trust-birthtime",
+        action="store_true",
+        help="dates mode: treat Finder's creation date as explicit evidence; read the calibration first",
+    )
+    parser.add_argument(
+        "--near-match",
+        action="store_true",
+        help="dates mode: also pair notes to archive copies by meaning, for review only",
+    )
+    parser.add_argument("--ids", help="dates mode: comma-separated proposal ids to write, instead of the confident ones")
     parser.add_argument("--run", help="existing run directory to resume")
     parser.add_argument("--limit", type=int, action=TrackingAction)
     parser.add_argument("--base-url", action=TrackingAction)
@@ -3237,9 +3679,26 @@ def parse_args(argv):
             raise UserError("renumber takes exactly one of --insert <number> or --set <domain=number,...>")
         if args.insert is not None and not 1 <= args.insert <= 99:
             raise UserError("--insert must be a domain number from 1 through 99")
+    dates_flags = (args.archive, args.self_only, args.include_file_times, args.trust_birthtime, args.near_match, args.ids)
+    if args.mode != "dates" and any(dates_flags):
+        raise UserError(
+            "--archive, --self-only, --include-file-times, --trust-birthtime, --near-match, and --ids belong to dates mode"
+        )
     if args.mode in {"attachments", "drift", "renumber"}:
         # Deterministic filesystem work: no classification, so no model or
         # embeddings service is resolved and these run with every endpoint down.
+        return args
+    if args.mode == "dates":
+        # Also deterministic, and no model ever. --near-match is the one path
+        # that needs a service, so it is the only one that resolves an endpoint.
+        args.archive = args.archive or []
+        if args.near_dupe_auto is None:
+            args.near_dupe_auto = NEAR_DUPE_AUTO
+        if args.near_match:
+            if args.no_embeddings:
+                raise UserError("--near-match needs the embeddings service; drop --no-embeddings")
+            args.embeddings_url = forge_embeddings.endpoint_url(args.embeddings_url)
+            args.embeddings_model = forge_embeddings.model_name(args.embeddings_model)
         return args
     # Skill-specific settings win, then the agent's configured chat service, then
     # the built-in non-thinking default.
@@ -3272,6 +3731,8 @@ def run(argv):
         result = doctor(args)
     elif args.mode == "attachments":
         result = attachments(args)
+    elif args.mode == "dates":
+        result = dates(args)
     elif args.mode == "drift":
         result = drift(args)
     elif args.mode == "renumber":
