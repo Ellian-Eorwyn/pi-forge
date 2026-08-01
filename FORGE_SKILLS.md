@@ -4,20 +4,20 @@
 
 ## Launch Context Summary
 
-- Available skills: 23
-- Model-visible skills at launch: 23
+- Available skills: 24
+- Model-visible skills at launch: 24
 - Tools offered at launch: 14
 
 | Launch context block | Tokens |
 |---|---:|
-| Base system prompt (intro, tools list, guidelines, connected services) | 406 |
+| Base system prompt (intro, tools list, guidelines, connected services) | 396 |
 | Tool JSON schemas (14 tools) | 3041 |
 | Managed instructions (`AGENTS.md` with its `<project_context>` wrapper) | 1452 |
-| Skills menu (metadata for all model-visible skills) | 3259 |
-| **Total launch context (always processed)** | **8157** |
-| Maximum if every `SKILL.md` body is also loaded at once | 60187 |
+| Skills menu (metadata for all model-visible skills) | 3400 |
+| **Total launch context (always processed)** | **8289** |
+| Maximum if every `SKILL.md` body is also loaded at once | 62003 |
 
-Of that total, the forge profile itself owns 4710 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
+Of that total, the forge profile itself owns 4852 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
 
 Of the skills menu above, the shared wrapper (instructions and XML envelope, independent of skill count) is ~92 tokens; the rest scales with the number of skills.
 
@@ -70,6 +70,7 @@ Sorted by launch cost. `Prompt lines` counts a tool's `promptSnippet` and `promp
 | [`vault-capture`](forge/skills/vault-capture/SKILL.md) | Turn a braindump into schema-valid notes in an Obsidian vault inbox - split unedited thinking... | 138 | 2448 | 2559 | Model-visible |
 | [`vault-connections`](forge/skills/vault-connections/SKILL.md) | Search an Obsidian vault by meaning, propose links for per-id review, publish completed liter... | 151 | 2682 | 2807 | Model-visible |
 | [`vault-handoff`](forge/skills/vault-handoff/SKILL.md) | Send completed text artifacts to pi-vault review | 63 | 325 | 363 | Model-visible |
+| [`vault-naturalist`](forge/skills/vault-naturalist/SKILL.md) | Compile the seasonal Phenology tables on animal, plant, and fungus wiki cards into a queryabl... | 142 | 1570 | 1684 | Model-visible |
 | [`vault-organizer`](forge/skills/vault-organizer/SKILL.md) | Organize an Obsidian vault or its inbox from a human-maintained schema note - classify notes,... | 150 | 3576 | 3699 | Model-visible |
 | [`vault-transcripts`](forge/skills/vault-transcripts/SKILL.md) | Process raw voice-note and meeting transcripts in an Obsidian vault inbox - give each recordi... | 151 | 3875 | 3999 | Model-visible |
 | [`vault-wiki`](forge/skills/vault-wiki/SKILL.md) | Install the seven wiki entry templates and expand wiki entity notes into complete, cited refe... | 143 | 2300 | 2418 | Model-visible |

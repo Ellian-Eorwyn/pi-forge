@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import datetime
 import hashlib
 import importlib.util
 import json
@@ -61,6 +62,7 @@ capture_type: manual
 | `processed_by` | no | list | Automated workflows that transformed this note. |
 | `date` | no | scalar, human-owned | Subject date. |
 | `cover` | no | scalar, human-owned | Cover image. |
+| `created` | yes | scalar, derived | Date this note came into existence. |
 
 ### Property constraints
 
@@ -1212,7 +1214,7 @@ class HumanOwnedPropertyTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertNotIn("date", validated["metadata"])
         self.assertNotIn("cover", validated["metadata"])
-        self.assertTrue(any("human-owned" in warning for warning in warnings))
+        self.assertTrue(any("withheld" in warning for warning in warnings))
 
     def test_carry_forward_restores_human_owned_properties(self):
         schema = self.schema()
@@ -1265,6 +1267,153 @@ class HumanOwnedPropertyTests(unittest.TestCase):
             schema,
         )
         self.assertIn('\ncover: "https://example.com/a.png"\n', text)
+
+
+class DerivedPropertyTests(unittest.TestCase):
+    """``created``: a property neither the model nor the owner supplies.
+
+    The vault this serves lost its creation dates to a bulk reorganization that
+    flattened every file timestamp, so the point of the marker is not only to
+    withhold the property from the classifier -- ``human-owned`` already does
+    that -- but to let it be *required* while code, not a person, keeps it filled.
+    """
+
+    def schema(self, text=SCHEMA):
+        return vault_organizer.parse_schema_note(text)
+
+    def test_schema_marks_derived_properties(self):
+        schema = self.schema()
+        self.assertTrue(schema["properties"]["created"]["derived"])
+        self.assertFalse(schema["properties"]["date"]["derived"])
+        self.assertFalse(schema["properties"]["created"]["human_owned"])
+        self.assertEqual(vault_organizer.derived_properties(schema), ["created"])
+        self.assertEqual(vault_organizer.withheld_properties(schema), ["date", "cover", "created"])
+
+    def test_a_derived_property_may_be_required(self):
+        """The rule human-owned properties fall foul of, and the reason for the
+        second marker: something always supplies a derived value."""
+        self.assertEqual(self.schema()["properties"]["created"]["required"], "yes")
+
+    def test_a_property_cannot_be_both_human_owned_and_derived(self):
+        text = SCHEMA.replace(
+            "| `created` | yes | scalar, derived | Date this note came into existence. |",
+            "| `created` | no | scalar, derived, human-owned | Date this note came into existence. |",
+        )
+        with self.assertRaises(vault_organizer.UserError) as caught:
+            vault_organizer.parse_schema_note(text)
+        self.assertIn("cannot be both", str(caught.exception))
+
+    def test_classifier_is_never_offered_a_derived_property(self):
+        schema = self.schema()
+        self.assertNotIn("created", vault_organizer.compact_schema_for_prompt(schema)["property_order"])
+        prompt = vault_organizer.system_prompt(schema)
+        self.assertNotIn("created", json.loads(prompt.split("Required response shape:\n")[1])["metadata"])
+
+    def test_a_classifier_supplied_created_is_dropped(self):
+        schema = self.schema()
+        response = ok_response(metadata={
+            "type": "note", "status": "active", "domain": "personal", "created": "2019-04-04",
+        })
+        validated, warnings, errors = vault_organizer.validate_classification(response, schema)
+        self.assertEqual(errors, [])
+        self.assertNotIn("created", validated["metadata"])
+        self.assertTrue(any("withheld" in warning for warning in warnings))
+
+    def test_an_existing_created_is_carried_forward_untouched(self):
+        """Write-once. Filing the same note twice must not change its birthday."""
+        schema = self.schema()
+        validated = {"metadata": {"type": "note", "status": "active", "domain": "personal"}}
+        vault_organizer.carry_forward_provenance(
+            validated, "created: 2021-06-09\n", schema, [], Path("2026-01-01 Later.md")
+        )
+        self.assertEqual(validated["metadata"]["created"], "2021-06-09")
+        self.assertEqual(validated["created_evidence"], "carried")
+
+    def test_a_filename_date_prefix_beats_every_other_tier(self):
+        schema = self.schema()
+        validated = {"metadata": {"type": "note", "status": "active", "domain": "personal"}}
+        vault_organizer.carry_forward_provenance(
+            validated, "date: 2024-02-02\n", schema, [], Path("2019-11-30 Trip north.md")
+        )
+        self.assertEqual(validated["metadata"]["created"], "2019-11-30")
+        self.assertEqual(validated["created_evidence"], "filename")
+
+    def test_the_subject_date_is_used_when_the_filename_carries_none(self):
+        schema = self.schema()
+        validated = {"metadata": {"type": "note", "status": "active", "domain": "personal"}}
+        vault_organizer.carry_forward_provenance(validated, "date: 2024-02-02\n", schema, [], Path("Trip north.md"))
+        self.assertEqual(validated["metadata"]["created"], "2024-02-02")
+        self.assertEqual(validated["created_evidence"], "date_property")
+
+    def test_a_note_with_no_evidence_at_all_is_stamped_with_the_run_date(self):
+        schema = self.schema()
+        validated = {"metadata": {"type": "note", "status": "active", "domain": "personal"}}
+        vault_organizer.carry_forward_provenance(validated, "", schema, [], None)
+        self.assertEqual(validated["metadata"]["created"], datetime.date.today().isoformat())
+        self.assertEqual(validated["created_evidence"], "run_date")
+
+    def test_an_invalid_calendar_date_in_a_filename_is_not_used(self):
+        schema = self.schema()
+        validated = {"metadata": {"type": "note", "status": "active", "domain": "personal"}}
+        vault_organizer.carry_forward_provenance(validated, "date: 2024-02-02\n", schema, [], Path("2026-02-30 No.md"))
+        self.assertEqual(validated["metadata"]["created"], "2024-02-02")
+
+    def test_a_vault_whose_schema_has_no_created_is_left_alone(self):
+        text = SCHEMA.replace("| `created` | yes | scalar, derived | Date this note came into existence. |\n", "")
+        schema = vault_organizer.parse_schema_note(text)
+        validated = {"metadata": {"type": "note", "status": "active", "domain": "personal"}}
+        vault_organizer.carry_forward_provenance(validated, "", schema, [], None)
+        self.assertNotIn("created", validated["metadata"])
+        self.assertNotIn("created_evidence", validated)
+
+    def test_a_template_is_never_stamped(self):
+        """``template-install`` compares the installed file byte-for-byte with the
+        shipped one, so a stamped template is refused as owner-modified forever
+        after."""
+        schema = self.schema()
+        validated = {"metadata": {"type": "template", "status": "active", "domain": "meta"}}
+        vault_organizer.carry_forward_provenance(validated, "", schema, [], Path("Wiki Concept.md"))
+        self.assertNotIn("created", validated["metadata"])
+        self.assertEqual(vault_organizer.missing_required_properties(validated["metadata"], schema), [])
+
+    def test_required_properties_are_reported_when_missing(self):
+        schema = self.schema()
+        self.assertEqual(
+            vault_organizer.missing_required_properties({"type": "note", "status": "active"}, schema),
+            ["domain", "created"],
+        )
+        self.assertEqual(
+            vault_organizer.missing_required_properties(
+                {"type": "note", "status": "active", "domain": "personal", "created": "2026-01-01"}, schema
+            ),
+            [],
+        )
+
+    def test_reuse_frontmatter_does_not_replay_a_derived_value(self):
+        """``--reuse-frontmatter`` pushes existing values through validation, and
+        a derived key there would be rejected as unapproved for the classifier.
+        Carry-forward is what restores it."""
+        schema = self.schema()
+        reused = vault_organizer.reuse_frontmatter_classification(
+            schema, "type: note\nstatus: active\ndomain: personal\ncreated: 2020-01-01\n"
+        )
+        self.assertIsNotNone(reused)
+        validated, _warnings = reused
+        self.assertNotIn("created", validated["metadata"])
+
+    def test_the_report_names_the_evidence_behind_each_date(self):
+        lines = "\n".join(vault_organizer.created_report_lines([
+            {"created_evidence": "filename"},
+            {"created_evidence": "filename"},
+            {"created_evidence": "filesystem"},
+            {"created_evidence": None},
+        ]))
+        self.assertIn("## Created Dates", lines)
+        self.assertIn("2 read from a `YYYY-MM-DD` filename prefix", lines)
+        self.assertIn("weakest evidence", lines)
+
+    def test_the_report_section_is_absent_when_nothing_was_stamped(self):
+        self.assertEqual(vault_organizer.created_report_lines([{"created_evidence": None}]), [])
 
 
 class SourcesTreeTests(unittest.TestCase):

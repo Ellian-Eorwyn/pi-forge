@@ -667,7 +667,8 @@ def draft_system(spec, voice_segment=""):
         name = "the opening definition" if section["id"] == vault_wiki.LEAD_SECTION else f"'{section['heading']}'"
         limits = []
         if section["max_bullets"]:
-            limits.append(f"at most {section['max_bullets']} bullets")
+            unit = "rows" if section["fill"] == "table" else "bullets"
+            limits.append(f"at most {section['max_bullets']} {unit}")
         if section["max_chars"]:
             unit = "per bullet" if section["fill"] == "bullets" else "total"
             limits.append(f"at most {section['max_chars']} characters {unit}")
@@ -675,12 +676,18 @@ def draft_system(spec, voice_segment=""):
             limits.append("omit entirely if the sources do not support it")
         suffix = f" ({'; '.join(limits)})" if limits else ""
         lines.append(f"- {section['id']} — {name}: {section['guidance']}{suffix}")
+        for column in section["columns"]:
+            lines.append(f"    - {column['id']}: {column['guidance']}")
+            if column["values"]:
+                lines.append(f"      one of: {', '.join(column['values'])}")
     lines.extend(
         [
             "",
             "A bullet section's value is a JSON array of strings, one entry per bullet,",
-            "with no leading '- '. A prose section's value is a single string. Never put a",
-            "line break inside any string.",
+            "with no leading '- '. A prose section's value is a single string. A table",
+            "section's value is a JSON array of objects, one per row, keyed by the column",
+            "ids listed under it — never a pre-rendered Markdown table. Never put a line",
+            "break inside any string.",
             "",
             "Wikilink a [[Target]] only when it appears in allowedLinks. Never invent one.",
             "",
@@ -726,7 +733,7 @@ def model_section_ids(spec):
     return tuple(
         section["id"]
         for section in spec["sections"]
-        if not section["owner"] and section["fill"] in ("lead", "prose", "bullets")
+        if not section["owner"] and section["fill"] in vault_wiki.DRAFTED_FILL_MODES
     )
 
 
@@ -830,7 +837,9 @@ def draft_note(args, service, spec, item, sources, run_dir, allowed_links, voice
         # source of unparseable responses — an unescaped newline mid-string loses
         # the whole note.
         "sectionsToFill": {
-            identifier: ([] if vault_wiki.section_by_id(spec, identifier)["fill"] == "bullets" else "")
+            identifier: (
+                [] if vault_wiki.section_by_id(spec, identifier)["fill"] in ("bullets", "table") else ""
+            )
             for identifier in model_section_ids(spec)
         },
         "allowedLinks": allowed_links,
@@ -871,7 +880,7 @@ def draft_note(args, service, spec, item, sources, run_dir, allowed_links, voice
     for key, raw in value["sections"].items():
         if key not in model_section_ids(spec):
             continue
-        text = coerce_section(raw)
+        text = coerce_section(raw, vault_wiki.section_by_id(spec, key))
         if text:
             sections[key] = tidy_footnote_markers(normalize_section(key, text, spec))
     dedupe_footnote_markers(sections)
@@ -886,8 +895,17 @@ def draft_note(args, service, spec, item, sources, run_dir, allowed_links, voice
     return {"id": item["id"], "sections": sections, "citations": citations}
 
 
-def coerce_section(raw):
-    """Accept a bullet section as an array or, if the model regressed, a string."""
+def coerce_section(raw, section=None):
+    """Accept a section as its declared shape or, if the model regressed, a string.
+
+    A table arrives as an array of row objects and is rendered here, so the note
+    holds a Markdown table rather than the model's idea of one. A model that
+    ignored that and sent a pre-rendered table still lands as a string, which the
+    ownership and budget checks judge normally.
+    """
+    if section and section["fill"] == "table" and isinstance(raw, list):
+        rows = [entry for entry in raw if isinstance(entry, dict)]
+        return vault_wiki.render_table(rows, section["columns"])
     if isinstance(raw, list):
         items = [str(entry).strip().lstrip("-*+ ").strip() for entry in raw]
         return "\n".join(f"- {entry}" for entry in items if entry)
@@ -941,6 +959,10 @@ def normalize_section(identifier, text, spec):
     try:
         section = vault_wiki.section_by_id(spec, identifier)
     except KeyError:
+        return text
+    if section["fill"] == "table":
+        # Already rendered from rows by coerce_section, or sent as a string the
+        # budget check judges. Adding bullet markers to either would be corruption.
         return text
     if section["fill"] != "bullets":
         return text
@@ -1201,6 +1223,29 @@ def drop_unresolved_links(sections, item, index):
     return dropped
 
 
+def check_table_values(identifier, rows, section):
+    """Hold back a table row whose controlled cell is not a declared value.
+
+    Deterministic, like every other check that runs before the reviewer. A
+    phenology row saying "whelping" instead of "birth" reads fine to a person and
+    is invisible to the index that has to answer "what is due this month", so it
+    is caught here rather than compiled into silence later.
+    """
+    problems = []
+    for column in section["columns"]:
+        if not column["values"]:
+            continue
+        allowed = set(column["values"])
+        for row in rows:
+            value = (row.get(column["id"]) or "").strip()
+            if value and value.casefold() not in {item.casefold() for item in allowed}:
+                problems.append(
+                    f"section '{identifier}' column '{column['id']}' has unknown value '{value}'"
+                    f" (expected one of: {', '.join(column['values'])})"
+                )
+    return problems
+
+
 def check_budgets(sections, spec):
     problems = []
     total = 0
@@ -1211,7 +1256,17 @@ def check_budgets(sections, spec):
         except KeyError:
             problems.append(f"draft wrote unknown section '{identifier}'")
             continue
-        if section["fill"] == "bullets":
+        if section["fill"] == "table":
+            rows, malformed = vault_wiki.parse_table(text, section["columns"])
+            problems.extend(f"section '{identifier}': {problem}" for problem in malformed)
+            if not rows:
+                problems.append(f"section '{identifier}' should be a table but has no rows")
+            if section["max_bullets"] and len(rows) > section["max_bullets"]:
+                problems.append(
+                    f"section '{identifier}' has {len(rows)} rows, over the {section['max_bullets']} budget"
+                )
+            problems.extend(check_table_values(identifier, rows, section))
+        elif section["fill"] == "bullets":
             bullets = [line for line in text.splitlines() if BULLET_RE.match(line)]
             if not bullets:
                 problems.append(f"section '{identifier}' should be bullets but has none")

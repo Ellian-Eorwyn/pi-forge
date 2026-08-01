@@ -39,6 +39,8 @@ from vault_classification import (  # noqa: F401  (re-exported for callers and t
     validate_classification,
 )
 from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
+    CREATED_EVIDENCE,
+    UNSTAMPED_TYPES,
     COMPILED_SCHEMA_VERSION,
     DEFAULT_SCHEMA,
     INBOX_DIR,
@@ -52,6 +54,8 @@ from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
     compile_destination,
     compiled_routes,
     compiled_schema_for,
+    derive_created,
+    derived_properties,
     domain_folder,
     drift_counts,
     drift_finding_id,
@@ -59,6 +63,7 @@ from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
     has_control_character,
     heading_index,
     human_owned_properties,
+    missing_required_properties,
     WORKSPACE_MARKER,
     is_divider_row,
     is_workspace_dir,
@@ -76,6 +81,7 @@ from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
     path_is_inside,
     project_folder,
     project_name,
+    property_derived,
     property_human_owned,
     property_shape,
     property_value_mode,
@@ -103,6 +109,7 @@ from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
     unsafe_filename_reason,
     valid_wikilink,
     validate_derived_paths,
+    withheld_properties,
     yaml_quote,
     yaml_scalar,
 )
@@ -643,7 +650,29 @@ def plan_dedupe(args, vault, items, index_entries, warnings, schema_label="<sche
     return result, losers
 
 
-def carry_forward_provenance(validated, frontmatter_text, schema, warnings):
+def stamp_created(metadata, previous, schema, path, today=None):
+    """Give a note a creation date when nothing carried one forward.
+
+    ``created`` is the one derived property with a derivation rule. A schema that
+    marks some other property derived gets it withheld from the classifier and
+    carried forward like this one, but nothing invents a value for it: there
+    would be no evidence to invent it from.
+
+    Returns the evidence tier that answered, or None when the schema does not
+    define ``created`` at all -- vaults that have not adopted it keep working.
+    """
+    if "created" not in derived_properties(schema):
+        return None
+    if metadata.get("type") in UNSTAMPED_TYPES:
+        return None
+    if metadata.get("created"):
+        return "carried"
+    value, evidence = derive_created(path, metadata, previous, today or datetime.date.today().isoformat())
+    metadata["created"] = value
+    return evidence
+
+
+def carry_forward_provenance(validated, frontmatter_text, schema, warnings, path=None):
     """Restore properties the classifier does not own.
 
     Filing replaces a note's frontmatter wholesale from a model response, so a
@@ -654,12 +683,18 @@ def carry_forward_provenance(validated, frontmatter_text, schema, warnings):
     taken from the note's previous frontmatter, and the classifier's own value
     for ``processed_by`` is discarded: scripts are its only writers.
 
-    Properties the schema marks human-owned are restored the same way and for
-    the same reason. The classifier is never shown them, so filing would drop
-    every one on the first pass; the note's previous frontmatter is their only
-    source. Values are re-checked here because they bypass
+    Properties the schema marks human-owned or derived are restored the same way
+    and for the same reason. The classifier is never shown them, so filing would
+    drop every one on the first pass; the note's previous frontmatter is their
+    only source. Values are re-checked here because they bypass
     ``validate_classification`` entirely, and an unchecked control character
     would fail the whole run inside ``yaml_scalar``.
+
+    Restoring a derived property before stamping it is what makes ``created``
+    write-once: the value a note already carries always beats a fresh derivation,
+    so filing the same note twice cannot change its birthday. ``path`` unlocks the
+    filename and filesystem evidence tiers; without it the stamp falls back to the
+    note's own subject date and then to today.
     """
     metadata = validated.get("metadata")
     if not isinstance(metadata, dict):
@@ -667,7 +702,7 @@ def carry_forward_provenance(validated, frontmatter_text, schema, warnings):
     metadata.pop("processed_by", None)
     previous = parse_frontmatter(frontmatter_text or "")
 
-    for key in human_owned_properties(schema):
+    for key in withheld_properties(schema):
         metadata.pop(key, None)
         value = previous.get(key)
         if value is None:
@@ -717,6 +752,11 @@ def carry_forward_provenance(validated, frontmatter_text, schema, warnings):
             metadata["processed_by"] = clean
     elif processed_by:
         warnings.append("previous processed_by dropped: schema does not define it as a list property")
+
+    # Last, so it sees the date this pass restored rather than the one it replaced.
+    evidence = stamp_created(metadata, previous, schema, path)
+    if evidence:
+        validated["created_evidence"] = evidence
     return validated
 
 
@@ -806,7 +846,7 @@ def reuse_frontmatter_classification(schema, frontmatter_text):
     if not frontmatter_text:
         return None
     previous = parse_frontmatter(frontmatter_text)
-    withheld = set(human_owned_properties(schema)) | {"processed_by"}
+    withheld = set(withheld_properties(schema)) | {"processed_by"}
     candidate = {
         key: previous[key]
         for key in schema["property_order"]
@@ -822,7 +862,8 @@ def reuse_frontmatter_classification(schema, frontmatter_text):
     return validated, warnings
 
 
-def classify_note(args, schema, title, relative_source, frontmatter_text, body, schema_hash, cache, cache_path):
+def classify_note(args, schema, title, relative_source, frontmatter_text, body, schema_hash, cache,
+                  cache_path, path=None):
     body_hash = sha256_text(normalize_body_for_hash(body))
     frontmatter_hash = sha256_text(frontmatter_text or "")
     profile_prefix = classification_profile_prefix(args)
@@ -834,13 +875,13 @@ def classify_note(args, schema, title, relative_source, frontmatter_text, body, 
         reused = reuse_frontmatter_classification(schema, frontmatter_text)
         if reused is not None:
             validated, warnings = reused
-            carry_forward_provenance(validated, frontmatter_text, schema, warnings)
+            carry_forward_provenance(validated, frontmatter_text, schema, warnings, path)
             return validated, warnings, "frontmatter", key
     if not args.force_reclassify and key in cache:
         cached = cache[key]
         validated, warnings, errors = validate_classification(cached["response"], schema)
         if not errors:
-            carry_forward_provenance(validated, frontmatter_text, schema, warnings)
+            carry_forward_provenance(validated, frontmatter_text, schema, warnings, path)
             return validated, warnings, "cache", key
     excerpt, excerpted = excerpt_body(body)
     response = request_json_with_retry(
@@ -872,7 +913,7 @@ def classify_note(args, schema, title, relative_source, frontmatter_text, body, 
         }, warnings, "model", key
     cache[key] = {"response": response, "stored_at": time.time()}
     save_cache(cache_path, cache)
-    carry_forward_provenance(validated, frontmatter_text, schema, warnings)
+    carry_forward_provenance(validated, frontmatter_text, schema, warnings, path)
     validated["excerpted"] = excerpted
     return validated, warnings, "model", key
 
@@ -888,6 +929,7 @@ def base_record(item):
         "frontmatter_changed": False,
         "move_required": False,
         "excerpted": False,
+        "created_evidence": None,
         "needs_review": False,
         "review_reason": None,
         "suggestions": [],
@@ -945,7 +987,8 @@ def classify_items(args, vault, schema, schema_hash, items, losers, run_dir):
                 body = frontmatter["body"]
                 title = note_title(path, body)
                 classification, record_warnings, classification_source, _ = classify_note(
-                    args, schema, title, rel, frontmatter["frontmatter_text"], body, schema_hash, cache, cache_path
+                    args, schema, title, rel, frontmatter["frontmatter_text"], body, schema_hash, cache, cache_path,
+                    path,
                 )
                 record = base_record(item)
                 record["source_hash"] = source_hash
@@ -955,7 +998,12 @@ def classify_items(args, vault, schema, schema_hash, items, losers, run_dir):
                 record["review_reason"] = classification.get("review_reason")
                 record["suggestions"] = classification.get("suggestions", [])
                 record["excerpted"] = bool(classification.get("excerpted"))
+                record["created_evidence"] = classification.get("created_evidence")
                 record["warnings"] = record_warnings
+                missing = missing_required_properties(record["metadata"], schema)
+                if missing and not record["needs_review"]:
+                    record["needs_review"] = True
+                    record["review_reason"] = f"missing required properties: {', '.join(missing)}"
                 if record["needs_review"]:
                     record["status"] = "review"
                 else:
@@ -1103,7 +1151,9 @@ def verify_classifications(args, vault, schema, records, run_dir):
         validated, _warnings, errors = validate_classification(response, schema)
         if errors:
             raise UserError("; ".join(errors))
-        carry_forward_provenance(validated, frontmatter["frontmatter_text"], schema, by_path[rel].setdefault("warnings", []))
+        carry_forward_provenance(
+            validated, frontmatter["frontmatter_text"], schema, by_path[rel].setdefault("warnings", []), path
+        )
         return validated
 
     escalations = forge_verify.escalate(flagged, redo, journal_path=journal, progress=progress)
@@ -1500,6 +1550,35 @@ def verification_report(verification, records):
     return lines
 
 
+# What each evidence tier actually knows, said once here rather than left for the
+# reader to infer from a bare tier name. A backfilled date is only as good as the
+# thing it was read off, and the report is where that distinction survives.
+CREATED_EVIDENCE_LABELS = {
+    "carried": "already carried the date; nothing was derived",
+    "filename": "read from a `YYYY-MM-DD` filename prefix",
+    "date_property": "taken from the note's own `date` property",
+    "filesystem": "read from file timestamps, which a bulk move rewrites — weakest evidence",
+    "run_date": "no evidence in the note; stamped with today's date",
+}
+
+
+def created_report_lines(records):
+    """Say where every creation date came from, grouped by how well it is known."""
+    counts = {}
+    for record in records:
+        evidence = record.get("created_evidence")
+        if evidence:
+            counts[evidence] = counts.get(evidence, 0) + 1
+    if not counts:
+        return []
+    lines = ["## Created Dates", ""]
+    for evidence in CREATED_EVIDENCE:
+        if evidence in counts:
+            lines.append(f"- {counts[evidence]} {CREATED_EVIDENCE_LABELS[evidence]}")
+    lines.append("")
+    return lines
+
+
 def drift_report_lines(findings):
     """The `## Schema Drift` section: where the schema and the folders disagree."""
     lines = ["## Schema Drift", ""]
@@ -1593,6 +1672,7 @@ def write_plan(
         for record in sorted(repaired, key=lambda entry: entry["source"]):
             report.append(f"- `{record['original_name']}` → `{Path(record['destination']).name}`")
         report.append("")
+    report.extend(created_report_lines(records))
     report.extend(verification_report(verification, records))
     report.extend(["## Destination Counts", ""])
     if destination_counts:

@@ -178,17 +178,18 @@ class TemplateInstallTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.vault, ignore_errors=True)
         self.folder = self.vault / "99 Meta" / "99.03 Templates"
 
-    def test_installs_all_seven_and_then_no_ops(self):
+    def test_installs_every_kind_and_then_no_ops(self):
+        expected = len(vw.WIKI_KINDS)
         result = skill.command_template_install(install_args(self.vault))
-        self.assertEqual(result["data"]["written"], 7)
-        self.assertEqual(len(list(self.folder.glob("Wiki *.md"))), 7)
+        self.assertEqual(result["data"]["written"], expected)
+        self.assertEqual(len(list(self.folder.glob("Wiki *.md"))), expected)
         again = skill.command_template_install(install_args(self.vault))
         self.assertEqual(again["data"]["written"], 0)
         self.assertEqual({entry["action"] for entry in again["data"]["operations"]}, {"unchanged"})
 
     def test_dry_run_writes_nothing(self):
         result = skill.command_template_install(install_args(self.vault, dry_run=True))
-        self.assertEqual(result["data"]["written"], 7)
+        self.assertEqual(result["data"]["written"], len(vw.WIKI_KINDS))
         self.assertFalse(self.folder.exists())
 
     def test_refuses_to_overwrite_a_modified_template(self):

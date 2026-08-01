@@ -55,7 +55,7 @@ from vault_schema import (
 
 DEFAULT_PROFILE = "99 Meta/99.02 Schemas/0.03 Personal Context.md"
 PROFILE_BASENAME = "0.03 Personal Context.md"
-COMPILED_PROFILE_VERSION = 2
+COMPILED_PROFILE_VERSION = 3
 
 CARDS_SECTION = "Cards"
 CONTEXT_SECTION = "Context"
@@ -63,7 +63,19 @@ OWNER_SECTION = "Owner"
 
 # Register column value -> profile key. The columns read as English because a
 # person maintains them; the keys are what the pipeline passes around.
-OWNER_FIELDS = {"name": "name", "pronouns": "pronouns", "full name": "full_name"}
+#
+# ``home region`` names the wiki place note the owner currently lives in. It is
+# the one value that decides which of a species card's phenology rows apply here,
+# and putting it in this record rather than in a flag means moving house is a
+# one-line edit that every naturalist query picks up at once. It is deliberately
+# not part of ``owner_sentence``: where someone lives has no business in a prompt
+# that is summarizing a therapy session.
+OWNER_FIELDS = {
+    "name": "name",
+    "pronouns": "pronouns",
+    "full name": "full_name",
+    "home region": "home_region",
+}
 # A name, not a biography. Long enough for a full name with particles, short
 # enough that a paragraph pasted into the wrong row cannot become a salutation.
 MAX_OWNER_FIELD_CHARS = 40

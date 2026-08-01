@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-08-01",
+  "comment": "The controlled vocabulary of phenological events, per species kind. A Phenology table row whose Event is not listed here for its kind is a parse error rather than a free-text label, for the same reason the vault schema's controlled values are closed: an index that has to guess whether 'pupping', 'whelping' and 'birth' are the same event cannot answer 'what is due this month'. Add a row here before using it in a note. 'basis' is shared by every kind and says where a window came from -- the pipeline may write sourced or inferred, and observed is reserved for windows the owner derived from their own records, so a generated note can never claim to have seen anything.",
+  "windows": {
+    "months": ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"],
+    "yearRound": "year-round",
+    "comment": "A window is a month, a hyphenated month range that may wrap the new year (nov-feb), or year-round. Ranges are inclusive at both ends."
+  },
+  "basis": {
+    "sourced": "A citation in this note states the window.",
+    "inferred": "Reasoned from something a source states, rather than stated outright.",
+    "observed": "Derived from the owner's own observation notes. Never written by the pipeline."
+  },
+  "events": {
+    "animal": {
+      "present": "Resident and findable in the region.",
+      "arrival": "First returns to the region in a migratory cycle.",
+      "departure": "Leaves the region in a migratory cycle.",
+      "migration": "On passage through the region rather than resident in it.",
+      "mating": "Breeding season: pairing, rut, display, song.",
+      "birth": "Young are born or eggs hatch.",
+      "fledging": "Young leave the nest or den and begin moving independently.",
+      "dispersal": "Juveniles leave the natal territory.",
+      "moult": "Sheds and regrows feathers, fur, or skin.",
+      "torpor": "Enters short-term metabolic dormancy, days rather than a season.",
+      "hibernation": "Enters seasonal dormancy."
+    },
+    "plant": {
+      "present": "Visible above ground and identifiable.",
+      "bud-break": "Buds swell and open.",
+      "leaf-out": "Leaves expand.",
+      "flowering": "In bloom.",
+      "fruiting": "Fruit or seed is ripe.",
+      "seed-drop": "Releases seed.",
+      "senescence": "Leaves colour and die back.",
+      "dormancy": "Above-ground growth has stopped."
+    },
+    "fungus": {
+      "present": "The fruiting body persists year-round, as a perennial bracket does.",
+      "fruiting": "Fruiting bodies appear."
+    }
+  }
+}

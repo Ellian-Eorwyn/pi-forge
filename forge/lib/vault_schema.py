@@ -22,6 +22,7 @@ Consumers: ``skills/vault-organizer`` (classify, route, replace frontmatter) and
 note creation, and additive frontmatter merge).
 """
 
+import datetime
 import hashlib
 import json
 import os
@@ -56,7 +57,7 @@ REQUIRED_SECTIONS = [
     "Legacy normalization map",
     "Folder routing",
 ]
-COMPILED_SCHEMA_VERSION = 4
+COMPILED_SCHEMA_VERSION = 5
 # Declaring a "Sources root" section turns on the sources tree. It is optional so
 # that a vault filing sources by domain keeps working untouched, and so the two
 # forms cannot be half-adopted: with a root declared the Source kinds registry
@@ -326,9 +327,35 @@ def property_human_owned(shape_text):
     return "human-owned" in shape_text.strip().lower()
 
 
+def property_derived(shape_text):
+    """Whether a property records a fact code establishes rather than reads.
+
+    The third owner, after the classifier and the human. ``created`` is the date
+    a note came into existence: the model cannot know it, and asking the owner to
+    type it on every note is how it goes missing. Code derives it once from the
+    best evidence available and then carries it forward untouched.
+
+    Marking it here withholds it from the classifier exactly as ``human-owned``
+    does, but without that marker's ``Required: no`` rule -- a derived property
+    can be required precisely because something always supplies it.
+    """
+    return "derived" in shape_text.strip().lower()
+
+
 def human_owned_properties(schema):
     """Approved property names the classifier neither sees nor sets."""
     return [key for key in schema["property_order"] if schema["properties"][key].get("human_owned")]
+
+
+def derived_properties(schema):
+    """Approved property names code establishes and then never rewrites."""
+    return [key for key in schema["property_order"] if schema["properties"][key].get("derived")]
+
+
+def withheld_properties(schema):
+    """Every property the classifier is not responsible for, in schema order."""
+    withheld = set(human_owned_properties(schema)) | set(derived_properties(schema))
+    return [key for key in schema["property_order"] if key in withheld]
 
 
 def pad2(number):
@@ -424,6 +451,126 @@ def validate_filename_title(value, label):
     if cleaned.casefold() in RESERVED_WINDOWS_NAMES:
         raise UserError(f"{label} is a reserved filename: {value}")
     return cleaned
+
+
+# Leading YYYY-MM-DD, optionally followed by a separator. Anchored to the start of
+# the basename so a date appearing mid-title is not mistaken for the note's date.
+DATE_PREFIX_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?=$|[ _.\-])")
+ISO_DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+
+
+def iso_date(year, month, day):
+    """Return a YYYY-MM-DD string, or None when those numbers are not a date.
+
+    A real calendar check, so 2026-02-30 is reported rather than written.
+    """
+    try:
+        return datetime.date(year, month, day).isoformat()
+    except ValueError:
+        return None
+
+
+def parsed_prefix_date(stem):
+    """The YYYY-MM-DD a note's filename starts with, or None when it has none.
+
+    Exact where it applies and silent where it does not, which is what makes it
+    the first thing every date backfill tries.
+    """
+    match = DATE_PREFIX_RE.match(str(stem))
+    if not match:
+        return None
+    return iso_date(*(int(part) for part in match.groups()))
+
+
+def normalized_date_value(value):
+    """A frontmatter date narrowed to YYYY-MM-DD, or None when it is not one.
+
+    Obsidian writes a date property as a bare ``2026-08-01`` and a date-and-time
+    property as ``2026-08-01T09:14:00``. Both carry the day, which is the whole
+    of what a creation date claims, so the time is dropped rather than refused.
+    """
+    if not isinstance(value, str):
+        return None
+    match = ISO_DATE_RE.match(value.strip().split("T")[0].strip())
+    if not match:
+        return None
+    return iso_date(*(int(part) for part in match.groups()))
+
+
+def note_birthtime(path):
+    """A note's creation date according to the filesystem, or None.
+
+    ``st_birthtime`` exists on macOS and the BSDs; Linux exposes it only through
+    ``statx``, which Python does not surface, so mtime stands in there. Both are
+    the weakest evidence a creation date can rest on, because a bulk move or a
+    sync rewrites every one of them at once and they then say "recently touched"
+    rather than "made on". That is why this tier is tried last and reported by
+    name when it is used.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    stamp = getattr(stat, "st_birthtime", None) or stat.st_mtime
+    if not stamp:
+        return None
+    try:
+        return datetime.date.fromtimestamp(stamp).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+# Ordered best evidence first. Named so a report can say which tier answered
+# rather than presenting every backfilled date as equally well known.
+CREATED_EVIDENCE = ("carried", "filename", "date_property", "filesystem", "run_date")
+
+# A template is a stencil, not a note that happened. Its frontmatter is pinned by
+# the wiki template contract and the installed copy is compared byte-for-byte
+# against the shipped one, so stamping a derived property into a template both
+# invents a fact and makes every later ``template-install`` refuse the file as
+# owner-modified.
+UNSTAMPED_TYPES = frozenset({"template"})
+
+
+def derive_created(path, metadata, previous, today):
+    """The best available creation date for a note, paired with its evidence.
+
+    A filename that starts with a date was written by someone who meant that
+    date. The note's own subject date is the closest remaining proxy. File
+    timestamps come last for the reason ``note_birthtime`` gives. A note with no
+    other evidence at all is one the pipeline is seeing new, so the run date is a
+    fact about it rather than a guess.
+    """
+    if path is not None:
+        value = parsed_prefix_date(path.stem)
+        if value:
+            return value, "filename"
+    for source in (metadata, previous):
+        value = normalized_date_value(source.get("date")) if isinstance(source, dict) else None
+        if value:
+            return value, "date_property"
+    if path is not None:
+        value = note_birthtime(path)
+        if value:
+            return value, "filesystem"
+    return today, "run_date"
+
+
+def missing_required_properties(metadata, schema):
+    """Approved properties the schema requires that this note has no value for.
+
+    ``type``, ``status`` and ``domain`` are checked against model output long
+    before this, in ``validate_classification``. This is the general form, run
+    after the values code owns have been carried forward and stamped, so that
+    ``Required: yes`` on a derived property means what it says.
+    """
+    if metadata.get("type") in UNSTAMPED_TYPES:
+        return []
+    return [
+        key
+        for key in schema["property_order"]
+        if schema["properties"][key]["required"] == "yes" and metadata.get(key) in (None, "", [])
+    ]
 
 
 def normalize_project_value(value):
@@ -556,14 +703,20 @@ def parse_schema_note(text):
             "shape": property_shape(row["Shape"]),
             "value_mode": property_value_mode(row["Shape"]),
             "human_owned": property_human_owned(row["Shape"]),
+            "derived": property_derived(row["Shape"]),
             "definition": row["Definition"].strip(),
         }
     for required in ("type", "status", "domain"):
         if required not in properties:
             raise UserError(f"Approved properties: missing required core property {required}")
     for name, prop in properties.items():
+        # The two markers answer the same question -- who supplies this value --
+        # and a property carrying both names two owners for one cell.
+        if prop["human_owned"] and prop["derived"]:
+            raise UserError(f"Approved properties: {name} cannot be both human-owned and derived")
         # Nothing would ever satisfy the requirement: the classifier is not shown
         # human-owned properties, so it cannot supply one for a note that lacks it.
+        # A derived property is exempt because code supplies it unconditionally.
         if prop["human_owned"] and prop["required"] != "no":
             raise UserError(f"Approved properties: human-owned property {name} must be Required: no")
 

@@ -325,6 +325,65 @@ a later pass read it as prose. Vaults whose schema note does not define
 `processed_by` as a list property simply never carry the key, and the report
 warns when an existing value has to be dropped for that reason.
 
+## Property Ownership
+
+The `Shape` cell of an **Approved properties** row carries two optional markers,
+and they answer the same question — who supplies this value — with different
+answers. A row carrying both is a parse error.
+
+| Marker | Supplier | May be `Required: yes` |
+| --- | --- | --- |
+| `human-owned` | the owner, by hand | no |
+| `derived` | code, deterministically | yes |
+
+Both are withheld from the classifier: a property in the prompt is a property the
+model fills in, and neither of these is derivable from a note's text the way
+`type` or `domain` is. Both are restored from the note's previous frontmatter by
+`carry_forward_provenance`, which is why filing does not drop them on the first
+pass.
+
+The difference is the requirement. A required `human-owned` property is
+unsatisfiable by construction — the classifier is never shown it, so it can never
+supply one for a note that lacks it — and the parser refuses the row. A `derived`
+property is exempt precisely because something always supplies it.
+
+### `created`
+
+The one derived property with a derivation rule. `stamp_created` runs after
+carry-forward and fills it only when nothing carried one forward, so a value a
+note already has always wins and filing the same note twice cannot change its
+birthday. Evidence, best first:
+
+| Tier | Source |
+| --- | --- |
+| `carried` | the note's previous frontmatter — nothing was derived |
+| `filename` | a `YYYY-MM-DD` prefix on the basename, written by someone who meant it |
+| `date_property` | the note's own subject `date`, the closest remaining proxy |
+| `filesystem` | `st_birthtime`, else mtime |
+| `run_date` | no evidence at all; the note is one the pipeline is seeing new |
+
+The `filesystem` tier is last and named in the report because a bulk move or a
+sync rewrites every timestamp at once, after which they mean "recently touched"
+rather than "made on" — which is the failure this property exists to repair. The
+report's **Created Dates** section counts notes per tier rather than presenting
+every date as equally well known.
+
+`type: template` notes are never stamped. A template's frontmatter is pinned by
+the wiki template contract and the installed copy is compared byte-for-byte with
+the shipped one, so a stamped template would be refused as owner-modified by
+every later `template-install`.
+
+`missing_required_properties` is the general check that `Required: yes` means
+something for a property `validate_classification` does not hardcode. It runs
+after carry-forward and stamping; a note still missing a required value goes to
+review rather than being filed incomplete.
+
+Recovering the property across a whole vault is
+`scripts/backfill-vault-created.py`, which adds two tiers the filing path does
+not reach for: the pre-migration copies under `.vault-organizer/runs/*/backup/`,
+and the first commit adding a note when the vault is a git repository. It is dry
+run by default and `--min-tier` defaults to excluding `file`.
+
 ## Review Routing
 
 Notes that cannot be confidently classified (model review, validation

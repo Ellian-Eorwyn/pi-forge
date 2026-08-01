@@ -1,0 +1,30 @@
+{
+	"name": "vault-naturalist",
+	"type": "pi-forge-skill",
+	"version": "0.1.0",
+	"description": "Field observations and region-scoped phenology for a vault's natural-history wiki: compile every species card's seasonal windows into a queryable index, report what is expected here this month, and record what was actually seen.",
+	"skill_file": "SKILL.md",
+	"scripts_dir": "scripts",
+	"references_dir": "references",
+	"restart_safe": true,
+	"tools": [
+		{
+			"name": "vault_naturalist",
+			"description": "Compile the Phenology tables on animal, plant, and fungus wiki cards into a JSON index keyed by species, event, month, and region; report what is expected in a given month in the owner's declared home region; and write a single field observation as a schema-valid note linked to its species card. Deterministic throughout: no model is called and nothing is fetched. compile and report never write to a note.",
+			"command": "python3 scripts/vault-naturalist.py",
+			"destructive": false
+		}
+	],
+	"safety": {
+		"destructive_by_default": false,
+		"requires_review_for_filesystem_changes": true,
+		"preserve_provenance_when_applicable": true,
+		"never_deletes_notes": true,
+		"never_modifies_existing_notes": true,
+		"never_overwrites_an_existing_observation": true,
+		"never_writes_the_schema_note": true,
+		"marks_generated_notes_as_generated": true,
+		"never_records_an_observation_it_did_not_receive": true,
+		"calls_no_model_and_fetches_nothing": true
+	}
+}

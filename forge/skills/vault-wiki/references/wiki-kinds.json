@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-07-29",
-  "comment": "Per-kind section specification for wiki entity notes. This file decides which headings a generator owns; the paired template in references/templates decides what a note looks like. doctor checks the two agree. 'guidance' is sent to the drafting model verbatim, so it is prompt text as much as configuration. Length budgets are first guesses and expected to be retuned once real runs land.",
+  "updatedAt": "2026-08-01",
+  "comment": "Per-kind section specification for wiki entity notes. This file decides which headings a generator owns; the paired template in references/templates decides what a note looks like. doctor checks the two agree. 'guidance' is sent to the drafting model verbatim, so it is prompt text as much as configuration. Length budgets are first guesses and expected to be retuned once real runs land. The three species kinds carry a 'table' fill section, Phenology, whose rows are region-scoped: timing varies by latitude and elevation, so a window without a region is not a fact about anywhere. forge/lib/vault_phenology.py compiles those tables into an index the naturalist dashboard reads, and references/phenology-events.json is the controlled event vocabulary the columns refer to.",
   "kinds": {
     "concept": {
       "max_managed_chars": 2000,
@@ -469,6 +469,478 @@
           "max_chars": 300,
           "optional": true,
           "guidance": "One or two lines on what changed as a result."
+        },
+        {
+          "id": "sources",
+          "heading": "Sources",
+          "placeholder": "sources",
+          "fill": "links",
+          "guidance": "Deterministic."
+        },
+        {
+          "id": "notes",
+          "heading": "Notes",
+          "owner": true,
+          "guidance": "Owner-authored."
+        },
+        {
+          "id": "_footnotes",
+          "placeholder": "footnotes",
+          "fill": "footnotes",
+          "guidance": "Deterministic."
+        }
+      ]
+    },
+    "animal": {
+      "max_managed_chars": 2600,
+      "lead_guidance": "One or two sentences: what the animal is, the family it belongs to, its range, and its size. Give the scientific name once, in italics, if the note title does not already carry it.",
+      "sections": [
+        {
+          "id": "_lead",
+          "placeholder": "summary",
+          "fill": "lead",
+          "max_chars": 400,
+          "guidance": "What it is, where it lives, and how big it is. A reader should be able to picture it from this line alone."
+        },
+        {
+          "id": "identification",
+          "heading": "Identification",
+          "aliases": [
+            "Field Marks",
+            "Appearance",
+            "Description"
+          ],
+          "placeholder": "identification",
+          "fill": "bullets",
+          "max_bullets": 5,
+          "max_chars": 170,
+          "guidance": "Three to five bullets naming what distinguishes this animal in the field: size, markings, silhouette, call, gait. Prefer a feature a person can check at a distance over one that needs the animal in hand."
+        },
+        {
+          "id": "habitat",
+          "heading": "Habitat & Range",
+          "aliases": [
+            "Habitat",
+            "Range",
+            "Distribution"
+          ],
+          "placeholder": "habitat",
+          "fill": "prose",
+          "max_chars": 320,
+          "guidance": "One or two lines: the habitat types it uses and the extent of its range. Name the continent or region rather than assuming the reader's."
+        },
+        {
+          "id": "diet",
+          "heading": "Diet",
+          "aliases": [
+            "Feeding",
+            "Food"
+          ],
+          "placeholder": "diet",
+          "fill": "bullets",
+          "max_bullets": 5,
+          "max_chars": 140,
+          "guidance": "What it actually eats, and how that shifts across the year where the sources say so. Seasonal diet is what makes an animal findable."
+        },
+        {
+          "id": "behavior",
+          "heading": "Behavior",
+          "aliases": [
+            "Habits",
+            "Behaviour"
+          ],
+          "placeholder": "behavior",
+          "fill": "bullets",
+          "max_bullets": 5,
+          "max_chars": 170,
+          "guidance": "Three to five bullets on how it lives: activity period, sociality, territory, denning or roosting, response to people. Describe what it does, do not instruct the reader."
+        },
+        {
+          "id": "life_cycle",
+          "heading": "Life Cycle",
+          "aliases": [
+            "Reproduction",
+            "Breeding",
+            "Life History"
+          ],
+          "placeholder": "life_cycle",
+          "fill": "bullets",
+          "max_bullets": 5,
+          "max_chars": 170,
+          "guidance": "Breeding system, gestation or incubation, litter or clutch size, how long young stay dependent, and typical lifespan. Durations belong here; the calendar months they fall in belong in Phenology."
+        },
+        {
+          "id": "sign",
+          "heading": "Tracks & Sign",
+          "aliases": [
+            "Sign",
+            "Field Sign",
+            "Tracks"
+          ],
+          "placeholder": "sign",
+          "fill": "bullets",
+          "max_bullets": 4,
+          "max_chars": 150,
+          "optional": true,
+          "guidance": "What it leaves behind: track shape and size, scat, scratchings, nests, browse. Omit rather than guessing; a wrong track description sends someone after the wrong animal."
+        },
+        {
+          "id": "phenology",
+          "heading": "Phenology",
+          "aliases": [
+            "Seasonality",
+            "Seasonal Cycle",
+            "Timing"
+          ],
+          "placeholder": "phenology",
+          "fill": "table",
+          "columns": [
+            {
+              "id": "event",
+              "heading": "Event",
+              "guidance": "One of the events named in phenology-events.json for this kind. Nothing else.",
+              "values": [
+                "present",
+                "arrival",
+                "departure",
+                "migration",
+                "mating",
+                "birth",
+                "fledging",
+                "dispersal",
+                "moult",
+                "torpor",
+                "hibernation"
+              ]
+            },
+            {
+              "id": "window",
+              "heading": "Window",
+              "guidance": "A month (Feb), a month range (Jan-Mar), or year-round. Never a specific date: a window is a pattern, not an appointment."
+            },
+            {
+              "id": "region",
+              "heading": "Region",
+              "guidance": "A [[wikilink]] to the region the window holds in, or global when the source states it range-wide. Never generalize one region's timing to another."
+            },
+            {
+              "id": "basis",
+              "heading": "Basis",
+              "guidance": "sourced when a citation states it, inferred when you are reasoning from a stated fact. Never write observed: that value is reserved for the owner's own records.",
+              "values": [
+                "sourced",
+                "inferred"
+              ]
+            }
+          ],
+          "max_bullets": 12,
+          "optional": true,
+          "guidance": "One row per event the sources actually give timing for, in calendar order. Timing varies by latitude and elevation, so a row without a region is worth less than no row at all: name the region the source describes, and omit the event entirely rather than transplanting a window from somewhere else. Prefer a coarse window you can support over a precise one you cannot. For an animal the events are present, arrival, departure, mating, birth, fledging, dispersal, moult, torpor, hibernation, and migration."
+        },
+        {
+          "id": "conservation",
+          "heading": "Conservation",
+          "aliases": [
+            "Status",
+            "Threats"
+          ],
+          "placeholder": "conservation",
+          "fill": "prose",
+          "max_chars": 260,
+          "optional": true,
+          "guidance": "One line: the status a body such as the IUCN assigns, and the main pressure on it. Name the assessing body; a status without one is unciteable."
+        },
+        {
+          "id": "sources",
+          "heading": "Sources",
+          "placeholder": "sources",
+          "fill": "links",
+          "guidance": "Deterministic."
+        },
+        {
+          "id": "notes",
+          "heading": "Notes",
+          "owner": true,
+          "guidance": "Owner-authored."
+        },
+        {
+          "id": "_footnotes",
+          "placeholder": "footnotes",
+          "fill": "footnotes",
+          "guidance": "Deterministic."
+        }
+      ]
+    },
+    "plant": {
+      "max_managed_chars": 2600,
+      "lead_guidance": "One or two sentences: what the plant is, its family, its growth form, and its range. Give the scientific name once, in italics, if the note title does not already carry it.",
+      "sections": [
+        {
+          "id": "_lead",
+          "placeholder": "summary",
+          "fill": "lead",
+          "max_chars": 400,
+          "guidance": "Growth form, family, size at maturity, and where it grows. Say whether it is native to the region it is best known in."
+        },
+        {
+          "id": "identification",
+          "heading": "Identification",
+          "aliases": [
+            "Field Marks",
+            "Appearance",
+            "Description"
+          ],
+          "placeholder": "identification",
+          "fill": "bullets",
+          "max_bullets": 6,
+          "max_chars": 170,
+          "guidance": "Leaf shape and arrangement, flower structure and colour, bark or stem, height, and anything that separates it from its obvious neighbours. Arrangement and margin distinguish more plants than colour does."
+        },
+        {
+          "id": "habitat",
+          "heading": "Habitat & Range",
+          "aliases": [
+            "Habitat",
+            "Range",
+            "Distribution"
+          ],
+          "placeholder": "habitat",
+          "fill": "prose",
+          "max_chars": 320,
+          "guidance": "One or two lines: soil, moisture, light, elevation, and the extent of its range. Say if it is introduced or invasive anywhere the sources name."
+        },
+        {
+          "id": "life_cycle",
+          "heading": "Life Cycle",
+          "aliases": [
+            "Growth",
+            "Reproduction"
+          ],
+          "placeholder": "life_cycle",
+          "fill": "bullets",
+          "max_bullets": 5,
+          "max_chars": 160,
+          "guidance": "Annual, biennial or perennial; how it reproduces and spreads; how long to maturity; whether it is deciduous or evergreen. Durations here, calendar months in Phenology."
+        },
+        {
+          "id": "ecology",
+          "heading": "Ecology",
+          "aliases": [
+            "Ecological Role",
+            "Wildlife Value",
+            "Associations"
+          ],
+          "placeholder": "ecology",
+          "fill": "bullets",
+          "max_bullets": 5,
+          "max_chars": 170,
+          "guidance": "What depends on it: pollinators, the larvae it hosts, the animals that eat its fruit or browse it, what it associates with. This is the section that connects a plant note to the animal notes."
+        },
+        {
+          "id": "phenology",
+          "heading": "Phenology",
+          "aliases": [
+            "Seasonality",
+            "Seasonal Cycle",
+            "Timing"
+          ],
+          "placeholder": "phenology",
+          "fill": "table",
+          "columns": [
+            {
+              "id": "event",
+              "heading": "Event",
+              "guidance": "One of the events named in phenology-events.json for this kind. Nothing else.",
+              "values": [
+                "present",
+                "bud-break",
+                "leaf-out",
+                "flowering",
+                "fruiting",
+                "seed-drop",
+                "senescence",
+                "dormancy"
+              ]
+            },
+            {
+              "id": "window",
+              "heading": "Window",
+              "guidance": "A month (Feb), a month range (Jan-Mar), or year-round. Never a specific date: a window is a pattern, not an appointment."
+            },
+            {
+              "id": "region",
+              "heading": "Region",
+              "guidance": "A [[wikilink]] to the region the window holds in, or global when the source states it range-wide. Never generalize one region's timing to another."
+            },
+            {
+              "id": "basis",
+              "heading": "Basis",
+              "guidance": "sourced when a citation states it, inferred when you are reasoning from a stated fact. Never write observed: that value is reserved for the owner's own records.",
+              "values": [
+                "sourced",
+                "inferred"
+              ]
+            }
+          ],
+          "max_bullets": 12,
+          "optional": true,
+          "guidance": "One row per event the sources actually give timing for, in calendar order. Timing varies by latitude and elevation, so a row without a region is worth less than no row at all: name the region the source describes, and omit the event entirely rather than transplanting a window from somewhere else. Prefer a coarse window you can support over a precise one you cannot. For a plant the events are leaf-out, bud-break, flowering, fruiting, seed-drop, senescence, and dormancy."
+        },
+        {
+          "id": "uses_and_cautions",
+          "heading": "Uses & Cautions",
+          "owner": true,
+          "guidance": "Owner-authored. Edibility, toxicity, and medicinal use are judgments a person makes with a field guide in hand and their own risk to carry, so the pipeline never writes or reads this section."
+        },
+        {
+          "id": "conservation",
+          "heading": "Conservation",
+          "aliases": [
+            "Status",
+            "Threats"
+          ],
+          "placeholder": "conservation",
+          "fill": "prose",
+          "max_chars": 260,
+          "optional": true,
+          "guidance": "One line: assessed status and the main pressure on it, naming the assessing body."
+        },
+        {
+          "id": "sources",
+          "heading": "Sources",
+          "placeholder": "sources",
+          "fill": "links",
+          "guidance": "Deterministic."
+        },
+        {
+          "id": "notes",
+          "heading": "Notes",
+          "owner": true,
+          "guidance": "Owner-authored."
+        },
+        {
+          "id": "_footnotes",
+          "placeholder": "footnotes",
+          "fill": "footnotes",
+          "guidance": "Deterministic."
+        }
+      ]
+    },
+    "fungus": {
+      "max_managed_chars": 2600,
+      "lead_guidance": "One or two sentences: what the fungus is, its family, its fruiting body, and its habit. Give the scientific name once, in italics, if the note title does not already carry it.",
+      "sections": [
+        {
+          "id": "_lead",
+          "placeholder": "summary",
+          "fill": "lead",
+          "max_chars": 400,
+          "guidance": "What the fruiting body looks like, what it grows on, and its ecological habit. Never describe a fungus as edible in the lead."
+        },
+        {
+          "id": "identification",
+          "heading": "Identification",
+          "aliases": [
+            "Field Marks",
+            "Appearance",
+            "Description",
+            "Macroscopic Features"
+          ],
+          "placeholder": "identification",
+          "fill": "bullets",
+          "max_bullets": 6,
+          "max_chars": 180,
+          "guidance": "Cap shape, colour and surface; gills, pores or teeth and how they attach; stipe including any ring or volva; flesh colour and any bruising reaction; spore print colour; smell. Spore print and attachment separate more species than cap colour does."
+        },
+        {
+          "id": "habitat",
+          "heading": "Habitat & Substrate",
+          "aliases": [
+            "Habitat",
+            "Substrate",
+            "Where It Grows"
+          ],
+          "placeholder": "habitat",
+          "fill": "prose",
+          "max_chars": 320,
+          "guidance": "One or two lines: what it grows on or with, the trees it partners with, and its range. The host tree is often the identification."
+        },
+        {
+          "id": "ecology",
+          "heading": "Ecology",
+          "aliases": [
+            "Ecological Role",
+            "Habit"
+          ],
+          "placeholder": "ecology",
+          "fill": "bullets",
+          "max_bullets": 4,
+          "max_chars": 160,
+          "guidance": "Mycorrhizal, saprotrophic or parasitic, and what that means for where it appears. Name the partner species where the sources do."
+        },
+        {
+          "id": "lookalikes",
+          "heading": "Look-alikes",
+          "aliases": [
+            "Similar Species",
+            "Confusions",
+            "Lookalikes"
+          ],
+          "placeholder": "lookalikes",
+          "fill": "bullets",
+          "max_bullets": 5,
+          "max_chars": 200,
+          "guidance": "Each bullet names one species confused with this one and the single feature that separates them. Say plainly where a look-alike is dangerous. This section is the reason a fungus card exists, so write it even when the sources are thin, and say what the sources do not settle."
+        },
+        {
+          "id": "phenology",
+          "heading": "Phenology",
+          "aliases": [
+            "Seasonality",
+            "Seasonal Cycle",
+            "Timing"
+          ],
+          "placeholder": "phenology",
+          "fill": "table",
+          "columns": [
+            {
+              "id": "event",
+              "heading": "Event",
+              "guidance": "One of the events named in phenology-events.json for this kind. Nothing else.",
+              "values": [
+                "present",
+                "fruiting"
+              ]
+            },
+            {
+              "id": "window",
+              "heading": "Window",
+              "guidance": "A month (Feb), a month range (Jan-Mar), or year-round. Never a specific date: a window is a pattern, not an appointment."
+            },
+            {
+              "id": "region",
+              "heading": "Region",
+              "guidance": "A [[wikilink]] to the region the window holds in, or global when the source states it range-wide. Never generalize one region's timing to another."
+            },
+            {
+              "id": "basis",
+              "heading": "Basis",
+              "guidance": "sourced when a citation states it, inferred when you are reasoning from a stated fact. Never write observed: that value is reserved for the owner's own records.",
+              "values": [
+                "sourced",
+                "inferred"
+              ]
+            }
+          ],
+          "max_bullets": 12,
+          "optional": true,
+          "guidance": "One row per event the sources actually give timing for, in calendar order. Timing varies by latitude and elevation, so a row without a region is worth less than no row at all: name the region the source describes, and omit the event entirely rather than transplanting a window from somewhere else. Prefer a coarse window you can support over a precise one you cannot. For a fungus the event is fruiting, and present where a perennial bracket persists."
+        },
+        {
+          "id": "edibility",
+          "heading": "Edibility & Toxicity",
+          "owner": true,
+          "guidance": "Owner-authored. Whether to eat a mushroom is a judgment with a real cost of being wrong, made from a specimen in hand and not from an encyclopedia paragraph, so the pipeline never writes or reads this section."
         },
         {
           "id": "sources",

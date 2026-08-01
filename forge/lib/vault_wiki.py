@@ -39,10 +39,14 @@ WIKI_KIND_SUBDOMAIN = {
     "term": "terms",
     "work": "works",
     "figure": "figures",
+    "animal": "animals",
+    "plant": "plants",
+    "fungus": "fungi",
 }
-# Seven kinds collapse into four note types: a practice and a term both file as
-# `concept`, and a figure files as `person`. Type therefore cannot identify a
-# kind — resolve it from the subdomain (see ``kind_for_metadata``).
+# Ten kinds collapse into five note types: a practice and a term both file as
+# `concept`, a figure files as `person`, and all three species kinds file as
+# `organism`. Type therefore cannot identify a kind — resolve it from the
+# subdomain (see ``kind_for_metadata``).
 WIKI_KIND_TYPE = {
     "concept": "concept",
     "practice": "concept",
@@ -51,6 +55,9 @@ WIKI_KIND_TYPE = {
     "term": "concept",
     "work": "work",
     "figure": "person",
+    "animal": "organism",
+    "plant": "organism",
+    "fungus": "organism",
 }
 WIKI_TEMPLATE_NAMES = {
     "concept": "Wiki Concept.md",
@@ -60,7 +67,14 @@ WIKI_TEMPLATE_NAMES = {
     "term": "Wiki Term.md",
     "work": "Wiki Work.md",
     "figure": "Wiki Figure.md",
+    "animal": "Wiki Animal.md",
+    "plant": "Wiki Plant.md",
+    "fungus": "Wiki Fungus.md",
 }
+# The kinds whose subject is a living thing. They share the phenology table and
+# the rule that an edibility judgment is the owner's to write, so several checks
+# want to ask "is this a species card" without listing three strings again.
+SPECIES_KINDS = ("animal", "plant", "fungus")
 # The five fields ``import-run`` renders. A template may declare more, but these
 # must stay present so the research-import path keeps working unchanged.
 WIKI_TEMPLATE_FIELDS = ("title", "summary", "evidence", "sources", "provenance")
@@ -79,7 +93,11 @@ TEMPLATE_FRONTMATTER = {
 LEAD_SECTION = "_lead"
 FOOTNOTES_SECTION = "_footnotes"
 PSEUDO_SECTIONS = (LEAD_SECTION, FOOTNOTES_SECTION)
-FILL_MODES = ("lead", "prose", "bullets", "links", "footnotes")
+FILL_MODES = ("lead", "prose", "bullets", "links", "footnotes", "table")
+# Fill modes a model writes. ``links`` and ``footnotes`` are rendered from the
+# note's own properties and from the citations a draft actually used, so asking
+# a model for them would invite it to invent both.
+DRAFTED_FILL_MODES = ("lead", "prose", "bullets", "table")
 
 PLACEHOLDER_RE = re.compile(r"\{\{([^{}\r\n]+)\}\}")
 H1_RE = re.compile(r"^#\s+\S")
@@ -313,6 +331,7 @@ def _validate_kind_spec(kind, raw, path):
         fill = entry.get("fill", "prose")
         if fill not in FILL_MODES:
             raise UserError(f"{path}: {kind} section '{identifier}' has unknown fill '{fill}'")
+        columns = _validate_columns(kind, identifier, entry, fill, path)
         if owner and entry.get("placeholder"):
             raise UserError(f"{path}: {kind} owner section '{identifier}' must not name a placeholder")
         if not owner and not isinstance(entry.get("placeholder"), str):
@@ -337,6 +356,7 @@ def _validate_kind_spec(kind, raw, path):
                 "optional": bool(entry.get("optional")),
                 "max_bullets": entry.get("max_bullets"),
                 "max_chars": entry.get("max_chars"),
+                "columns": columns,
                 "guidance": entry.get("guidance", ""),
             }
         )
@@ -351,6 +371,96 @@ def _validate_kind_spec(kind, raw, path):
         "max_managed_chars": raw.get("max_managed_chars", 1600),
         "lead_guidance": raw.get("lead_guidance", ""),
     }
+
+
+def _validate_columns(kind, identifier, entry, fill, path):
+    """The declared columns of a ``table`` section, or () for every other fill.
+
+    A table is the one managed section whose content is structured rather than
+    prose, and the columns are what make it readable by something other than a
+    person. Declaring them here means the renderer, the drafting prompt, and the
+    compiler that reads the table back all agree on one list.
+    """
+    raw = entry.get("columns")
+    if fill != "table":
+        if raw:
+            raise UserError(f"{path}: {kind} section '{identifier}' declares columns but is not a table")
+        return ()
+    if not isinstance(raw, list) or not raw:
+        raise UserError(f"{path}: {kind} table section '{identifier}' needs a non-empty 'columns' list")
+    columns = []
+    seen = set()
+    for column in raw:
+        if not isinstance(column, dict) or not isinstance(column.get("id"), str):
+            raise UserError(f"{path}: {kind} section '{identifier}' has a column without a string id")
+        column_id = column["id"]
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", column_id):
+            raise UserError(f"{path}: {kind} section '{identifier}' column id must be snake_case: {column_id}")
+        if column_id in seen:
+            raise UserError(f"{path}: {kind} section '{identifier}' declares column '{column_id}' twice")
+        seen.add(column_id)
+        if not isinstance(column.get("heading"), str) or not column["heading"].strip():
+            raise UserError(f"{path}: {kind} section '{identifier}' column '{column_id}' needs a heading")
+        values = column.get("values")
+        if values is not None and (not isinstance(values, list) or not all(isinstance(v, str) for v in values)):
+            raise UserError(f"{path}: {kind} section '{identifier}' column '{column_id}' values must be strings")
+        columns.append(
+            {
+                "id": column_id,
+                "heading": column["heading"].strip(),
+                "values": tuple(values) if values else (),
+                "guidance": column.get("guidance", ""),
+            }
+        )
+    return tuple(columns)
+
+
+def render_table(rows, columns):
+    """A managed table section as Markdown, or "" when there are no rows.
+
+    An empty section is written as nothing rather than as a header with no body:
+    a species with no phenology researched yet should read as a gap, not as a
+    table asserting that it has no seasons.
+    """
+    if not rows:
+        return ""
+    lines = [
+        "| " + " | ".join(column["heading"] for column in columns) + " |",
+        "| " + " | ".join("---" for _ in columns) + " |",
+    ]
+    for row in rows:
+        cells = []
+        for column in columns:
+            value = row.get(column["id"], "") if isinstance(row, dict) else ""
+            # A literal pipe would end the cell early and silently reshape the row.
+            cells.append(re.sub(r"\s+", " ", str(value or "").replace("|", "\\|")).strip())
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
+def parse_table(text, columns):
+    """Read a managed table back into rows, ignoring the header and divider.
+
+    Returns ``(rows, problems)``. A row with the wrong cell count is reported
+    rather than padded, because guessing which column went missing is how a
+    mating window becomes a birth window.
+    """
+    rows, problems = [], []
+    headings = [column["heading"].strip().casefold() for column in columns]
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if all(set(cell) <= {"-", ":"} and cell for cell in cells):
+            continue
+        if [cell.casefold() for cell in cells] == headings:
+            continue
+        if len(cells) != len(columns):
+            problems.append(f"row has {len(cells)} cells, expected {len(columns)}: {stripped}")
+            continue
+        rows.append({column["id"]: cell.replace("\\|", "|") for column, cell in zip(columns, cells)})
+    return rows, problems
 
 
 def section_by_id(spec, identifier):
@@ -428,6 +538,23 @@ def parse_sections(body):
         current["content"].append(line)
     blocks.append(current)
     return {"blocks": blocks, "footnotes": footnotes, "ends_with_newline": body.endswith(("\n", "\r"))}
+
+
+def find_section_text(body, heading, aliases=()):
+    """The content of one level-two section, or None when the note has no such
+    heading.
+
+    Matching is on normalized heading text, the same rule the merge uses, so a
+    reader and a writer of the same section always agree on which block it is.
+    None and "" mean different things to a caller: a note with no Phenology
+    heading has not been researched, where one with an empty heading has been
+    and yielded nothing.
+    """
+    wanted = {normalize_heading(heading)} | {normalize_heading(alias) for alias in aliases}
+    for block in parse_sections(body)["blocks"]:
+        if block["heading"] is not None and normalize_heading(block["heading"]) in wanted:
+            return "".join(block["content"])
+    return None
 
 
 def assemble(parsed):

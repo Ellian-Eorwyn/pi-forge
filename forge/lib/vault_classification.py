@@ -7,9 +7,9 @@ import run_state
 from vault_schema import (
     UserError,
     has_control_character,
-    human_owned_properties,
     normalize_project_value,
     valid_wikilink,
+    withheld_properties,
 )
 
 
@@ -42,10 +42,11 @@ SYSTEM_INSTRUCTIONS = (
 def classifier_property_order(schema):
     """The approved properties the classifier is responsible for.
 
-    Human-owned properties are withheld: a property in the prompt is a property
-    the model fills in, and these record facts only the author knows.
+    Human-owned and derived properties are withheld: a property in the prompt is
+    a property the model fills in, and these record facts only the author knows
+    or only code can establish.
     """
-    withheld = set(human_owned_properties(schema))
+    withheld = set(withheld_properties(schema))
     return [key for key in schema["property_order"] if key not in withheld]
 
 
@@ -216,14 +217,14 @@ def validate_classification(response, schema):
     extra_keys = sorted(set(metadata) - set(schema["property_order"]))
     if extra_keys:
         errors.append(f"metadata contains unapproved keys: {', '.join(extra_keys)}")
-    # A human-owned key here is most likely the model echoing the advisory
+    # A withheld key here is most likely the model echoing the advisory
     # frontmatter it was shown. Dropping it costs nothing, where erroring would
     # spend a repair round-trip and could strand the note in review over a value
     # that is discarded either way. carry_forward_provenance restores the real one.
-    withheld = [key for key in human_owned_properties(schema) if key in metadata]
+    withheld = [key for key in withheld_properties(schema) if key in metadata]
     if withheld:
         metadata = {key: value for key, value in metadata.items() if key not in set(withheld)}
-        warnings.append(f"ignored classifier values for human-owned properties: {', '.join(sorted(withheld))}")
+        warnings.append(f"ignored classifier values for withheld properties: {', '.join(sorted(withheld))}")
     normalized, normalize_warnings = normalize_metadata(metadata, schema)
     warnings.extend(normalize_warnings)
     for key in ("type", "status", "domain"):
