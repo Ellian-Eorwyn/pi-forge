@@ -2413,7 +2413,7 @@ def atomic_write_bytes(path, data):
         raise
 
 
-def archive_fingerprints(roots, include_mtime, warnings):
+def archive_fingerprints(roots, args, warnings):
     """Read every Markdown file under the archive roots, once.
 
     Nothing is assumed of an archive: no schema, no folder meaning, no
@@ -2443,7 +2443,13 @@ def archive_fingerprints(roots, include_mtime, warnings):
                 relative = f"{label}/{resolved.relative_to(base).as_posix()}"
                 try:
                     entries.append(
-                        vault_dates.note_fingerprint(resolved, relative, resolved.read_bytes(), include_mtime)
+                        vault_dates.note_fingerprint(
+                            resolved,
+                            relative,
+                            resolved.read_bytes(),
+                            include_file_times=args.include_file_times,
+                            trust_birthtime=args.trust_birthtime,
+                        )
                     )
                 except (OSError, UnicodeDecodeError) as error:
                     warnings.append(f"archive file skipped: {relative} ({error})")
@@ -2486,7 +2492,47 @@ def near_match_archive(args, pending, archive, warnings):
     return found
 
 
-def render_date_report(rows, skipped, counts, property_key, dry_run):
+def render_calibration(calibration, trusted):
+    """The birthtime accuracy measurement, in the terms the decision needs."""
+    if not calibration["with_birthtime"]:
+        return ["## Finder creation dates", "", "No file carries one; this filesystem does not record them.", ""]
+    lines = [
+        "## Finder creation dates",
+        "",
+        f"- Archive files carrying one: {calibration['with_birthtime']} of {calibration['files']}",
+        f"- Of those, also stating a date in their name or frontmatter: {calibration['labelled']}",
+    ]
+    if calibration["labelled"]:
+        lines += [
+            f"- Creation date matches that stated date exactly: {calibration['same_day']}"
+            f" ({calibration['agreement']:.0%})",
+            f"- Within a day of it: {calibration['within_a_day']} ({calibration['loose_agreement']:.0%})",
+        ]
+    if calibration["largest_cluster"]:
+        day, count = calibration["largest_cluster"]
+        lines.append(f"- Largest single-day cluster: {count} files created {day} ({calibration['clustered']:.0%})")
+    lines += [
+        "",
+        "The files that state a date *and* carry a creation date are the labelled",
+        "examples: how often those two agree is roughly how often the creation date",
+        "is right on the files that state nothing. A large single-day cluster is the",
+        "opposite signal — that day is when the archive was copied, and every file in",
+        "it lost its original date.",
+        "",
+    ]
+    if trusted:
+        lines += ["Creation dates were **trusted** for this run: they count as explicit evidence.", ""]
+    else:
+        lines += [
+            "Creation dates are currently **weak** evidence and are never written",
+            "unattended. If the agreement above is high and the clustering low, re-run",
+            "with `--trust-birthtime` to promote them.",
+            "",
+        ]
+    return lines
+
+
+def render_date_report(rows, skipped, counts, property_key, dry_run, calibration=None, trusted=False):
     lines = [
         f"# Date backfill report ({property_key})",
         "",
@@ -2505,6 +2551,8 @@ def render_date_report(rows, skipped, counts, property_key, dry_run):
     ]
     if dry_run:
         lines += ["This was a dry run. Nothing has been written.", ""]
+    if calibration is not None:
+        lines += render_calibration(calibration, trusted)
 
     groups = (
         ("Ready to apply", "high", "Exact match on an explicitly dated file."),
@@ -2569,7 +2617,7 @@ def dates(args):
         )
 
     archive_roots = [Path(raw).expanduser().resolve() for raw in args.archive]
-    archive = archive_fingerprints(archive_roots, args.include_mtime, warnings)
+    archive = archive_fingerprints(archive_roots, args, warnings)
 
     notes = []
     for path in selected_notes(vault, schema_path, "vault", args.limit):
@@ -2578,7 +2626,15 @@ def dates(args):
             continue
         relative = relative_path(vault, path)
         try:
-            notes.append(vault_dates.note_fingerprint(path, relative, path.read_bytes(), args.include_mtime))
+            notes.append(
+                vault_dates.note_fingerprint(
+                    path,
+                    relative,
+                    path.read_bytes(),
+                    include_file_times=args.include_file_times,
+                    trust_birthtime=args.trust_birthtime,
+                )
+            )
         except (OSError, UnicodeDecodeError) as error:
             warnings.append(f"note skipped: {relative} ({error})")
 
@@ -2654,8 +2710,9 @@ def dates(args):
             offered = ", ".join(sorted(by_id)) or "none"
             raise UserError(f"unknown id {value}; this run proposes: {offered}")
 
+    calibration = vault_dates.calibrate_birthtime(archive or notes)
     run_dir = unique_run_directory(vault)
-    report = render_date_report(rows, skipped, counts, property_key, not args.apply)
+    report = render_date_report(rows, skipped, counts, property_key, not args.apply, calibration, args.trust_birthtime)
     # Written before any edit, so the evidence behind every date outlives the run.
     (run_dir / "date_report.md").write_text(report, encoding="utf-8")
     (run_dir / "date_report.json").write_text(
@@ -2663,6 +2720,7 @@ def dates(args):
             {
                 "property": property_key,
                 "counts": counts,
+                "birthtimeCalibration": calibration,
                 "proposals": [{key: row[key] for key in row if key != "path"} for row in rows],
                 "noEvidence": skipped,
             },
@@ -2718,6 +2776,8 @@ def dates(args):
             "runDirectory": str(run_dir),
             "dryRun": not args.apply,
             "counts": counts,
+            "birthtimeCalibration": calibration,
+            "trustBirthtime": args.trust_birthtime,
             "proposed": len(rows),
             "wouldApply": len(targets),
             "applied": applied,
@@ -3250,9 +3310,14 @@ def parse_args(argv):
     )
     parser.add_argument("--date-property", default="date", help="dates mode: the scalar property to fill (default: date)")
     parser.add_argument(
-        "--include-mtime",
+        "--include-file-times",
         action="store_true",
-        help="dates mode: offer filesystem timestamps as weak evidence, never auto-applied",
+        help="dates mode: offer Finder creation and modification times as weak evidence, never auto-applied",
+    )
+    parser.add_argument(
+        "--trust-birthtime",
+        action="store_true",
+        help="dates mode: treat Finder's creation date as explicit evidence; read the calibration first",
     )
     parser.add_argument(
         "--near-match",
@@ -3305,8 +3370,11 @@ def parse_args(argv):
     args.schema = args.schema or os.environ.get("VAULT_ORGANIZER_SCHEMA") or None
     if args.fix_schema and args.mode != "drift":
         raise UserError("--fix-schema belongs to drift mode")
-    if args.mode != "dates" and (args.archive or args.self_only or args.include_mtime or args.near_match or args.ids):
-        raise UserError("--archive, --self-only, --include-mtime, --near-match, and --ids belong to dates mode")
+    dates_flags = (args.archive, args.self_only, args.include_file_times, args.trust_birthtime, args.near_match, args.ids)
+    if args.mode != "dates" and any(dates_flags):
+        raise UserError(
+            "--archive, --self-only, --include-file-times, --trust-birthtime, --near-match, and --ids belong to dates mode"
+        )
     if args.mode in {"attachments", "drift"}:
         # Deterministic filesystem work: no classification, so no model or
         # embeddings service is resolved and these run with every endpoint down.

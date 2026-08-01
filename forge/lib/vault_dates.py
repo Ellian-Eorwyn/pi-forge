@@ -277,25 +277,95 @@ def body_evidence(body):
     return candidates
 
 
-def mtime_evidence(path):
-    """The filesystem's timestamp, which is ``weak`` and stays that way.
+def to_date(stamp):
+    """A POSIX timestamp as a local date, or None when it is not a plausible one."""
+    if not stamp:
+        return None
+    try:
+        value = datetime.datetime.fromtimestamp(stamp).date()
+    except (OSError, OverflowError, ValueError):
+        return None
+    return value if MIN_YEAR <= value.year <= MAX_YEAR else None
 
-    Copying a folder rewrites mtime, so on a reorganized archive this records
-    the day of the reorganization. It is here to break ties in a report, never
-    to be written.
+
+def file_times(path):
+    """``(birthtime, mtime)`` as dates, either of which may be None.
+
+    ``st_birthtime`` is what Finder shows as Date Created. macOS records it and
+    Linux does not, so the absence of the attribute is normal rather than an
+    error.
     """
     try:
         stat = Path(path).stat()
     except OSError:
-        return []
-    stamp = min(stat.st_mtime, getattr(stat, "st_birthtime", stat.st_mtime))
-    value = datetime.datetime.fromtimestamp(stamp).date()
-    if not (MIN_YEAR <= value.year <= MAX_YEAR):
-        return []
-    return [candidate(value, WEAK, "filesystem mtime", value.isoformat())]
+        return None, None
+    return to_date(getattr(stat, "st_birthtime", None)), to_date(stat.st_mtime)
 
 
-def extract_dates(path, relative, frontmatter_text, body, include_mtime=False):
+def filesystem_evidence(birthtime, mtime, trust_birthtime=False):
+    """Dates the filesystem carries, which are only as good as what made the copy.
+
+    A Finder *move* preserves birthtime; a *copy* resets it to the day of the
+    copy, and most archive tools reset it too. Neither outcome is guessable from
+    the file, so both stay ``weak`` — unless the caller has read the calibration
+    below and decided otherwise, which is what ``trust_birthtime`` records.
+    """
+    candidates = []
+    if birthtime is not None:
+        tier = EXPLICIT if trust_birthtime else WEAK
+        candidates.append(candidate(birthtime, tier, "finder created", birthtime.isoformat()))
+    if mtime is not None:
+        candidates.append(candidate(mtime, WEAK, "filesystem modified", mtime.isoformat()))
+    return candidates
+
+
+def calibrate_birthtime(entries):
+    """Measure birthtime against the files that also state a date in their text.
+
+    Whether an archive's creation dates survived is not a thing to assume in
+    either direction — it depends on how the archive was made, and the answer
+    is in the files. Every file carrying *both* an explicit text date and a
+    birthtime is a labelled example, so the agreement rate across them
+    estimates how often birthtime is right on the files that state nothing.
+
+    ``clustered`` is the other half of the question: if a large share of the
+    archive shares one birthtime, that day is when the copy happened, and the
+    agreement rate is being measured on survivors of a different history.
+    """
+    labelled = same_day = within_a_day = 0
+    days = {}
+    with_birthtime = 0
+    for entry in entries:
+        birth = entry.get("birthtime")
+        if not birth:
+            continue
+        with_birthtime += 1
+        days[birth] = days.get(birth, 0) + 1
+        stated = [item["date"] for item in entry["candidates"] if item["tier"] == EXPLICIT and item["source"] != "finder created"]
+        if not stated:
+            continue
+        labelled += 1
+        best = min(abs((datetime.date.fromisoformat(value) - datetime.date.fromisoformat(birth)).days) for value in stated)
+        if best == 0:
+            same_day += 1
+        if best <= 1:
+            within_a_day += 1
+    clusters = sorted(days.items(), key=lambda item: (-item[1], item[0]))[:5]
+    return {
+        "files": len(entries),
+        "with_birthtime": with_birthtime,
+        "labelled": labelled,
+        "same_day": same_day,
+        "within_a_day": within_a_day,
+        "agreement": round(same_day / labelled, 4) if labelled else None,
+        "loose_agreement": round(within_a_day / labelled, 4) if labelled else None,
+        "largest_cluster": clusters[0] if clusters else None,
+        "clustered": round(clusters[0][1] / with_birthtime, 4) if clusters and with_birthtime else None,
+        "top_days": [{"date": day, "files": count} for day, count in clusters],
+    }
+
+
+def extract_dates(path, relative, frontmatter_text, body, times=None, include_file_times=False, trust_birthtime=False):
     """Every date candidate a single file offers, best evidence first.
 
     Duplicates on (date, tier) collapse to the first source that found them, so
@@ -306,8 +376,11 @@ def extract_dates(path, relative, frontmatter_text, body, include_mtime=False):
     candidates.extend(filename_evidence(path))
     candidates.extend(path_evidence(relative))
     candidates.extend(body_evidence(body))
-    if include_mtime:
-        candidates.extend(mtime_evidence(path))
+    if include_file_times or trust_birthtime:
+        birthtime, mtime = times if times is not None else file_times(path)
+        candidates.extend(
+            filesystem_evidence(birthtime, mtime if include_file_times else None, trust_birthtime=trust_birthtime)
+        )
     seen = set()
     unique = []
     for entry in candidates:
@@ -341,13 +414,18 @@ def match_stem(name):
     return stem
 
 
-def note_fingerprint(path, relative, data, include_mtime=False):
+def note_fingerprint(path, relative, data, include_file_times=False, trust_birthtime=False):
     """Everything the matcher and the extractor need from one file, read once."""
     split = split_frontmatter(data)
     body = split["body"]
     normalized = normalize_body_for_hash(body)
     title = note_title(Path(path), body)
+    # Always recorded, even when it is not evidence: calibration needs the
+    # birthtime of every file, including the ones that also state a date.
+    birthtime, mtime = file_times(path)
     return {
+        "birthtime": birthtime.isoformat() if birthtime else "",
+        "mtime": mtime.isoformat() if mtime else "",
         "path": str(path),
         "relative": relative,
         "malformed": split["malformed"],
@@ -359,7 +437,15 @@ def note_fingerprint(path, relative, data, include_mtime=False):
         "normalized": normalized,
         "title": title.casefold().strip(),
         "stem": match_stem(path),
-        "candidates": extract_dates(path, relative, split["frontmatter_text"], body, include_mtime),
+        "candidates": extract_dates(
+            path,
+            relative,
+            split["frontmatter_text"],
+            body,
+            times=(birthtime, mtime),
+            include_file_times=include_file_times,
+            trust_birthtime=trust_birthtime,
+        ),
     }
 
 

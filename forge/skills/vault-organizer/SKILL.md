@@ -169,13 +169,39 @@ python3 <skill-directory>/scripts/vault-organizer.py dates --vault <vault> --arc
 ```
 
 **Relay the report's counts and hold the reviewable ones for the user. Never
-pass an id they have not seen and named.** Three things are worth telling them
+pass an id they have not seen and named.** Two things are worth telling them
 explicitly: how many notes still have no evidence anywhere and need a date
-typed by hand; that `type: source` and `type: wiki` notes are held back even on
-perfect evidence, because a source's subject date is the work's and not the day
-the note was made; and that `--include-mtime` exists but that a copied folder
-usually carries the date of the copy, which is why filesystem times are never
-written unattended.
+typed by hand, and that `type: source` and `type: wiki` notes are held back even
+on perfect evidence, because a source's subject date is the work's and not the
+day the note was made.
+
+### Finder creation dates
+
+macOS records a creation time (`st_birthtime`) that Finder shows as Date
+Created, and on an archive it is often the best evidence there is. It is also
+often worthless: a Finder *move* preserves it, but a *copy* resets it to the day
+of the copy, and most archive tools reset it too. Which happened is not
+guessable from the file, so the report measures it instead of assuming.
+
+Every run prints a `## Finder creation dates` section. Files carrying both a
+creation date *and* a date stated in their name or frontmatter are labelled
+examples: how often those two agree estimates how often the creation date is
+right on the files that state nothing. The largest single-day cluster is the
+counter-signal — a big one is the day the archive was copied, and every file in
+it lost its original date.
+
+Creation dates start as `weak` evidence, which is never written unattended. When
+the calibration justifies it, promote them:
+
+```bash
+python3 <skill-directory>/scripts/vault-organizer.py dates --vault <vault> --archive <folder> --trust-birthtime
+```
+
+That makes a creation date count as explicit evidence, so an exact match on one
+becomes auto-appliable. **Read the calibration to the user and let them make
+that call.** `--include-file-times` adds both creation and modification times as
+`weak` evidence for the report without promoting anything; a modification time
+is never eligible for promotion, since nothing makes it a creation date.
 
 Guarantees: dry run is the default, the report is written before any edit, an
 existing value is never overwritten, each note is backed up under the run

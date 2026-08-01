@@ -197,7 +197,7 @@ naming the proposal's id.
 | --- | --- |
 | `explicit` | A machine wrote it somewhere structural: a `created`/`date-created`/`createdAt`/`ctime` frontmatter key, a filename date, an Obsidian unique-note id, or a `YYYY/MM/DD.md` daily-note path |
 | `stated` | A person typed it under a label in the first 20 lines, or linked a daily note there |
-| `weak` | A bare date somewhere in the body, or a filesystem timestamp under `--include-mtime` |
+| `weak` | A bare date somewhere in the body, or a filesystem timestamp under `--include-file-times` |
 
 | Match | Rule |
 | --- | --- |
@@ -215,6 +215,25 @@ Two demotions from `high` to `medium`. A `type: source` or `type: wiki` note,
 because its subject date is the work's rather than the day the note was made.
 And a file whose own filename and frontmatter give different explicit dates,
 which means one of them is not describing that file.
+
+### Calibrating Finder creation dates
+
+`st_birthtime` is what Finder shows as Date Created. Whether an archive's copies
+still carry a real one depends entirely on how the archive was made — a Finder
+move preserves it, a copy resets it — and that is not guessable from the file,
+so `calibrate_birthtime` measures it rather than assuming either way.
+
+Files carrying both a creation date and an `explicit` date from their name or
+frontmatter are labelled examples. The share of those where the two agree
+estimates the accuracy of the creation date on the files that state nothing.
+Reported alongside it is the largest single-day cluster: when a big share of the
+archive was created on one day, that day is the copy, and the agreement rate is
+being measured on the survivors of a different history.
+
+The measurement is always computed and always reported. `--trust-birthtime`
+acts on it by promoting a creation date from `weak` to `explicit`, which is what
+makes it auto-appliable. A modification time is never promotable — nothing makes
+it a creation date — so `--include-file-times` only ever adds `weak` evidence.
 
 ### Choosing between candidates
 

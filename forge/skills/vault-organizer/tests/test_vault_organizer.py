@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import datetime
 import hashlib
 import importlib.util
 import json
@@ -1748,13 +1749,62 @@ class DateEvidenceTests(unittest.TestCase):
         found = self.dates.body_evidence("# T\n\nwritten on [[2016-07-08]]\n")
         self.assertEqual([(entry["tier"], entry["date"]) for entry in found], [("stated", "2016-07-08")])
 
-    def test_filesystem_time_never_leaves_the_weak_tier(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "note.md"
-            path.write_text("# Note\n", encoding="utf-8")
-            found = self.dates.mtime_evidence(path)
-        self.assertEqual([entry["tier"] for entry in found], ["weak"])
+    def test_filesystem_times_are_weak_until_they_are_calibrated(self):
+        day = datetime.date(2019, 3, 4)
+        found = self.dates.filesystem_evidence(day, day)
+        self.assertEqual([(entry["tier"], entry["source"]) for entry in found],
+                         [("weak", "finder created"), ("weak", "filesystem modified")])
         self.assertEqual(self.dates.confidence(self.dates.IDENTICAL, "weak"), "low")
+
+        # Trusting it is a decision the caller records, and only birthtime is
+        # ever eligible: nothing makes a modification time a creation date.
+        trusted = self.dates.filesystem_evidence(day, day, trust_birthtime=True)
+        self.assertEqual([(entry["tier"], entry["source"]) for entry in trusted],
+                         [("explicit", "finder created"), ("weak", "filesystem modified")])
+        self.assertEqual(self.dates.confidence(self.dates.IDENTICAL, "explicit"), "high")
+
+    def test_supplied_file_times_reach_the_tier_the_flags_ask_for(self):
+        # The end-to-end path only runs on a filesystem that records a creation
+        # time, so the wiring from flags to tiers is proven here instead.
+        times = (datetime.date(2019, 3, 4), datetime.date(2024, 8, 1))
+        plain = self.dates.extract_dates("Note.md", "Note.md", "", "# Note\n", times=times)
+        self.assertEqual(plain, [], "no filesystem evidence unless it is asked for")
+
+        weak = self.dates.extract_dates("Note.md", "Note.md", "", "# Note\n", times=times, include_file_times=True)
+        self.assertEqual(
+            [(entry["tier"], entry["source"], entry["date"]) for entry in weak],
+            [("weak", "finder created", "2019-03-04"), ("weak", "filesystem modified", "2024-08-01")],
+        )
+
+        trusted = self.dates.extract_dates("Note.md", "Note.md", "", "# Note\n", times=times, trust_birthtime=True)
+        self.assertEqual(
+            [(entry["tier"], entry["source"], entry["date"]) for entry in trusted],
+            [("explicit", "finder created", "2019-03-04")],
+            "trusting the creation date does not drag the modification time along",
+        )
+
+    def test_calibration_measures_birthtime_against_files_that_state_a_date(self):
+        def entry(birthtime, stated):
+            candidates = []
+            if stated:
+                candidates.append(self.dates.candidate(datetime.date.fromisoformat(stated), "explicit", "filename", stated))
+            return {"birthtime": birthtime, "candidates": candidates}
+
+        report = self.dates.calibrate_birthtime([
+            entry("2019-03-04", "2019-03-04"),   # agrees
+            entry("2020-01-02", "2020-01-03"),   # a day out
+            entry("2021-05-05", "2015-01-01"),   # disagrees
+            entry("2019-03-04", None),           # unlabelled, still counted as a file
+        ])
+        self.assertEqual((report["with_birthtime"], report["labelled"]), (4, 3))
+        self.assertEqual((report["same_day"], report["within_a_day"]), (1, 2))
+        self.assertAlmostEqual(report["agreement"], 1 / 3, places=3)
+        self.assertEqual(report["largest_cluster"], ("2019-03-04", 2))
+
+    def test_calibration_says_nothing_when_no_file_carries_a_creation_date(self):
+        report = self.dates.calibrate_birthtime([{"birthtime": "", "candidates": []}])
+        self.assertEqual(report["with_birthtime"], 0)
+        self.assertIsNone(report["agreement"])
 
     def test_a_stem_matches_across_a_date_prefix_and_a_copy_suffix(self):
         self.assertEqual(self.dates.match_stem("2023-04-11 Standup Notes.md"), "standup notes")
@@ -1971,6 +2021,30 @@ class DateBackfillTests(unittest.TestCase):
         self.assertEqual(payload["data"]["plan"], [])
         report = Path(payload["artifacts"][0]).read_text(encoding="utf-8")
         self.assertIn("These need a date typed by hand.", report)
+
+    def test_a_creation_date_is_weak_until_it_is_trusted(self):
+        # Only birthtime can be promoted, and only on a filesystem that records
+        # one, so this asserts the tiering rather than a specific date.
+        self.note("04 Technology/4.03 Obsidian/Standup.md", self.BODY)
+        copy = self.write(self.archive / "a/Standup.md", self.BODY)
+        if not hasattr(copy.stat(), "st_birthtime"):
+            self.skipTest("this filesystem records no creation time")
+
+        weak = self.plan(self.dates("--include-file-times"))["04 Technology/4.03 Obsidian/Standup.md"]
+        self.assertEqual((weak["evidence"], weak["confidence"]), ("weak", "low"))
+        self.assertEqual(self.dates("--include-file-times", "--apply")["data"]["applied"], [])
+
+        trusted = self.plan(self.dates("--trust-birthtime"))["04 Technology/4.03 Obsidian/Standup.md"]
+        self.assertEqual((trusted["evidence"], trusted["confidence"]), ("explicit", "high"))
+
+    def test_the_report_calibrates_creation_dates_against_stated_ones(self):
+        self.note("04 Technology/4.03 Obsidian/Standup.md", self.BODY)
+        self.write(self.archive / "a/2019-03-04 Standup.md", self.BODY)
+        payload = self.dates()
+        calibration = payload["data"]["birthtimeCalibration"]
+        self.assertEqual(calibration["files"], 1)
+        report = Path(payload["artifacts"][0]).read_text(encoding="utf-8")
+        self.assertIn("## Finder creation dates", report)
 
     def test_an_unknown_id_is_refused_with_the_ids_on_offer(self):
         self.note("04 Technology/4.03 Obsidian/Standup.md", self.BODY)
