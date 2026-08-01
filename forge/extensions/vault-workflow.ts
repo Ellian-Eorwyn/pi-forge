@@ -47,8 +47,110 @@ const CONTEXT_CUSTOM_TYPE = "vault-workflow-context";
 // mutation vectors so "thinking out loud" cannot change the vault.
 const DESTRUCTIVE_BASH = /(^|\s|\|)(rm|rmdir|mv|dd|truncate|tee)\s|--apply\b|\s>>?\s|\bgit\s+(commit|push|mv|rm)\b|\bsed\s+-i\b|\bmkdir\b/;
 
+// The Obsidian CLI needs its own gate: none of its mutating subcommands contain a
+// token the regex above catches ("rename" is not "rm", "move" is not "mv"), and it
+// exits 0 whether it succeeded or failed. It is also the sharpest tool in the room —
+// `rename` rewrites links across the whole vault and `eval` runs arbitrary JS in the
+// app. So this is an allowlist of the query subcommands, not a denylist of the
+// dangerous ones: an Obsidian release that adds a subcommand is blocked by default
+// rather than waved through.
+//
+// Read-only means "does not change the vault or the app". Commands that merely open
+// a file or tab are left out too — planning never needs them, and `daily` creates
+// today's note as a side effect of opening it.
+const OBSIDIAN_READONLY = new Set([
+	"aliases", "backlinks", "base:query", "base:views", "bases", "bookmarks",
+	"commands", "daily:path", "daily:read", "deadends", "diff", "file", "files",
+	"folder", "folders", "help", "history", "history:list", "history:read",
+	"hotkey", "hotkeys", "links", "orphans", "outline", "plugin", "plugins",
+	"plugins:enabled", "properties", "property:read", "random:read", "read",
+	"recents", "search", "search:context", "snippets", "snippets:enabled",
+	"sync:deleted", "sync:history", "sync:read", "sync:status", "tabs", "tag",
+	"tags", "tasks", "template:read", "templates", "themes", "unresolved",
+	"vault", "vaults", "version", "wordcount", "workspace",
+]);
+
+const SHELL_SEPARATORS = new Set([";", "|", "&", "\n", "(", ")"]);
+
+// Split on whitespace and shell separators while respecting quotes, so a quoted
+// parameter value (vault="My Vault") does not leak a bare word that then reads as a
+// subcommand. Separators are emitted as their own tokens to bound each command.
+function shellTokens(command: string): string[] {
+	const tokens: string[] = [];
+	let current = "";
+	let quote = "";
+	const flush = () => {
+		if (current) tokens.push(current);
+		current = "";
+	};
+	for (const char of command) {
+		if (quote) {
+			if (char === quote) quote = "";
+			else current += char;
+			continue;
+		}
+		if (char === '"' || char === "'") {
+			quote = char;
+			continue;
+		}
+		if (SHELL_SEPARATORS.has(char)) {
+			flush();
+			tokens.push(char);
+			continue;
+		}
+		if (/\s/.test(char)) {
+			flush();
+			continue;
+		}
+		current += char;
+	}
+	flush();
+	return tokens;
+}
+
+function isObsidianBinary(token: string): boolean {
+	const name = token.split(/[/\\]/).pop() ?? "";
+	return name === "obsidian" || name === "obsidian.exe";
+}
+
+// Wrappers that pass command position through to the next token, so `sudo obsidian
+// delete` is still recognised as an obsidian invocation.
+const COMMAND_WRAPPERS = new Set(["env", "sudo", "nohup", "time", "command", "xargs", "exec", "nice"]);
+
+/**
+ * Subcommand of every `obsidian` invocation in a command line, in order. A bare
+ * `obsidian` (the interactive TUI, which would hang the bash tool anyway) yields "".
+ *
+ * Only tokens in command position count, so `grep obsidian notes.md` is left alone.
+ */
+function obsidianSubcommands(command: string): string[] {
+	const found: string[] = [];
+	const tokens = shellTokens(command);
+	let commandPosition = true;
+	for (let index = 0; index < tokens.length; index += 1) {
+		const token = tokens[index];
+		const wasCommandPosition = commandPosition;
+		commandPosition =
+			SHELL_SEPARATORS.has(token) ||
+			(wasCommandPosition && (COMMAND_WRAPPERS.has(token) || /^[A-Za-z_]\w*=/.test(token)));
+		if (!wasCommandPosition || !isObsidianBinary(token)) continue;
+		let subcommand = "";
+		for (let scan = index + 1; scan < tokens.length; scan += 1) {
+			const argument = tokens[scan];
+			if (SHELL_SEPARATORS.has(argument)) break;
+			// vault=Loom and friends precede the subcommand; flags follow it.
+			if (/^[A-Za-z][\w:.-]*=/.test(argument) || argument.startsWith("-")) continue;
+			subcommand = argument;
+			break;
+		}
+		found.push(subcommand);
+	}
+	return found;
+}
+
 function looksDestructive(command: string): boolean {
-	return DESTRUCTIVE_BASH.test(command);
+	if (DESTRUCTIVE_BASH.test(command)) return true;
+	return obsidianSubcommands(command).some((subcommand) => !OBSIDIAN_READONLY.has(subcommand));
 }
 
 function planPrompt(): string {

@@ -169,6 +169,62 @@ test("read-only phases block mutating bash but allow reads", async () => {
 	assert.equal(await toolCall({ toolName: "bash", input: { command: "rm -rf notes" } }), undefined, "execute allows it");
 });
 
+test("read-only phases block mutating obsidian subcommands and allow queries", async () => {
+	const h = harness();
+	const toolCall = h.events.get("tool_call");
+	assert.ok(toolCall);
+	await h.run("plan");
+
+	const blocked = async (command: string) => {
+		const result = (await toolCall({ toolName: "bash", input: { command } })) as { block?: boolean } | undefined;
+		return result?.block === true;
+	};
+
+	// None of these contain a token the generic regex catches.
+	for (const command of [
+		"obsidian rename path=Notes/A.md name=B",
+		"obsidian move path=Notes/A.md to=Archive",
+		"obsidian delete path=Notes/A.md",
+		'obsidian property:set path=Notes/A.md name=status value="done"',
+		'obsidian eval code="app.vault.delete(f)"',
+		"obsidian history:restore path=Notes/A.md version=2",
+		"obsidian create name=Scratch",
+		"obsidian command id=editor:toggle-bold",
+		"obsidian daily",
+		"obsidian task toggle",
+		"obsidian plugin:uninstall id=dataview",
+		"/usr/local/bin/obsidian rename path=A.md name=B",
+		"sudo obsidian delete path=A.md",
+		"obsidian backlinks path=A.md | obsidian delete path=B.md",
+		'obsidian vault="My Vault" rename path=A.md name=B',
+		"obsidian", // the interactive TUI
+		"obsidian vault=Loom", // no subcommand at all
+	]) {
+		assert.equal(await blocked(command), true, `blocks: ${command}`);
+	}
+
+	for (const command of [
+		"obsidian backlinks path=Notes/A.md format=json",
+		"obsidian vault=Loom properties format=json counts",
+		'obsidian vault="My Vault" search query="schema" format=json',
+		"obsidian --copy unresolved format=json verbose",
+		"obsidian read path=Notes/A.md | grep type",
+		"/usr/local/bin/obsidian version",
+		"obsidian base:query path=Dash.base format=paths",
+		"grep -rn obsidian .", // "obsidian" as an argument, not a command
+		"ls -la .obsidian/",
+	]) {
+		assert.equal(await blocked(command), false, `allows: ${command}`);
+	}
+
+	await h.run("execute");
+	assert.equal(
+		await toolCall({ toolName: "bash", input: { command: "obsidian rename path=A.md name=B" } }),
+		undefined,
+		"execute allows it",
+	);
+});
+
 test("phase persists and restores on session_start", async () => {
 	const h = harness();
 	await h.run("execute");
