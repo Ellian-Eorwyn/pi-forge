@@ -96,6 +96,13 @@ or `document-ingest` first, or say plainly that the file will sit there untouche
 Route "review my article", "be reviewer 2 on this", or "peer review this draft"
 to `reviewer-2`. It reviews substance only and never modifies the article.
 
+Route "why did that session go badly", "mine this session log for skill
+improvements", or "analyze this agent transcript for pain points" to
+`skill-tuner`. It reads the session log read-only, writes only its own run
+directory under `forge-output/skill-tuner/`, and produces an evidence-cited
+report; the actual skill edits it recommends stay with `skill-builder` and
+`coding`.
+
 Route "I want to start cataloguing X", "what would a proper schema for X look
 like", or "does my wiki match how the field actually works" to `vault-curator`.
 It researches the field's published practice before proposing anything, and adds

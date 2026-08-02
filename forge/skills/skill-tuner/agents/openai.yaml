@@ -1,0 +1,4 @@
+interface:
+  display_name: "Skill Tuner"
+  short_description: "Mine session logs for pain points that improve skills"
+  default_prompt: "Use $skill-tuner to analyze this session log and produce an evidence-cited report on what went wrong and how to make the skills involved more robust."

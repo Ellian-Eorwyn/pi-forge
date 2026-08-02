@@ -24,6 +24,7 @@ reconciles it.
 - `report-output`: Assemble polished deliverables from processed research or document outputs.
 - `reviewer-2`: Peer-review a scholarly article note as a separate review copy in `00 Inbox` - anchored critique callouts on research gaps, evidence, logic, theory, and structure, each carrying its fix and citations resolved against real `web-research` runs, plus a ranked meta review and revision plan; never modifies the article.
 - `skill-builder`: Design, scaffold, validate, and audit portable Agent Skills.
+- `skill-tuner`: Mine a completed pi session log for pain points - error channels, truncation loops, compaction losses, retry loops, and the ambiguity and knowledge reliance visible only in the thinking narrative - into severity-ranked evidence with byte-exact quotes and entry locators, reviewed by the thinking service, then author a token-bounded skill-tuning report whose every claim cites appendix evidence ids; the session log stays read-only.
 - `site-builder`: Build static websites from structured content folders.
 - `spreadsheet-analysis`: Analyze, clean, validate, and enrich tabular datasets.
 - `transcript-cleanup`: Clean raw transcripts into readable, structured documents.

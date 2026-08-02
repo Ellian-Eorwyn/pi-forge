@@ -1,0 +1,24 @@
+{
+	"name": "skill-tuner",
+	"type": "pi-forge-skill",
+	"version": "0.1.0",
+	"description": "Mine a pi session log for pain points and author a bounded, evidence-cited skill-tuning report.",
+	"skill_file": "SKILL.md",
+	"scripts_dir": "scripts",
+	"references_dir": "references",
+	"run_state_contract": "../../RUN_STATE_CONTRACT.md",
+	"restart_safe": true,
+	"tools": [
+		{
+			"name": "skill_tuner",
+			"description": "Initialize, extract, verify, synthesize, report, and validate session pain-point mining runs.",
+			"command": "python3 scripts/skill-tuner.py",
+			"destructive": false
+		}
+	],
+	"safety": {
+		"destructive_by_default": false,
+		"requires_review_for_filesystem_changes": true,
+		"preserve_provenance_when_applicable": true
+	}
+}

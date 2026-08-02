@@ -1,0 +1,14 @@
+{
+	"positive": [
+		"Mine this session log for skill improvements.",
+		"Why did that vault-wiki session go so badly? Analyze the transcript.",
+		"Produce a pain-point report from yesterday's session so we can tune the skills.",
+		"Break down this session log and tell me where the model struggled."
+	],
+	"negative": [
+		"Clean up this meeting transcript in my vault inbox.",
+		"Extract structured evidence from these research papers.",
+		"Review this pull request for bugs.",
+		"Build a new skill for release management."
+	]
+}
