@@ -45,7 +45,6 @@ The `forge` profile provides agents with the following built-in skills:
 - **`transcription`**: Transcribe audio or video, then correct and clean it
 - **`vault-capture`**: Turn a braindump into schema-valid vault notes
 - **`vault-connections`**: Search and connect vault notes, then publish validated research runs through reviewed inbox/wiki proposals
-- **`vault-handoff`**: Send completed text artifacts to pi-vault review
 - **`vault-organizer`**: Classify and organize Obsidian notes from a schema note
 - **`vault-transcripts`**: Classify, clean, and summarize raw transcripts into vault notes
 - **`vault-wiki`**: Expand thin wiki entity notes into cited reference cards

@@ -415,9 +415,9 @@ sentence, list, or table is cut mid-structure.
 ### 7.6 Deliberately not converted
 
 `coding`, `file-conversion`, `organize-folder`, `report-output`, `site-builder`,
-`skill-builder`, `transcription`, `vault-handoff`. These are either deterministic
-tooling with no model call, or single-judgment agent authoring where §3.1's rule
-applies — deliverables stay agent-authored.
+`skill-builder`, `transcription`. These are either deterministic tooling with no
+model call, or single-judgment agent authoring where §3.1's rule applies —
+deliverables stay agent-authored.
 
 The one open candidate is **`transcript-cleanup`'s faithful-cleanup track**. A
 long faithful cleanup *is* per-segment bulk work done in the agent's context, and

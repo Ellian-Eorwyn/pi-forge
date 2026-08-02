@@ -30,7 +30,7 @@ in `forge/SCRIPT_TOOL_CONTRACT.md`.
 
 <!-- forge:skills-list start -->
 
-The live skill inventory currently contains 24 capability workflows, listed
+The live skill inventory currently contains 23 capability workflows, listed
 here with the one-line descriptions maintained in `forge/CAPABILITIES.md`:
 
 - `coding`: Inspect repositories and ship small, reviewable code changes.
@@ -50,7 +50,6 @@ here with the one-line descriptions maintained in `forge/CAPABILITIES.md`:
 - `transcription`: Transcribe audio/video with per-chunk checkpoints, then correct and clean the transcript.
 - `vault-capture`: Turn an owner-authored typed or spoken braindump into schema-valid notes in `00 Inbox`, applying the vault's scoped voice policy, adding vault-first journal reflection, marking output `capture_type: generated`, and keeping the braindump verbatim; for transcription exports use `vault-transcripts` instead.
 - `vault-connections`: Search an Obsidian vault by meaning, propose note links for per-id approval, validate completed literature/meta-literature/deep-research runs, preserve imported report bodies, turn deep research into source-policy `Synthesis` notes with quotes and provenance (`--notes`), and create evidence-backed wiki notes from vault-owned templates.
-- `vault-handoff`: Prepare completed artifacts for pi-vault or Obsidian review.
 - `vault-naturalist`: Compile the region-scoped `Phenology` tables on animal, plant, and fungus wiki cards into a queryable index, report which species are expected in the owner's declared home region in a given month, and record a single field observation as a schema-valid note linked to its species card; deterministic throughout, and `sourced`/`inferred` windows stay distinguishable from `observed` ones.
 - `vault-organizer`: Classify, de-duplicate, and organize Obsidian notes from a human-maintained vault schema note, with restart-safe resumable runs, a recoverable duplicate quarantine, asset-embed repair, an opt-in per-kind sources tree, deterministic date backfill from older copies of notes, schema drift detection that blocks applying when the schema and the folders on disk disagree, a `renumber` mode that shifts domain numbers and every folder derived from them without touching a note, and optional link-safe moves and property-vocabulary drift when the Obsidian CLI is available.
 - `vault-transcripts`: Classify, rename, clean, and summarize raw transcripts while distinguishing owner memos/journals, personal exchanges, external sources, and unknown material; apply scoped voice only where valid, add introspective reflection to journals and working reflection to memos, cite only outside sources already in hand, and keep the original transcription verbatim as its own linked source note; clean speech into readable written prose without changing meaning, mark every generated section as a callout, and reprocess or reconcile notes the pipeline already wrote.
@@ -89,8 +88,6 @@ candidates as available tools.
 
 The current extension/tool surfaces outside skill-local scripts are:
 
-- `forge/extensions/pi-vault-client.ts`: provides `pi_vault_submit_artifact` for
-  pending pi-vault proposal handoff.
 - `forge/extensions/web-research.ts`: provides `forge_web_search`,
   `forge_web_read`, `forge_deep_web_research`, `forge_web_discover`,
   `forge_academic_web_research`, and `forge_reference_lookup` for search, page
