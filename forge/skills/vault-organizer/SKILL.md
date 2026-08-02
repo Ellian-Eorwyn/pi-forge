@@ -158,8 +158,47 @@ Confidence is the weaker of two independent things: how sure we are that an
 archive file is an older copy of the note (`identical` body, unique `named`,
 unique `titled`, or `similar` under `--near-match`), and how explicitly that
 file states a date (`explicit` in a filename, path, or frontmatter key;
-`stated` under a label in the opening lines; `weak` otherwise). Only
-`high` — an exact match on an explicitly dated file — is written by `--apply`.
+`stated` under a label in the opening lines; `year` when only the year is
+known; `weak` otherwise). Only `high` — an exact match on an explicitly dated
+file — is written by `--apply`.
+
+Two things are measured across the whole corpus rather than read off any single
+file, because no single file can report them:
+
+- **Which numeric ordering the filenames use.** `Dream 05 15 2013` is a date and
+  `Long Week Past 6 4 2013` is either June 4th or April 6th. The names that need
+  no deciding — where one ordering is not a date, or both agree — settle it for
+  the ones that do. If they disagree, no ambiguous name is read at all.
+- **Which days were imports rather than writing.** See below.
+
+### Import stamps, and why a year is sometimes the whole answer
+
+A copy resets creation dates, which lands a great many files on one day. That is
+visible across a corpus even though it is invisible in any one file: a birthtime
+day shared by more than a dozen *distinct notes* is when a copy ran. Those days
+are listed in the report as `importStamps`, and a birthtime on one is discarded
+entirely — not even its year survives, because the year it carries is the year
+of the copy.
+
+The same stamps contaminate frontmatter: an importer that reset birthtimes also
+wrote them into `created:` keys, so the key reads as explicit while meaning
+nothing. A creation key whose value falls on a stamp day is demoted to `year`
+unless the note's own filename or daily-note path vouches for that day. A
+creation date in the future is dropped outright.
+
+What is left when the day is gone is often still a real year — from a `2015/`
+folder in the archive path, or from that demotion. Those become the `year` tier,
+written `YYYY-01-01`, where **the day is a placeholder and not a reading**. They
+never reach `high` however good the match is, and `--apply` ignores them until
+asked:
+
+```bash
+python3 <skill-directory>/scripts/vault-organizer.py dates --vault <vault> --archive <folder> --apply --year-only
+```
+
+**Say plainly that the day is invented before writing these.** A year that sorts
+correctly is worth something; a fabricated day that looks precise is a trap, and
+the whole point of the tier is that the report says which is which.
 
 Everything else is listed in `date_report.md` with an id, and written only when
 the user names it:
@@ -190,18 +229,26 @@ right on the files that state nothing. The largest single-day cluster is the
 counter-signal — a big one is the day the archive was copied, and every file in
 it lost its original date.
 
-Creation dates start as `weak` evidence, which is never written unattended. When
-the calibration justifies it, promote them:
+Read that section together with the import stamps above, because the agreement
+rate alone will mislead. An archive can average 48% agreement while containing
+one tree whose birthtimes are pristine and another whose are all one day — the
+average describes neither. The stamp list is the finer-grained answer, and it is
+what decides each individual birthtime; the agreement rate is context.
+
+Creation dates start as `weak` evidence, which is never written unattended. Once
+the stamped days are excluded, what remains is worth promoting:
 
 ```bash
 python3 <skill-directory>/scripts/vault-organizer.py dates --vault <vault> --archive <folder> --trust-birthtime
 ```
 
-That makes a creation date count as explicit evidence, so an exact match on one
-becomes auto-appliable. **Read the calibration to the user and let them make
-that call.** `--include-file-times` adds both creation and modification times as
-`weak` evidence for the report without promoting anything; a modification time
-is never eligible for promotion, since nothing makes it a creation date.
+That makes an *unstamped* creation date count as explicit evidence, so an exact
+match on one becomes auto-appliable; stamped ones are unaffected and stay out.
+**Read the calibration to the user and let them make that call.**
+`--include-file-times` adds creation and modification times as `weak` evidence
+for the report without promoting anything, and is the only way to see the
+stamped birthtimes at all; a modification time is never eligible for promotion,
+since nothing makes it a creation date.
 
 Guarantees: dry run is the default, the report is written before any edit, an
 existing value is never overwritten, each note is backed up under the run

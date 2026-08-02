@@ -1849,6 +1849,73 @@ class DateEvidenceTests(unittest.TestCase):
         found = self.dates.first_date_in(text)
         return found[0].isoformat() if found else None
 
+    def spaced(self, stem, month_first=None):
+        found = self.dates.resolve_spaced_date(stem, month_first)
+        return found[0].isoformat() if found else None
+
+    def test_spaced_filename_dates_read_the_last_run(self):
+        # `Day 1 7 15 2013` must read the date and not the "Day 1".
+        self.assertEqual(self.spaced("Day 1 7 15 2013"), "2013-07-15")
+        self.assertEqual(self.spaced("Dream 05 15 2013"), "2013-05-15")
+        # Same day either way, so no convention is needed to read it.
+        self.assertEqual(self.spaced("Morning Coffee 6 6 2013"), "2013-06-06")
+        self.assertIsNone(self.spaced("nothing here 2013"))
+
+    def test_an_ambiguous_spaced_date_waits_for_the_corpus(self):
+        # 6 4 2013 is June 4th or April 6th and the string cannot say which.
+        self.assertIsNone(self.spaced("Long Week Past 6 4 2013"))
+        self.assertEqual(self.spaced("Long Week Past 6 4 2013", True), "2013-06-04")
+        self.assertEqual(self.spaced("Long Week Past 6 4 2013", False), "2013-04-06")
+
+    def test_the_corpus_decides_the_ordering_only_when_it_agrees(self):
+        month = [{"path": "/v/Dream 05 15 2013.md"}, {"path": "/v/Storm 6 27 2013.md"}]
+        self.assertEqual(self.dates.filename_convention(month)[0], True)
+        mixed = month + [{"path": "/v/Other 15 05 2013.md"}]
+        self.assertIsNone(self.dates.filename_convention(mixed)[0])
+        self.assertIsNone(self.dates.filename_convention([{"path": "/v/plain.md"}])[0])
+
+    def test_a_separated_date_outranks_a_spaced_one(self):
+        found = self.dates.filename_evidence(Path("/v/2013-05-15 notes 1 2 2014.md"), True)
+        self.assertEqual([c["date"] for c in found], ["2013-05-15"])
+
+    def test_a_year_folder_says_the_year_and_no_day(self):
+        found = self.dates.year_evidence("Journal/12.01 Daily/2015/Depression.md")
+        self.assertEqual([(c["date"], c["tier"]) for c in found], [("2015-01-01", self.dates.YEAR)])
+        self.assertEqual(self.dates.year_evidence("Journal/Daily/Depression.md"), [])
+
+    def test_an_import_stamp_is_found_by_how_many_notes_share_it(self):
+        # One day carrying many distinct notes is a copy; a day carrying one or
+        # two is somebody writing.
+        entries = [{"birthtime": "2015-12-01", "body_hash": "h%d" % n, "relative": str(n)} for n in range(40)]
+        entries += [{"birthtime": "2015-06-02", "body_hash": "x", "relative": "x"}]
+        stamps = self.dates.stamp_days(entries)
+        self.assertEqual(sorted(stamps), ["2015-12-01"])
+        # Four copies of one note must not look like four things made that day.
+        copies = [{"birthtime": "2020-01-01", "body_hash": "same", "relative": str(n)} for n in range(40)]
+        self.assertEqual(self.dates.stamp_days(copies), {})
+
+    def test_a_stamped_birthtime_gives_nothing_not_even_its_year(self):
+        # The stamp is the day the copy ran, so its year is the copy's year.
+        stamped = self.dates.filesystem_evidence(
+            datetime.date(2026, 7, 1), None, trust_birthtime=True, stamp_days={"2026-07-01"}
+        )
+        self.assertEqual(stamped, [])
+        genuine = self.dates.filesystem_evidence(
+            datetime.date(2020, 7, 14), None, trust_birthtime=True, stamp_days={"2026-07-01"}
+        )
+        self.assertEqual([(c["date"], c["tier"]) for c in genuine], [("2020-07-14", self.dates.EXPLICIT)])
+
+    def test_a_creation_date_in_the_future_is_not_believed(self):
+        # An organization note named "Architecture 2030" arrived carrying this.
+        text = "created: '2030-01-01'\n"
+        self.assertEqual(self.dates.frontmatter_evidence(text, today=datetime.date(2026, 8, 1)), [])
+        past = self.dates.frontmatter_evidence("created: '2024-03-02'\n", today=datetime.date(2026, 8, 1))
+        self.assertEqual([c["date"] for c in past], ["2024-03-02"])
+
+    def test_year_evidence_never_reaches_the_auto_apply_tier(self):
+        self.assertEqual(self.dates.confidence(self.dates.IDENTICAL, self.dates.YEAR), "year")
+        self.assertEqual(self.dates.confidence(self.dates.IDENTICAL, self.dates.EXPLICIT), "high")
+
     def test_unambiguous_numeric_dates_parse(self):
         self.assertEqual(self.first("2023-04-11"), "2023-04-11")
         self.assertEqual(self.first("2023.04.11"), "2023-04-11")

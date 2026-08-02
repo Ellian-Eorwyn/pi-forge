@@ -2642,6 +2642,12 @@ def render_date_report(rows, skipped, counts, property_key, dry_run, calibration
     groups = (
         ("Ready to apply", "high", "Exact match on an explicitly dated file."),
         ("Held for review", "medium", "Name it with `--ids` to write it."),
+        (
+            "Year known, day not",
+            "year",
+            "A year folder or an import stamp fixes the year; the day is a `-01-01` "
+            "placeholder, not a reading. `--year-only` writes these.",
+        ),
         ("Weak evidence", "low", "Nothing structural said this; read before naming it."),
     )
     for title, level, blurb in groups:
@@ -2723,6 +2729,26 @@ def dates(args):
         except (OSError, UnicodeDecodeError) as error:
             warnings.append(f"note skipped: {relative} ({error})")
 
+    # Two facts belong to the corpus rather than to any file: which days were
+    # import events, and which way this vault writes a spaced numeric date.
+    # Both are measured over everything read, then fed back through the evidence.
+    corpus = archive + notes
+    stamps = vault_dates.stamp_days(corpus)
+    month_first, convention = vault_dates.filename_convention(corpus)
+    vault_dates.recalculate_dates(
+        corpus,
+        month_first=month_first,
+        stamps=set(stamps),
+        trust_birthtime=args.trust_birthtime,
+        include_file_times=args.include_file_times,
+    )
+    if stamps:
+        biggest = max(stamps.items(), key=lambda item: item[1])
+        warnings.append(
+            f"{len(stamps)} birthtime day(s) look like import stamps, the largest {biggest[0]} "
+            f"covering {biggest[1]} distinct notes; their day is dropped and only the year kept"
+        )
+
     counts = {
         "notes": len(notes),
         "already_dated": 0,
@@ -2730,6 +2756,7 @@ def dates(args):
         "archive_files": len(archive),
         "high": 0,
         "medium": 0,
+        "year": 0,
         "low": 0,
         "no_evidence": 0,
     }
@@ -2787,9 +2814,15 @@ def dates(args):
             }
         )
 
-    rows.sort(key=lambda row: (row["confidence"] != "high", row["date"], row["note"]))
+    rank = {"high": 0, "medium": 1, "year": 2, "low": 3}
+    rows.sort(key=lambda row: (rank.get(row["confidence"], 9), row["date"], row["note"]))
     by_id = {row["id"]: row for row in rows}
     requested = [value.strip() for value in (args.ids or "").split(",") if value.strip()]
+    # An --ids that parses to nothing is a caller whose id list came out empty,
+    # not a caller asking for the confident ones. Falling through to those would
+    # write the whole tier the caller was trying to narrow.
+    if args.ids is not None and not requested:
+        raise UserError("--ids was given but names no ids; drop the flag to write the confident ones")
     for value in requested:
         if value not in by_id:
             offered = ", ".join(sorted(by_id)) or "none"
@@ -2806,6 +2839,8 @@ def dates(args):
                 "property": property_key,
                 "counts": counts,
                 "birthtimeCalibration": calibration,
+                "importStamps": dict(sorted(stamps.items(), key=lambda item: -item[1])),
+                "filenameConvention": {"monthFirst": month_first, **convention},
                 "proposals": [{key: row[key] for key in row if key != "path"} for row in rows],
                 "noEvidence": skipped,
             },
@@ -2816,7 +2851,8 @@ def dates(args):
         encoding="utf-8",
     )
 
-    targets = [by_id[value] for value in requested] if requested else [row for row in rows if row["confidence"] == "high"]
+    auto = {"high", "year"} if args.year_only else {"high"}
+    targets = [by_id[value] for value in requested] if requested else [row for row in rows if row["confidence"] in auto]
     applied = []
     refused = []
     if args.apply:
@@ -3627,6 +3663,14 @@ def parse_args(argv):
         help="dates mode: also pair notes to archive copies by meaning, for review only",
     )
     parser.add_argument("--ids", help="dates mode: comma-separated proposal ids to write, instead of the confident ones")
+    parser.add_argument(
+        "--year-only",
+        action="store_true",
+        help=(
+            "dates mode: also write proposals whose year is known but whose day is not, "
+            "as YYYY-01-01; the day is a placeholder, so read the report first"
+        ),
+    )
     parser.add_argument("--run", help="existing run directory to resume")
     parser.add_argument("--limit", type=int, action=TrackingAction)
     parser.add_argument("--base-url", action=TrackingAction)
@@ -3679,10 +3723,19 @@ def parse_args(argv):
             raise UserError("renumber takes exactly one of --insert <number> or --set <domain=number,...>")
         if args.insert is not None and not 1 <= args.insert <= 99:
             raise UserError("--insert must be a domain number from 1 through 99")
-    dates_flags = (args.archive, args.self_only, args.include_file_times, args.trust_birthtime, args.near_match, args.ids)
+    dates_flags = (
+        args.archive,
+        args.self_only,
+        args.include_file_times,
+        args.trust_birthtime,
+        args.near_match,
+        args.ids,
+        args.year_only,
+    )
     if args.mode != "dates" and any(dates_flags):
         raise UserError(
-            "--archive, --self-only, --include-file-times, --trust-birthtime, --near-match, and --ids belong to dates mode"
+            "--archive, --self-only, --include-file-times, --trust-birthtime, --near-match, --ids, "
+            "and --year-only belong to dates mode"
         )
     if args.mode in {"attachments", "drift", "renumber"}:
         # Deterministic filesystem work: no classification, so no model or

@@ -15,7 +15,7 @@
 | Managed instructions (`AGENTS.md` with its `<project_context>` wrapper) | 1553 |
 | Skills menu (metadata for all model-visible skills) | 3401 |
 | **Total launch context (always processed)** | **8400** |
-| Maximum if every `SKILL.md` body is also loaded at once | 63875 |
+| Maximum if every `SKILL.md` body is also loaded at once | 64520 |
 
 Of that total, the forge profile itself owns 4953 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
 
@@ -71,7 +71,7 @@ Sorted by launch cost. `Prompt lines` counts a tool's `promptSnippet` and `promp
 | [`vault-connections`](forge/skills/vault-connections/SKILL.md) | Search an Obsidian vault by meaning, propose links for per-id review, publish completed liter... | 151 | 2682 | 2807 | Model-visible |
 | [`vault-handoff`](forge/skills/vault-handoff/SKILL.md) | Send completed text artifacts to pi-vault review | 63 | 325 | 363 | Model-visible |
 | [`vault-naturalist`](forge/skills/vault-naturalist/SKILL.md) | Compile the seasonal Phenology tables on animal, plant, and fungus wiki cards into a queryabl... | 142 | 1570 | 1684 | Model-visible |
-| [`vault-organizer`](forge/skills/vault-organizer/SKILL.md) | Organize an Obsidian vault or its inbox from a human-maintained schema note - classify notes,... | 150 | 5152 | 5276 | Model-visible |
+| [`vault-organizer`](forge/skills/vault-organizer/SKILL.md) | Organize an Obsidian vault or its inbox from a human-maintained schema note - classify notes,... | 150 | 5797 | 5921 | Model-visible |
 | [`vault-transcripts`](forge/skills/vault-transcripts/SKILL.md) | Process raw voice-note and meeting transcripts in an Obsidian vault inbox - give each recordi... | 151 | 3968 | 4092 | Model-visible |
 | [`vault-wiki`](forge/skills/vault-wiki/SKILL.md) | Install the seven wiki entry templates and expand wiki entity notes into complete, cited refe... | 143 | 2300 | 2418 | Model-visible |
 | [`web-collection`](forge/skills/web-collection/SKILL.md) | Archive and organize web sources | 138 | 2017 | 2129 | Model-visible |

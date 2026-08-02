@@ -36,8 +36,12 @@ from vault_schema import (
 # would only be guessing from.
 EXPLICIT = "explicit"
 STATED = "stated"
+# A year with no day behind it: a year folder in the archive path, or a
+# birthtime whose day is an import stamp. Rendered as ``YYYY-01-01``, where the
+# day is a placeholder and says so, never a claim about January.
+YEAR = "year"
 WEAK = "weak"
-EVIDENCE_RANK = {EXPLICIT: 0, STATED: 1, WEAK: 2}
+EVIDENCE_RANK = {EXPLICIT: 0, STATED: 1, YEAR: 2, WEAK: 3}
 
 # Match tiers, strongest first. ``self`` is the vault note's own evidence: there
 # is no matching step to get wrong, so it ranks with an identical body.
@@ -78,6 +82,22 @@ ZETTEL_ID_RE = re.compile(r"(?<!\d)(\d{4})(\d{2})(\d{2})\d{4,6}(?!\d)")
 # DD-MM-YYYY or MM-DD-YYYY. Which one is unknowable from the string, so this is
 # only ever read when exactly one of the two positions can be a month.
 NUMERIC_DMY_RE = re.compile(r"(?<!\d)(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})(?!\d)")
+
+# The same two orderings written with spaces, as in `Dream 05 15 2013`. Kept
+# apart from NUMERIC_DMY_RE because a separator-free run of numbers is far
+# likelier to be something other than a date, so this is only read from a
+# filename -- never from body prose, where "call me at 5 15 2013" would match.
+SPACED_DMY_RE = re.compile(r"(?<!\d)(\d{1,2})\s+(\d{1,2})\s+((?:19|20)\d{2})(?!\d)")
+
+# A bare four-digit folder name: `.../12.01 Daily/2015/Depression.md`. Says the
+# year and nothing more.
+YEAR_DIR_RE = re.compile(r"^((?:19|20)\d{2})$")
+
+# A birthtime day shared by more than this many distinct archive notes is when
+# an import ran, not when anything was written. Measured on Ellie's archive the
+# split is not close: 377 days carry one or two notes, and 28 carry thirteen or
+# more -- one of them 1,419.
+STAMP_NOTE_THRESHOLD = 12
 
 TEXT_DATE_RE = re.compile(
     r"(?<!\w)(?:"
@@ -142,6 +162,46 @@ def parse_numeric_dmy(first, second, year):
     return None
 
 
+def spaced_date_readings(stem):
+    """``(month_first, day_first, quote)`` for the last spaced run in a filename.
+
+    Both readings are returned rather than one, because which is meant is a
+    property of the corpus and not of the string. The *last* run wins so that
+    ``Day 1 7 15 2013`` reads the date and not the "Day 1".
+    """
+    matches = list(SPACED_DMY_RE.finditer(stem))
+    if not matches:
+        return None
+    match = matches[-1]
+    first, second, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
+    return valid_date(year, first, second), valid_date(year, second, first), match.group(0)
+
+
+def resolve_spaced_date(stem, month_first=None):
+    """The date a spaced filename means, or None while it stays ambiguous.
+
+    Unambiguous on its own when only one ordering is a real date, or when both
+    orderings land on the same day (``6 6 2013``). Otherwise it takes
+    ``month_first``, which the corpus decides -- see ``corpus_calibration``.
+    """
+    readings = spaced_date_readings(stem)
+    if not readings:
+        return None
+    month_reading, day_reading, quote = readings
+    if month_reading and not day_reading:
+        return month_reading, quote, True
+    if day_reading and not month_reading:
+        return day_reading, quote, True
+    if month_reading and day_reading:
+        if month_reading == day_reading:
+            return month_reading, quote, True
+        if month_first is True:
+            return month_reading, quote, False
+        if month_first is False:
+            return day_reading, quote, False
+    return None
+
+
 def dates_in_text(text):
     """Every unambiguous date in ``text``, as ``(date, matched substring)``."""
     found = []
@@ -198,23 +258,62 @@ def loose_frontmatter_pairs(frontmatter_text):
     return pairs
 
 
-def frontmatter_evidence(frontmatter_text):
-    """Dates under a creation-ish frontmatter key."""
+def frontmatter_evidence(frontmatter_text, today=None):
+    """Dates under a creation-ish frontmatter key.
+
+    A creation date in the future is not a date this file was created on, so it
+    is dropped rather than believed. These keys are written by importers and by
+    models, and both produce nonsense from time to time: an organization note
+    named "Architecture 2030" arrived carrying ``created: '2030-01-01'``.
+    """
+    horizon = today or datetime.date.today()
     candidates = []
     for key, raw in loose_frontmatter_pairs(frontmatter_text):
         if key not in CREATION_KEYS:
             continue
         found = first_date_in(raw)
-        if found:
+        if found and found[0] <= horizon:
             candidates.append(candidate(found[0], EXPLICIT, "frontmatter:" + key, raw))
     return candidates
 
 
-def filename_evidence(path):
-    """A date carried by the file's own name."""
+def filename_evidence(path, month_first=None):
+    """A date carried by the file's own name.
+
+    A separated date wins outright. Only when there is none does the spaced
+    form get a look, so ``2013-05-15 notes 1 2 2014`` still reads as May.
+    """
     stem = Path(path).stem
     found = first_date_in(stem)
-    return [candidate(found[0], EXPLICIT, "filename", found[1])] if found else []
+    if found:
+        return [candidate(found[0], EXPLICIT, "filename", found[1])]
+    spaced = resolve_spaced_date(stem, month_first)
+    if spaced:
+        value, quote, self_evident = spaced
+        source = "filename" if self_evident else "filename (corpus reads month first)"
+        return [candidate(value, EXPLICIT, source, quote)]
+    return []
+
+
+def year_directory(relative):
+    """The year named by a bare four-digit folder on the path, or None."""
+    for part in Path(relative).parts[:-1]:
+        match = YEAR_DIR_RE.match(part.strip())
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def year_evidence(relative):
+    """A year folder standing over the file: ``12.01 Daily/2015/Depression.md``.
+
+    Says the year and refuses to invent the day. January 1st here is the
+    placeholder the schema's date format forces, not a reading of the evidence.
+    """
+    year = year_directory(relative)
+    if year is None or not (MIN_YEAR <= year <= MAX_YEAR):
+        return []
+    return [candidate(datetime.date(year, 1, 1), YEAR, "year folder", str(relative))]
 
 
 def path_evidence(relative):
@@ -302,21 +401,80 @@ def file_times(path):
     return to_date(getattr(stat, "st_birthtime", None)), to_date(stat.st_mtime)
 
 
-def filesystem_evidence(birthtime, mtime, trust_birthtime=False):
+def filesystem_evidence(birthtime, mtime, trust_birthtime=False, stamp_days=frozenset(), surface_stamped=False):
     """Dates the filesystem carries, which are only as good as what made the copy.
 
     A Finder *move* preserves birthtime; a *copy* resets it to the day of the
     copy, and most archive tools reset it too. Neither outcome is guessable from
-    the file, so both stay ``weak`` — unless the caller has read the calibration
-    below and decided otherwise, which is what ``trust_birthtime`` records.
+    one file alone -- but it is plain across a whole archive, because a reset
+    lands thousands of files on a single day. ``stamp_days`` holds the days that
+    happened on, so a birthtime is read three ways rather than two:
+
+    * on a stamp day -- the year survived the copy and the day did not, so it is
+      ``year`` evidence and the day is dropped;
+    * off a stamp day, with the caller trusting birthtimes -- ``explicit``;
+    * off a stamp day otherwise -- ``weak``, as before.
+
+    A modification time is never promotable. Nothing makes it a creation date.
     """
     candidates = []
     if birthtime is not None:
-        tier = EXPLICIT if trust_birthtime else WEAK
-        candidates.append(candidate(birthtime, tier, "finder created", birthtime.isoformat()))
+        stamped = birthtime.isoformat() in stamp_days
+        if stamped:
+            # Not even the year survives a stamp. The day the copy ran carries
+            # the copy's year, so a note written in 2013 and copied in 2026
+            # reads as 2026. A year folder can say the year; this cannot. It is
+            # left out entirely rather than filling the review pile with a
+            # thousand rows nobody can act on -- unless file times were asked
+            # for by name, which is a request to see exactly this.
+            if surface_stamped:
+                candidates.append(candidate(birthtime, WEAK, "finder created (import stamp)", birthtime.isoformat()))
+        else:
+            tier = EXPLICIT if trust_birthtime else WEAK
+            candidates.append(candidate(birthtime, tier, "finder created", birthtime.isoformat()))
     if mtime is not None:
         candidates.append(candidate(mtime, WEAK, "filesystem modified", mtime.isoformat()))
     return candidates
+
+
+def stamp_days(entries, threshold=STAMP_NOTE_THRESHOLD):
+    """The birthtime days that are import events rather than creation dates.
+
+    Counted in distinct notes, not files: an archive holding four copies of one
+    note must not look like four things made that day. A day carrying more
+    distinct notes than a person writes in a day is when a copy ran.
+    """
+    per_day = {}
+    for entry in entries:
+        birth = entry.get("birthtime")
+        if not birth:
+            continue
+        per_day.setdefault(birth, set()).add(entry.get("body_hash") or entry.get("relative"))
+    return {day: len(notes) for day, notes in per_day.items() if len(notes) > threshold}
+
+
+def filename_convention(entries):
+    """Whether spaced filename dates in this corpus read month-first.
+
+    Decided only by the filenames that need no deciding -- the ones where one
+    ordering is not a date, or both orderings agree. ``None`` when they
+    disagree or there are none, which leaves every ambiguous name unread.
+    """
+    month_first = day_first = 0
+    for entry in entries:
+        readings = spaced_date_readings(Path(entry["path"]).stem if entry.get("path") else "")
+        if not readings:
+            continue
+        month_reading, day_reading, _ = readings
+        if month_reading and not day_reading:
+            month_first += 1
+        elif day_reading and not month_reading:
+            day_first += 1
+    if month_first and not day_first:
+        return True, {"month_first": month_first, "day_first": day_first}
+    if day_first and not month_first:
+        return False, {"month_first": month_first, "day_first": day_first}
+    return None, {"month_first": month_first, "day_first": day_first}
 
 
 def calibrate_birthtime(entries):
@@ -365,22 +523,8 @@ def calibrate_birthtime(entries):
     }
 
 
-def extract_dates(path, relative, frontmatter_text, body, times=None, include_file_times=False, trust_birthtime=False):
-    """Every date candidate a single file offers, best evidence first.
-
-    Duplicates on (date, tier) collapse to the first source that found them, so
-    a filename and a frontmatter key agreeing counts once rather than twice.
-    """
-    candidates = []
-    candidates.extend(frontmatter_evidence(frontmatter_text))
-    candidates.extend(filename_evidence(path))
-    candidates.extend(path_evidence(relative))
-    candidates.extend(body_evidence(body))
-    if include_file_times or trust_birthtime:
-        birthtime, mtime = times if times is not None else file_times(path)
-        candidates.extend(
-            filesystem_evidence(birthtime, mtime if include_file_times else None, trust_birthtime=trust_birthtime)
-        )
+def dedupe_candidates(candidates):
+    """Best evidence first, one entry per (date, tier)."""
     seen = set()
     unique = []
     for entry in candidates:
@@ -391,6 +535,112 @@ def extract_dates(path, relative, frontmatter_text, body, times=None, include_fi
         unique.append(entry)
     unique.sort(key=lambda entry: (EVIDENCE_RANK[entry["tier"]], entry["date"]))
     return unique
+
+
+def extract_dates(
+    path,
+    relative,
+    frontmatter_text,
+    body,
+    times=None,
+    include_file_times=False,
+    trust_birthtime=False,
+    month_first=None,
+    stamp_days=frozenset(),
+):
+    """Every date candidate a single file offers, best evidence first.
+
+    Duplicates on (date, tier) collapse to the first source that found them, so
+    a filename and a frontmatter key agreeing counts once rather than twice.
+
+    ``month_first`` and ``stamp_days`` are corpus facts and are not known on the
+    first read of a file; ``recalculate_dates`` supplies them on a second pass.
+    """
+    candidates = []
+    candidates.extend(frontmatter_evidence(frontmatter_text))
+    candidates.extend(filename_evidence(path, month_first))
+    candidates.extend(path_evidence(relative))
+    candidates.extend(year_evidence(relative))
+    candidates.extend(body_evidence(body))
+    if include_file_times or trust_birthtime:
+        birthtime, mtime = times if times is not None else file_times(path)
+        candidates.extend(
+            filesystem_evidence(
+                birthtime,
+                mtime if include_file_times else None,
+                trust_birthtime=trust_birthtime,
+                stamp_days=stamp_days,
+                surface_stamped=include_file_times,
+            )
+        )
+    return dedupe_candidates(candidates)
+
+
+def recalculate_dates(entries, month_first=None, stamps=frozenset(), trust_birthtime=False, include_file_times=False):
+    """Re-read every entry's evidence now that the corpus has been measured.
+
+    Which filename ordering this corpus uses, and which days were import events,
+    are facts about the whole archive that no single file can report. Rather
+    than read every file twice, the candidates that depend on them are recomputed
+    from what the fingerprint already carries: the path, the year folder, and the
+    birthtime. Frontmatter, body, and separated-filename evidence are untouched.
+    """
+    for entry in entries:
+        keep = [
+            item
+            for item in entry["candidates"]
+            if item["source"] not in ("year folder",)
+            and not item["source"].startswith("finder created")
+            and not item["source"].startswith("filename (corpus")
+            and not item["source"].startswith("frontmatter:")
+        ]
+        # A note's own name or daily-note path is independent of whatever an
+        # importer wrote into its frontmatter, so it can vouch for a date that
+        # happens to fall on an import day.
+        vouched = {
+            item["date"]
+            for item in keep
+            if item["source"] in ("filename", "daily-note path")
+        }
+        added = []
+        for item in frontmatter_evidence(entry.get("frontmatter_text") or ""):
+            # An importer that stamped birthtimes also wrote those stamps into
+            # `created:` keys, so the key inherits the copy date and reads as
+            # explicit. The year in it is still good; the day is the copy's.
+            if item["tier"] == EXPLICIT and item["date"] in stamps and item["date"] not in vouched:
+                year = int(item["date"][:4])
+                added.append(
+                    candidate(
+                        datetime.date(year, 1, 1),
+                        YEAR,
+                        item["source"] + " (import stamp, year only)",
+                        item["quote"],
+                    )
+                )
+            else:
+                added.append(item)
+        added.extend(year_evidence(entry["relative"]))
+        if entry.get("birthtime") or entry.get("mtime"):
+            birth = datetime.date.fromisoformat(entry["birthtime"]) if entry.get("birthtime") else None
+            mod = datetime.date.fromisoformat(entry["mtime"]) if entry.get("mtime") else None
+            if include_file_times or trust_birthtime:
+                added.extend(
+                    filesystem_evidence(
+                        birth,
+                        mod if include_file_times else None,
+                        trust_birthtime=trust_birthtime,
+                        stamp_days=stamps,
+                        surface_stamped=include_file_times,
+                    )
+                )
+        if not any(item["source"] == "filename" for item in keep):
+            added.extend(
+                item
+                for item in filename_evidence(entry["path"], month_first)
+                if item["source"].startswith("filename (corpus")
+            )
+        entry["candidates"] = dedupe_candidates(keep + added)
+    return entries
 
 
 def self_contradicts(candidates):
@@ -414,7 +664,9 @@ def match_stem(name):
     return stem
 
 
-def note_fingerprint(path, relative, data, include_file_times=False, trust_birthtime=False):
+def note_fingerprint(
+    path, relative, data, include_file_times=False, trust_birthtime=False, month_first=None, stamps=frozenset()
+):
     """Everything the matcher and the extractor need from one file, read once."""
     split = split_frontmatter(data)
     body = split["body"]
@@ -445,6 +697,8 @@ def note_fingerprint(path, relative, data, include_file_times=False, trust_birth
             times=(birthtime, mtime),
             include_file_times=include_file_times,
             trust_birthtime=trust_birthtime,
+            month_first=month_first,
+            stamp_days=stamps,
         ),
     }
 
@@ -516,9 +770,16 @@ def match_archive(note, indexes):
 
 
 def confidence(match_tier, evidence_tier):
-    """The weaker of the two axes, named for the report and the apply gate."""
+    """The weaker of the two axes, named for the report and the apply gate.
+
+    ``year`` never reaches ``high`` however good the match is. The year behind it
+    may be certain, but the day is a placeholder, and the apply gate exists to
+    keep invented days out of the vault unless someone asks for them by name.
+    """
     if evidence_tier == WEAK:
         return "low"
+    if evidence_tier == YEAR:
+        return "year"
     if match_tier in AUTO_MATCH and evidence_tier in AUTO_EVIDENCE:
         return "high"
     return "medium"
