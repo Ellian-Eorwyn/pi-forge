@@ -1,0 +1,121 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-08-01",
+  "comment": "Where a field writes its cataloguing practice down. This steers the research queries; it is not a resolver. Entries carry a 'site' rather than a deep link on purpose -- the same reason vault-wiki's canonical-sources.json does: entry paths are not constructible from a subject name, so the URL is found by search and matched, never guessed. A cluster is a hint, not a gate: an unmatched subject still researches, it just runs unrestricted queries. Clusters were chosen because each has a published standard a practitioner would actually name; a hobby with no published practice is expected to come back thin, and the run should say so rather than pad. Add a cluster when a real run comes back empty, and record which query found nothing.",
+  "generic_queries": [
+    "{subject} cataloguing standard metadata schema",
+    "how to catalogue a {subject} collection best practice",
+    "{subject} controlled vocabulary authority file",
+    "{subject} record fields required minimum"
+  ],
+  "clusters": [
+    {
+      "id": "biodiversity",
+      "label": "Living things and field records",
+      "matches": ["species", "plant", "animal", "fungus", "insect", "bird", "lichen", "herbarium", "specimen", "observation", "natural history"],
+      "sources": [
+        {"label": "Darwin Core (TDWG)", "site": "dwc.tdwg.org", "why": "The occurrence/taxon field standard everything else in biodiversity maps to."},
+        {"label": "GBIF", "site": "gbif.org", "why": "Shows Darwin Core as actually published, including which fields are in practice mandatory."},
+        {"label": "Audubon Core (TDWG)", "site": "tdwg.org", "why": "The media-description half, for specimen photographs."},
+        {"label": "Index Herbariorum", "site": "sweetgum.nybg.org", "why": "Herbarium label and accession conventions."}
+      ]
+    },
+    {
+      "id": "collections",
+      "label": "Museum and object collections",
+      "matches": ["artefact", "artifact", "museum", "collection", "antique", "curio", "exhibit", "accession"],
+      "sources": [
+        {"label": "Spectrum (Collections Trust)", "site": "collectionstrust.org.uk", "why": "The collections-management procedure most museums actually run on."},
+        {"label": "CIDOC-CRM", "site": "cidoc-crm.org", "why": "The conceptual reference model for cultural heritage; strong on the event/object split."},
+        {"label": "Getty vocabularies (AAT, TGN, ULAN)", "site": "getty.edu", "why": "Controlled vocabularies for object type, place, and maker."}
+      ]
+    },
+    {
+      "id": "bibliographic",
+      "label": "Books, papers, and published works",
+      "matches": ["book", "library", "bibliography", "journal", "periodical", "zine", "manuscript", "reading"],
+      "sources": [
+        {"label": "Dublin Core (DCMI)", "site": "dublincore.org", "why": "The minimum viable descriptive set, and the one most tools speak."},
+        {"label": "MARC 21", "site": "loc.gov", "why": "What a library catalogue record actually contains."},
+        {"label": "BIBFRAME", "site": "loc.gov", "why": "The work/instance/item split, which is the interesting structural idea."}
+      ]
+    },
+    {
+      "id": "archives",
+      "label": "Papers, records, and personal archives",
+      "matches": ["archive", "correspondence", "papers", "records", "ephemera", "photograph"],
+      "sources": [
+        {"label": "ISAD(G) (ICA)", "site": "ica.org", "why": "Multi-level description: fonds to item, which is the archival answer to hierarchy."},
+        {"label": "DACS (SAA)", "site": "www2.archivists.org", "why": "The US practice, more concrete than ISAD(G) about required elements."},
+        {"label": "PREMIS", "site": "loc.gov", "why": "Preservation and fixity metadata, for anything digitised."}
+      ]
+    },
+    {
+      "id": "geoscience",
+      "label": "Minerals, rocks, and fossils",
+      "matches": ["mineral", "rock", "fossil", "meteorite", "gem", "crystal", "geology"],
+      "sources": [
+        {"label": "Mindat", "site": "mindat.org", "why": "The de facto locality and species database; its record shape is the field's habit."},
+        {"label": "IMA-CNMNC nomenclature", "site": "ima-mineralogy.org", "why": "The naming authority for mineral species."},
+        {"label": "Paleobiology Database", "site": "paleobiodb.org", "why": "Occurrence records for fossil material."}
+      ]
+    },
+    {
+      "id": "horticulture",
+      "label": "Gardens, cultivars, and growing",
+      "matches": ["garden", "cultivar", "seed", "crop", "orchard", "houseplant", "propagation"],
+      "sources": [
+        {"label": "International Code of Nomenclature for Cultivated Plants", "site": "ishs.org", "why": "Cultivar naming, which differs from botanical binomials."},
+        {"label": "RHS Horticultural Database", "site": "rhs.org.uk", "why": "Cultivar records as published."},
+        {"label": "USDA PLANTS", "site": "plants.usda.gov", "why": "Hardiness, distribution, and accepted names."}
+      ]
+    },
+    {
+      "id": "recorded_media",
+      "label": "Music, film, and recordings",
+      "matches": ["album", "record", "vinyl", "film", "movie", "game", "podcast", "recording"],
+      "sources": [
+        {"label": "MusicBrainz style guide", "site": "musicbrainz.org", "why": "A worked, opinionated answer to release/recording/work modelling."},
+        {"label": "Discogs database guidelines", "site": "discogs.com", "why": "Physical-copy cataloguing: pressing, matrix, condition."},
+        {"label": "FRBR / RDA", "site": "rdatoolkit.org", "why": "The work/expression/manifestation/item distinction these all descend from."}
+      ]
+    },
+    {
+      "id": "graded_collectibles",
+      "label": "Graded collectibles",
+      "matches": ["stamp", "coin", "banknote", "card", "comic", "numismatic", "philately"],
+      "sources": [
+        {"label": "Sheldon and comparable grading scales", "site": "money.org", "why": "Condition as a published scale rather than an adjective."},
+        {"label": "Scott / Stanley Gibbons catalogue conventions", "site": "stanleygibbons.com", "why": "Catalogue numbering as the identity key."}
+      ]
+    },
+    {
+      "id": "craft",
+      "label": "Textiles, tools, and making",
+      "matches": ["pattern", "yarn", "fabric", "tool", "recipe", "brew", "woodworking", "sewing", "knitting"],
+      "sources": [
+        {"label": "schema.org", "site": "schema.org", "why": "Recipe, HowTo, and Product give a serviceable field list where no domain standard exists."},
+        {"label": "Ravelry pattern data model", "site": "ravelry.com", "why": "A large real-world craft catalogue, useful as observed practice."}
+      ]
+    },
+    {
+      "id": "people",
+      "label": "People, families, and genealogy",
+      "matches": ["genealogy", "family", "ancestor", "lineage", "descendant"],
+      "sources": [
+        {"label": "GEDCOM", "site": "gedcom.io", "why": "The interchange format every genealogy tool reads; its event model is the useful part."},
+        {"label": "Genealogical Proof Standard (BCG)", "site": "bcgcertification.org", "why": "Evidence and citation practice, which is the half software gets wrong."}
+      ]
+    },
+    {
+      "id": "general",
+      "label": "No published domain standard",
+      "matches": ["*"],
+      "sources": [
+        {"label": "Dublin Core (DCMI)", "site": "dublincore.org", "why": "The fallback minimum descriptive set."},
+        {"label": "schema.org", "site": "schema.org", "why": "A published field list for most everyday kinds of thing."},
+        {"label": "Wikipedia", "site": "en.wikipedia.org", "why": "Last resort, and only for what the field calls things."}
+      ]
+    }
+  ]
+}

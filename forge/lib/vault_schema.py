@@ -1058,6 +1058,34 @@ def sibling_numbers(schema, origin):
     return set()
 
 
+def free_numbers(schema, parent):
+    """Numbers 1-99 no row already holds under ``parent``, lowest first.
+
+    ``parent`` is origin-shaped: ``{"kind": "domain"}``, ``{"kind": "subdomain",
+    "domain": "wiki"}``, ``{"kind": "source_kind"}``, or ``{"kind": "project",
+    "domain": ..., "subdomain": ...}``. A proposal picks its number from this
+    list rather than from a model, so it cannot claim a slot the registry
+    already holds.
+    """
+    taken = set(sibling_numbers(schema, parent))
+    if parent["kind"] == "domain":
+        # `0` is the inbox and the sources root is reserved against domains.
+        taken.add(0)
+        root = schema.get("sources_root")
+        if root:
+            taken.add(root["number"])
+    if parent["kind"] == "subdomain":
+        # A project registered directly under a domain compiles into the same
+        # `<domain>.<nn>` namespace a subdomain does, so its number is taken
+        # here too even though it lives in a different table.
+        taken.update(
+            entry["number"]
+            for entry in schema["projects"].values()
+            if entry["domain"] == parent["domain"] and not entry.get("subdomain")
+        )
+    return [number for number in range(1, 100) if number not in taken]
+
+
 def schema_side_fix(schema, origin, target_number):
     """The row edit that would make the schema agree with disk, or None if the registry cannot express it.
 
@@ -1540,17 +1568,14 @@ def drift_counts(findings):
     return counts
 
 
-def replace_schema_row_number(text, row):
-    """Rewrite one registry row's Number cell and nothing else.
+def registry_table_bounds(plain, table):
+    """The line range holding ``table``'s Markdown table.
 
-    Surgical by contract: the row is matched by its ``Value`` cell and every
-    other byte of the note — including the row's own Definition prose and the
-    cell's spacing and backtick style — survives unchanged.
+    ``Subdomains/<domain>`` addresses one ``### <domain>`` subsection; every
+    other registry name is a plain H2 section.
     """
-    lines = text.splitlines(keepends=True)
-    plain = [line.rstrip("\r\n") for line in lines]
-    if row["table"].startswith("Subdomains/"):
-        domain = row["table"].split("/", 1)[1]
+    if table.startswith("Subdomains/"):
+        domain = table.split("/", 1)[1]
         outer_start, outer_end = section_bounds(plain, "Subdomains")
         start = None
         for index, level, title in iter_heading_lines(plain[outer_start + 1:outer_end]):
@@ -1562,14 +1587,86 @@ def replace_schema_row_number(text, row):
                 break
         if start is None:
             raise UserError(f"schema has no Subdomains subsection for {domain}")
-        bounds = (start, outer_end)
-    else:
-        bounds = section_bounds(plain, row["table"])
+        return start, outer_end
+    return section_bounds(plain, table)
 
-    positions = [index for index in range(bounds[0] + 1, bounds[1]) if plain[index].strip().startswith("|")]
+
+def registry_table_positions(plain, table):
+    """``(header cells, line positions)`` for ``table``, header line first."""
+    start, end = registry_table_bounds(plain, table)
+    positions = [index for index in range(start + 1, end) if plain[index].strip().startswith("|")]
     if len(positions) < 2:
-        raise UserError(f"{row['table']}: no Markdown table to edit")
-    header = split_markdown_table_row(plain[positions[0]])
+        raise UserError(f"{table}: no Markdown table to edit")
+    return split_markdown_table_row(plain[positions[0]]), positions
+
+
+def _data_row_positions(plain, positions):
+    """The table's real rows: everything after the header, minus the divider."""
+    return [
+        index
+        for index in positions[2:]
+        if not is_divider_row(split_markdown_table_row(plain[index]))
+    ]
+
+
+def _column_is_backticked(plain, data, column_index):
+    """True when every non-empty cell already in this column is wrapped in backticks."""
+    seen = False
+    for index in data:
+        cell = split_markdown_table_row(plain[index])[column_index]
+        if not cell:
+            continue
+        seen = True
+        if not (cell.startswith("`") and cell.endswith("`") and len(cell) >= 2):
+            return False
+    return seen
+
+
+def _column_backtick_flags(plain, data, header):
+    return [_column_is_backticked(plain, data, index) for index in range(len(header))]
+
+
+def _render_table_row(header, cells, reference, backticked):
+    """One table row, taking cell spacing from ``reference`` and style from ``backticked``."""
+    parts = reference.split("|")
+    if len(parts) != len(header) + 2:
+        raise UserError(f"cannot copy row style: reference row has {len(parts) - 2} cells, expected {len(header)}")
+    rendered = []
+    for column_index, column in enumerate(header):
+        value = str(cells[column]).strip()
+        if value and backticked[column_index]:
+            value = f"`{value}`"
+        cell = parts[column_index + 1]
+        lead = cell[: len(cell) - len(cell.lstrip())] or " "
+        trail = cell[len(cell.rstrip()):] or " "
+        rendered.append(f"{lead}{value}{trail}")
+    return parts[0] + "|" + "|".join(rendered) + "|" + parts[-1]
+
+
+def _insert_line_after(lines, plain, position, rendered):
+    """Insert ``rendered`` as its own line below ``position``, preserving line endings.
+
+    A reference line with no ending is the file's last line; it gets one so the
+    inserted line does not run onto the end of it.
+    """
+    ending = lines[position][len(plain[position]):]
+    if ending:
+        lines.insert(position + 1, rendered + ending)
+    else:
+        lines[position] = plain[position] + "\n"
+        lines.insert(position + 1, rendered)
+
+
+def replace_schema_row_number(text, row):
+    """Rewrite one registry row's Number cell and nothing else.
+
+    Surgical by contract: the row is matched by its ``Value`` cell and every
+    other byte of the note — including the row's own Definition prose and the
+    cell's spacing and backtick style — survives unchanged.
+    """
+    lines = text.splitlines(keepends=True)
+    plain = [line.rstrip("\r\n") for line in lines]
+    header, positions = registry_table_positions(plain, row["table"])
     for column in (row["match_column"], row["field"]):
         if column not in header:
             raise UserError(f"{row['table']}: table has no {column} column")
@@ -1577,9 +1674,8 @@ def replace_schema_row_number(text, row):
     field_index = header.index(row["field"])
     matches = [
         index
-        for index in positions[2:]
-        if not is_divider_row(split_markdown_table_row(plain[index]))
-        and normalize_project_value(split_markdown_table_row(plain[index])[match_index]) == row["value"]
+        for index in _data_row_positions(plain, positions)
+        if normalize_project_value(split_markdown_table_row(plain[index])[match_index]) == row["value"]
     ]
     if not matches:
         raise UserError(f"{row['table']}: no row with {row['match_column']} {row['value']}")
@@ -1600,6 +1696,167 @@ def replace_schema_row_number(text, row):
     ending = lines[position][len(plain[position]):]
     lines[position] = "|".join(parts) + ending
     return "".join(lines), plain[position], "|".join(parts)
+
+
+# `value — definition`, in the order a bullet registry is probed for one.
+BULLET_SEPARATORS = (" — ", " – ", " - ", ": ")
+MATCH_COLUMNS = ("Value", "Approved value", "Property", "Legacy input")
+
+
+def insert_schema_row(text, table, cells):
+    """Append one row to a registry table, changing no other byte.
+
+    ``cells`` maps every column header to a plain value. Backtick style is taken
+    from the column's existing cells and spacing from the last row, so an
+    inserted row is indistinguishable from a hand-written one.
+
+    This function only ever adds. It refuses a value the table already carries,
+    and it has no way to reach an existing row's cells — editing one is
+    ``replace_schema_row_number``, and editing a Label or Definition is the
+    owner's to do by hand.
+    """
+    lines = text.splitlines(keepends=True)
+    plain = [line.rstrip("\r\n") for line in lines]
+    header, positions = registry_table_positions(plain, table)
+    missing = [column for column in header if column not in cells]
+    if missing:
+        raise UserError(f"{table}: new row is missing {', '.join(missing)}")
+    unknown = [column for column in cells if column not in header]
+    if unknown:
+        raise UserError(f"{table}: table has no {', '.join(unknown)} column")
+    data = _data_row_positions(plain, positions)
+    if not data:
+        raise UserError(f"{table}: table has no rows to copy style from")
+
+    for column in MATCH_COLUMNS:
+        if column not in header:
+            continue
+        index = header.index(column)
+        existing = {
+            normalize_project_value(split_markdown_table_row(plain[row])[index]) for row in data
+        }
+        if normalize_project_value(str(cells[column])) in existing:
+            raise UserError(f"{table}: {strip_schema_value(str(cells[column]))} is already registered")
+        break
+
+    row_text = _render_table_row(
+        header, cells, plain[data[-1]], _column_backtick_flags(plain, data, header)
+    )
+    _insert_line_after(lines, plain, data[-1], row_text)
+    return "".join(lines), row_text
+
+
+def insert_registry_bullet(text, heading, value, definition=""):
+    """Append one bullet to a controlled-vocabulary section, changing no other byte.
+
+    **Note types**, **Status values**, and **Capture types** are bullet
+    registries rather than tables. The indent, marker, backtick style, and
+    ``value — definition`` separator are copied from the bullets already there.
+    """
+    lines = text.splitlines(keepends=True)
+    plain = [line.rstrip("\r\n") for line in lines]
+    start, end = section_bounds(plain, heading)
+    positions = [
+        index for index in range(start + 1, end) if re.match(r"^\s*[-*]\s+\S", plain[index])
+    ]
+    if not positions:
+        raise UserError(f"{heading}: no bullets to append to")
+    if value in parse_bullet_registry(plain, heading):
+        raise UserError(f"{heading}: {value} is already registered")
+
+    match = re.match(r"^(\s*)([-*])(\s+)(.+?)\s*$", plain[positions[-1]])
+    indent, marker, gap, body = match.group(1), match.group(2), match.group(3), match.group(4)
+    separator = " — "
+    for candidate in BULLET_SEPARATORS:
+        if candidate in body:
+            separator = candidate
+            break
+    rendered_value = f"`{value}`" if body.startswith("`") else value
+    bullet = indent + marker + gap + rendered_value
+    if definition:
+        bullet += separator + definition
+    _insert_line_after(lines, plain, positions[-1], bullet)
+    return "".join(lines), bullet
+
+
+def insert_subdomain_section(text, domain, first_row):
+    """Add a ``### <domain>`` subsection under **Subdomains**, carrying its first row.
+
+    A newly registered domain has no subdomain table, and ``insert_schema_row``
+    can only append to one that exists. The heading, column headers, divider,
+    and row style are all copied from the last subsection already present, so
+    the new table matches the note's own shape.
+
+    ``first_row`` is required rather than optional because ``table_after``
+    refuses a table with no rows: an empty subsection would make the whole
+    schema note unparseable. The domain's **Domains** row must already be in
+    the text, or the parser refuses a subsection naming an unknown domain — so
+    in ``candidate_schema_text`` the Domains row comes first.
+    """
+    lines = text.splitlines(keepends=True)
+    plain = [line.rstrip("\r\n") for line in lines]
+    start, end = section_bounds(plain, "Subdomains")
+    subsections = [
+        (start + 1 + index, title)
+        for index, level, title in iter_heading_lines(plain[start + 1:end])
+        if level == 3
+    ]
+    if any(title == domain for _, title in subsections):
+        raise UserError(f"Subdomains: {domain} already has a subsection")
+    if not subsections:
+        raise UserError("Subdomains: no existing subsection to copy the table shape from")
+
+    template_start, template_domain = subsections[-1]
+    template = [
+        index
+        for index in range(template_start + 1, end)
+        if plain[index].strip().startswith("|")
+    ]
+    if len(template) < 3:
+        raise UserError(f"Subdomains/{template_domain}: no table with rows to copy the shape from")
+    header = split_markdown_table_row(plain[template[0]])
+    data = _data_row_positions(plain, template)
+    missing = [column for column in header if column not in first_row]
+    if missing:
+        raise UserError(f"Subdomains/{domain}: first row is missing {', '.join(missing)}")
+    row_text = _render_table_row(
+        header, first_row, plain[data[-1]], _column_backtick_flags(plain, data, header)
+    )
+
+    anchor = end - 1
+    while anchor > start and not plain[anchor].strip():
+        anchor -= 1
+    block = ["", f"### {domain}", "", plain[template[0]], plain[template[1]], row_text]
+    for rendered in block:
+        _insert_line_after(lines, plain, anchor, rendered)
+        plain.insert(anchor + 1, rendered)
+        anchor += 1
+    return "".join(lines), f"### {domain}"
+
+
+def candidate_schema_text(text, insertions):
+    """Apply every additive insertion in order and return ``(text, rendered lines)``.
+
+    Used to build a candidate note for validation before anything is written:
+    the caller parses it, validates the derived paths, re-checks drift, and
+    discards the candidate if any of that fails. Insertions are ordered, so a
+    new domain's ``subsection`` must precede rows addressed to it.
+    """
+    rendered = []
+    for insertion in insertions:
+        kind = insertion.get("kind")
+        if kind == "row":
+            text, line = insert_schema_row(text, insertion["table"], insertion["cells"])
+        elif kind == "bullet":
+            text, line = insert_registry_bullet(
+                text, insertion["heading"], insertion["value"], insertion.get("definition", "")
+            )
+        elif kind == "subsection":
+            text, line = insert_subdomain_section(text, insertion["domain"], insertion["first_row"])
+        else:
+            raise UserError(f"unknown schema insertion kind: {kind}")
+        rendered.append(line)
+    return text, rendered
 
 
 def compiled_schema_for(vault, schema_path, cache_dir=None):

@@ -1,0 +1,120 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-08-01",
+  "comment": "The decisions any catalog has to make, whatever it catalogs. This file exists because of docs/service-split-handoff.md section 2.1: asked an open question, the non-thinking model answers with whatever the prompt made salient and silently skips the rest -- in the measured case, 4 categories of 8. A reasoning model walks a list like this in its scratchpad; this one has to be handed it. So the model never generates the dimensions, only decides which apply to the subject and what the field's own vocabulary calls them. 'often_missed' marks the ones a model reaches for last; 'enumeration_clause' names those explicitly in the prompt, because naming the omission is what moved the numbers, not listing the full set.",
+  "enumeration_clause": "Work through the dimensions in order and ask what this field does about each one before moving on. Do not stop at identification, description, and classification: a catalog also has to settle naming authority, provenance and acquisition, condition and state, measurement and units, identifiers issued by outside registries, legal and ethical constraints, the split between a reference record and an event record, and what is kept versus discarded. A dimension this field genuinely does not have is a legitimate answer; say so rather than inventing practice for it.",
+  "dimensions": [
+    {
+      "id": "identity",
+      "label": "Identity and naming authority",
+      "question": "What names one of these unambiguously, and who decides the correct name?",
+      "often_missed": true,
+      "why": "Fields with a nomenclatural authority (binomial names, IMA mineral names, MARC authority files) have a right answer and a citation for it. A vault that stores the popular name loses the join to every outside record.",
+      "vault_note": "Usually the note title convention, in the existing wiki form 'Canonical Name, Gloss'."
+    },
+    {
+      "id": "classification",
+      "label": "Classification hierarchy",
+      "question": "What formal hierarchy or controlled taxonomy do practitioners file these under?",
+      "often_missed": false,
+      "why": "Distinguishes a genuine storage boundary from a topical label. Most hierarchies belong in the note body or in links, not in the folder tree.",
+      "vault_note": "A hierarchy is rarely a subdomain. Folder depth is capped at domain/subdomain/project."
+    },
+    {
+      "id": "description",
+      "label": "Identification and description",
+      "question": "What does a practitioner record to tell one of these from a similar one?",
+      "often_missed": false,
+      "why": "The core of a reference card and the section a field guide is actually good at.",
+      "vault_note": "Managed body sections in the kind spec."
+    },
+    {
+      "id": "provenance",
+      "label": "Provenance and acquisition",
+      "question": "Where did this specimen, copy, or record come from, and how is that chain recorded?",
+      "often_missed": true,
+      "why": "Museums, archives, and libraries treat provenance as load-bearing; a hobby catalog usually invents it late and badly.",
+      "vault_note": "Often a body table on the record note rather than a property."
+    },
+    {
+      "id": "temporal",
+      "label": "Temporal facts",
+      "question": "Which dates matter, and do any of them recur or vary by season?",
+      "often_missed": false,
+      "why": "A recurring window is a different fact from a one-off date and cannot be stored the same way.",
+      "vault_note": "One-off dates use the existing `date` property. Recurring windows are a managed body table, the way Phenology is."
+    },
+    {
+      "id": "spatial",
+      "label": "Spatial facts",
+      "question": "Does place change what is true about one of these, or only where it was found?",
+      "often_missed": false,
+      "why": "If a fact varies by region, storing it without its region makes it a fact about nowhere.",
+      "vault_note": "Region-scoped rows in a body table, keyed to a wiki `place` note."
+    },
+    {
+      "id": "condition",
+      "label": "Condition and state",
+      "question": "Does one of these have a condition, grade, or lifecycle state that practitioners record on a scale?",
+      "often_missed": true,
+      "why": "Graded fields (philately, numismatics, book collecting, conservation) have published scales; a free-text guess is worthless next to one.",
+      "vault_note": "A controlled column in a body table. Not a `status` value -- `status` is the note's lifecycle, not the object's."
+    },
+    {
+      "id": "measurement",
+      "label": "Measurement and units",
+      "question": "What is measured, in what units, and to what precision?",
+      "often_missed": true,
+      "why": "Units left implicit are the classic silent corruption; a field with a standard usually names one.",
+      "vault_note": "Units belong in the column heading, not in each cell."
+    },
+    {
+      "id": "media",
+      "label": "Media, specimens, and physical holdings",
+      "question": "Is there a photograph, specimen, recording, or physical object, and how is it referenced?",
+      "often_missed": false,
+      "why": "A catalog whose records point at nothing is a reading list.",
+      "vault_note": "Attachments live under the Meta attachments route; `cover` is human-owned and never set by tooling."
+    },
+    {
+      "id": "identifiers",
+      "label": "External registry identifiers",
+      "question": "Which outside registries issue an identifier for one of these, and which is canonical?",
+      "often_missed": true,
+      "why": "The single highest-value field for later federation, and the one a model asked for 'good metadata' almost never proposes.",
+      "vault_note": "A body table row or a Sources link. It is not worth a global frontmatter property."
+    },
+    {
+      "id": "relationships",
+      "label": "Relationships between records",
+      "question": "What typed relationships do practitioners draw between two of these?",
+      "often_missed": false,
+      "why": "Decides what belongs in `related`/`parent` versus what needs its own note.",
+      "vault_note": "The vault has `parent`, `related`, `people`, and `organization`. No new link property is available."
+    },
+    {
+      "id": "record_split",
+      "label": "Reference record versus event record",
+      "question": "Does this field keep a durable card about the kind of thing, separate from a dated record of one encounter?",
+      "often_missed": true,
+      "why": "The single most consequential structural decision, and the one the species feature turned on: a species card and a sighting are not the same note and must not share a route.",
+      "vault_note": "A reference card is a wiki subdomain; an event record is its own domain."
+    },
+    {
+      "id": "constraints",
+      "label": "Legal, ethical, and safety constraints",
+      "question": "Is any of this regulated, protected, dangerous, or sensitive to publish?",
+      "often_missed": true,
+      "why": "Protected-species localities, human remains, culturally restricted material, and edibility claims all have practice around them that a generic schema silently violates.",
+      "vault_note": "Usually an owner-owned section the pipeline never writes, the way edibility is on fungus cards."
+    },
+    {
+      "id": "retention",
+      "label": "Retention and curation",
+      "question": "What does a practitioner discard, correct, or supersede, and how is that recorded?",
+      "often_missed": true,
+      "why": "A catalog with no notion of a superseded record accumulates contradictions.",
+      "vault_note": "The existing `status` values usually cover this. Check before proposing anything."
+    }
+  ]
+}
