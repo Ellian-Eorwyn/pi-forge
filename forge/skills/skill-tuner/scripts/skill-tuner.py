@@ -155,6 +155,38 @@ CITABLE_ITEM_STATUSES = {"extracted", "verified", "escalated"}
 SKILL_PATH_RE = re.compile(r"skills/([a-z0-9][a-z0-9-]*)/")
 SKILL_SCRIPT_RE = re.compile(r"scripts/([a-z0-9][a-z0-9-]*)\.(?:py|mjs)\b")
 
+# Grounding. A verified diagnosis paired with an invented fix is worse than no
+# fix: an agent acting on it edits paths that do not exist. Measured on the
+# example session, the author proposed `$VAULT/wiki/<subdomain>/` and
+# `max_context_wait`, neither of which exists anywhere - a small model reaching
+# for a tidier convention than the real one. So every path, flag, and
+# identifier a recommendation names is checked against what the session
+# actually demonstrated, and anything left over is marked rather than trusted.
+BACKTICK_RE = re.compile(r"`([^`\n]{2,120})`")
+FLAG_LIKE_RE = re.compile(r"^--[A-Za-z][\w-]*$")
+IDENTIFIER_LIKE_RE = re.compile(r"^[A-Za-z_][\w.]*$")
+PATH_EXTENSIONS = (".md", ".py", ".mjs", ".json", ".jsonl", ".txt", ".yaml", ".yml", ".csv", ".ts")
+PLACEHOLDER_RE = re.compile(r"<[^>]*>|\{\{[^}]*\}\}|\$\{[^}]*\}")
+# Paths in a session log live inside JSON strings, so quotes and newlines are
+# the real delimiters; splitting those out first keeps a segment from swallowing
+# the prose around it ("vault-wiki.py apply --vault" is not a filename).
+CORPUS_DELIMITER_RE = re.compile(r"[\"'\n\r\t\\]+")
+NUMBER_PREFIX_RE = re.compile(r"^[\d.]+\s+")
+SEGMENT_TRIM = " \t,;:)(][}{*`"
+# A literal segment shorter than this proves nothing on its own, and a path
+# needs at least one distinctive segment: "wiki" occurs inside "09 Wiki", and
+# accepting it would ground an entire fabricated tree.
+MIN_GROUNDED_SEGMENT_CHARS = 4
+MIN_DISTINCTIVE_SEGMENT_CHARS = 6
+MIN_ADVISORY_IDENTIFIER_CHARS = 6
+# The report is required to name its own vocabulary, which by construction
+# never appears in a session log. Flagging it would bury the invented
+# identifiers the check exists to surface.
+CONTROLLED_VOCABULARY = {
+    value.casefold()
+    for value in ITEM_TYPES + SEVERITIES + LAYERS + CHANGE_TYPES + sorted(INTERPRETATIONS) + sorted(CONFIDENCES)
+}
+
 KNOWN_ENTRY_TYPES = {"session", "model_change", "thinking_level_change", "message", "custom_message", "compaction"}
 KNOWN_MESSAGE_ROLES = {"user", "assistant", "toolResult"}
 KNOWN_ASSISTANT_BLOCKS = {"text", "thinking", "toolCall"}
@@ -276,7 +308,12 @@ METHOD_TEXT = (
     "(its L-number is the line in the source session log). Quotes are verbatim from the "
     "rendered timeline. Severity is one of blocker, major, minor, papercut; recommended "
     "changes name one of: instruction_clarification, decomposition, deterministic_guard, "
-    "contract_tightening, backend_config, new_reference, new_tool."
+    "contract_tightening, backend_config, new_reference, new_tool.\n\n"
+    "**What is verified here and what is not.** The diagnoses - what happened, and the quoted "
+    "evidence for it - were reviewed against their sources. The recommendations were not: they are "
+    "proposals written from that evidence, and any path, flag, or setting one names is a suggestion "
+    "rather than a confirmed fact. Names that do not appear anywhere in the session are listed under "
+    "Unverified Recommendation Details. Confirm a name exists before acting on it."
 )
 
 # --------------------------------------------------------------------------- #
@@ -2419,6 +2456,92 @@ def appendix_line(item, index_by_line):
     return f"- [{item['id']}] {location} - {item['item_type']}, {label}, {item['severity']}{suffix} - {support}"
 
 
+def session_corpus(run):
+    """Everything the session literally demonstrated, for grounding checks.
+
+    Read from the raw log rather than the elided timeline: a path that only
+    appeared inside an elided payload is still a real path, and flagging it
+    would punish a correct recommendation. ``require_stable_input`` has already
+    proved the file has not changed.
+    """
+    lowered = Path(run["input"]["path"]).read_text(encoding="utf-8", errors="replace").casefold()
+    segments = set()
+    for chunk in CORPUS_DELIMITER_RE.split(lowered):
+        candidate = chunk.strip(SEGMENT_TRIM)
+        if not candidate:
+            continue
+        # Both forms: the whole slash-delimited piece, so a folder name keeps
+        # its space ("09 wiki"), and its bare words, so a filename survives the
+        # prose around it ("...uses scripts/vault-wiki.py to expand").
+        for piece in candidate.split("/"):
+            value = piece.strip(SEGMENT_TRIM)
+            if not value:
+                continue
+            segments.add(value)
+            segments.update(word.strip(SEGMENT_TRIM) for word in value.split() if word.strip(SEGMENT_TRIM))
+            # This vault numbers its folders and notes ("0.03 Personal
+            # Context.md"), and a recommendation naming the file without its
+            # number is describing a real file, not inventing one.
+            unnumbered = NUMBER_PREFIX_RE.sub("", value).strip(SEGMENT_TRIM)
+            if unnumbered and unnumbered != value:
+                segments.add(unnumbered)
+    return {"text": lowered, "segments": segments}
+
+
+def classify_referent(token):
+    value = token.strip()
+    if FLAG_LIKE_RE.match(value):
+        return "flag"
+    stripped = value.rstrip("/")
+    if "/" in stripped or stripped.casefold().endswith(PATH_EXTENSIONS):
+        return "path"
+    if IDENTIFIER_LIKE_RE.match(value) and len(value) >= MIN_ADVISORY_IDENTIFIER_CHARS:
+        return "identifier"
+    return None
+
+
+def path_is_grounded(token, corpus, ground_roots):
+    """A path is grounded when the session used its literal segments, or when a
+    caller-supplied root actually holds it."""
+    cleaned = PLACEHOLDER_RE.sub("/", token.strip().strip("'\"").rstrip("/"))
+    cleaned = re.sub(r"^[~$][A-Za-z_]*/", "", cleaned).lstrip("./")
+    literals = [part.strip() for part in cleaned.split("/") if part.strip()]
+    literals = [part for part in literals if len(part) >= MIN_GROUNDED_SEGMENT_CHARS]
+    if not literals:
+        return False
+    distinctive = any(len(part) >= MIN_DISTINCTIVE_SEGMENT_CHARS for part in literals)
+    if distinctive and all(part.casefold() in corpus["segments"] for part in literals):
+        return True
+    for root in ground_roots:
+        candidate = Path(root).expanduser() / cleaned
+        if candidate.exists():
+            return True
+    return False
+
+
+def ungrounded_referents(text, corpus, ground_roots=()):
+    """Referents a recommendation names that the session never demonstrated.
+
+    Returns ``(blocking, advisory)``: paths and flags an agent would act on
+    directly, and identifiers worth a second look.
+    """
+    blocking = []
+    advisory = []
+    for token in dict.fromkeys(BACKTICK_RE.findall(text)):
+        kind = classify_referent(token)
+        if kind is None:
+            continue
+        if kind == "path":
+            if not path_is_grounded(token, corpus, ground_roots):
+                blocking.append(token)
+        elif kind == "flag":
+            if token.casefold() not in corpus["text"]:
+                blocking.append(token)
+        elif token.casefold() not in CONTROLLED_VOCABULARY and token.casefold() not in corpus["text"]:
+            advisory.append(token)
+    return blocking, advisory
+
+
 def plan_sections(groups, buckets):
     groups_by_id = {group["groupId"]: group for group in groups}
     sections = [{"sectionId": "executive-summary", "title": "Executive Summary", "kind": "exec", "groupIds": [group["groupId"] for group in groups[:EXEC_SUMMARY_TOP_GROUPS]]}]
@@ -2531,9 +2654,17 @@ def section_gates(content, section, budget, valid_ids):
     return problems
 
 
-def author_section(run_directory, think, section, payload, budget, valid_ids, args):
+def author_section(run_directory, think, section, payload, budget, valid_ids, args, corpus=None, ground_roots=()):
+    """Author one section, then give ungrounded referents one chance to go.
+
+    Grounding is deliberately not a hard gate. A section whose diagnosis is
+    verified and whose fix names one invented path is still worth keeping - the
+    diagnosis is the expensive part - so a failed grounding retry marks the
+    referents instead of discarding the section.
+    """
     messages = [{"role": "system", "content": AUTHOR_SYSTEM}, {"role": "user", "content": payload}]
     problems = []
+    body = None
     for _attempt in range(SECTION_ATTEMPTS_MAX):
         content, record = forge_llm.call(
             think,
@@ -2546,20 +2677,91 @@ def author_section(run_directory, think, section, payload, budget, valid_ids, ar
         run_state.append_jsonl_fsync(run_directory / "inference_journal.jsonl", record)
         problems = section_gates(content, section, budget, valid_ids)
         if not problems:
-            return content.strip()
+            body = content.strip()
+            break
         messages = [
             *messages,
             {"role": "assistant", "content": content},
             {"role": "user", "content": "That section was unusable: " + "; ".join(problems[:5]) + ". Return the corrected section body only."},
         ]
-    raise UserError("; ".join(problems[:5]))
+    if body is None:
+        raise UserError("; ".join(problems[:5]))
+    if corpus is None:
+        return body
+    blocking, _advisory = ungrounded_referents(body, corpus, ground_roots)
+    if not blocking:
+        return body
+    progress(f"[ground] {section['sectionId']}: {len(blocking)} ungrounded referent(s), asking once for a rewrite")
+    retry = [
+        *messages,
+        {"role": "assistant", "content": body},
+        {
+            "role": "user",
+            "content": (
+                "These names do not appear anywhere in the session, so they cannot be trusted as real: "
+                + ", ".join(f"`{token}`" for token in blocking[:10])
+                + ". Rewrite the section using only paths, flags, and identifiers the evidence actually shows, "
+                "or describe the change without naming one. Keep every [p######] citation. "
+                "Return the corrected section body only."
+            ),
+        },
+    ]
+    content, record = forge_llm.call(
+        think,
+        retry,
+        max_tokens=AUTHOR_MAX_TOKENS,
+        background=not args.foreground,
+        timeout=args.request_timeout,
+        task="skill-tuner-ground",
+    )
+    run_state.append_jsonl_fsync(run_directory / "inference_journal.jsonl", record)
+    candidate = content.strip()
+    if section_gates(candidate, section, budget, valid_ids):
+        return body
+    retried_blocking, _advisory = ungrounded_referents(candidate, corpus, ground_roots)
+    return candidate if len(retried_blocking) < len(blocking) else body
 
 
 def section_path(run_directory, order, section):
     return run_directory / "sections" / f"{order:02d}-{section['sectionId']}.md"
 
 
-def assemble_report(run, run_directory, meta, results, items, sections, bodies, index_by_line):
+def grounding_report(sections, bodies, corpus, ground_roots):
+    """Recomputed at assembly, so a resumed run reports the same caution."""
+    findings = {}
+    for section in sections:
+        body = bodies.get(section["sectionId"], "")
+        blocking, advisory = ungrounded_referents(body, corpus, ground_roots)
+        if blocking or advisory:
+            findings[section["sectionId"]] = {"blocking": blocking, "advisory": advisory}
+    return findings
+
+
+def grounding_text(sections, findings):
+    lines = [
+        "Diagnoses in this report are evidence-cited and were reviewed. Recommendations were not: "
+        "they are proposals, and the model writing them can invent a plausible-looking path. Every path, "
+        "flag, and identifier a recommendation names is checked against what the session actually "
+        "demonstrated; the ones below were not found, so treat them as unverified guesses and confirm the "
+        "real name before acting on them."
+    ]
+    titles = {section["sectionId"]: section["title"] for section in sections}
+    for section_id in sorted(findings):
+        entry = findings[section_id]
+        if entry["blocking"]:
+            lines.append(
+                f"- **{titles.get(section_id, section_id)}** - not found in the session: "
+                + ", ".join(f"`{token}`" for token in entry["blocking"][:12])
+            )
+        if entry["advisory"]:
+            lines.append(
+                f"- {titles.get(section_id, section_id)} - worth confirming: "
+                + ", ".join(f"`{token}`" for token in entry["advisory"][:12])
+            )
+    return "\n".join(lines)
+
+
+def assemble_report(run, run_directory, meta, results, items, sections, bodies, index_by_line, findings=None):
     items_by_id = {item["id"]: item for item in items}
     parts = [
         f"# Skill Tuning Report - session {run['input']['sessionId']}",
@@ -2578,6 +2780,9 @@ def assemble_report(run, run_directory, meta, results, items, sections, bodies, 
     if not any(section["kind"] == "crosscutting" for section in sections):
         parts.append("## Crosscutting")
         parts.append("No crosscutting issues were recorded.")
+    if findings:
+        parts.append("## Unverified Recommendation Details")
+        parts.append(grounding_text(sections, findings))
     body_so_far = "\n\n".join(parts)
     cited = memo_evidence_ids(body_so_far)
     appendix_items = [items_by_id[item_id] for item_id in sorted(cited) if item_id in items_by_id]
@@ -2610,6 +2815,11 @@ def command_report(args):
 
         sections = plan_sections(groups, groups_payload["buckets"]) if groups else []
         budget = report_budget_chars(run)
+        corpus = session_corpus(run)
+        ground_roots = [Path(root).expanduser() for root in (args.ground_root or [])]
+        for root in ground_roots:
+            if not root.is_dir():
+                fail(f"--ground-root is not a directory: {root}", code="missing_input")
         fixed_probe, _cited = assemble_report(
             run, run_directory, meta, results, items, [], {}, index_by_line
         )
@@ -2639,7 +2849,9 @@ def command_report(args):
             progress(f"[author {order}/{len(sections)}] {section['title']} ({budgets[section['sectionId']]} chars)")
             payload = section_payload(section, budgets[section["sectionId"]], run, meta, groups_by_id, items_by_id, index_by_line, clusters)
             try:
-                body = author_section(run_directory, think, section, payload, budgets[section["sectionId"]], valid_ids, args)
+                body = author_section(
+                    run_directory, think, section, payload, budgets[section["sectionId"]], valid_ids, args, corpus, ground_roots
+                )
             except InterruptedError:
                 run_state.append_run_event(run_directory, {"type": "report_preempted", "sectionId": section["sectionId"]})
                 emit(
@@ -2653,7 +2865,8 @@ def command_report(args):
             run_state.append_run_event(run_directory, {"type": "section_authored", "sectionId": section["sectionId"]})
             bodies[section["sectionId"]] = body
 
-        report, cited = assemble_report(run, run_directory, meta, results, items, sections, bodies, index_by_line)
+        findings = grounding_report(sections, bodies, corpus, ground_roots)
+        report, cited = assemble_report(run, run_directory, meta, results, items, sections, bodies, index_by_line, findings)
         shrink_pass = 0
         while len(report) > budget and shrink_pass < ASSEMBLY_SHRINK_PASSES and sections:
             shrink_pass += 1
@@ -2666,7 +2879,9 @@ def command_report(args):
             progress(f"[shrink {shrink_pass}] report is {overage} chars over; re-authoring {fattest['sectionId']} at {new_budget} chars")
             payload = section_payload(fattest, new_budget, run, meta, groups_by_id, items_by_id, index_by_line, clusters)
             try:
-                body = author_section(run_directory, think, fattest, payload, new_budget, valid_ids, args)
+                body = author_section(
+                    run_directory, think, fattest, payload, new_budget, valid_ids, args, corpus, ground_roots
+                )
             except (UserError, forge_llm.ChatError) as error:
                 fail(f"shrink pass failed on {fattest['sectionId']}: {error}", code="section_failed")
             except InterruptedError:
@@ -2675,7 +2890,8 @@ def command_report(args):
                 return
             run_state.atomic_write_text(section_path(run_directory, order, fattest), body + "\n")
             bodies[fattest["sectionId"]] = body
-            report, cited = assemble_report(run, run_directory, meta, results, items, sections, bodies, index_by_line)
+            findings = grounding_report(sections, bodies, corpus, ground_roots)
+            report, cited = assemble_report(run, run_directory, meta, results, items, sections, bodies, index_by_line, findings)
 
         run_state.atomic_write_text(run_directory / "report.md", report)
         update_report_meta(
@@ -2686,6 +2902,11 @@ def command_report(args):
                 "reportBudgetTokens": run["options"]["reportBudgetTokens"],
                 "citedEvidenceIds": cited,
                 "sectionBudgets": budgets,
+                "grounding": {
+                    "groundRoots": [str(root) for root in ground_roots],
+                    "ungroundedBySection": findings,
+                    "ungroundedTotal": sum(len(entry["blocking"]) for entry in findings.values()),
+                },
             },
         )
         set_phase(run_directory, "validate", "validate", {"type": "report_written", "chars": len(report)})
@@ -2701,6 +2922,7 @@ def command_report(args):
                 "budgetChars": budget,
                 "sections": [section["sectionId"] for section in sections],
                 "citedEvidence": len(cited),
+                "ungroundedReferents": sum(len(entry["blocking"]) for entry in findings.values()),
                 "nextAction": "validate",
             },
         )
@@ -2784,6 +3006,20 @@ def command_validate(args):
                 errors.append(f"item {item['id']} is {item['status']} but the report never mentions it")
         if run["input"]["sha256"] not in report:
             errors.append("provenance does not record the input sha256")
+        grounding = meta.get("grounding") or {}
+        ungrounded = grounding.get("ungroundedBySection") or {}
+        blocking_total = sum(len(entry.get("blocking") or []) for entry in ungrounded.values())
+        if blocking_total and "## Unverified Recommendation Details" not in report:
+            errors.append(
+                f"{blocking_total} recommendation referents were not found in the session but the report does not caution about them"
+            )
+        if "What is verified here and what is not" not in report:
+            errors.append("the report does not distinguish verified diagnoses from unverified recommendations")
+        if blocking_total:
+            warnings.append(
+                f"{blocking_total} referent(s) named in recommendations do not appear in the session; "
+                "they are marked in the report and must be confirmed before acting on them"
+            )
     sections_dir = run_directory / "sections"
     if sections_dir.is_dir():
         for path in sorted(sections_dir.glob("*.md")):
@@ -2962,6 +3198,11 @@ def parser():
 
     report = subparsers.add_parser("report", help="Author the report sections on the thinking service and assemble report.md.")
     report.add_argument("run_directory")
+    report.add_argument(
+        "--ground-root",
+        action="append",
+        help="Directory a recommendation's paths may also resolve against, beyond what the session shows (repo, vault). May be repeated.",
+    )
     add_model_arguments(report, think=True)
     report.set_defaults(handler=command_report)
 

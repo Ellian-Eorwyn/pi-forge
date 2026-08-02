@@ -27,7 +27,7 @@ from real usage evidence. The input is a pi session log (format v3, the
 - `extract <run-directory>`: mine every pending chunk on the chat service, serially so open threads chain across chunk boundaries. `--limit <n>` for a trial.
 - `verify <run-directory>`: one batched review of all evidence on the thinking service; flags are escalated with the reviewer's objection and the chunk in context.
 - `synthesize <run-directory>`: deterministic merge and ranking into `synthesis/groups.json` plus a bounded `authoring_context.md`; `--no-embeddings` skips the advisory clusters.
-- `report <run-directory>`: author the report sections on the thinking service under explicit character budgets and assemble `report.md` with its evidence appendix.
+- `report <run-directory>`: author the report sections on the thinking service under explicit character budgets and assemble `report.md` with its evidence appendix. `--ground-root <dir>` (repeatable) lets paths that exist in a repo or vault count as grounded alongside what the session shows.
 - `validate <run-directory>`: deterministic gates - budget, resolvable citations, appendix consistency, verification honesty. Marks the run complete when clean.
 - `retry <run-directory> --item <chunk-id>|--all-failed`: requeue `needs_review` chunks; clears the generated report artifacts so later stages rebuild.
 
@@ -98,6 +98,23 @@ contracts, `coding` for script changes. Every recommendation names a
 `change_type` (instruction_clarification, decomposition, deterministic_guard,
 contract_tightening, backend_config, new_reference, new_tool) and cites the
 evidence, so the improving model can judge each one against the appendix.
+
+**Diagnoses are verified; recommendations are not.** Verification reviews the
+evidence — does the claim match its quote and its deterministic corroboration.
+Nothing reviews whether a proposed fix is *correct*, and a model writing one
+will reach for a tidier convention than the real one: a live run proposed
+`$VAULT/wiki/<subdomain>/` for a vault whose notes live in `09 Wiki/9.01
+Concepts`, and a config key that exists nowhere. So `report` checks every path,
+flag, and identifier a recommendation names against what the session actually
+demonstrated, gives the model one chance to rewrite what it cannot ground, and
+lists whatever survives under **Unverified Recommendation Details**. Pass
+`--ground-root <dir>` (repeatable) to also let real paths in a repo or vault
+count as grounded.
+
+When handing the report to another agent, tell it plainly: act on the
+diagnoses, treat every recommendation as a proposal, and confirm any path or
+setting it is told to change actually exists before changing it. Anything in
+the Unverified Recommendation Details list is a guess by construction.
 
 For a suite over many sessions, run one directory per session;
 `evidence.jsonl` carries `sessionId` on every item so a future aggregator can

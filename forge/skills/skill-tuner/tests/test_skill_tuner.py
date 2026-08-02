@@ -627,6 +627,73 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(groups[1]["itemIds"], ["p000003"])
 
 
+class GroundingTests(unittest.TestCase):
+    """A verified diagnosis with an invented fix is worse than no fix."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.session = write_session(Path(self.directory.name) / "session.jsonl")
+        self.corpus = skill_tuner.session_corpus({"input": {"path": str(self.session)}})
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def check(self, token):
+        return skill_tuner.ungrounded_referents(f"Recommended change: use `{token}` here.", self.corpus)
+
+    def test_paths_the_session_used_are_grounded(self):
+        for token in ("skills/vault-wiki/SKILL.md", "vault-wiki.py", "09 Wiki/Animals.md", "--vault"):
+            blocking, advisory = self.check(token)
+            self.assertEqual((blocking, advisory), ([], []), f"{token} should be grounded")
+
+    def test_invented_paths_and_flags_are_blocking(self):
+        for token in ("$VAULT/schema/wiki/index.md", "local_coordinates.json", "--auto-split"):
+            blocking, _advisory = self.check(token)
+            self.assertEqual(blocking, [token], f"{token} should be flagged as ungrounded")
+
+    def test_a_lone_short_segment_cannot_ground_a_fabricated_tree(self):
+        # "wiki" occurs inside "09 Wiki"; accepting it would ground the whole path.
+        blocking, _advisory = self.check("$VAULT/wiki/<subdomain>/<note_name>.md")
+        self.assertEqual(len(blocking), 1)
+
+    def test_invented_identifiers_are_advisory_not_blocking(self):
+        blocking, advisory = self.check("max_context_wait")
+        self.assertEqual(blocking, [])
+        self.assertEqual(advisory, ["max_context_wait"])
+
+    def test_the_reports_own_vocabulary_is_never_flagged(self):
+        """Noise here would bury the invented identifiers the check exists for."""
+        body = (
+            "Recommended change: `deterministic_guard`, severity: `major` [p000001]. "
+            "Layer `harness`, interpretation `inferred`, type `silent_failure`, "
+            "but tune `max_tool_call_latency` too."
+        )
+        blocking, advisory = skill_tuner.ungrounded_referents(body, self.corpus)
+        self.assertEqual(blocking, [])
+        self.assertEqual(advisory, ["max_tool_call_latency"])
+
+    def test_a_ground_root_can_vouch_for_a_path_the_session_never_used(self):
+        root = Path(self.directory.name) / "repo"
+        (root / "forge" / "lib").mkdir(parents=True)
+        (root / "forge" / "lib" / "forge_verify.py").write_text("", encoding="utf-8")
+        token = "forge/lib/forge_verify.py"
+        self.assertEqual(self.check(token)[0], [token])
+        blocking, _advisory = skill_tuner.ungrounded_referents(
+            f"use `{token}`", self.corpus, ground_roots=[root]
+        )
+        self.assertEqual(blocking, [])
+
+    def test_grounding_caution_names_the_section_and_the_token(self):
+        sections = [{"sectionId": "skill-vault-wiki", "title": "Skill: vault-wiki", "kind": "skill"}]
+        bodies = {"skill-vault-wiki": "Write notes to `$VAULT/wiki/notes/entry.md` [p000001]."}
+        findings = skill_tuner.grounding_report(sections, bodies, self.corpus, ())
+        self.assertIn("skill-vault-wiki", findings)
+        text = skill_tuner.grounding_text(sections, findings)
+        self.assertIn("Skill: vault-wiki", text)
+        self.assertIn("$VAULT/wiki/notes/entry.md", text)
+        self.assertIn("Recommendations were not", text)
+
+
 class PipelineTests(unittest.TestCase):
     """End-to-end CLI runs against the stub server; never a real endpoint."""
 

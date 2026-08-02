@@ -43,6 +43,16 @@ still unfolding at the chunk boundary) and `chunk_summary` (at most two sentence
 - A quote that exists in the timeline but not in the cited entry relocates the locator
   deterministically and appends a note; it does not burn the retry.
 - Evidence ids match `\bp\d{6}\b` and are never reused, even across retries.
+- Every path, flag, and identifier a recommendation names in backticks is checked
+  against what the session demonstrated. A path grounds when all its literal segments
+  of 4+ characters appear as real path segments and at least one is 6+ characters
+  (so a bare `wiki` cannot ground a fabricated tree); numbered vault names are indexed
+  with and without their number prefix. Ungrounded paths and flags cost one rewrite
+  request and are then listed under **Unverified Recommendation Details**; ungrounded
+  identifiers are advisory. The report's own controlled vocabulary is never flagged.
+  `--ground-root` adds directories a path may also resolve against.
+- Diagnoses are verified against their evidence; recommendations are not, and the
+  report says so in its method section.
 - The report is capped at the configured token budget using ceil(characters / 4);
   the default is 16384 tokens (65536 characters).
 
