@@ -126,7 +126,7 @@ Rendered per comment, inserted after its anchor block with a blank line on each
 side:
 
 ```markdown
-> [!example]- R2 r-003 · Theory · major
+> [!r2-theory]- R2 r-003 · Theory · major
 > On: “Most participants described professional astronomers as colleagues.”
 >
 > The finding is reported without the conceptual apparatus that would make it
@@ -143,12 +143,27 @@ side:
 
 | Category | Callout | Label |
 | --- | --- | --- |
-| `gap` | `[!question]` | Research gap |
-| `evidence` | `[!warning]` | Thin evidence |
-| `logic` | `[!failure]` | Logic |
-| `theory` | `[!example]` | Theory |
-| `structure` | `[!abstract]` | Structure |
-| `strength` | `[!success]` | Strength |
+| `gap` | `[!r2-gap]` | Research gap |
+| `evidence` | `[!r2-evidence]` | Thin evidence |
+| `logic` | `[!r2-logic]` | Logic |
+| `theory` | `[!r2-theory]` | Theory |
+| `structure` | `[!r2-structure]` | Structure |
+| `strength` | `[!r2-strength]` | Strength |
+
+The types are prefixed because a review comment is apparatus about an article,
+not content in a note. The vault's own callout registry
+(`99 Meta/99.02 Schemas/0.04 Note Format.md`) reads the unprefixed names as the
+latter, and this skill used to borrow them: `structure` rendered as `[!abstract]`
+put a criticism of an article in the same cyan that means "here is what this note
+is", and `strength` took the green that means "sourced and checkable". The prefix
+keeps the two vocabularies from colliding. `vault_format.py` knows `r2-` is a
+namespace and exempts it from the note registry;
+`forge/lib/vault-format/loom-notes.css` styles it as a left bar rather than a
+filled box, so the article's own prose keeps the weight on the page.
+
+Review copies rendered before the rename carry the unprefixed types. The strip
+grammar reads both, so they still round-trip; they render stock until the review
+is regenerated.
 
 The outer callout is collapsed (`-`) so the article still reads as an article;
 the reader opens the ones they want. The suggested-text callout is expanded
@@ -171,8 +186,14 @@ can mark something and put it first in the report, it never deletes it.
 The marker line is the strip anchor:
 
 ```
-^> \[!(question|warning|failure|example|abstract|success)\]- R2 (r-\d{3}) · <label>( · (major|minor))?$
+^> \[!(r2-gap|r2-evidence|r2-logic|r2-theory|r2-structure|r2-strength
+      |question|warning|failure|example|abstract|success)\]- R2 (r-\d{3}) · <label>( · (major|minor))?$
 ```
+
+The alternation is built from `CATEGORIES` plus `LEGACY_CALLOUTS`, so it always
+covers what this version writes and what earlier versions wrote. Dropping the
+legacy half would leave an older review copy's comments unrecognised, and the
+strip is the only thing separating them from the author's own prose.
 
 Every line of a comment starts with `>`, every insertion is wrapped in blank
 lines, and the appended tail begins with a unique `%% R2 review boundary %%`
