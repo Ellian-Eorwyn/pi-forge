@@ -82,9 +82,16 @@ Rules the script enforces, not suggestions:
   which is the machine's, which a `##` heading could not do — as headings the
   reflection sections were indistinguishable from ones the cleanup wrote. The
   handwritten preamble stays down with the cleaned text, because it is the
-  owner's writing and not apparatus. `forge/skills/vault-transcripts/references/loom-notes.css`
+  owner's writing and not apparatus. `forge/lib/vault-format/loom-notes.css`
   styles these callout types; a vault without it still reads correctly, since
   folding is Markdown rather than CSS.
+- **The callout types come from the vault's registry**, declared in
+  `99 Meta/99.02 Schemas/0.04 Note Format.md` and checked by
+  `forge/lib/vault_format.py`. This skill writes three of the nine — `summary`,
+  `reflection`, `connections` — and a fourth would need a row there first, since
+  an unregistered callout renders as stock blue with a pencil icon. The registry
+  is not injected into the cleanup prompt; `render_callout` in
+  `forge/lib/vault_reflection.py` applies the syntax after the checks pass.
 - Whichever note holds the recording holds all of it, byte for byte, including
   its handwritten preamble and any trailing text. The cleanup is a convenience;
   the transcription is the record.

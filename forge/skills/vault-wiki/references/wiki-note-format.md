@@ -39,9 +39,22 @@ The lead is rendered as an `> [!abstract]` callout. A wiki note is skimmed befor
 it is read, and the lead is the sentence that decides whether to keep reading, so
 it is worth setting apart. Wrapping is idempotent — the lead is rewritten on
 every expansion — and a note whose lead is still plain prose gets the callout the
-next time it is expanded. `forge/skills/vault-transcripts/references/loom-notes.css`
+next time it is expanded. `forge/lib/vault-format/loom-notes.css`
 styles it alongside the callouts the transcript pipeline writes; without that
 snippet it renders as a stock Obsidian abstract callout, which is fine.
+
+`abstract` is Obsidian's own name for the callout the vault's registry
+(`99 Meta/99.02 Schemas/0.04 Note Format.md`) calls `summary`; they are one type
+and render identically, and `vault_format.ALIASES` folds one onto the other.
+
+The registry's other blocks — `key`, `define`, `evidence`, `caution`, `question` —
+are **not** used in card sections, and the section spine stays plain `##`
+headings. Ownership here is by visible heading text, and
+`assert_only_managed_changed` byte-compares every unmanaged section across 467
+notes, so a section that became a callout would stop being findable and the merge
+would refuse the note. Adopting callouts per section is a `render` key in
+[wiki-kinds.json](wiki-kinds.json) plus a parser that accepts a callout title as
+a section anchor, and it is deliberately not done here.
 
 The schema's approved-property list is closed and strips anything else, so no
 per-kind structured data can live in frontmatter. A figure's lifespan, a work's

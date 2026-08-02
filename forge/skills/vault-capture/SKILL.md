@@ -147,7 +147,7 @@ Each of those renders as a collapsed callout — `> [!reflection]- <Section>`, a
 braindump from their own thinking, which a `##` heading could not do. The model
 still writes `##` and the deterministic checks still read `##`; the callouts go
 on afterwards, once the note has passed them.
-`forge/skills/vault-transcripts/references/loom-notes.css` styles these callout
+`forge/lib/vault-format/loom-notes.css` styles these callout
 types vault-wide, the same ones `vault-transcripts` writes. A vault without it
 still reads correctly, since folding is Markdown rather than CSS.
 

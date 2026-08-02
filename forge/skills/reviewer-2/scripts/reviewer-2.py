@@ -56,15 +56,28 @@ COMMENTS_SCHEMA_VERSION = 1
 # Each category gets its own callout type, so a reader scanning the margin sees
 # what kind of objection it is before opening it. The labels are part of the
 # marker line and therefore part of the strip grammar: changing one changes what
-# an already-rendered review copy round-trips as.
+# an already-rendered review copy round-trips as, which is why LEGACY_CALLOUTS
+# below still exists.
+#
+# The types are prefixed because a review comment is apparatus about an article,
+# not a claim inside a note, and the vault's own vocabulary
+# (`99 Meta/99.02 Schemas/0.04 Note Format.md`) reads the unprefixed names as the
+# latter. Borrowing them put a criticism of an article's structure in the same
+# cyan as a note's summary, and a `strength` in the green that means "sourced and
+# checkable". Prefixing keeps the two vocabularies from ever colliding again.
 CATEGORIES = {
-    "gap": ("question", "Research gap"),
-    "evidence": ("warning", "Thin evidence"),
-    "logic": ("failure", "Logic"),
-    "theory": ("example", "Theory"),
-    "structure": ("abstract", "Structure"),
-    "strength": ("success", "Strength"),
+    "gap": ("r2-gap", "Research gap"),
+    "evidence": ("r2-evidence", "Thin evidence"),
+    "logic": ("r2-logic", "Logic"),
+    "theory": ("r2-theory", "Theory"),
+    "structure": ("r2-structure", "Structure"),
+    "strength": ("r2-strength", "Strength"),
 }
+# The unprefixed types this skill wrote before the rename. Read, never written: a
+# review copy rendered by an earlier version has to keep round-tripping, and the
+# strip grammar is the only thing standing between its comments and the author's
+# own prose.
+LEGACY_CALLOUTS = ("question", "warning", "failure", "example", "abstract", "success")
 SEVERITIES = ("major", "minor")
 # A criticism that the literature does not yet say enough about this needs the
 # literature attached. A logical or structural repair does not: a bridge
@@ -78,7 +91,9 @@ FILENAME_SUFFIX = "Reviewer 2"
 INVENTORY_KINDS = {"paragraph", "quote", "list"}
 INVENTORY_MIN_CHARS = 120
 
-CALLOUT_ALTERNATION = "|".join(sorted({callout for callout, _label in CATEGORIES.values()}))
+CALLOUT_ALTERNATION = "|".join(
+    sorted({callout for callout, _label in CATEGORIES.values()} | set(LEGACY_CALLOUTS), key=len, reverse=True)
+)
 MARKER_RE = re.compile(rf"^> \[!(?:{CALLOUT_ALTERNATION})\]- R2 (r-\d{{3}}) · [^·\n]+?(?: · (?:major|minor))?\s*$")
 COMMENT_ID_RE = re.compile(r"^r-\d{3}$")
 SENTINEL_PREFIX = "%% R2 review boundary "

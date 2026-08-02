@@ -49,10 +49,18 @@ Rules the script enforces, not suggestions:
   itself. That is the one visible difference between what the person thought and
   what a model made of it, and a `##` heading could not carry it: as a heading
   the reflection was indistinguishable from a section of the note proper.
-  `forge/skills/vault-transcripts/references/loom-notes.css` styles these callout
+  `forge/lib/vault-format/loom-notes.css` styles these callout
   types — the same ones `vault-transcripts` writes, unscoped, so generated
   material looks generated wherever it appears. A vault without the snippet still
   reads correctly, since folding is Markdown rather than CSS.
+- **The callouts this skill writes come from the vault's registry**, declared in
+  `99 Meta/99.02 Schemas/0.04 Note Format.md` and checked by
+  `forge/lib/vault_format.py`. It writes two of the nine, `reflection` and
+  `connections`, and adding a third means adding a row there first — an
+  unregistered callout renders as stock blue with a pencil icon, which reads as a
+  decision rather than an oversight. The registry is not injected into the
+  drafting prompt: the model is asked for `##` sections and `fold_reflection`
+  rewraps them, so nothing here depends on a model getting `>` prefixes right.
 - Everything after `# Braindump` is the source text unchanged. The drafts are a
   convenience; what the person actually said is the record.
 - **One note per dump carries the braindump** — the primary, chosen

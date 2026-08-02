@@ -1,0 +1,285 @@
+/* Loom — note format
+ *
+ * The vault's visual vocabulary for the body of an ordinary note. The registry
+ * this implements is `99 Meta/99.02 Schemas/0.04 Note Format.md`; that note is
+ * the authority and this file is one of its three implementations, alongside
+ * `forge/lib/vault_reflection.py` (which emits the callouts) and the templates
+ * in `99 Meta/99.03 Templates`. `vault_format.py` parses the note's registry
+ * table and checks all three agree, so a callout added here and nowhere else is
+ * a failure rather than a surprise.
+ *
+ * ---------------------------------------------------------------------------
+ * Colour carries epistemic status; the quiet register carries apparatus.
+ *
+ *   > [!summary]        cyan     orientation — what this note is
+ *   > [!key]            blue     the load-bearing claims; the skim target
+ *   > [!define]         yellow   a stipulated meaning or term boundary
+ *   > [!evidence]       green    sourced and checkable, carries a citation
+ *   > [!reflection]-    purple   generated interpretation
+ *   > [!question]       pink     acknowledged uncertainty, still open
+ *   > [!caution]        orange   limits, misuse, contested ground
+ *   > [!connections]-   quiet    relations to other notes
+ *   > [!provenance]-    quiet    machine audit trail
+ *
+ * Red is deliberately unclaimed. Obsidian's built-in `danger`, `error`,
+ * `failure`, and `bug` keep it, so a real problem still reads as one.
+ *
+ * `caution` and `question` are Obsidian built-ins rather than invented names —
+ * `caution` is an alias of `warning`, so the whole family is styled together and
+ * keeps its stock orange. `question` ships orange too, which collides with
+ * `warning` in stock Obsidian; moving it to pink is what separates "this is
+ * unresolved" from "this is dangerous". Aliases move with their family, because
+ * rendering `[!help]` differently from `[!question]` would teach the reader a
+ * distinction that does not exist.
+ *
+ * ---------------------------------------------------------------------------
+ * Three rules govern any addition here.
+ *
+ * Never colour alone. Every block carries an icon and a title word, so the
+ * scheme survives greyscale, colour blindness, and this snippet being toggled
+ * off. Red/green is the specific pairing that fails most readers.
+ *
+ * Everything derives from theme variables. `var(--color-*-rgb)`, never a
+ * literal hex, so the active theme and light/dark follow for free and the
+ * snippet syncs to mobile with the vault.
+ *
+ * Degrade to readable Markdown. Folding is the `-` after the type, not CSS. A
+ * vault without this snippet still reads correctly; it just reads plainer.
+ *
+ * Unscoped, unlike loom-dashboard.css: these appear in every kind of note, and
+ * the point of them is that a kind of information looks like itself wherever it
+ * appears. Toggle off in Appearance to get stock callout rendering back.
+ */
+
+/* ---------------------------------------------------------------------------
+   Identity
+   Obsidian reads --callout-color as an RGB triple and --callout-icon as a
+   lucide icon name. `summary`, `abstract`, and `tldr` are one built-in family,
+   but `data-callout` carries whichever word was actually written, so all three
+   are named to keep the accent uniform.
+   --------------------------------------------------------------------------- */
+
+.callout[data-callout="summary"],
+.callout[data-callout="abstract"],
+.callout[data-callout="tldr"] {
+  --callout-color: var(--color-cyan-rgb);
+  --callout-icon: lucide-align-left;
+}
+
+.callout[data-callout="key"] {
+  --callout-color: var(--color-blue-rgb);
+  --callout-icon: lucide-key;
+}
+
+.callout[data-callout="define"] {
+  --callout-color: var(--color-yellow-rgb);
+  --callout-icon: lucide-book-open;
+}
+
+.callout[data-callout="evidence"] {
+  --callout-color: var(--color-green-rgb);
+  --callout-icon: lucide-quote;
+}
+
+.callout[data-callout="reflection"] {
+  --callout-color: var(--color-purple-rgb);
+  --callout-icon: lucide-sparkles;
+}
+
+/* Built-in, recoloured. Stock Obsidian paints this orange, the same as the
+   warning family, so "unresolved" and "dangerous" arrive looking identical. */
+.callout[data-callout="question"],
+.callout[data-callout="help"],
+.callout[data-callout="faq"] {
+  --callout-color: var(--color-pink-rgb);
+  --callout-icon: lucide-help-circle;
+}
+
+/* Built-in, kept. `caution` is an alias of `warning`; orange is already right. */
+.callout[data-callout="caution"],
+.callout[data-callout="warning"],
+.callout[data-callout="attention"] {
+  --callout-color: var(--color-orange-rgb);
+  --callout-icon: lucide-alert-triangle;
+}
+
+/* The quiet register. --callout-quote is Obsidian's own neutral, so this stays
+   a theme variable rather than a hard-coded grey, and a theme that restyles
+   quotes carries these with it. Connections and provenance are apparatus, not
+   claims: they say where a note sits and how it was made, and neither is
+   something to read on the way past. */
+.callout[data-callout="connections"] {
+  --callout-color: var(--callout-quote);
+  --callout-icon: lucide-link;
+}
+
+.callout[data-callout="provenance"] {
+  --callout-color: var(--callout-quote);
+  --callout-icon: lucide-history;
+}
+
+/* ---------------------------------------------------------------------------
+   Readability
+   Obsidian paints the callout title at the raw accent colour, which for yellow
+   on a light background is 1.79:1 — well under WCAG AA, and the vault runs
+   light. The icon and the border keep the full accent, because that is what
+   identifies the block at a glance; the words get mixed toward body text until
+   they are comfortably readable. 45% is the largest accent share that clears
+   4.5:1 for every colour in the registry, in both light and dark; the worst
+   case at that setting is 4.76:1. Raising it past 50% puts yellow under.
+
+   This is a variable override rather than a rule on .callout-title-inner, so it
+   survives Obsidian reorganising its own callout markup.
+   --------------------------------------------------------------------------- */
+
+.callout {
+  --callout-title-color: color-mix(in srgb, rgb(var(--callout-color)) 45%, var(--text-normal));
+}
+
+/* ---------------------------------------------------------------------------
+   Quiet apparatus
+   A tinted edge is enough to say what kind of block this is. Anything louder
+   competes with the words the note is actually about.
+   --------------------------------------------------------------------------- */
+
+.callout[data-callout="summary"],
+.callout[data-callout="abstract"],
+.callout[data-callout="tldr"],
+.callout[data-callout="key"],
+.callout[data-callout="define"],
+.callout[data-callout="evidence"],
+.callout[data-callout="reflection"],
+.callout[data-callout="question"],
+.callout[data-callout="help"],
+.callout[data-callout="faq"],
+.callout[data-callout="caution"],
+.callout[data-callout="warning"],
+.callout[data-callout="attention"],
+.callout[data-callout="connections"],
+.callout[data-callout="provenance"] {
+  border: 1px solid
+    color-mix(in srgb, rgb(var(--callout-color)) 24%, var(--background-modifier-border));
+  border-radius: 8px;
+  background: color-mix(in srgb, rgb(var(--callout-color)) 6%, var(--background-secondary));
+}
+
+.callout[data-callout="reflection"] > .callout-title .callout-title-inner,
+.callout[data-callout="connections"] > .callout-title .callout-title-inner,
+.callout[data-callout="provenance"] > .callout-title .callout-title-inner {
+  font-weight: 600;
+  font-size: var(--font-ui-medium);
+}
+
+/* A folded section is a one-line offer to read more; it should not shout. */
+
+.callout.is-collapsed[data-callout="reflection"],
+.callout.is-collapsed[data-callout="connections"],
+.callout.is-collapsed[data-callout="provenance"] {
+  opacity: 0.92;
+}
+
+.callout[data-callout="reflection"] .callout-content ul,
+.callout[data-callout="connections"] .callout-content ul,
+.callout[data-callout="provenance"] .callout-content ul,
+.callout[data-callout="key"] .callout-content ul,
+.callout[data-callout="question"] .callout-content ul {
+  margin-block: 0.3rem;
+}
+
+/* ---------------------------------------------------------------------------
+   Review apparatus — the `r2-` namespace
+   `reviewer-2` writes comments *about* an article, not content *in* a note, so
+   its vocabulary is deliberately not the one above. It borrowed the unprefixed
+   built-ins once, which put a criticism of an article's structure in the same
+   cyan as a note's summary and a `strength` in the green that means "sourced and
+   checkable". The prefix keeps the two from colliding again, and `vault_format`
+   exempts the namespace from the registry rather than pretending it is a note
+   block. Red is available here, because in a review a failure of logic is
+   exactly what red is for.
+
+   Older review copies still carry the unprefixed types; reviewer-2's strip
+   grammar reads both, and those render stock until the review is regenerated.
+   --------------------------------------------------------------------------- */
+
+.callout[data-callout="r2-gap"] {
+  --callout-color: var(--color-pink-rgb);
+  --callout-icon: lucide-search;
+}
+
+.callout[data-callout="r2-evidence"] {
+  --callout-color: var(--color-orange-rgb);
+  --callout-icon: lucide-alert-triangle;
+}
+
+.callout[data-callout="r2-logic"] {
+  --callout-color: var(--color-red-rgb);
+  --callout-icon: lucide-x-circle;
+}
+
+.callout[data-callout="r2-theory"] {
+  --callout-color: var(--color-purple-rgb);
+  --callout-icon: lucide-lightbulb;
+}
+
+.callout[data-callout="r2-structure"] {
+  --callout-color: var(--color-blue-rgb);
+  --callout-icon: lucide-list-tree;
+}
+
+.callout[data-callout="r2-strength"] {
+  --callout-color: var(--color-green-rgb);
+  --callout-icon: lucide-check;
+}
+
+/* A review copy is read as a stack of objections, so these are flatter than note
+   callouts: a left bar rather than a filled box, which keeps the article's own
+   prose the thing with weight on the page. */
+.callout[data-callout^="r2-"] {
+  border: none;
+  border-left: 3px solid rgb(var(--callout-color));
+  border-radius: 0 6px 6px 0;
+  background: color-mix(in srgb, rgb(var(--callout-color)) 5%, var(--background-secondary));
+}
+
+/* ---------------------------------------------------------------------------
+   Headings
+   Callouts only reach notes that get rewritten. Headings are the structure the
+   other six thousand notes already have, and CSS cannot read a heading's text —
+   Obsidian sets no attribute for it outside Publish — so the treatment has to be
+   uniform. A left rule is the one that survives that constraint: it marks where
+   a section starts without claiming to know what kind of section it is.
+
+   Applied in reading view and live preview both, since notes are read in either.
+   Excluded from callouts, whose titles already carry their own weight, and from
+   dashboards, where loom-dashboard.css turns h2 into an uppercase eyebrow.
+   --------------------------------------------------------------------------- */
+
+.markdown-rendered h2,
+.markdown-source-view.mod-cm6 .HyperMD-header-2 {
+  padding-left: 0.55em;
+  border-left: 3px solid color-mix(in srgb, var(--interactive-accent) 55%, transparent);
+  line-height: var(--line-height-tight);
+}
+
+.markdown-rendered h3,
+.markdown-source-view.mod-cm6 .HyperMD-header-3 {
+  padding-left: 0.58em;
+  border-left: 2px solid var(--background-modifier-border);
+}
+
+/* A callout title already carries its own weight, and a heading inside one is
+   subordinate to it. */
+.markdown-rendered .callout h2,
+.markdown-rendered .callout h3 {
+  padding-left: 0;
+  border-left: none;
+}
+
+/* On dashboards loom-dashboard.css turns h2 into an uppercase eyebrow. Its rule
+   is more specific and already wins on colour and border; this makes the indent
+   explicit rather than leaving it to specificity. */
+.markdown-preview-view.loom-dashboard h2,
+.markdown-preview-view.loom-dashboard h3 {
+  padding-left: 0;
+  border-left: none;
+}

@@ -41,6 +41,26 @@ REFLECTION_HEADINGS = frozenset(JOURNAL_HEADINGS) | frozenset(WORKING_HEADINGS)
 CONNECTIONS_HEADING = "Connections"
 CONNECTIONS_CALLOUT = "connections"
 REFLECTION_CALLOUT = "reflection"
+PROVENANCE_CALLOUT = "provenance"
+
+# The vault's callout vocabulary, declared by
+# `99 Meta/99.02 Schemas/0.04 Note Format.md` and styled by
+# `.obsidian/snippets/loom-notes.css`. Repeated here so `vault_format` can prove
+# the three agree: a callout emitted from code and missing from the registry
+# renders as stock blue with a pencil icon, which reads as a decision rather than
+# an oversight. Only the names this vault writes -- Obsidian's own aliases for
+# them live in `vault_format.ALIASES`.
+VAULT_CALLOUTS = (
+    "summary",
+    "key",
+    "define",
+    "evidence",
+    "reflection",
+    "question",
+    "caution",
+    CONNECTIONS_CALLOUT,
+    PROVENANCE_CALLOUT,
+)
 
 
 def render_callout(kind, title, lines, collapsed=True):
@@ -133,9 +153,11 @@ __all__ = [
     "OUTSIDE_SOURCE_LIMIT",
     "OUTSIDE_SOURCE_MIN_CHARS",
     "OUTSIDE_SOURCE_READ_BYTES",
+    "PROVENANCE_CALLOUT",
     "REFLECTION_CALLOUT",
     "REFLECTION_HEADINGS",
     "URL_RE",
+    "VAULT_CALLOUTS",
     "WORKING_HEADINGS",
     "callout_type_for",
     "cited_lines",
