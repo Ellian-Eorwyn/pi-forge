@@ -30,7 +30,7 @@ in `forge/SCRIPT_TOOL_CONTRACT.md`.
 
 <!-- forge:skills-list start -->
 
-The live skill inventory currently contains 24 capability workflows, listed
+The live skill inventory currently contains 25 capability workflows, listed
 here with the one-line descriptions maintained in `forge/CAPABILITIES.md`:
 
 - `coding`: Inspect repositories and ship small, reviewable code changes.
@@ -50,6 +50,7 @@ here with the one-line descriptions maintained in `forge/CAPABILITIES.md`:
 - `transcription`: Transcribe audio/video with per-chunk checkpoints, then correct and clean the transcript.
 - `vault-capture`: Turn an owner-authored typed or spoken braindump into schema-valid notes in `00 Inbox`, applying the vault's scoped voice policy, adding vault-first journal reflection, marking output `capture_type: generated`, and keeping the braindump verbatim; for transcription exports use `vault-transcripts` instead.
 - `vault-connections`: Search an Obsidian vault by meaning, propose note links for per-id approval, validate completed literature/meta-literature/deep-research runs, preserve imported report bodies, turn deep research into source-policy `Synthesis` notes with quotes and provenance (`--notes`), and create evidence-backed wiki notes from vault-owned templates.
+- `vault-curator`: Research how a field actually catalogues its records through `web-research`, reconcile that against the compiled schema using a closed set of moves, and propose the smallest legal way to hold it — schema rows whose numbers are chosen by code and which are proved against a candidate copy of the schema note before they are shown, plus wiki kind specs, templates, and body-table sections as patch files; applying is per-id and additive only, and a run with no field sources proposes nothing.
 - `vault-handoff`: Prepare completed artifacts for pi-vault or Obsidian review.
 - `vault-naturalist`: Compile the region-scoped `Phenology` tables on animal, plant, and fungus wiki cards into a queryable index, report which species are expected in the owner's declared home region in a given month, and record a single field observation as a schema-valid note linked to its species card; deterministic throughout, and `sourced`/`inferred` windows stay distinguishable from `observed` ones.
 - `vault-organizer`: Classify, de-duplicate, and organize Obsidian notes from a human-maintained vault schema note, with restart-safe resumable runs, a recoverable duplicate quarantine, asset-embed repair, an opt-in per-kind sources tree, deterministic date backfill from older copies of notes, schema drift detection that blocks applying when the schema and the folders on disk disagree, a `renumber` mode that shifts domain numbers and every folder derived from them without touching a note, and optional link-safe moves and property-vocabulary drift when the Obsidian CLI is available.

@@ -1,0 +1,32 @@
+{
+  "name": "vault-curator",
+  "type": "pi-forge-skill",
+  "version": "0.1.0",
+  "description": "Research how a field actually catalogues its records, compare that against a vault's schema and conventions, and propose the smallest legal way to hold it: schema rows proved against a candidate copy of the schema note, plus the wiki kind specs, templates, and source policy the machine side needs.",
+  "skill_file": "SKILL.md",
+  "scripts_dir": "scripts",
+  "references_dir": "references",
+  "restart_safe": true,
+  "tools": [
+    {
+      "name": "vault_curator",
+      "description": "Propose schema and machine-side changes for a kind of thing a vault does not yet know how to hold. Researches the field's published practice through web-research, reconciles it against the compiled schema using a closed set of moves, proves every proposed row against a candidate copy of the schema note, and reviews the result on the thinking service. Applying is per-id and additive only: rows are added to the schema note, never edited, removed, or renumbered, and never in Approved properties or the Project registry.",
+      "command": "python3 scripts/vault-curator.py",
+      "destructive": false
+    }
+  ],
+  "safety": {
+    "destructive_by_default": false,
+    "requires_review_for_filesystem_changes": true,
+    "preserve_provenance_when_applicable": true,
+    "never_deletes_notes": true,
+    "never_edits_an_existing_schema_row": true,
+    "never_renumbers": true,
+    "never_proposes_a_frontmatter_property": true,
+    "never_touches_the_project_registry": true,
+    "never_writes_repo_files": true,
+    "refuses_to_propose_without_field_sources": true,
+    "backs_up_the_schema_note_before_writing": true,
+    "reproves_every_row_against_the_note_as_it_is_at_apply_time": true
+  }
+}

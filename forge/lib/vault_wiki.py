@@ -311,6 +311,20 @@ def load_kind_specs(path):
     return specs
 
 
+def validate_proposed_kind_spec(kind, raw, path="<proposal>"):
+    """Validate a spec for a kind the library does not know about yet.
+
+    ``load_kind_specs`` only validates the registered kinds, because a spec for
+    an unregistered one cannot be filed. A proposal has to be checked *before*
+    the kind exists — registering it means editing ``WIKI_KIND_SUBDOMAIN``,
+    ``WIKI_KIND_TYPE``, and ``WIKI_TEMPLATE_NAMES``, which is a code change and
+    a human's to make — so this runs the same checks without the registry.
+    """
+    if not isinstance(raw, dict):
+        raise UserError(f"{path}: {kind} spec must be an object")
+    return _validate_kind_spec(kind, raw, path)
+
+
 def _validate_kind_spec(kind, raw, path):
     sections = raw.get("sections")
     if not isinstance(sections, list) or not sections:
@@ -364,7 +378,9 @@ def _validate_kind_spec(kind, raw, path):
     placeholders.extend(name for name in WIKI_TEMPLATE_FIELDS if name not in placeholders)
     return {
         "kind": kind,
-        "template": WIKI_TEMPLATE_NAMES[kind],
+        # `.get` rather than `[]` so a proposed kind, which has no registered
+        # template name yet, validates instead of raising KeyError.
+        "template": WIKI_TEMPLATE_NAMES.get(kind, f"Wiki {kind.title()}.md"),
         "sections": validated,
         "placeholders": tuple(placeholders),
         "required_placeholders": tuple(WIKI_TEMPLATE_FIELDS),

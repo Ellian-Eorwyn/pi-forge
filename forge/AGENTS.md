@@ -96,6 +96,12 @@ or `document-ingest` first, or say plainly that the file will sit there untouche
 Route "review my article", "be reviewer 2 on this", or "peer review this draft"
 to `reviewer-2`. It reviews substance only and never modifies the article.
 
+Route "I want to start cataloguing X", "what would a proper schema for X look
+like", or "does my wiki match how the field actually works" to `vault-curator`.
+It researches the field's published practice before proposing anything, and adds
+rows to the schema note only, per accepted id. Filing notes, fixing drift, and
+renumbering stay with `vault-organizer`.
+
 The `vault-workflow` extension adds a plan -> execute -> verify loop driven by
 `/plan`, `/execute`, `/verify`, and `/workflow off`. Each phase sets its own
 tools and thinking behaviour and injects its own rules, so follow the injected

@@ -4,20 +4,20 @@
 
 ## Launch Context Summary
 
-- Available skills: 24
-- Model-visible skills at launch: 24
+- Available skills: 25
+- Model-visible skills at launch: 25
 - Tools offered at launch: 14
 
 | Launch context block | Tokens |
 |---|---:|
 | Base system prompt (intro, tools list, guidelines, connected services) | 406 |
 | Tool JSON schemas (14 tools) | 3041 |
-| Managed instructions (`AGENTS.md` with its `<project_context>` wrapper) | 1553 |
-| Skills menu (metadata for all model-visible skills) | 3401 |
-| **Total launch context (always processed)** | **8400** |
-| Maximum if every `SKILL.md` body is also loaded at once | 64520 |
+| Managed instructions (`AGENTS.md` with its `<project_context>` wrapper) | 1643 |
+| Skills menu (metadata for all model-visible skills) | 3551 |
+| **Total launch context (always processed)** | **8641** |
+| Maximum if every `SKILL.md` body is also loaded at once | 67287 |
 
-Of that total, the forge profile itself owns 4953 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
+Of that total, the forge profile itself owns 5194 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
 
 Of the skills menu above, the shared wrapper (instructions and XML envelope, independent of skill count) is ~92 tokens; the rest scales with the number of skills.
 
@@ -69,6 +69,7 @@ Sorted by launch cost. `Prompt lines` counts a tool's `promptSnippet` and `promp
 | [`transcription`](forge/skills/transcription/SKILL.md) | Transcribe audio or video, then correct and clean it | 141 | 1639 | 1754 | Model-visible |
 | [`vault-capture`](forge/skills/vault-capture/SKILL.md) | Turn a braindump into schema-valid notes in an Obsidian vault inbox - split unedited thinking... | 138 | 2539 | 2650 | Model-visible |
 | [`vault-connections`](forge/skills/vault-connections/SKILL.md) | Search an Obsidian vault by meaning, propose links for per-id review, publish completed liter... | 151 | 2682 | 2807 | Model-visible |
+| [`vault-curator`](forge/skills/vault-curator/SKILL.md) | Research how a field catalogues its records and propose what that means for an Obsidian vault... | 151 | 2403 | 2526 | Model-visible |
 | [`vault-handoff`](forge/skills/vault-handoff/SKILL.md) | Send completed text artifacts to pi-vault review | 63 | 325 | 363 | Model-visible |
 | [`vault-naturalist`](forge/skills/vault-naturalist/SKILL.md) | Compile the seasonal Phenology tables on animal, plant, and fungus wiki cards into a queryabl... | 142 | 1570 | 1684 | Model-visible |
 | [`vault-organizer`](forge/skills/vault-organizer/SKILL.md) | Organize an Obsidian vault or its inbox from a human-maintained schema note - classify notes,... | 150 | 5797 | 5921 | Model-visible |
