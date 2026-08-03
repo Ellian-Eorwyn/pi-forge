@@ -263,6 +263,22 @@ class MembershipTests(CorpusTestCase):
         self.assertIsNotNone(record, "the aliased link should still resolve to a member")
         self.assertEqual(record["annotation"], "core theory text")
 
+    def test_a_wikilink_inside_an_html_comment_is_not_reported_as_a_loose_link(self):
+        # draft-hub leaves scaffolding comments that name the project, and a
+        # comment is not content a reader sees or an agent may read.
+        self.write(
+            f"{PROJECT_FOLDER}/Article 2.md",
+            note({"type": "project", "status": "active", "domain": "academic",
+                  "project": '"[[Article 2]]"'},
+                 "# Article 2\n\n## Corpus\n\n### Sources\n\n"
+                 "<!-- nothing is filed under [[Article 2]] for sources yet -->\n"),
+        )
+        parsed = vc.parse_corpus_section(
+            (self.vault / PROJECT_FOLDER / "Article 2.md").read_text(encoding="utf-8")
+        )
+        self.assertEqual(parsed["loose_links"], [])
+        self.assertEqual(parsed["entries"], [])
+
     def test_prose_outside_the_corpus_section_never_adds_a_member(self):
         self.assertNotIn("09 Wiki/9.01 Concepts/Old Draft.md", self.paths(self.resolve()))
 
@@ -427,6 +443,49 @@ class ManifestTests(CorpusTestCase):
         drift = vc.compare_manifest(vc.read_manifest(self.vault, project), vc.build_manifest(again, None))
         self.assertEqual(drift["state"], "stale")
         self.assertIn(f"{PROJECT_FOLDER}/Working Draft.md", drift["removed"])
+
+
+class InsertCorpusSectionTests(unittest.TestCase):
+    SECTION = "## Corpus\n\n### Sources\n\n- [[A Source]] — \n"
+
+    def test_the_section_lands_before_owner_authored_notes(self):
+        body = (
+            "---\ntype: project\n---\n\n# FORGE\n\nWhat the project is.\n\n"
+            "## Links\n\n- [[Something]]\n\n## Notes\n\nMy own scratch, never written to.\n"
+        )
+        updated, where = vc.insert_corpus_section(body, self.SECTION)
+        self.assertEqual(where, "before-notes")
+        self.assertLess(updated.index("## Corpus"), updated.index("## Notes"))
+        # everything the owner wrote survives, in order
+        for fragment in ("# FORGE", "What the project is.", "## Links", "- [[Something]]",
+                         "My own scratch, never written to."):
+            self.assertIn(fragment, updated)
+        self.assertEqual(updated.count("## Notes"), 1)
+
+    def test_a_hub_without_a_notes_heading_gets_the_section_at_the_end(self):
+        body = "---\ntype: project\n---\n\n# RAPID\n\nProse only.\n"
+        updated, where = vc.insert_corpus_section(body, self.SECTION)
+        self.assertEqual(where, "at-end")
+        self.assertTrue(updated.rstrip().endswith("- [[A Source]] —"))
+        self.assertIn("Prose only.", updated)
+
+    def test_inserting_twice_is_refused_rather_than_duplicating_the_section(self):
+        body = "---\ntype: project\n---\n\n# X\n\nProse.\n"
+        once, _ = vc.insert_corpus_section(body, self.SECTION)
+        with self.assertRaises(vc.UserError):
+            vc.insert_corpus_section(once, self.SECTION)
+
+    def test_nothing_outside_the_inserted_block_changes(self):
+        body = (
+            "---\ntype: project\n---\n\n# HoMEDUCS\n\nLine one.\n\n> [!summary]\n> A callout.\n\n"
+            "## Notes\n\nOwner text.\n"
+        )
+        updated, _ = vc.insert_corpus_section(body, self.SECTION)
+        removed = updated.replace(self.SECTION.rstrip("\n") + "\n", "")
+        self.assertEqual(
+            [line for line in removed.splitlines() if line.strip()],
+            [line for line in body.splitlines() if line.strip()],
+        )
 
 
 if __name__ == "__main__":

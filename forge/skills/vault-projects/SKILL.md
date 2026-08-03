@@ -81,18 +81,35 @@ approved-property list is closed and unapproved keys are deleted on rewrite, so 
 
 ## Starting a hub from nothing
 
-`draft-hub` writes a skeleton to the workflow root — never into the vault's note
-tree, and never over an existing hub:
+`draft-hub` builds a skeleton from what the vault already knows. Without
+`--apply` it writes only to the workflow root, so the draft can be read first:
 
 ```bash
 python3 <skill-directory>/scripts/vault-projects.py draft-hub --vault <vault> --project "Article 2"
 ```
+
+With `--apply` it puts the hub where the owner actually works — the project
+folder — because a hub in a run directory is a hub nobody browses, and the
+`## Corpus` section only earns its keep by living in the note they already open.
+What it does there depends on what is already present:
+
+- **No hub** — writes `<project folder>/<Project>.md`.
+- **A hub without `## Corpus`** — inserts only that section, before `## Notes`
+  when that heading exists, since `## Notes` is owner-authored and always last.
+  Every other line of the note is left exactly as it was.
+- **A hub that already has `## Corpus`** — refuses, and says so. Regenerating
+  would discard annotations someone wrote by hand.
 
 It seeds `### Sources`, `### People`, `### Organizations`, and `### Wiki` from
 every note in the vault that already carries `project: "[[Article 2]]"` and lives
 outside the project folder, each as a bullet with an empty annotation for the
 owner to fill in. Notes already in the folder are left out on purpose: they are
 members by position and listing them adds nothing.
+
+Where two notes in the vault answer to one basename, the draft writes the full
+path rather than the bare name. A bare link to a contested name is not a link the
+resolver will accept, so writing the path now is the difference between a hub
+that resolves the first time it is used and one that has to be repaired by hand.
 
 The draft is a starting point, not an answer. Read it with the owner, cut what
 does not belong, write the annotations, then place the finished note in

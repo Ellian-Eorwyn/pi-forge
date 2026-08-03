@@ -346,19 +346,29 @@ def command_pack(args):
     )
 
 
-def draft_link(record):
+def draft_link(record, ambiguous=frozenset()):
     """Link by filename, display by heading when a filename says nothing.
 
     Some sources are filed under whatever the download was called. `[[15]]` is a
     correct link and a useless line in a hub a person is supposed to read, so the
     draft carries the note's own H1 as the display text. Resolution still goes by
-    the filename before the pipe, so the alias cannot break the link.
+    the target before the pipe, so the alias cannot break the link.
+
+    When two notes share a basename the bare form is not a link at all -- the
+    resolver refuses it rather than guessing -- so the draft writes the full path
+    instead. That is the same fix a person would have to make by hand, and
+    writing it now means the hub resolves the first time it is used.
     """
     title = record["title"]
+    contested = title.lower() in ambiguous and record["path"].endswith(".md")
+    target = record["path"][: -len(".md")] if contested else title
     heading = (record.get("heading") or "").strip()
-    if not heading or heading == title or any(character in heading for character in "[]|#^"):
-        return f"[[{title}]]"
-    return f"[[{title}|{heading}]]"
+    display = heading if heading and heading != title else title
+    if target != title and display == title:
+        return f"[[{target}|{title}]]"
+    if not display or display == target or any(character in display for character in "[]|#^"):
+        return f"[[{target}]]"
+    return f"[[{target}|{display}]]"
 
 
 def command_draft_hub(args):
@@ -383,6 +393,13 @@ def command_draft_hub(args):
         }
         (inside if relative.startswith(prefix) else outside).append(record)
 
+    # Basenames that more than one note in the vault answers to. A bare
+    # `[[Name]]` for one of these resolves to nothing, so the draft qualifies it.
+    index = vault_corpus.build_link_index(vault)
+    ambiguous = {
+        key for key, paths in index.get("by_basename", {}).items() if len(set(paths)) > 1
+    }
+
     buckets = {heading: [] for heading, _ in DRAFT_SECTIONS}
     for record in sorted(outside, key=lambda item: (item["type"], item["title"])):
         placed = False
@@ -402,14 +419,7 @@ def command_draft_hub(args):
     }
     if project.get("subdomain"):
         metadata["subdomain"] = project["subdomain"]
-    lines = [serialize_frontmatter(metadata, schema).rstrip("\n"), "", f"# {project['name']}", ""]
-    lines += [
-        "> [!summary]",
-        f"> {project.get('definition') or 'What this project is and what it is for.'}",
-        "",
-        "Replace this paragraph with the state of the work: what is done, what is next,",
-        "and anything a person picking this up in six months would need to know.",
-        "",
+    corpus_lines = [
         "## Corpus",
         "",
         "Everything in this folder is part of the project already. List below only what",
@@ -418,16 +428,30 @@ def command_draft_hub(args):
     ]
     for heading, _ in DRAFT_SECTIONS:
         records = buckets[heading]
-        lines.append(f"### {heading}")
-        lines.append("")
+        corpus_lines.append(f"### {heading}")
+        corpus_lines.append("")
         if records:
             for record in records:
-                lines.append(f"- {draft_link(record)} — ")
+                corpus_lines.append(f"- {draft_link(record, ambiguous)} — ")
         else:
-            lines.append(f"<!-- no notes carry project: {project['value']} for this role yet -->")
-        lines.append("")
+            corpus_lines.append(
+                f"<!-- nothing outside the folder is filed under this project for {heading.lower()} yet -->"
+            )
+        corpus_lines.append("")
+
+    lines = [serialize_frontmatter(metadata, schema).rstrip("\n"), "", f"# {project['name']}", ""]
+    lines += [
+        "> [!summary]",
+        f"> {project.get('definition') or 'What this project is and what it is for.'}",
+        "",
+        "Replace this paragraph with the state of the work: what is done, what is next,",
+        "and anything a person picking this up in six months would need to know.",
+        "",
+    ]
+    lines += corpus_lines
     lines += ["## Notes", ""]
     draft = "\n".join(lines).rstrip() + "\n"
+    corpus_section = "\n".join(corpus_lines).rstrip() + "\n"
 
     directory = run_directory(vault, schema, project["name"])
     draft_path = directory / f"{project['name']}.md"
@@ -439,26 +463,66 @@ def command_draft_hub(args):
     )
 
     warnings = []
-    if located["hub"]:
-        warnings.append(
-            f"a hub already exists at {located['hub']}; this draft is a separate file for comparison, "
-            "not a replacement"
-        )
+    artifacts = [
+        {"path": relative_path(vault, draft_path), "kind": "hub-draft"},
+        {"path": relative_path(vault, inventory_path), "kind": "folder-inventory"},
+    ]
     if not outside:
         warnings.append(
             f"no notes outside the folder carry project: {project['value']}, so every role section is empty; "
             "add links by hand or file the notes first"
         )
+
+    # Placing the hub is the point of drafting one. A hub that stays in a run
+    # directory is a hub nobody browses, and the `## Corpus` section only earns
+    # its keep by being the note the owner already opens when working on the
+    # project.
+    placement, placed_at = "draft-only", None
+    hub_target = vault / prefix / f"{project['name']}.md"
+    if located["hub"]:
+        existing = vault / located["hub"]
+        body = existing.read_text(encoding="utf-8")
+        if vault_corpus.CORPUS_HEADING_RE.search(body):
+            placement = "already-has-corpus"
+            warnings.append(
+                f"{located['hub']} already has a `## Corpus` section; edit it by hand rather than "
+                "regenerating, so the annotations already written are not lost"
+            )
+        elif args.apply:
+            # Only the new section is written. Everything the owner wrote stays
+            # byte for byte where it was, and the section lands before `## Notes`
+            # because that heading is owner-authored and always sits last.
+            updated, where = vault_corpus.insert_corpus_section(body, corpus_section)
+            existing.write_text(updated, encoding="utf-8")
+            placement, placed_at = f"corpus-section-added-{where}", located["hub"]
+            artifacts.append({"path": located["hub"], "kind": "hub"})
+        else:
+            placement = "would-add-corpus-section"
+            warnings.append(
+                f"{located['hub']} exists without a `## Corpus` section; rerun with --apply to insert one, "
+                "which touches nothing else in that note"
+            )
+    elif args.apply:
+        hub_target.parent.mkdir(parents=True, exist_ok=True)
+        hub_target.write_text(draft, encoding="utf-8")
+        placement, placed_at = "hub-created", relative_path(vault, hub_target)
+        artifacts.append({"path": placed_at, "kind": "hub"})
+    else:
+        placement = "would-create-hub"
+        warnings.append(
+            f"no hub exists for {project['name']}; rerun with --apply to write this draft to "
+            f"{relative_path(vault, hub_target)}"
+        )
+
     return structured(
         "ok",
-        artifacts=[
-            {"path": relative_path(vault, draft_path), "kind": "hub-draft"},
-            {"path": relative_path(vault, inventory_path), "kind": "folder-inventory"},
-        ],
+        artifacts=artifacts,
         warnings=warnings,
         data={
             "project": project["name"],
             "existingHub": located["hub"],
+            "placement": placement,
+            "placedAt": placed_at,
             "counts": {
                 "inFolder": len(inside),
                 "outsideFolder": len(outside),
@@ -509,6 +573,14 @@ def parse_args(argv=None):
     add_common(draft)
     draft.add_argument("--project", required=True)
     draft.add_argument("--print-draft", action="store_true", help="include the draft text in the JSON payload")
+    draft.add_argument(
+        "--apply",
+        action="store_true",
+        help=(
+            "write the hub into the project folder: create it when the project has none, "
+            "or insert only a `## Corpus` section when a hub already exists"
+        ),
+    )
 
     return parser.parse_args(argv)
 

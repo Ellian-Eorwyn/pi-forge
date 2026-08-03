@@ -200,11 +200,60 @@ class DraftHubTests(SkillTestCase):
         draft = self.run_command("draft-hub", "--project", "Article 2", "--print-draft")["data"]["draft"]
         self.assertIn("[[15|Simulationism: The Right to Dream]]", draft)
 
-    def test_draft_never_overwrites_an_existing_hub(self):
+    def test_a_contested_basename_is_drafted_as_a_path_qualified_link(self):
+        # Two notes answering to one name make the bare link unresolvable, so the
+        # draft has to write the path or the hub is broken the moment it is used.
+        for folder in ("Academic/Theory", "Academic/Dissertation"):
+            target = self.vault / SOURCES / folder
+            target.mkdir(parents=True, exist_ok=True)
+            (target / "Shared Name.md").write_text(
+                note({"type": "source", "status": "complete", "domain": "academic",
+                      "source_kind": "article", "project": '"[[Article 2]]"'},
+                     "# Shared Name\n\nProse.\n"),
+                encoding="utf-8",
+            )
+        (self.vault / PROJECT_FOLDER / "Article 2.md").unlink()
+        draft = self.run_command("draft-hub", "--project", "Article 2", "--print-draft")["data"]["draft"]
+        self.assertIn(f"[[{SOURCES}/Academic/Theory/Shared Name|", draft)
+        self.assertNotIn("[[Shared Name]]", draft)
+
+    def test_draft_never_overwrites_a_hub_that_already_has_a_corpus(self):
         original = (self.vault / PROJECT_FOLDER / "Article 2.md").read_text(encoding="utf-8")
-        result = self.run_command("draft-hub", "--project", "Article 2")
+        result = self.run_command("draft-hub", "--project", "Article 2", "--apply")
         self.assertEqual((self.vault / PROJECT_FOLDER / "Article 2.md").read_text(encoding="utf-8"), original)
-        self.assertTrue(any("already exists" in warning for warning in result["warnings"]))
+        self.assertEqual(result["data"]["placement"], "already-has-corpus")
+
+    def test_without_apply_nothing_is_written_into_the_project_folder(self):
+        (self.vault / PROJECT_FOLDER / "Article 2.md").unlink()
+        result = self.run_command("draft-hub", "--project", "Article 2")
+        self.assertEqual(result["data"]["placement"], "would-create-hub")
+        self.assertFalse((self.vault / PROJECT_FOLDER / "Article 2.md").exists())
+
+    def test_apply_puts_the_hub_in_the_project_folder(self):
+        # A hub left in a run directory is a hub nobody browses.
+        (self.vault / PROJECT_FOLDER / "Article 2.md").unlink()
+        result = self.run_command("draft-hub", "--project", "Article 2", "--apply")
+        self.assertEqual(result["data"]["placement"], "hub-created")
+        hub = self.vault / PROJECT_FOLDER / "Article 2.md"
+        self.assertTrue(hub.exists())
+        self.assertIn("## Corpus", hub.read_text(encoding="utf-8"))
+
+    def test_apply_adds_only_a_corpus_section_to_a_hub_that_lacks_one(self):
+        hub = self.vault / PROJECT_FOLDER / "Article 2.md"
+        hub.write_text(
+            note({"type": "project", "status": "active", "domain": "academic",
+                  "project": '"[[Article 2]]"'},
+                 "# Article 2\n\nProse the owner wrote.\n\n## Links\n\n- [[Somewhere]]\n\n"
+                 "## Notes\n\nOwner scratch.\n"),
+            encoding="utf-8",
+        )
+        result = self.run_command("draft-hub", "--project", "Article 2", "--apply")
+        self.assertEqual(result["data"]["placement"], "corpus-section-added-before-notes")
+        text = hub.read_text(encoding="utf-8")
+        self.assertIn("Prose the owner wrote.", text)
+        self.assertIn("- [[Somewhere]]", text)
+        self.assertIn("Owner scratch.", text)
+        self.assertLess(text.index("## Corpus"), text.index("## Notes"))
 
 
 if __name__ == "__main__":

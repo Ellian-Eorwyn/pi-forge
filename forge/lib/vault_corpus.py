@@ -234,6 +234,34 @@ def resolve_target(index, target):
 # --------------------------------------------------------------------------- #
 
 
+COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+CORPUS_HEADING_RE = re.compile(rf"^##\s+{re.escape(CORPUS_HEADING)}\s*$", re.MULTILINE)
+NOTES_HEADING_RE = re.compile(r"^##\s+Notes\s*$", re.MULTILINE)
+
+
+def insert_corpus_section(body, section):
+    """Put a ``## Corpus`` section into a hub that has prose but no corpus yet.
+
+    Only the new section is added. A hub that already exists is a note someone
+    wrote, so the alternative -- regenerating the whole file from the schema --
+    would throw away their prose to gain a section that can simply be inserted.
+
+    The section lands before ``## Notes`` when that heading is present, because
+    the note format keeps ``## Notes`` last and owner-authored, and appending
+    after it would put generated content inside the one section nothing is
+    allowed to write. Returns the new body and where it went.
+    """
+    if CORPUS_HEADING_RE.search(body):
+        raise UserError("this note already has a `## Corpus` section")
+    block = section.rstrip("\n") + "\n"
+    notes = NOTES_HEADING_RE.search(body)
+    if notes:
+        head = body[: notes.start()].rstrip("\n")
+        tail = body[notes.start():]
+        return f"{head}\n\n{block}\n{tail}", "before-notes"
+    return body.rstrip("\n") + "\n\n" + block, "at-end"
+
+
 def parse_corpus_section(body):
     """Read a hub's ``## Corpus`` section into role buckets and exclusions.
 
@@ -263,7 +291,12 @@ def parse_corpus_section(body):
             continue
         bullet = BULLET_RE.match(line)
         if not bullet:
-            if LINK_RE.search(EMBED_RE.sub("", line)):
+            # An HTML comment is not content. Scaffolding left by `draft-hub`
+            # names the project it is scaffolding, and a bare wikilink in a
+            # comment would otherwise be reported as a link someone forgot to
+            # put in a bullet.
+            visible = COMMENT_RE.sub("", line)
+            if LINK_RE.search(EMBED_RE.sub("", visible)):
                 loose_links.append({"line": offset, "text": line.strip()})
             continue
         text = bullet.group(1).strip()
