@@ -273,3 +273,9 @@ concepts.
   argument structure, concepts, and candidate tensions, but every substantive
   final claim still requires an `m######` evidence citation.
 - Do not assume Obsidian schemas or frontmatter unless the user requests them.
+- A run directory is machine state, not vault content. Nothing in it becomes a
+  note by being written there: the distilled prose reaches the vault only
+  through `vault-connections import-run`, per accepted id, and the evidence
+  tables, JSONL, and `working/` stay in the run. When a run belongs to a vault
+  project, its hub cites the run path as provenance in ordinary body prose —
+  never under `## Corpus`, which is the closed list of what an agent may read.

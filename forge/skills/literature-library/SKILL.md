@@ -29,6 +29,12 @@ Inside an Obsidian vault, write runs to the vault workflow root:
 
 Outside a vault, use `forge-output/literature-library/<source-stem>/`.
 
+A run directory is never the vault copy of anything. Converted Markdown carries
+bibliographic frontmatter, not schema frontmatter, and enters the vault only
+through `vault-connections import-run` and then `vault-organizer`, which files it
+into the sources tree. A project reaches those sources by listing them in its hub
+note's `## Corpus` section, not by holding a second copy of the run.
+
 ## Command Card
 
 - `doctor --json`: local capability check. Touches no network.

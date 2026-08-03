@@ -1,0 +1,31 @@
+{
+	"name": "vault-projects",
+	"type": "pi-forge-skill",
+	"version": "0.1.0",
+	"description": "Resolve a vault project into the closed set of files an agent may work from — the project folder plus the sources, people, organizations, and wiki cards its hub note lists — and freeze that set as a _corpus.json manifest beside the hub, so a project can be handed off without duplicating a single file.",
+	"skill_file": "SKILL.md",
+	"scripts_dir": "scripts",
+	"references_dir": "references",
+	"restart_safe": true,
+	"tools": [
+		{
+			"name": "vault_projects",
+			"description": "List registered projects with their hub notes and manifest freshness; resolve one project's corpus from its folder and its hub's Corpus section; check hubs, links, closures, and manifests with doctor; emit the resolved corpus to _corpus.json; pack a corpus into one budgeted context file; and draft a hub skeleton from notes that already carry the project. Deterministic throughout: no model is called and nothing is fetched. Only emit --apply writes to the vault, and the only file it writes is its own manifest.",
+			"command": "python3 scripts/vault-projects.py",
+			"destructive": false
+		}
+	],
+	"safety": {
+		"destructive_by_default": false,
+		"requires_review_for_filesystem_changes": true,
+		"preserve_provenance_when_applicable": true,
+		"never_deletes_notes": true,
+		"never_modifies_existing_notes": true,
+		"never_edits_a_hub_note": true,
+		"never_writes_the_schema_note": true,
+		"only_vault_write_is_its_own_manifest": true,
+		"never_duplicates_a_source_into_a_project_folder": true,
+		"never_guesses_an_ambiguous_link": true,
+		"calls_no_model_and_fetches_nothing": true
+	}
+}

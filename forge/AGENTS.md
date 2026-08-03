@@ -109,6 +109,15 @@ It researches the field's published practice before proposing anything, and adds
 rows to the schema note only, per accepted id. Filing notes, fixing drift, and
 renumbering stay with `vault-organizer`.
 
+Route "hand this project to an agent", "what belongs to project X", "work only
+from this project's materials", or "the corpus for X" to `vault-projects`. A
+project is its folder plus what its hub note lists under `## Corpus`, so shared
+sources stay filed once in the sources tree and are still reachable; `emit`
+freezes that set as `_corpus.json` beside the hub. When a project folder holds a
+`_corpus.json`, treat `members[]` as the whole of what may be read, and say
+plainly that something is outside the corpus rather than searching the vault for
+it. Never copy a source into a project folder to make the folder complete.
+
 The `vault-workflow` extension adds a plan -> execute -> verify loop driven by
 `/plan`, `/execute`, `/verify`, and `/workflow off`. Each phase sets its own
 tools and thinking behaviour and injects its own rules, so follow the injected
