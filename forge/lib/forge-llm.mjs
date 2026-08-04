@@ -128,7 +128,15 @@ export function normalizeChatUrl(value) {
 export function resolveService(name, options = {}) {
 	const services = resolveConnectedServices(options);
 	const service = name === "think" ? services.think : services.chat;
-	return { name, enabled: Boolean(service.enabled), url: normalizeChatUrl(service.baseUrl), model: service.model, scheduling: service.scheduling };
+	return {
+		name,
+		enabled: Boolean(service.enabled),
+		url: normalizeChatUrl(service.baseUrl),
+		model: service.model,
+		contextTokens: service.contextTokens,
+		chatTemplateKwargs: service.chatTemplateKwargs,
+		scheduling: service.scheduling,
+	};
 }
 
 /**
@@ -146,6 +154,8 @@ export function resolveThinkService(options = {}) {
 		enabled: Boolean(chosen.enabled),
 		url: normalizeChatUrl(chosen.baseUrl),
 		model: chosen.model,
+		contextTokens: chosen.contextTokens,
+		chatTemplateKwargs: chosen.chatTemplateKwargs,
 		scheduling: chosen.scheduling,
 		...(isFallback ? { fallback: "chat" } : {}),
 	};
@@ -339,6 +349,7 @@ export async function call(service, messages, options = {}) {
 	if (responseFormat) request.response_format = responseFormat;
 	if (cachePrompt) request.cache_prompt = true;
 	if (maxTokens) request.max_tokens = maxTokens;
+	if (service.chatTemplateKwargs) request.chat_template_kwargs = service.chatTemplateKwargs;
 	let useSlot = background && Boolean(scheduling.enabled);
 	if (useSlot) request.id_slot = scheduling.backgroundSlot;
 	// Refuse a prompt that cannot fit before uploading it and taking a lease.
@@ -346,13 +357,14 @@ export async function call(service, messages, options = {}) {
 	// ("exceeds the available context size (131072 tokens)"), but its advice —
 	// "try increasing it" — is wrong here: the context is fixed by the
 	// deployment, and the knob a skill actually has is how much it sends.
+	const contextTokens = service.contextTokens || SLOT_CONTEXT_TOKENS;
 	const estimatedPrompt = estimatePromptTokens(messages);
 	const reservedOutput = maxTokens || 0;
-	if (estimatedPrompt + reservedOutput > SLOT_CONTEXT_TOKENS) {
+	if (estimatedPrompt + reservedOutput > contextTokens) {
 		throw new ContextBudgetError(
 			`prompt is about ${estimatedPrompt} tokens and reserves ${reservedOutput} for output, ` +
-				`over the ${SLOT_CONTEXT_TOKENS}-token slot limit. Send less text per call ` +
-				`(lower the skill's packet or chunk size), or lower maxTokens.`,
+				`over the ${contextTokens}-token limit on service ${JSON.stringify(service.name)}. ` +
+				`Send less text per call (lower the skill's packet or chunk size), or lower maxTokens.`,
 		);
 	}
 	const body = JSON.stringify(request);
@@ -471,7 +483,14 @@ export async function servedModels(service, timeoutMs = 5000) {
  * hundred wasted tokens on every item and nothing else reveals it.
  */
 export async function serviceDoctor(service, { expectNonThinking = false, timeoutMs = 30_000 } = {}) {
-	const report = { service: service.name, url: service.url, model: service.model, reachable: false };
+	const report = {
+		service: service.name,
+		url: service.url,
+		model: service.model,
+		contextTokens: service.contextTokens || SLOT_CONTEXT_TOKENS,
+		chatTemplateKwargs: service.chatTemplateKwargs ?? null,
+		reachable: false,
+	};
 	if (!service.enabled) {
 		report.detail = "disabled in connectedServices";
 		return report;
@@ -501,6 +520,19 @@ export async function serviceDoctor(service, { expectNonThinking = false, timeou
 	report.hiddenTokens = record.hiddenTokens;
 	const thought = record.reasoned || THINK_BLOCK.test(content);
 	report.thinking = thought;
+	// An empty reply that still burned tokens is worth naming outright: the
+	// backend reasoned into `reasoning_content`, which this client never reads,
+	// so nothing arrives to parse and every JSON-expecting skill fails on a
+	// response the server reported as successful.
+	if (!content.trim() && (record.generatedTokens || 0) > 0) {
+		report.emptyContent = true;
+		report.warning =
+			`the endpoint generated ~${record.generatedTokens} tokens but returned empty content: it is reasoning ` +
+			`into a field this client does not read. Set chatTemplateKwargs to {"enable_thinking": false} for this ` +
+			`service (connectedServices, or FORGE_BASE_CHAT_TEMPLATE_KWARGS / FORGE_THINK_TEMPLATE_KWARGS).`;
+		report.detail = "reachable, but answers with no visible content";
+		return report;
+	}
 	if (expectNonThinking && thought) {
 		report.warning = `this endpoint is configured for bulk work but spent ~${record.hiddenTokens} hidden reasoning tokens on a one-word reply; every item is paying that`;
 	}

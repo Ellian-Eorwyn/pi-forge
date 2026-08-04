@@ -82,12 +82,67 @@ test("a prompt that cannot fit a slot is refused before the request is sent", as
 				assert.ok(error instanceof ContextBudgetError);
 				// Callers that only know about ChatError still catch it.
 				assert.ok(error instanceof ChatError);
-				assert.match(error.message, /slot limit/);
+				// The ceiling and the service it belongs to, because a service
+				// can now carry a smaller one than the default slot.
+				assert.match(error.message, new RegExp(`${SLOT_CONTEXT_TOKENS}-token limit on service "chat"`));
 				return true;
 			},
 		);
 		// Refused before a socket was opened, not after a long prefill.
 		assert.equal(stub.requests.length, 0);
+	} finally {
+		await stub.close();
+	}
+});
+
+test("a service can carry a smaller ceiling than the default slot", async () => {
+	const stub = await startStub(() => ({ content: "{}" }));
+	try {
+		// Comfortably inside a 131072-token slot, well over a 4096-token one.
+		const messages = [{ role: "user", content: "x".repeat(40_000) }];
+		await call(service(stub.url), messages);
+		assert.equal(stub.requests.length, 1);
+
+		const smaller = { ...service(stub.url), contextTokens: 4096 };
+		await assert.rejects(
+			() => call(smaller, messages),
+			(error) => {
+				assert.ok(error instanceof ContextBudgetError);
+				assert.match(error.message, /4096-token limit on service "chat"/);
+				return true;
+			},
+		);
+		// Refused before a socket was opened, so the count has not moved.
+		assert.equal(stub.requests.length, 1);
+	} finally {
+		await stub.close();
+	}
+});
+
+test("chat template kwargs are forwarded verbatim, and omitted when unset", async () => {
+	const stub = await startStub(() => ({ content: "{}" }));
+	try {
+		await call({ ...service(stub.url), chatTemplateKwargs: { enable_thinking: false } }, [{ role: "user", content: "hi" }]);
+		assert.deepEqual(stub.requests[0].chat_template_kwargs, { enable_thinking: false });
+		// A backend that does not understand the field must not be sent it.
+		await call(service(stub.url), [{ role: "user", content: "hi" }]);
+		assert.ok(!("chat_template_kwargs" in stub.requests[1]));
+	} finally {
+		await stub.close();
+	}
+});
+
+test("the doctor names an endpoint that answers with no visible content", async () => {
+	// Measured against the task backend: with `--reasoning-format deepseek` the
+	// reply arrives in `reasoning_content` and `content` is empty, so every
+	// JSON-expecting skill fails on a response the server called a success.
+	const stub = await startStub(() => ({ content: "", predicted: 64 }));
+	try {
+		const report = await serviceDoctor(service(stub.url), { expectNonThinking: true });
+		assert.equal(report.reachable, true);
+		assert.equal(report.emptyContent, true);
+		assert.match(report.warning, /enable_thinking/);
+		assert.match(report.detail, /no visible content/);
 	} finally {
 		await stub.close();
 	}

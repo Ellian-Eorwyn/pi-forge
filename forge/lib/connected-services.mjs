@@ -22,10 +22,21 @@ export const DEFAULT_CONNECTED_SERVICES = Object.freeze({
 	// Bulk per-file work: the non-thinking configuration of the same weights.
 	// Batch skills spend no hidden reasoning tokens here. Scheduling is on
 	// because this endpoint is not a separate server — see the note on `think`.
+	//
+	// `contextTokens` and `chatTemplateKwargs` exist so a service can be pointed
+	// somewhere that is not this deployment. The first is the ceiling the
+	// preflight enforces: left at the slot default, a skill aimed at a smaller
+	// backend sends a prompt this client believes fits and reads the server's
+	// rejection as the model failing the task. The second is forwarded verbatim
+	// as `chat_template_kwargs`; a backend running `--reasoning-format deepseek`
+	// answers into `reasoning_content` and returns empty `content`, so nothing
+	// arrives to parse until it is sent `{"enable_thinking": false}`.
 	chat: Object.freeze({
 		enabled: true,
 		baseUrl: "http://llms:8004/v1/chat/completions",
 		model: "chat",
+		contextTokens: SLOT_CONTEXT_TOKENS,
+		chatTemplateKwargs: null,
 		scheduling: Object.freeze({
 			enabled: true,
 			interactiveSlot: 0,
@@ -45,6 +56,8 @@ export const DEFAULT_CONNECTED_SERVICES = Object.freeze({
 		enabled: true,
 		baseUrl: "http://llms:8008/v1/chat/completions",
 		model: "code",
+		contextTokens: SLOT_CONTEXT_TOKENS,
+		chatTemplateKwargs: null,
 		scheduling: Object.freeze({
 			enabled: true,
 			interactiveSlot: 0,
@@ -174,6 +187,8 @@ function seedInferenceService(current, defaults) {
 		enabled: current.enabled ?? defaults.enabled,
 		baseUrl: normalizeHttpBaseUrl(current.baseUrl) ?? defaults.baseUrl,
 		model: normalizeServiceName(current.model) ?? defaults.model,
+		contextTokens: normalizePositiveInteger(current.contextTokens, defaults.contextTokens),
+		chatTemplateKwargs: normalizeTemplateKwargs(current.chatTemplateKwargs) ?? defaults.chatTemplateKwargs,
 		scheduling: {
 			enabled: scheduling.enabled ?? defaults.scheduling.enabled,
 			interactiveSlot: normalizeNonnegativeInteger(scheduling.interactiveSlot, defaults.scheduling.interactiveSlot),
@@ -213,6 +228,14 @@ export function resolveConnectedServices(options = {}) {
 	const explicitThinkModel = normalizeServiceName(options.thinkModel);
 	const explicitEmbeddings = normalizeHttpBaseUrl(options.embeddingsUrl);
 	const explicitEmbeddingsModel = normalizeServiceName(options.embeddingsModel);
+	const envChatContext = normalizePositiveInteger(parseInteger(env.FORGE_BASE_CHAT_CONTEXT_TOKENS), undefined);
+	const envThinkContext = normalizePositiveInteger(parseInteger(env.FORGE_THINK_CONTEXT_TOKENS), undefined);
+	const envChatTemplate = normalizeTemplateKwargs(env.FORGE_BASE_CHAT_TEMPLATE_KWARGS);
+	const envThinkTemplate = normalizeTemplateKwargs(env.FORGE_THINK_TEMPLATE_KWARGS);
+	const explicitChatContext = normalizePositiveInteger(parseInteger(options.chatContextTokens), undefined);
+	const explicitThinkContext = normalizePositiveInteger(parseInteger(options.thinkContextTokens), undefined);
+	const explicitChatTemplate = normalizeTemplateKwargs(options.chatTemplateKwargs);
+	const explicitThinkTemplate = normalizeTemplateKwargs(options.thinkTemplateKwargs);
 	return {
 		searxng: {
 			enabled: explicitSearxng ? true : searxngEnvPresent ? Boolean(envSearxng) : seeded.searxng.enabled,
@@ -226,12 +249,16 @@ export function resolveConnectedServices(options = {}) {
 			enabled: explicitChat ? true : chatEnvPresent ? Boolean(envChat) : seeded.chat.enabled,
 			baseUrl: explicitChat ?? envChat ?? seeded.chat.baseUrl,
 			model: explicitChatModel ?? envChatModel ?? seeded.chat.model,
+			contextTokens: explicitChatContext ?? envChatContext ?? seeded.chat.contextTokens,
+			chatTemplateKwargs: explicitChatTemplate ?? envChatTemplate ?? seeded.chat.chatTemplateKwargs,
 			scheduling: seeded.chat.scheduling,
 		},
 		think: {
 			enabled: explicitThink ? true : thinkEnvPresent ? Boolean(envThink) : seeded.think.enabled,
 			baseUrl: explicitThink ?? envThink ?? seeded.think.baseUrl,
 			model: explicitThinkModel ?? envThinkModel ?? seeded.think.model,
+			contextTokens: explicitThinkContext ?? envThinkContext ?? seeded.think.contextTokens,
+			chatTemplateKwargs: explicitThinkTemplate ?? envThinkTemplate ?? seeded.think.chatTemplateKwargs,
 			scheduling: seeded.think.scheduling,
 		},
 		embeddings: {
@@ -310,4 +337,33 @@ function normalizeNonnegativeInteger(value, fallback) {
 
 function normalizePositiveInteger(value, fallback) {
 	return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+/** A settings value or env var that should be a count of tokens. */
+function parseInteger(value) {
+	if (Number.isInteger(value)) return value;
+	if (typeof value !== "string" || !value.trim()) return undefined;
+	const parsed = Number.parseInt(value.trim(), 10);
+	return Number.isNaN(parsed) ? undefined : parsed;
+}
+
+/**
+ * A `chat_template_kwargs` object, from a settings mapping or a JSON string in
+ * an env var. Anything else — a bare string, an array, malformed JSON, or `{}` —
+ * is treated as unset, because forwarding it would make the backend reject the
+ * whole request rather than ignore one bad field.
+ */
+function normalizeTemplateKwargs(value) {
+	if (value && typeof value === "object" && !Array.isArray(value)) {
+		return Object.keys(value).length ? { ...value } : undefined;
+	}
+	if (typeof value !== "string" || !value.trim()) return undefined;
+	let parsed;
+	try {
+		parsed = JSON.parse(value);
+	} catch {
+		return undefined;
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+	return Object.keys(parsed).length ? parsed : undefined;
 }

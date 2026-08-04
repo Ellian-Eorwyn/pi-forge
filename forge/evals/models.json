@@ -1,0 +1,64 @@
+{
+  "readme": [
+    "Models the suite can be pointed at. `url` accepts a bare /v1 base or a full",
+    "chat-completions URL. `contextTokens` is what one request may use, which is",
+    "not the backend's total context when it serves parallel slots.",
+    "`chatTemplateKwargs` is forwarded verbatim; a reasoning backend needs",
+    "{\"enable_thinking\": false} or it answers into reasoning_content and returns",
+    "empty content. `outputHeadroom` is extra output tokens a model needs before",
+    "it starts answering: a reasoning backend spends them thinking, and without",
+    "it every reply is preamble that ends mid-thought.",
+    "Run `run.py doctor --model <id>` after adding an entry.",
+    "`fingerprintUrl` points at somewhere that reports model metadata when the",
+    "serving port does not: a proxy answers /v1/models with an id and nothing else,",
+    "while the backend it fronts serves the same ids with params, quant, and context.",
+    "For a hosted model add \"apiKeyEnv\": \"SOME_ENV_VAR\"; the suite reads the key",
+    "from the environment and never stores it here."
+  ],
+  "models": {
+    "chat-27b": {
+      "label": "Qwen3.6-27B-Q6_K (chat, non-thinking)",
+      "url": "http://llms:8004/v1",
+      "model": "chat",
+      "contextTokens": 131072,
+      "chatTemplateKwargs": null,
+      "notes": "The bulk tier every skill uses today. This is the baseline the others are read against.",
+      "fingerprintUrl": "http://llms:8010/v1",
+      "expectParams": 27320697856
+    },
+    "task-9b": {
+      "label": "Qwen3.5-9B-Q4_K_M (task)",
+      "url": "http://llms:8007/v1",
+      "model": "task",
+      "contextTokens": 32768,
+      "chatTemplateKwargs": {
+        "enable_thinking": false
+      },
+      "expectModelPath": "/mnt/LLMs/llamacpp/llm-stack-git/models/Qwen3.5-9B-Q4_K_M.gguf",
+      "notes": "Only servable when the router has these weights loaded; :8007 serves whichever task model is configured, so `run` refuses unless the endpoint matches expectModelPath. No expectParams: this entry was never fingerprinted, and the results under results/task-9b/ predate fingerprinting — treat their model attribution as unconfirmed."
+    },
+    "task-4b": {
+      "label": "Qwen3.5-4B-UD-Q6_K_XL (task)",
+      "url": "http://llms:8007/v1",
+      "model": "task",
+      "contextTokens": 32768,
+      "chatTemplateKwargs": {
+        "enable_thinking": false
+      },
+      "expectParams": 4205751296,
+      "expectModelPath": "/mnt/LLMs/llamacpp/llm-stack-git/models/Qwen3.5-4B-UD-Q6_K_XL.gguf",
+      "notes": "Fingerprinted 2026-08-03: 4.21B params, Q6_K, ctx 32769, 1 slot. Shares a router with embed/ocr/rank at MODEL_ROUTER_MAX=1, so the first call after another member ran pays a swap. chatTemplateKwargs is now redundant here — the router's own preset passes --chat-template-kwargs {\"enable_thinking\":false} — but it is kept because it costs nothing and survives a preset that stops doing so."
+    },
+    "think-27b": {
+      "label": "Qwen3.6-27B-Q6_K (code, thinking)",
+      "url": "http://llms:8008/v1",
+      "model": "code",
+      "contextTokens": 131072,
+      "chatTemplateKwargs": null,
+      "outputHeadroom": 12000,
+      "notes": "The verification tier. Same weights as chat-27b with reasoning on, so the gap between the two is the value of thinking rather than of scale. Reasoning consumes the output budget before the answer starts, so every case needs headroom. First set to 3000 from two probe items at ~1,900 tokens; a full run then showed real cases spending 3,500-9,938, truncating items in four of twelve. Raised to cover the observed maximum with margin. A cap costs nothing unless it is reached, so err high: too low silently converts a model failure out of thin air.",
+      "fingerprintUrl": "http://llms:8010/v1",
+      "expectParams": 27320697856
+    }
+  }
+}

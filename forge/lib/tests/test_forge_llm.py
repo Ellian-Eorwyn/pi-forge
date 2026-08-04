@@ -128,6 +128,44 @@ class ResolutionTests(unittest.TestCase):
         self.assertEqual(resolved["url"], "http://only:1/v1/chat/completions")
         self.assertEqual(resolved["fallback"], "chat")
 
+    def test_a_service_carries_its_own_context_ceiling(self):
+        default = forge_llm.resolve_service("chat", env={}, settings={})
+        self.assertEqual(default["contextTokens"], forge_llm.SLOT_CONTEXT_TOKENS)
+
+        settings = {"chat": {"contextTokens": 32768}}
+        from_settings = forge_llm.resolve_service("chat", env={}, settings=settings)
+        self.assertEqual(from_settings["contextTokens"], 32768)
+
+        environment = {"FORGE_BASE_CHAT_CONTEXT_TOKENS": "8192"}
+        from_environment = forge_llm.resolve_service("chat", env=environment, settings=settings)
+        self.assertEqual(from_environment["contextTokens"], 8192)
+
+    def test_a_nonsense_context_ceiling_falls_back_rather_than_disabling_the_check(self):
+        # Zero, a negative, and a non-number all mean "unset". Honouring any of
+        # them would leave the preflight comparing against a ceiling nothing can
+        # fit, or against no ceiling at all.
+        for value in (0, -1, "many", None):
+            resolved = forge_llm.resolve_service("chat", env={}, settings={"chat": {"contextTokens": value}})
+            self.assertEqual(resolved["contextTokens"], forge_llm.SLOT_CONTEXT_TOKENS)
+
+    def test_chat_template_kwargs_resolve_from_settings_and_environment(self):
+        self.assertIsNone(forge_llm.resolve_service("chat", env={}, settings={})["chatTemplateKwargs"])
+
+        settings = {"chat": {"chatTemplateKwargs": {"enable_thinking": False}}}
+        from_settings = forge_llm.resolve_service("chat", env={}, settings=settings)
+        self.assertEqual(from_settings["chatTemplateKwargs"], {"enable_thinking": False})
+
+        environment = {"FORGE_BASE_CHAT_TEMPLATE_KWARGS": '{"enable_thinking": true}'}
+        from_environment = forge_llm.resolve_service("chat", env=environment, settings=settings)
+        self.assertEqual(from_environment["chatTemplateKwargs"], {"enable_thinking": True})
+
+    def test_unusable_chat_template_kwargs_are_treated_as_unset(self):
+        # Forwarding a malformed value would make the backend reject the whole
+        # request rather than ignore one field.
+        for value in ("not json", "[1,2]", "{}", "", 7):
+            resolved = forge_llm.resolve_service("chat", env={}, settings={"chat": {"chatTemplateKwargs": value}})
+            self.assertIsNone(resolved["chatTemplateKwargs"])
+
     def test_settings_are_read_from_the_agent_directory(self):
         with tempfile.TemporaryDirectory() as directory:
             agent = Path(directory) / "agent"
@@ -177,6 +215,34 @@ class ResponseParsingTests(unittest.TestCase):
             self.assertTrue(server.requests[0]["cache_prompt"])
             self.assertNotIn("id_slot", server.requests[0])
 
+    def test_chat_template_kwargs_are_forwarded_verbatim(self):
+        with FakeChatServer(responses=['{"ok": true}']) as server:
+            configured = service(server.url)
+            configured["chatTemplateKwargs"] = {"enable_thinking": False}
+            forge_llm.call_json(configured, [{"role": "user", "content": "hi"}])
+            self.assertEqual(server.requests[0]["chat_template_kwargs"], {"enable_thinking": False})
+
+    def test_no_chat_template_kwargs_key_when_none_is_configured(self):
+        # A backend that does not understand the field must not be sent it.
+        with FakeChatServer(responses=['{"ok": true}']) as server:
+            forge_llm.call_json(service(server.url), [{"role": "user", "content": "hi"}])
+            self.assertNotIn("chat_template_kwargs", server.requests[0])
+
+    def test_a_smaller_service_ceiling_refuses_a_prompt_the_default_would_allow(self):
+        with FakeChatServer(responses=['{"ok": true}']) as server:
+            # Comfortably inside a 131072-token slot, well over a 4096-token one.
+            messages = [{"role": "user", "content": "x" * 40000}]
+            forge_llm.call_json(service(server.url), messages)
+            self.assertEqual(len(server.requests), 1)
+
+            smaller = service(server.url)
+            smaller["contextTokens"] = 4096
+            with self.assertRaises(forge_llm.ContextBudgetError) as caught:
+                forge_llm.call_json(smaller, messages)
+            self.assertIn("4096-token limit on service 'chat'", str(caught.exception))
+            # Refused before a socket was opened, so the count has not moved.
+            self.assertEqual(len(server.requests), 1)
+
     def test_background_calls_pin_the_background_slot(self):
         with tempfile.TemporaryDirectory() as directory, FakeChatServer(responses=['{"ok": true}']) as server:
             forge_llm.call_json(
@@ -219,6 +285,25 @@ class DoctorTests(unittest.TestCase):
             configured["model"] = "not-served"
             report = forge_llm.service_doctor(configured)
             self.assertTrue(report["modelMismatch"])
+
+    def test_doctor_names_an_endpoint_that_answers_with_no_visible_content(self):
+        # Measured against the task backend: with `--reasoning-format deepseek`
+        # the reply arrives in `reasoning_content` and `content` is empty, so
+        # every JSON-expecting skill fails on a response the server called a
+        # success. The doctor has to say which knob fixes it.
+        with FakeChatServer(responses=[""], predicted_n=64) as server:
+            report = forge_llm.service_doctor(service(server.url), expect_non_thinking=True)
+            self.assertTrue(report["reachable"])
+            self.assertTrue(report["emptyContent"])
+            self.assertIn("enable_thinking", report["warning"])
+            self.assertIn("no visible content", report["detail"])
+
+    def test_doctor_reports_the_effective_context_ceiling(self):
+        with FakeChatServer(responses=["ready"], predicted_n=2) as server:
+            configured = service(server.url)
+            configured["contextTokens"] = 32768
+            report = forge_llm.service_doctor(configured)
+            self.assertEqual(report["contextTokens"], 32768)
 
     def test_doctor_reports_an_unreachable_endpoint(self):
         report = forge_llm.service_doctor(service("http://127.0.0.1:9/v1/chat/completions"), timeout=1.0)

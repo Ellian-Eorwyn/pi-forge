@@ -1,0 +1,10 @@
+{
+  "name": "enumeration-clause-removed",
+  "why": "Calibration, not an improvement. docs/service-split-handoff.md 2.1 measured this exact clause taking a non-thinking model from 17 items / 4 types to 41 / 12. If the suite cannot see the degradation when it is removed, it cannot see an improvement either, and every null result from a variant is uninterpretable.",
+  "applies": [
+    "enumeration-breadth"
+  ],
+  "patch": {
+    "systemStrip": "- Work through the item types in order and ask what the document offers for each one before\n  moving on. Do not stop at claims, findings, methods, and limitations: documents also carry\n  definitions, data sources, variables, populations, technologies, policies, cited works,\n  research gaps, and connections to other work.\n"
+  }
+}

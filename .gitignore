@@ -41,3 +41,7 @@ plans/
 .pi/hf-sessions/
 .pi/hf-sessions-backup/
 collect.sh
+
+# Model evaluation suite: fixtures are real vault notes and results are per-machine.
+forge/evals/.frozen/
+forge/evals/results/

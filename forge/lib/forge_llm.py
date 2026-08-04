@@ -33,6 +33,13 @@ Configuration:
   the batch service (default ``http://llms:8004/v1/chat/completions``, ``chat``).
 - ``FORGE_THINK_URL`` / ``FORGE_THINK_MODEL`` override the thinking service
   (default ``http://llms:8008/v1/chat/completions``, ``code``).
+- ``FORGE_BASE_CHAT_CONTEXT_TOKENS`` / ``FORGE_THINK_CONTEXT_TOKENS`` override the
+  per-request context ceiling, for a service whose backend is smaller than the
+  default slot.
+- ``FORGE_BASE_CHAT_TEMPLATE_KWARGS`` / ``FORGE_THINK_TEMPLATE_KWARGS`` carry a
+  JSON object forwarded as ``chat_template_kwargs``. A reasoning model reached
+  this way needs ``{"enable_thinking": false}`` or it answers into a field this
+  client does not read; see ``chatTemplateKwargs`` below.
 """
 
 import http.client
@@ -55,11 +62,29 @@ import run_state
 # both the slots and this ceiling.
 SLOT_CONTEXT_TOKENS = 131072
 
+# Two fields exist because a service is not always the deployment above. Pointing
+# `chat` at a smaller model — the 9B on the swapping router, say — changes both
+# how much fits and how the backend has to be asked to answer:
+#
+# - `contextTokens` is the ceiling the preflight check enforces. Left at the
+#   default a skill would send a prompt this client believes fits, and read the
+#   server's rejection as the model failing the task rather than the harness
+#   overfilling it.
+# - `chatTemplateKwargs` is forwarded verbatim as `chat_template_kwargs`. A
+#   backend running `--reasoning-format deepseek` returns its reasoning in a
+#   separate `reasoning_content` field and leaves `content` empty, so there is no
+#   `<think>` block for THINK_BLOCK_RE to strip and nothing to parse; measured on
+#   the task backend, a 16-token budget went entirely to reasoning. Sending
+#   `{"enable_thinking": false}` makes it answer in two tokens like the
+#   non-thinking profile does. `reasoning_budget: 0` and a `/no_think` suffix
+#   were both tried against the same server and neither had any effect.
 DEFAULT_SERVICES = {
     "chat": {
         "enabled": True,
         "url": "http://llms:8004/v1/chat/completions",
         "model": "chat",
+        "contextTokens": SLOT_CONTEXT_TOKENS,
+        "chatTemplateKwargs": None,
         "scheduling": {
             "enabled": True,
             "interactiveSlot": 0,
@@ -73,6 +98,8 @@ DEFAULT_SERVICES = {
         "enabled": True,
         "url": "http://llms:8008/v1/chat/completions",
         "model": "code",
+        "contextTokens": SLOT_CONTEXT_TOKENS,
+        "chatTemplateKwargs": None,
         "scheduling": {
             "enabled": True,
             "interactiveSlot": 0,
@@ -89,6 +116,14 @@ SERVICE_URL_ENVIRONMENT = {
     "think": ("FORGE_THINK_URL",),
 }
 SERVICE_MODEL_ENVIRONMENT = {"chat": ("FORGE_BASE_MODEL",), "think": ("FORGE_THINK_MODEL",)}
+SERVICE_CONTEXT_ENVIRONMENT = {
+    "chat": ("FORGE_BASE_CHAT_CONTEXT_TOKENS",),
+    "think": ("FORGE_THINK_CONTEXT_TOKENS",),
+}
+SERVICE_TEMPLATE_KWARGS_ENVIRONMENT = {
+    "chat": ("FORGE_BASE_CHAT_TEMPLATE_KWARGS",),
+    "think": ("FORGE_THINK_TEMPLATE_KWARGS",),
+}
 
 # A thinking backend that was asked not to think can still emit a stray block.
 # Strip it defensively everywhere rather than trusting any one server's config.
@@ -180,8 +215,31 @@ def normalize_base_url(value, default=None):
     return url
 
 
+def _positive_int(value):
+    """A positive integer, or None for anything that is not one."""
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return number if number > 0 else None
+
+
+def _template_kwargs(value):
+    """A ``chat_template_kwargs`` object, from a mapping or a JSON string."""
+    if isinstance(value, dict):
+        return dict(value) or None
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        return dict(parsed) if isinstance(parsed, dict) and parsed else None
+    return None
+
+
 def resolve_service(name, base_url=None, model=None, env=None, settings=None):
-    """Resolve a named service to ``{enabled, url, model, scheduling}``.
+    """Resolve a named service to ``{enabled, url, model, contextTokens,
+    chatTemplateKwargs, scheduling}``.
 
     Precedence: explicit argument, environment, ``connectedServices`` settings,
     built-in default.
@@ -198,6 +256,23 @@ def resolve_service(name, base_url=None, model=None, env=None, settings=None):
     resolved_url = normalize_base_url(base_url or environment_url or persisted.get("baseUrl"), defaults["url"])
     resolved_model = model or environment_model or persisted.get("model") or defaults["model"]
 
+    environment_context = next(
+        (environment[key] for key in SERVICE_CONTEXT_ENVIRONMENT[name] if environment.get(key)), None
+    )
+    resolved_context = (
+        _positive_int(environment_context)
+        or _positive_int(persisted.get("contextTokens"))
+        or defaults["contextTokens"]
+    )
+    environment_template = next(
+        (environment[key] for key in SERVICE_TEMPLATE_KWARGS_ENVIRONMENT[name] if environment.get(key)), None
+    )
+    resolved_template = (
+        _template_kwargs(environment_template)
+        or _template_kwargs(persisted.get("chatTemplateKwargs"))
+        or defaults["chatTemplateKwargs"]
+    )
+
     persisted_scheduling = persisted.get("scheduling") if isinstance(persisted.get("scheduling"), dict) else {}
     scheduling = {**defaults["scheduling"]}
     for key, value in persisted_scheduling.items():
@@ -208,6 +283,8 @@ def resolve_service(name, base_url=None, model=None, env=None, settings=None):
         "enabled": bool(persisted.get("enabled", defaults["enabled"])),
         "url": resolved_url,
         "model": resolved_model,
+        "contextTokens": resolved_context,
+        "chatTemplateKwargs": resolved_template,
         "scheduling": scheduling,
     }
 
@@ -422,6 +499,9 @@ def call(
         request["cache_prompt"] = True
     if max_tokens:
         request["max_tokens"] = max_tokens
+    template_kwargs = service.get("chatTemplateKwargs")
+    if template_kwargs:
+        request["chat_template_kwargs"] = template_kwargs
     use_slot = background and scheduling.get("enabled")
     if use_slot:
         request["id_slot"] = scheduling["backgroundSlot"]
@@ -430,13 +510,14 @@ def call(
     # ("exceeds the available context size (131072 tokens)"), but its advice —
     # "try increasing it" — is wrong here: the context is fixed by the
     # deployment, and the knob a skill actually has is how much it sends.
+    context_tokens = service.get("contextTokens") or SLOT_CONTEXT_TOKENS
     estimated_prompt = estimate_prompt_tokens(messages)
     reserved_output = max_tokens or 0
-    if estimated_prompt + reserved_output > SLOT_CONTEXT_TOKENS:
+    if estimated_prompt + reserved_output > context_tokens:
         raise ContextBudgetError(
             f"prompt is about {estimated_prompt} tokens and reserves {reserved_output} for output, "
-            f"over the {SLOT_CONTEXT_TOKENS}-token slot limit. Send less text per call "
-            f"(lower the skill's packet or chunk size), or lower max_tokens."
+            f"over the {context_tokens}-token limit on service {service['name']!r}. Send less text "
+            f"per call (lower the skill's packet or chunk size), or lower max_tokens."
         )
     body = json.dumps(request).encode("utf-8")
 
@@ -533,7 +614,14 @@ def service_doctor(service, expect_non_thinking=False, timeout=30.0):
     regardless of the id sent, so a stale name stays invisible until someone
     points the same config at a server that validates it.
     """
-    report = {"service": service["name"], "url": service["url"], "model": service["model"], "reachable": False}
+    report = {
+        "service": service["name"],
+        "url": service["url"],
+        "model": service["model"],
+        "contextTokens": service.get("contextTokens") or SLOT_CONTEXT_TOKENS,
+        "chatTemplateKwargs": service.get("chatTemplateKwargs"),
+        "reachable": False,
+    }
     if not service["enabled"]:
         report["detail"] = "disabled in connectedServices"
         return report
@@ -562,6 +650,21 @@ def service_doctor(service, expect_non_thinking=False, timeout=30.0):
     report["hiddenTokens"] = record["hiddenTokens"]
     thought = record["reasoned"] or bool(THINK_BLOCK_RE.match(content))
     report["thinking"] = thought
+    # An empty reply that still burned tokens is the one failure mode worth
+    # naming outright: the backend reasoned into `reasoning_content`, which this
+    # client never reads, so nothing arrives to parse and every JSON-expecting
+    # skill fails on a response the server reported as successful.
+    generated = record.get("generatedTokens") or 0
+    if not content.strip() and generated > 0:
+        report["emptyContent"] = True
+        report["warning"] = (
+            f"the endpoint generated ~{generated} tokens but returned empty content: it is reasoning "
+            "into a field this client does not read. Set chatTemplateKwargs to "
+            '{"enable_thinking": false} for this service (connectedServices, or '
+            "FORGE_BASE_CHAT_TEMPLATE_KWARGS / FORGE_THINK_TEMPLATE_KWARGS)."
+        )
+        report["detail"] = "reachable, but answers with no visible content"
+        return report
     if expect_non_thinking and thought:
         report["warning"] = (
             f"this endpoint is configured for bulk work but spent ~{record['hiddenTokens']} hidden "

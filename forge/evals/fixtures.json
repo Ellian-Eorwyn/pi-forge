@@ -1,0 +1,349 @@
+{
+  "readme": [
+    "Fixtures are real vault notes, pinned by sha256 and materialized into the",
+    "gitignored .frozen/ by `run.py freeze`. Only the pointer lives in git: this",
+    "repository is public and the notes are not.",
+    "A drifted hash is not an error, it is a signal - the note changed and the",
+    "numbers stop being comparable until it is re-pinned deliberately.",
+    "`excerpt` is applied at freeze time so the sha of what the model saw is the",
+    "sha on disk. `head` keeps the frontmatter, which several cases score against."
+  ],
+  "fixtures": {
+    "braindump-brainstorm": {
+      "path": "00 Inbox/Brainstorm.md",
+      "sha256": "74fa6298547b5800833332050124820da1f1bc0f444660e27ca027a4285e3996",
+      "note": "A tidy outline followed by a 900-word dictated wall. Names no people, so any name in a draft is provably invented."
+    },
+    "braindump-merge": {
+      "path": "00 Inbox/20260803 103935-9E614205 2026-08-03 10_40_36.md",
+      "sha256": "13fa2f1a5390fda33196f98cf896c565929351110a5bda364d9ef8e8a856a7dd"
+    },
+    "braindump-requirements": {
+      "path": "10 Sources/10.03 Transcript/Technology/Software Development/2026-06-12 - Memo - Vault Manager Feature Requirements - Transcript.md",
+      "sha256": "c5875f67ad76b93890244ec1220e03ff40c48ff775cb5ac5e35f539e6eef5bad"
+    },
+    "braindump-speakers": {
+      "path": "00 Inbox/20260730 120019-F709DCCE 2026-07-30 12_04_15.md",
+      "sha256": "8a67f497999061eac065e2a1250ca1c7d4d9763dba2ca3ec4299ac4c32e1eea2"
+    },
+    "braindump-todo": {
+      "path": "00 Inbox/20260803 103416-7C21A6C6 2026-08-03 10_37_55.md",
+      "sha256": "b040fc375bb89c32590c0bf4c3fd2fc4956cac3ca85777ccf8c6407c11c8bafd"
+    },
+    "braindump-voice": {
+      "path": "00 Inbox/20260803 104136-820B6FCE 2026-08-03 10_42_58.md",
+      "sha256": "30ad63c2880e409adcee82faaabab72d9cd029267447e37351ecebce306b4144"
+    },
+    "braindump-weather": {
+      "path": "00 Inbox/Ambient Weather WS-2902 Local Data Access.md",
+      "sha256": "15e758f3f48eb9272cac65c8f6d39c2f76da29892266b98e54a7ebdcf4414250"
+    },
+    "classify-agnotology": {
+      "path": "09 Wiki/9.01 Concepts/Agnotology.md",
+      "sha256": "692e4cccdaef2af140ab31da2ab8efb66b25f0dccee3112c27430eb22015fe38"
+    },
+    "classify-calnext": {
+      "path": "10 Sources/10.04 Report/Work/Building Energy/CalNEXT-2025-HVAC-TPM-Final-Report.md",
+      "sha256": "0180716b3350011e7dc4751486be6555022c046ce4a9c78f2f9c65716249630b",
+      "excerpt": {
+        "mode": "head",
+        "chars": 24000
+      }
+    },
+    "classify-demand-response": {
+      "path": "06 Work/6.02 Building Energy/Demand Response.md",
+      "sha256": "31003560f7a2c509633187fbc5ca8a25f37631685cb01a070f38b9e71e0dd6e6",
+      "note": "Thirteen words. Almost no signal, and the schema still has one right answer."
+    },
+    "classify-focaccia": {
+      "path": "02 Craft/2.02 Cooking/3.04 Focaccia Bread Recipe.md",
+      "sha256": "d24e7c5201867e24cda988d1410489d50365a0867769847b0c941eaad824ba2e"
+    },
+    "classify-kuhn": {
+      "path": "09 Wiki/9.07 Figures/Thomas Kuhn.md",
+      "sha256": "7005b0d1054c7803be5716e1d91e34b7e726f0855b896c0687d474985774d518"
+    },
+    "classify-lecture": {
+      "path": "10 Sources/10.03 Transcript/Work/Building Energy/Lecture - The Brave Solution For Cleaner Building Air - Transcript.md",
+      "sha256": "d68eed2615b193bf7018433b4f099f1edf05c25f2327d7895842c29546b87a17",
+      "excerpt": {
+        "mode": "head",
+        "chars": 24000
+      }
+    },
+    "classify-memo-transcript": {
+      "path": "10 Sources/10.03 Transcript/Technology/Software Development/2026-07-29 - Memo - Personal Context Notes For Local LLM - Transcript.md",
+      "sha256": "eeeefe1b438b19ca1c73052c688d6b0bbae5621918162c98f8a10d39c099dd57",
+      "note": "type: source with source_kind, so it routes into the sources tree rather than its domain folder."
+    },
+    "classify-mycology": {
+      "path": "10 Sources/10.09 Website/Craft/Mycology/4.24 Shroomery - BOD Monotub Tek 2.md",
+      "sha256": "2b99f6b60030fc10e7e8d4686ea4b099885edd8b02d811fa20928bf84d951306",
+      "excerpt": {
+        "mode": "head",
+        "chars": 24000
+      }
+    },
+    "classify-piforge-memo": {
+      "path": "04 Technology/4.02 Software Development/4.02.01 Pi Forge/2026-07-29 - Memo - Personal Context Notes For Local LLM.md",
+      "sha256": "7c19d783055056706ee89de320c7f6cc94127f38b846d100fb56b2a02a50abd5"
+    },
+    "classify-policy": {
+      "path": "10 Sources/10.05 Policy/Work/Building Energy/11_applicant_declarations.md",
+      "sha256": "38b2246ccb03d3df3ebf6e74ddd29750f2b4007f8b521b27c0bbc139e608ce9f",
+      "excerpt": {
+        "mode": "head",
+        "chars": 24000
+      }
+    },
+    "classify-reification": {
+      "path": "09 Wiki/9.01 Concepts/Reification.md",
+      "sha256": "afbd5c1c720d8b36cc956669f8f204cd35e5b1e3541909e39ec833e378c369c1"
+    },
+    "classify-retrieval-memo": {
+      "path": "99 Meta/99.06 Workflows/2026-07-29 - Memo - Improving Vault Context Retrieval.md",
+      "sha256": "b1e18071490bf1cefe000950ab4f880b2a8beefe065134e95b6136fdb1a8fc4b"
+    },
+    "classify-retrieval-transcript": {
+      "path": "10 Sources/10.03 Transcript/Meta/Workflows/2026-07-29 - Memo - Improving Vault Context Retrieval - Transcript.md",
+      "sha256": "893dd45411b2ba3745e8beb609bf96999e53298bdda8c3aa4aa7356a9bfd0832"
+    },
+    "classify-tomatoes": {
+      "path": "02 Craft/2.01 Gardening/1.03 Hydroponic Tomatoes.md",
+      "sha256": "84ce28a690740cd80d8f29ad118336f4a327b391f4fca0021ce68e553a7dde75"
+    },
+    "classify-website": {
+      "path": "10 Sources/10.09 Website/Work/Building Energy/Website Information.md",
+      "sha256": "f1601dd451b344898f29e9ad93c952fececcbc32ca80d8ca85cb7f652b2a2ee1",
+      "excerpt": {
+        "mode": "head",
+        "chars": 24000
+      }
+    },
+    "classify-zagal": {
+      "path": "10 Sources/10.02 Article/Academic/Dissertation/Zagal and Deterding - 2018 - Definitions of Role-Playing Games.md",
+      "sha256": "de7f9c6860e0e6de549f11f0aa0239291f4173700545bf32f36b9f6f25d331ce",
+      "excerpt": {
+        "mode": "head",
+        "chars": 24000
+      },
+      "note": "source_kind and project both set; the project must not pull it out of the sources tree."
+    },
+    "concept-anomaly": {
+      "path": "09 Wiki/9.01 Concepts/Anomaly.md",
+      "sha256": "1b2c993433f8ab1a269e58df37a05c9c73bab6a70ec93e83fbb949ab30df707e"
+    },
+    "concept-black-boxing": {
+      "path": "09 Wiki/9.01 Concepts/Black Boxing.md",
+      "sha256": "f201b4fe053b3563db81921f33cff8d56df777c70473421c5bcdd35cda5deac3"
+    },
+    "concept-boundary-objects": {
+      "path": "09 Wiki/9.01 Concepts/Boundary Objects.md",
+      "sha256": "9904fcacdfa4922d1c78bed2e567982cb9c4613448b5b64e76d7beb67001e7bb"
+    },
+    "concept-infrastructural-inversion": {
+      "path": "09 Wiki/9.01 Concepts/Infrastructural Inversion.md",
+      "sha256": "3b067507231f5d8a9b1ee4f3235ff86b60571f8f4a9e3c4b39a92e50243e7522"
+    },
+    "concept-inscription": {
+      "path": "09 Wiki/9.01 Concepts/Inscription.md",
+      "sha256": "1cc70b79172d88dd2bd0b77657f14d73b58f29a378b09ff221c8f1c2be8fb0a5"
+    },
+    "concept-looping-effects": {
+      "path": "09 Wiki/9.01 Concepts/Looping Effects.md",
+      "sha256": "8cd6de444ab0042b2ea3617df6eeeeb5ca75410a482678296e6377f788c7ca1f"
+    },
+    "concept-making-up-people": {
+      "path": "09 Wiki/9.01 Concepts/Making Up People.md",
+      "sha256": "6fbe41b0ccec88b2b41b993846524c6ff8cebd5e14adaefdecabd30b4940520c"
+    },
+    "concept-normal-science": {
+      "path": "09 Wiki/9.01 Concepts/Normal Science.md",
+      "sha256": "67c5e291a1aa78ab78c1e6fde0f443ef2f659b5aa777a0a86a5dfb8868dd3cfe"
+    },
+    "figure-bruno-latour": {
+      "path": "09 Wiki/9.07 Figures/Bruno Latour.md",
+      "sha256": "f8662d4a786e9dfe9a13181786a8e44410fffe1621861ee967a4a989bed387a0"
+    },
+    "figure-ian-hacking": {
+      "path": "09 Wiki/9.07 Figures/Ian Hacking.md",
+      "sha256": "4f321932d10695ceefe55d7b0ed016c6e65e44d81702aed389203ce58e0f2141"
+    },
+    "figure-susan-leigh-star": {
+      "path": "09 Wiki/9.07 Figures/Susan Leigh Star.md",
+      "sha256": "0e7de162f501ba7ff3d656f372d7dc19a26777b891af12572dab6a32602d806d"
+    },
+    "figure-thomas-kuhn": {
+      "path": "09 Wiki/9.07 Figures/Thomas Kuhn.md",
+      "sha256": "7005b0d1054c7803be5716e1d91e34b7e726f0855b896c0687d474985774d518"
+    },
+    "manual-ocr-chunk": {
+      "path": "10 Sources/10.07 Manual/Work/000120_clean.md",
+      "sha256": "6e6cb3aac87732ba1b7cfd9466a10868e018e93411e8a03100ba29238af16d72",
+      "excerpt": {
+        "mode": "lines",
+        "start": 900,
+        "end": 2813
+      },
+      "note": "Ligature corruption, hard wraps mid-sentence, and `## Page N` scaffolding."
+    },
+    "raw-asr-piforge": {
+      "path": "00 Inbox/20260803 093650-82E752A8 2026-08-03 09_44_13.md",
+      "sha256": "ee8f5a9cde80a671ef5550b0de8b275f09613bee7ae435bd5f11a1d6fe185a51",
+      "note": "Unfiled ASR: timestamps, fillers, and the speaker correcting the transcriber mid-sentence."
+    },
+    "report-arpae-q6": {
+      "path": "10 Sources/10.04 Report/Work/Data Centers/ARPA-E Coolerchips Q6_UCDavis_final (1).md",
+      "sha256": "b2f6ae5b22ca4dacd412180f386c4b0d93f3079616731f3542d2f0a668cb1d20",
+      "excerpt": {
+        "mode": "head",
+        "chars": 24000
+      }
+    },
+    "report-arpae-q8": {
+      "path": "10 Sources/10.04 Report/Work/Data Centers/ARPA-E Coolerchips Q8_UCDavis_final.md",
+      "sha256": "93b4f93da1c36c163a940262af6b83ac6c8d064dfaa18cb048a45c80a4ab7d10",
+      "excerpt": {
+        "mode": "head",
+        "chars": 24000
+      }
+    },
+    "report-calnext": {
+      "path": "10 Sources/10.04 Report/Work/Building Energy/CalNEXT-2025-HVAC-TPM-Final-Report.md",
+      "sha256": "0180716b3350011e7dc4751486be6555022c046ce4a9c78f2f9c65716249630b",
+      "excerpt": {
+        "mode": "head",
+        "chars": 24000
+      }
+    },
+    "report-claude-dc": {
+      "path": "10 Sources/10.04 Report/Work/Data Centers/Claude - Research Report.md",
+      "sha256": "c1e42321e8ab295f982a56c2e03cbfbe4b444041c2859d221ff8fb2939488f94",
+      "excerpt": {
+        "mode": "head",
+        "chars": 24000
+      }
+    },
+    "report-claude-work": {
+      "path": "10 Sources/10.04 Report/Work/Claude - Research Report.md",
+      "sha256": "0fe71e10c1bb3a6cce62130a9d773d087de3ce59e17143027e721b07d128e287",
+      "excerpt": {
+        "mode": "head",
+        "chars": 24000
+      }
+    },
+    "report-claude-work2": {
+      "path": "10 Sources/10.04 Report/Work/Claude - ResearchReport.md",
+      "sha256": "18dcab93c467dfcbf17fea49cc9586daa0c0d136bf05bf89e0372cb3415eb7d6",
+      "excerpt": {
+        "mode": "head",
+        "chars": 24000
+      }
+    },
+    "report-datacenter": {
+      "path": "10 Sources/10.04 Report/Work/Data Centers/Datacenter Cooling Market Study - Preliminary Findings Report.md",
+      "sha256": "d270ff5c099e2300635c89fe778489003c4130630f785f072edaa22b11153d12",
+      "excerpt": {
+        "mode": "head",
+        "chars": 24000
+      }
+    },
+    "report-gemini-dc": {
+      "path": "10 Sources/10.04 Report/Work/Data Centers/Gemini - Research Report.md",
+      "sha256": "37dc14a7b8332bc198c3567bc777a34aa1644b6c51869b84a7f28bf75b1ddeaf",
+      "excerpt": {
+        "mode": "head",
+        "chars": 24000
+      }
+    },
+    "transcript-context": {
+      "path": "10 Sources/10.03 Transcript/Technology/Software Development/2026-07-29 - Memo - Personal Context Notes For Local LLM - Transcript.md",
+      "sha256": "eeeefe1b438b19ca1c73052c688d6b0bbae5621918162c98f8a10d39c099dd57"
+    },
+    "transcript-context-cleaned": {
+      "path": "04 Technology/4.02 Software Development/4.02.01 Pi Forge/2026-07-29 - Memo - Personal Context Notes For Local LLM.md",
+      "sha256": "7c19d783055056706ee89de320c7f6cc94127f38b846d100fb56b2a02a50abd5"
+    },
+    "transcript-deepsearch": {
+      "path": "10 Sources/10.03 Transcript/Technology/Software Development/2026-04-06 - Memo - Research Assistant App Deep Search Mode - Transcript.md",
+      "sha256": "86997a5899591ccb4233a014566d10010a73bf5a33238663a045827e6de3f779"
+    },
+    "transcript-deepsearch-cleaned": {
+      "path": "04 Technology/4.02 Software Development/4.02.01 Pi Forge/2026-04-06 - Memo - Research Assistant App Deep Search Mode.md",
+      "sha256": "98b6b5d350705a195e282869bbd0ccaa17f169d131e238752885ef46c4a6573f"
+    },
+    "transcript-export": {
+      "path": "10 Sources/10.03 Transcript/Technology/Software Development/2026-04-06 - Memo - Exporting Containerized Research Repository - Transcript.md",
+      "sha256": "2fd3d033226b3cfb9370de94388fbf879faa62ba0f3669efd0deddbd7840e9c7"
+    },
+    "transcript-export-cleaned": {
+      "path": "04 Technology/4.02 Software Development/2026-04-06 - Memo - Exporting Containerized Research Repository.md",
+      "sha256": "4af8ced048f25ec24b11236e2f38720dd0fde10262503e3d536a49f0de6e3e66"
+    },
+    "transcript-knowledgebase": {
+      "path": "10 Sources/10.03 Transcript/Technology/Software Development/2026-04-06 - Memo - Agentic Repository Knowledge Base Design - Transcript.md",
+      "sha256": "d2fe6c7da99ee9d02afc2a7387931c789075c7e48761c1c479fbf1ce53e51828"
+    },
+    "transcript-knowledgebase-cleaned": {
+      "path": "04 Technology/4.02 Software Development/4.02.01 Pi Forge/2026-04-06 - Memo - Agentic Repository Knowledge Base Design.md",
+      "sha256": "7b599fad0e680f1335559870fe647b2f51294b0f1731cc0535a78c8be3047dbb"
+    },
+    "transcript-retrieval": {
+      "path": "10 Sources/10.03 Transcript/Meta/Workflows/2026-07-29 - Memo - Improving Vault Context Retrieval - Transcript.md",
+      "sha256": "893dd45411b2ba3745e8beb609bf96999e53298bdda8c3aa4aa7356a9bfd0832"
+    },
+    "transcript-retrieval-cleaned": {
+      "path": "99 Meta/99.06 Workflows/2026-07-29 - Memo - Improving Vault Context Retrieval.md",
+      "sha256": "b1e18071490bf1cefe000950ab4f880b2a8beefe065134e95b6136fdb1a8fc4b"
+    },
+    "transcript-schemadesign": {
+      "path": "10 Sources/10.03 Transcript/Meta/Vault Design/2026-06-29 - Memo - Py Vault Implementation Schema Design - Transcript.md",
+      "sha256": "459beacdd903c3008fbdbe91d0ae02553e3687c14613421520e02d533d9f7492"
+    },
+    "transcript-schemadesign-cleaned": {
+      "path": "99 Meta/99.01 Vault Design/2026-06-29 - Memo - Py Vault Implementation Schema Design.md",
+      "sha256": "3ea2bf0349efe2f63f72945d41297ded8714f08a29d54b12327a964c2b01cb71"
+    },
+    "transcript-vaultintegration": {
+      "path": "10 Sources/10.03 Transcript/Technology/Software Development/2026-07-24 - Memo - PyForge Obsidian Vault Integration Feature - Transcript.md",
+      "sha256": "fdfecceb8dcbac9e48d8da20b21587b80633c76c326ad23b644b9529e8b81ef9"
+    },
+    "transcript-vaultintegration-cleaned": {
+      "path": "04 Technology/4.02 Software Development/4.02.01 Pi Forge/2026-07-24 - Memo - PyForge Obsidian Vault Integration Feature.md",
+      "sha256": "51b635310684dd9585827313b07cf8258666ec99e8a38e2771ea3b73c63559db"
+    },
+    "transcript-vaultmanager": {
+      "path": "10 Sources/10.03 Transcript/Technology/Software Development/2026-06-12 - Memo - Vault Manager Feature Requirements - Transcript.md",
+      "sha256": "c5875f67ad76b93890244ec1220e03ff40c48ff775cb5ac5e35f539e6eef5bad"
+    },
+    "transcript-vaultmanager-cleaned": {
+      "path": "04 Technology/4.02 Software Development/4.02.01 Pi Forge/2026-06-12 - Memo - Vault Manager Feature Requirements.md",
+      "sha256": "b1fed4b3d73c66e7f1f704e2ef2b21e5e213d248b2656a871fad5b37df3944c7"
+    },
+    "transcript-vpp-chunk": {
+      "path": "10 Sources/10.03 Transcript/Work/Market Research/Meeting - Introduction To Virtual Power Plants - Transcript.md",
+      "sha256": "dedb288d720c4e92f20d5eee84c552acf58c72129eb5f092fe482186d16e05a0",
+      "excerpt": {
+        "mode": "lines",
+        "start": 60,
+        "end": 2400
+      },
+      "note": "A long slice of a multi-speaker meeting; the case chunks it and takes the first eight."
+    },
+    "vault-schema": {
+      "path": "99 Meta/99.02 Schemas/0.00 Vault Schema.md",
+      "sha256": "d3dce887f6f5e040cd303aeb6cd99dc2939c9f4bb4bbf50ee67a50d1c6e6518b",
+      "note": "The registry every classification is scored against; folder paths are compiled from it, never guessed."
+    },
+    "transcript-brattle": {
+      "path": "10 Sources/10.03 Transcript/Work/Market Research/Meeting - Discussion Of Brattle Report On VPP Costs - Transcript.md",
+      "sha256": "0f58621cd6e86f8510450acadbf3cbfd6b9a0b07cb069589a34dff51a22fff68",
+      "excerpt": {
+        "mode": "lines",
+        "start": 40,
+        "end": 1400
+      },
+      "note": "A second Speaker-N diarized meeting, so the meeting cleanup case is not eight windows of one conversation. Diarized rather than named, which is why it is usable where a transcript carrying real first names would not be."
+    }
+  }
+}

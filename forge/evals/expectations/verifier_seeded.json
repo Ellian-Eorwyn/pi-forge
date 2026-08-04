@@ -1,0 +1,454 @@
+{
+  "readme": [
+    "A seeded review set: extraction items over the frozen `report-calnext` excerpt,",
+    "some sound and some with a planted defect. `defect` is the answer key —",
+    "null means the item is correct and flagging it is a false positive.",
+    "Every quote is copied from the frozen fixture, so a verifier that actually",
+    "checks quotes against the document can settle most of these without judgment.",
+    "The reordered-quote item is deliberately NOT a defect: skill-tuner measured",
+    "small models reordering adjacent sentences inside otherwise verbatim text, and",
+    "a verifier that treats that as fabrication burns escalations on real material.",
+    "Items v-011 and up are generated from verbatim sentences of the frozen source with a defect planted mechanically, so the set scales past what is worth hand-authoring. Every quote is still real text from the document; only the paraphrase is manipulated."
+  ],
+  "source": "report-calnext",
+  "items": [
+    {
+      "id": "v-001",
+      "defect": null,
+      "why": "Sound. Paraphrase matches, quote is verbatim.",
+      "item": {
+        "item_type": "definition",
+        "text": "The Technology Priority Maps give CalNEXT a framework for communicating priorities, defining focus areas, and screening projects.",
+        "direct_quotes": "The Technology Priority Maps (TPMs) provide the CalNEXT program a framework to externally communicate priorities, clearly define the central focus areas, and assist with project screening.",
+        "locator": "Page 9, Introduction",
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-002",
+      "defect": null,
+      "why": "Sound. A correct list of the partner organizations.",
+      "item": {
+        "item_type": "population",
+        "text": "The HVAC TPM SME Team was reformed with representatives from each program team partner.",
+        "direct_quotes": "with representatives from each of the program team partners: AESC, Energy Solutions, TRC, UC Davis, VEIC, and the Ortiz Group",
+        "locator": "Page 9, 2025 TPM Key Changes",
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-003",
+      "defect": "fabricated-quote",
+      "why": "The quote appears nowhere in the document. The cheapest defect to catch and the one the whole design rests on.",
+      "item": {
+        "item_type": "finding",
+        "text": "The report concludes that heat pump adoption tripled between 2023 and 2025.",
+        "direct_quotes": "Heat pump adoption across the California residential sector tripled between 2023 and 2025.",
+        "locator": "Page 9",
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-004",
+      "defect": "invented-number",
+      "why": "The quote is verbatim, but the paraphrase attaches a figure the document never gives.",
+      "item": {
+        "item_type": "claim",
+        "text": "The HVAC category has changed more than any other, accounting for 62 percent of all revisions this cycle.",
+        "direct_quotes": "The HVAC category has seen significant changes over the years, relative to other technology area categories.",
+        "locator": "Page 9, 2025 TPM Key Changes",
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-005",
+      "defect": "reversed-attribution",
+      "why": "The document has CalNEXT tracking while external programs lead. This reverses it.",
+      "item": {
+        "item_type": "policy",
+        "text": "Under the Observe role, CalNEXT takes the lead in unlocking these opportunities while external programs track progress.",
+        "direct_quotes": "CalNEXT will track progress but encourage external programs to take lead in unlocking these opportunities.",
+        "locator": "Page 7, Glossary",
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-006",
+      "defect": "inverted-definition",
+      "why": "The document defines Low as lower industry interest. This states the opposite while quoting the real definition.",
+      "item": {
+        "item_type": "definition",
+        "text": "A Low ranking marks the items with the highest industry interest and the largest Total System Benefit impacts.",
+        "direct_quotes": "Covers items that have lower industry interest and/or impacts for Total System Benefit (TSB)",
+        "locator": "Page 7, Rankings",
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-007",
+      "defect": null,
+      "why": "Not a defect. Two adjacent clauses of a verbatim passage appear in swapped order — a documented small-model habit, not fabrication. A verifier that flags this is costing escalations on real material.",
+      "item": {
+        "item_type": "method",
+        "text": "The team gathered SME feedback by survey before revising, having first reformed the HVAC TPM SME Team.",
+        "direct_quotes": "The process this year started with the reformation of the HVAC TPM SME Team. This year, the project team incorporated a stronger survey push to gather feedback directly from HVAC subject-matter experts (SMEs) before beginning the revision process.",
+        "locator": "Page 9",
+        "interpretation": "explicit",
+        "confidence": "medium",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-008",
+      "defect": "inference-as-fact",
+      "why": "A judgment the document does not make, presented as explicit rather than inferred.",
+      "item": {
+        "item_type": "finding",
+        "text": "The TSB transition has made low-GWP refrigerant research the program's single highest priority.",
+        "direct_quotes": "the continued need for programs to transition to the Total System Benefit (TSB) metric has implications for both demand flexibility and low global warming potential (GWP) refrigerants",
+        "locator": "Page 9",
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-009",
+      "defect": null,
+      "why": "Sound. A faithful restatement of the Medium ranking.",
+      "item": {
+        "item_type": "definition",
+        "text": "A Medium ranking covers items that evolve or show promise for existing and common technologies for TSB.",
+        "direct_quotes": "Covers items that are an evolution of or offer promise to existing and common technologies for TSB.",
+        "locator": "Page 7, Rankings",
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-010",
+      "defect": "invented-locator",
+      "why": "Quote and paraphrase are both sound; the locator points at a page the excerpt does not contain.",
+      "item": {
+        "item_type": "definition",
+        "text": "CalNEXT Priority communicates the expected level of focus by CalNEXT subject-matter experts.",
+        "direct_quotes": "Communicates expected level of focus by CalNEXT SMEs.",
+        "locator": "Page 214, Appendix C",
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-011",
+      "defect": null,
+      "why": "Sound: the paraphrase restates the quote and nothing more.",
+      "item": {
+        "item_type": "finding",
+        "text": "Observe Observe: CalNEXT will track progress but encourage external programs to take lead in unlocking these opportunities",
+        "direct_quotes": "Observe Observe: CalNEXT will track progress but encourage external programs to take lead in unlocking these opportunities.",
+        "locator": null,
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-012",
+      "defect": "invented-number",
+      "why": "The quote is verbatim; the paraphrase attaches a percentage the document never gives.",
+      "item": {
+        "item_type": "claim",
+        "text": "High High: CalNEXT SME team has highlighted this technology family as having high impacts within the technology category, accounting for 47 percent of the total",
+        "direct_quotes": "High High: CalNEXT SME team has highlighted this technology family as having high impacts within the technology category.",
+        "locator": null,
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-013",
+      "defect": null,
+      "why": "Sound: the paraphrase restates the quote and nothing more.",
+      "item": {
+        "item_type": "finding",
+        "text": "Medium Medium: CalNEXT SME team determined this technology family has moderate overall impacts within the technology category",
+        "direct_quotes": "Medium Medium: CalNEXT SME team determined this technology family has moderate overall impacts within the technology category.",
+        "locator": null,
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-014",
+      "defect": "reversed-claim",
+      "why": "The paraphrase asserts the opposite of the quote it cites.",
+      "item": {
+        "item_type": "claim",
+        "text": "The report does not find that low Low: CalNEXT SME team has highlighted this technology family as having low relative impacts within the technology category",
+        "direct_quotes": "Low Low: CalNEXT SME team has highlighted this technology family as having low relative impacts within the technology category.",
+        "locator": null,
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-015",
+      "defect": null,
+      "why": "Sound: the paraphrase restates the quote and nothing more.",
+      "item": {
+        "item_type": "finding",
+        "text": "The TPMs document the impact potential, programmatic research needs, and market readiness of all technology families across each of the end-use technology areas",
+        "direct_quotes": "The TPMs document the impact potential, programmatic research needs, and market readiness of all technology families across each of the end-use technology areas.",
+        "locator": null,
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-016",
+      "defect": "fabricated-quote",
+      "why": "The quoted text appears nowhere in the document.",
+      "item": {
+        "item_type": "finding",
+        "text": "In addition, research conducted by California’s investor-owned utility (IOU) Codes and Standards Enhancement (CASE) Team related to multiple technology families and have impacted the state of knowledge to varying degrees",
+        "direct_quotes": "Statewide deployment reached ninety percent of eligible facilities by the third quarter.",
+        "locator": null,
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-017",
+      "defect": null,
+      "why": "Sound: the paraphrase restates the quote and nothing more.",
+      "item": {
+        "item_type": "finding",
+        "text": "Finally, the continued need for programs to transition to the Total System Benefit (TSB) metric has implications for both demand flexibility and low global warming potential (GWP) refrigerants",
+        "direct_quotes": "Finally, the continued need for programs to transition to the Total System Benefit (TSB) metric has implications for both demand flexibility and low global warming potential (GWP) refrigerants.",
+        "locator": null,
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-018",
+      "defect": "invented-number",
+      "why": "The quote is verbatim; the paraphrase attaches a percentage the document never gives.",
+      "item": {
+        "item_type": "claim",
+        "text": "As for the 2025 TPM update, the CalNEXT Program Team established a robust process for this initial phase of the TPM development and revisions, accounting for 47 percent of the total",
+        "direct_quotes": "As for the 2025 TPM update, the CalNEXT Program Team established a robust process for this initial phase of the TPM development and revisions.",
+        "locator": null,
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-019",
+      "defect": null,
+      "why": "Sound: the paraphrase restates the quote and nothing more.",
+      "item": {
+        "item_type": "finding",
+        "text": "This year, the project team incorporated a stronger survey push to gather feedback directly from HVAC subject-matter experts (SMEs) before beginning the revision process",
+        "direct_quotes": "This year, the project team incorporated a stronger survey push to gather feedback directly from HVAC subject-matter experts (SMEs) before beginning the revision process.",
+        "locator": null,
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-020",
+      "defect": "reversed-claim",
+      "why": "The paraphrase asserts the opposite of the quote it cites.",
+      "item": {
+        "item_type": "claim",
+        "text": "The report does not find that the process this year started with the reformation of the HVAC TPM SME Team, with representatives from each of the program team partners: AESC, Energy Solutions, TRC, UC Davis, VEIC, and the Ortiz Group",
+        "direct_quotes": "The process this year started with the reformation of the HVAC TPM SME Team, with representatives from each of the program team partners: AESC, Energy Solutions, TRC, UC Davis, VEIC, and the Ortiz Group.",
+        "locator": null,
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-021",
+      "defect": null,
+      "why": "Sound: the paraphrase restates the quote and nothing more.",
+      "item": {
+        "item_type": "finding",
+        "text": "These emerging technology products are then contextualized into priority maps through a markets and solutions lens",
+        "direct_quotes": "These emerging technology products are then contextualized into priority maps through a markets and solutions lens.",
+        "locator": null,
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-022",
+      "defect": "fabricated-quote",
+      "why": "The quoted text appears nowhere in the document.",
+      "item": {
+        "item_type": "finding",
+        "text": "In 2025, these research initiatives have been revised as needed based off any market changes that have occurred since the 2024 HVAC TPM revision",
+        "direct_quotes": "Statewide deployment reached ninety percent of eligible facilities by the third quarter.",
+        "locator": null,
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-023",
+      "defect": null,
+      "why": "Sound: the paraphrase restates the quote and nothing more.",
+      "item": {
+        "item_type": "finding",
+        "text": "The end goal of these visual summaries is to have a clear representation of where the technology family stands in the portfolio and what remaining research is needed",
+        "direct_quotes": "The end goal of these visual summaries is to have a clear representation of where the technology family stands in the portfolio and what remaining research is needed.",
+        "locator": null,
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-024",
+      "defect": "invented-number",
+      "why": "The quote is verbatim; the paraphrase attaches a percentage the document never gives.",
+      "item": {
+        "item_type": "claim",
+        "text": "To date, most research projects take place within a handful of technology families across HVAC, which was a large driver in how the technology families were chosen in 2025, accounting for 47 percent of the total",
+        "direct_quotes": "To date, most research projects take place within a handful of technology families across HVAC, which was a large driver in how the technology families were chosen in 2025.",
+        "locator": null,
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-025",
+      "defect": null,
+      "why": "Sound: the paraphrase restates the quote and nothing more.",
+      "item": {
+        "item_type": "finding",
+        "text": "This can be in the form of needs that are currently being addressed with existing projects or needs that may exist but are not critical to the objectives of meeting TSB metrics",
+        "direct_quotes": "This can be in the form of needs that are currently being addressed with existing projects or needs that may exist but are not critical to the objectives of meeting TSB metrics.",
+        "locator": null,
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-026",
+      "defect": "reversed-claim",
+      "why": "The paraphrase asserts the opposite of the quote it cites.",
+      "item": {
+        "item_type": "claim",
+        "text": "The report does not find that the cross-listed technology family was revised for the 2025 HVAC and Water Heating updates, those changes are reflected in this HVAC Final Report and will also be reflected in the Water Heating Final Report",
+        "direct_quotes": "The cross-listed technology family was revised for the 2025 HVAC and Water Heating updates, those changes are reflected in this HVAC Final Report and will also be reflected in the Water Heating Final Report.",
+        "locator": null,
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-027",
+      "defect": null,
+      "why": "Sound: the paraphrase restates the quote and nothing more.",
+      "item": {
+        "item_type": "finding",
+        "text": "Overall, the changes made in this 2025 TPM aim to increase technology transfers broadly across the portfolio, allowing the CalNEXT team to define new measures of interest and illustrate its efforts to bring them to the portfolio",
+        "direct_quotes": "Overall, the changes made in this 2025 TPM aim to increase technology transfers broadly across the portfolio, allowing the CalNEXT team to define new measures of interest and illustrate its efforts to bring them to the portfolio.",
+        "locator": null,
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    },
+    {
+      "id": "v-028",
+      "defect": "fabricated-quote",
+      "why": "The quoted text appears nowhere in the document.",
+      "item": {
+        "item_type": "finding",
+        "text": "The project team has decided to evolve the icons to a cohesive theme, reword the research initiative columns as a hierarchy of needs, and update the tables accordingly",
+        "direct_quotes": "Statewide deployment reached ninety percent of eligible facilities by the third quarter.",
+        "locator": null,
+        "interpretation": "explicit",
+        "confidence": "high",
+        "notes": null
+      }
+    }
+  ],
+  "packets": {
+    "packet-1": [
+      "v-001",
+      "v-003",
+      "v-016",
+      "v-019"
+    ],
+    "packet-2": [
+      "v-002",
+      "v-004",
+      "v-018",
+      "v-021"
+    ],
+    "packet-3": [
+      "v-005",
+      "v-007",
+      "v-020",
+      "v-023"
+    ],
+    "packet-4": [
+      "v-006",
+      "v-009",
+      "v-022",
+      "v-025"
+    ],
+    "packet-5": [
+      "v-008",
+      "v-011",
+      "v-024",
+      "v-027"
+    ],
+    "packet-6": [
+      "v-010",
+      "v-013",
+      "v-026"
+    ],
+    "packet-7": [
+      "v-012",
+      "v-015",
+      "v-028"
+    ],
+    "packet-8": [
+      "v-014",
+      "v-017"
+    ]
+  }
+}
