@@ -1,0 +1,275 @@
+{
+  "meeting": "VPP Insiders session two: the business opportunity and the value chain",
+  "note": "Three panellists — a vertically integrated utility, a SaaS platform, and a V2G startup. Two things make this the strongest fixture of the public five: the utility states its decarbonization deadline twice with different end dates, and the startup describes an EV financing model in detail and then says it has never financed a vehicle. Both reward reading to the end. Attributed by role and company, not by the names panellists give.",
+  "facts": [
+    {
+      "id": "f1",
+      "kind": "attribution",
+      "canonical": "Portland General Electric is a vertically integrated utility in Oregon serving about two million people",
+      "aliases": [
+        "PGE is a vertically integrated electric utility",
+        "we serve about two million people"
+      ],
+      "evidence": "We have um we serve about two million people."
+    },
+    {
+      "id": "f2",
+      "kind": "date",
+      "canonical": "Oregon law requires the investor-owned utilities to cut greenhouse gas emissions 80% by 2030",
+      "aliases": [
+        "80% reduction in greenhouse gas emissions by 2030",
+        "reduce greenhouse gas emissions by 80% by 2030"
+      ],
+      "evidence": "To achieve an 80% reduction in greenhouse gas emissions by 2030 and a hundred percent reduction in greenhouse gas emissions below baseline by 2040."
+    },
+    {
+      "id": "f3",
+      "kind": "date",
+      "canonical": "the date for the 100% reduction is given inconsistently, as 2043 the first time and 2040 the second",
+      "aliases": [
+        "100% by 2043",
+        "hundred percent reduction below baseline by 2040"
+      ],
+      "evidence": "By 80% by 2030 and 100% by 2043."
+    },
+    {
+      "id": "f4",
+      "kind": "attribution",
+      "canonical": "PGE defines a virtual power plant as distributed energy resources and flexible loads orchestrated through a technology platform to provide grid and power operations services",
+      "aliases": [
+        "a power plant consisting of distributed energy resources and flexible loads orchestrated through a technology platform"
+      ],
+      "evidence": "a power plant consisting of distributed energy resources and flexible loads orchestrated through a technology platform to provide grid and power operations services."
+    },
+    {
+      "id": "f5",
+      "kind": "figure",
+      "canonical": "PGE has a goal of 25% of its peak demand being met by virtual power plant resources",
+      "aliases": [
+        "goal of 25% of our peak demand to be comprised of virtual power plant resources"
+      ],
+      "evidence": "Let's see, I my deck doesn't say a date here, but we have a goal of um 25% of our peak demand to be comprised of virtual power plant resources."
+    },
+    {
+      "id": "f6",
+      "kind": "figure",
+      "canonical": "PGE's residential battery program pays $1.70 per kWh dispatched during an event",
+      "aliases": [
+        "residential battery program is providing $1.70 per KWH"
+      ],
+      "evidence": "The residential battery program is providing $1."
+    },
+    {
+      "id": "f7",
+      "kind": "figure",
+      "canonical": "PGE's peak time rebates behavioural demand response program pays a dollar per kWh",
+      "aliases": [
+        "peak time rebates program pays a dollar per KWH"
+      ],
+      "evidence": "The behavioral demand response program I mentioned, PGE's peak time rebates program pays a dollar per KWH."
+    },
+    {
+      "id": "f8",
+      "kind": "figure",
+      "canonical": "program restrictions are typically no more than three events per week or 20 events per summer",
+      "aliases": [
+        "no more than three events per week",
+        "20 events per summer"
+      ],
+      "evidence": "And so in some cases of programs, it's no more than three events per week."
+    },
+    {
+      "id": "f9",
+      "kind": "attribution",
+      "canonical": "batteries are never drained to zero because local controls always override the utility dispatch",
+      "aliases": [
+        "The local controls will always override the utility",
+        "none of the batteries will allow them to be drained down to zero"
+      ],
+      "evidence": "The local controls will always override the utility."
+    },
+    {
+      "id": "f10",
+      "kind": "figure",
+      "canonical": "the utility assumes an absolute maximum draw of eighty percent of a customer battery",
+      "aliases": [
+        "I assume an absolute maximum of eighty percent"
+      ],
+      "evidence": "I assume an absolute maximum of eighty percent all the time is what I can do."
+    },
+    {
+      "id": "f11",
+      "kind": "attribution",
+      "canonical": "PGE is a client of Virtual Peaker and uses it to dispatch some of its demand response programs",
+      "aliases": [
+        "we're actually a client of virtual peakers"
+      ],
+      "evidence": "So for we're actually a client of virtual peakers, we use them to dispatch a few of our um demand response"
+    },
+    {
+      "id": "f12",
+      "kind": "figure",
+      "canonical": "a controller expects to fire up a gas plant to 150 megawatts and get close to 150 megawatts, which is the confidence a VPP must match",
+      "aliases": [
+        "fire it up to 150 megawatts and get pretty close to 150 megawatts"
+      ],
+      "evidence": "press their button on a gas power plant and fire it up to 150 megawatts and get pretty close to 150 megawatts."
+    },
+    {
+      "id": "f13",
+      "kind": "date",
+      "canonical": "MISO is not expected to support FERC Order 2222 until 2030",
+      "aliases": [
+        "MISO isn't gonna have support for FERC 2222 until 2030"
+      ],
+      "evidence": "isn't gonna have support it estimates for FERC 2222 until 2030."
+    },
+    {
+      "id": "f14",
+      "kind": "figure",
+      "canonical": "the California Emergency Load Reduction Program pays $2 per kilowatt hour",
+      "aliases": [
+        "they pay you $2 per kilowatt hour"
+      ],
+      "evidence": "You can take that revenue and under the California Emergency Load Reduction Program, based on the max number of events per year and you know the number of hours per event, they also charge or they pay you $2 per kilowatt hour."
+    },
+    {
+      "id": "f15",
+      "kind": "figure",
+      "canonical": "the theoretical maximum for an electric vehicle producing 11 kilowatts is $6,600 a year",
+      "aliases": [
+        "an electric vehicle that produces 11 kilowatts",
+        "You can produce $6,600 a year"
+      ],
+      "evidence": "You can produce $6,600 a year."
+    },
+    {
+      "id": "f16",
+      "kind": "attribution",
+      "canonical": "the proposed financing model would discount an electric vehicle by around ten thousand dollars in exchange for capturing 80% of the payouts instead of 20%",
+      "aliases": [
+        "Instead of capturing 20% of your payouts, we capture 80%",
+        "finance your electric vehicle reducing it by ten thousand dollars"
+      ],
+      "evidence": "Instead of capturing 20% of your payouts, we capture 80%."
+    },
+    {
+      "id": "f17",
+      "kind": "attribution",
+      "canonical": "no vehicles have been financed yet, because a season of events is needed first to get concrete numbers",
+      "aliases": [
+        "we haven't financed any vehicles right now",
+        "we haven't financed yet"
+      ],
+      "evidence": "Yeah, so we haven't financed any vehicles right now."
+    },
+    {
+      "id": "f18",
+      "kind": "attribution",
+      "canonical": "OhmConnect is a residential demand response aggregator that bids into the market through thermostats and smart plugs and sells capacity contracts to community choice aggregators",
+      "aliases": [
+        "they're a residential demand response aggregator",
+        "sell the product as a capacity contract to CCAs"
+      ],
+      "evidence": "So they're a residential demand response aggregator."
+    },
+    {
+      "id": "f19",
+      "kind": "date",
+      "canonical": "the February 2021 Texas freeze cut gas production and spiked demand response value in San Diego",
+      "aliases": [
+        "February of 21",
+        "that's when the Texas freeze happened"
+      ],
+      "evidence": "There are some spikes happening now in the winter, particularly there, February of 21."
+    },
+    {
+      "id": "f20",
+      "kind": "figure",
+      "canonical": "the capacity factor of a V2G virtual power plant might be only 50%",
+      "aliases": [
+        "capacity factor of a V2G virtual power plant might only be 50%"
+      ],
+      "evidence": "The capacity factor of a V2G virtual power plant might only be 50% or 0."
+    },
+    {
+      "id": "f21",
+      "kind": "figure",
+      "canonical": "about 90% of commercial and industrial buildings are very old stock, which limits what the technology can do there",
+      "aliases": [
+        "90% of CNI buildings are like very old stock"
+      ],
+      "evidence": "It's just like the technology isn't quite there yet, especially like 90% of CNI buildings are like very old stock."
+    },
+    {
+      "id": "f22",
+      "kind": "attribution",
+      "canonical": "Nissan supports vehicle to grid today, and newer models such as the Ford F-150 Lightning are adding it",
+      "aliases": [
+        "Nissan for instance supports vehicle to grid right now",
+        "the Ford F-150 Lightning"
+      ],
+      "evidence": "There with that it gets into certain car manufacturers, like Nissan, for instance, supports vehicle to grid right now."
+    },
+    {
+      "id": "f23",
+      "kind": "attribution",
+      "canonical": "PGE does not bid customer-sided resources into the ISO and participates in the energy imbalance market instead",
+      "aliases": [
+        "we are not for the most part bidding in these customer-sided resources into the ISO",
+        "we participate in the energy imbalance market"
+      ],
+      "evidence": "But um we are not asterisk for the most part bidding in these customer-sided resources into the"
+    },
+    {
+      "id": "f24",
+      "kind": "action",
+      "canonical": "the next session will cover the technology aspects, in a week",
+      "aliases": [
+        "we'll see everybody in a week for the tech session",
+        "Next time we'll talk about the tech aspects"
+      ],
+      "evidence": "Um we'll see everybody in um in a week for the text session."
+    }
+  ],
+  "traps": [
+    {
+      "id": "t1",
+      "canonical": "the startup finances electric vehicles for its virtual power plant customers",
+      "aliases": [
+        "they finance electric vehicles",
+        "the company offers EV financing"
+      ],
+      "why": "described at length as the plan and then explicitly retracted as not yet happening — 'we haven't financed any vehicles right now'. Reporting the financing model as operating is the single most likely error on this transcript"
+    },
+    {
+      "id": "t2",
+      "canonical": "the panel agreed on a definition of a virtual power plant",
+      "aliases": [
+        "the panel agreed on a definition of a virtual power plant",
+        "settled on one definition of a VPP"
+      ],
+      "why": "the utility gave a deliberately broad definition and the startup gave a narrow dispatchability one, calling it a never-ending debate"
+    },
+    {
+      "id": "t3",
+      "canonical": "PGE bids its customer resources into the California ISO",
+      "aliases": [
+        "PGE bids customer resources into the ISO"
+      ],
+      "why": "the opposite was stated: PGE is in Oregon, is not PG&E, is not in CAISO, and does not bid customer-sided resources into an ISO"
+    }
+  ],
+  "notStated": [
+    {
+      "id": "n1",
+      "field": "due",
+      "canonical": "begin financing electric vehicles",
+      "aliases": [
+        "financing electric vehicles",
+        "start financing vehicles"
+      ],
+      "why": "conditioned on getting through a season of events, with no date given"
+    }
+  ]
+}

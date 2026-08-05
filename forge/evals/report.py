@@ -137,10 +137,28 @@ def render(model_ids, baseline=None):
             if not document:
                 cells.append("—")
                 continue
+            # "n/a" and "—" say different things and both differ from "0/8".
+            # A dash is "not measured yet", n/a is "this model cannot be asked
+            # this question", and a zero is a model that was asked and failed.
+            if document.get("notApplicable"):
+                cells.append("n/a")
+                continue
             summary = document["summary"]
             cells.append(f"{summary['passed']}/{summary['items']}")
         lines.append(f"| `{case_id}` | {dimension} | " + " | ".join(cells) + " |")
     lines.append("")
+    skipped = [
+        (model_id, case_id, loaded[model_id][case_id]["notApplicable"])
+        for model_id in present
+        for case_id in cases
+        if loaded[model_id].get(case_id, {}).get("notApplicable")
+    ]
+    if skipped:
+        lines.append("`n/a` — not run, and not a failure:")
+        lines.append("")
+        for model_id, case_id, why in skipped:
+            lines.append(f"- `{model_id}` / `{case_id}` — {why}")
+        lines.append("")
 
     # --- per-case metrics --------------------------------------------------
     lines.extend(["## Metrics", ""])
@@ -163,7 +181,7 @@ def render(model_ids, baseline=None):
             cells = []
             for model_id in present:
                 document = loaded[model_id].get(case_id)
-                entry = document["summary"]["metrics"].get(name) if document else None
+                entry = (document["summary"].get("metrics") or {}).get(name) if document else None
                 cells.append(_fmt(entry["mean"]) if entry else "—")
             lines.append(f"| {name} | " + " | ".join(cells) + " |")
         lines.append("")
@@ -253,24 +271,46 @@ def render(model_ids, baseline=None):
             "",
         ]
     )
-    lines.append("| Model | Items | Generated tokens | Tokens/item | Items/min | Hidden reasoning | Wall time |")
-    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+    lines.append(
+        "| Model | Items | Generated tokens | Tokens/item | Items/min | Prefill tok/s | Decode tok/s | Hidden reasoning | Wall time |"
+    )
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for model_id in present:
-        documents = loaded[model_id]
-        items = sum(document["summary"]["items"] for document in documents.values())
-        generated = sum(document["summary"]["generatedTokens"] for document in documents.values())
-        hidden = sum(document["summary"]["hiddenTokens"] for document in documents.values())
-        elapsed = sum(document["elapsedMs"] for document in documents.values())
-        attempts = sum(document["summary"].get("attempts", document["summary"]["items"]) for document in documents.values())
+        # A skipped case contributes no items and no time. Including its empty
+        # summary in these sums would be harmless; including it in the rates
+        # would not, which is why they are computed from what actually ran.
+        documents = [d for d in loaded[model_id].values() if not d.get("notApplicable")]
+        items = sum(document["summary"]["items"] for document in documents)
+        generated = sum(document["summary"]["generatedTokens"] for document in documents)
+        hidden = sum(document["summary"]["hiddenTokens"] for document in documents)
+        elapsed = sum(document["elapsedMs"] for document in documents)
+        attempts = sum(document["summary"].get("attempts", document["summary"]["items"]) for document in documents)
         per_item = round(generated / attempts) if attempts else 0
         per_minute = round(attempts / (elapsed / 60000), 1) if elapsed else 0
+        prefill = [
+            d["summary"]["speed"]["prefillTokensPerSecond"]
+            for d in documents
+            if (d["summary"].get("speed") or {}).get("prefillTokensPerSecond")
+        ]
+        decode = [
+            d["summary"]["speed"]["decodeTokensPerSecond"]
+            for d in documents
+            if (d["summary"].get("speed") or {}).get("decodeTokensPerSecond")
+        ]
         lines.append(
-            f"| `{model_id}` | {items} | {generated:,} | {per_item:,} | {per_minute} | {hidden:,} | {elapsed / 1000:.0f}s |"
+            f"| `{model_id}` | {items} | {generated:,} | {per_item:,} | {per_minute} | "
+            f"{_fmt(statistics.median(prefill), 0) if prefill else '—'} | "
+            f"{_fmt(statistics.median(decode), 1) if decode else '—'} | "
+            f"{hidden:,} | {elapsed / 1000:.0f}s |"
         )
     lines.append("")
 
     # --- judged ------------------------------------------------------------
-    if graded and graded.get("summary"):
+    # Only when a case in *this* comparison is actually judged. `scored.json`
+    # outlives the runs it describes, and printing an old grade beside new
+    # numbers reads as if the new ones had been graded.
+    judged_here = any(document.get("judged") for documents in loaded.values() for document in documents.values())
+    if graded and graded.get("summary") and judged_here:
         lines.extend(["## Graded quality", "", "Blind means, 1-5.", ""])
         lines.append("| Model | Voice | Faithfulness | Coverage | Usability | Graded |")
         lines.append("| --- | --- | --- | --- | --- | --- |")
@@ -287,18 +327,76 @@ def render(model_ids, baseline=None):
             [
                 "## Graded quality",
                 "",
-                "Not graded. The judged cases measure what no gate can settle — voice, faithfulness,",
-                "whether a summary is any good — so a routing decision made without them rests only on",
-                "the parts a checker could see. Run `judge`, grade the bundle, then `score`.",
+                *(
+                    [
+                        "No judged case ran in this comparison, so there is nothing for a grader to have",
+                        "read. That is expected for a gates-only selection and is not a gap.",
+                    ]
+                    if not judged_here
+                    else [
+                        "Not graded. The judged cases measure what no gate can settle — voice, faithfulness,",
+                        "whether a summary is any good — so a routing decision made without them rests only on",
+                        "the parts a checker could see. Run `judge`, grade the bundle, then `score`.",
+                    ]
+                ),
                 "",
             ]
         )
 
-    lines.extend(_recommendation(loaded, present, baseline, graded))
+    cleared_by_model = {}
+    recommendation = _recommendation(loaded, present, baseline, graded, cleared_by_model)
+    lines.extend(_stage_routing(loaded, present, baseline, cleared_by_model))
+    lines.extend(recommendation)
     return "\n".join(lines) + "\n"
 
 
-def _recommendation(loaded, present, baseline, graded):
+def _stage_routing(loaded, present, baseline, cleared_by_model):
+    """One row per pi-forge stage: the smallest model that does it, and the speedup.
+
+    The routing recommendation below says, per case, whether a candidate held
+    up. This says the thing a person actually acts on — for each stage of real
+    work, what is the cheapest model that does it, and what does moving buy.
+    A case that no candidate cleared stays on the baseline and says so.
+    """
+    lines = [
+        "## Stage routing",
+        "",
+        "The smallest model that cleared each stage, and what moving there buys.",
+        "Speed is the median item time on that case, so it includes prompt size:",
+        "a stage with a long prompt gains less from a faster decoder than one with a short prompt.",
+        "",
+        "| Stage | Case | Smallest model that cleared | vs baseline |",
+        "| --- | --- | --- | --- |",
+    ]
+    # Smallest first, so the first model that cleared a case is the cheapest one
+    # that did. Size comes from the registry, not from the id, because an id is
+    # a label someone typed.
+    registry = harness.models()
+    ordered = sorted(present, key=lambda m: registry.get(m, {}).get("sizeGiB") or 1e9)
+    for case_id in sorted({case for documents in loaded.values() for case in documents}):
+        document = next((loaded[m][case_id] for m in present if case_id in loaded[m]), None)
+        if not document:
+            continue
+        stage = f"`{document.get('skill') or '—'}` / {document['dimension']}"
+        winner, detail = None, ""
+        for model_id in ordered:
+            if case_id in cleared_by_model.get(model_id, set()):
+                winner = model_id
+                break
+        if winner is None:
+            winner = f"`{baseline}` only"
+        else:
+            base_ms = ((loaded[baseline].get(case_id) or {}).get("summary", {}).get("speed") or {}).get("msPerItemMedian")
+            here_ms = ((loaded[winner].get(case_id) or {}).get("summary", {}).get("speed") or {}).get("msPerItemMedian")
+            if base_ms and here_ms:
+                detail = f"{base_ms / here_ms:.1f}x faster" if here_ms < base_ms else f"{here_ms / base_ms:.1f}x slower"
+            winner = f"`{winner}`"
+        lines.append(f"| {stage} | `{case_id}` | {winner} | {detail or '—'} |")
+    lines.append("")
+    return lines
+
+
+def _recommendation(loaded, present, baseline, graded, cleared_by_model=None):
     lines = ["## Routing recommendation", ""]
     others = [model_id for model_id in present if model_id != baseline]
     if not others:
@@ -316,10 +414,17 @@ def _recommendation(loaded, present, baseline, graded):
         lines.append("")
         _counts, _detail, severity_by_case = severity_for(loaded[model_id], graded, model_id)
         cleared, held, blocked = [], [], []
+        cleared_ids = (cleared_by_model if cleared_by_model is not None else {}).setdefault(model_id, set())
         for case_id, document in sorted(loaded[model_id].items()):
+            if document.get("notApplicable"):
+                held.append(f"`{case_id}` — not run: {document['notApplicable']}")
+                continue
             summary = document["summary"]
             base = loaded[baseline].get(case_id)
-            if not base or not summary["items"]:
+            if base and base.get("notApplicable"):
+                held.append(f"`{case_id}` — the baseline could not run it: {base['notApplicable']}")
+                continue
+            if not base or not summary.get("items"):
                 held.append(f"`{case_id}` — no baseline to compare against")
                 continue
             rate = summary["passRate"]
@@ -378,6 +483,7 @@ def _recommendation(loaded, present, baseline, graded):
                     blocked.append(f"`{case_id}` — gates hold up ({shape}), but graded {gap:.1f} below the baseline")
                     continue
             cleared.append(f"`{case_id}` — {shape}")
+            cleared_ids.add(case_id)
 
         if cleared:
             lines.append("**Safe to route here** (every gate clean, quality held):")

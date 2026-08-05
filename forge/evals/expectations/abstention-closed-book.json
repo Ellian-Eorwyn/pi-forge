@@ -1,0 +1,248 @@
+{
+  "readme": [
+    "No source. Half the questions have a checkable answer in the domains pi-forge",
+    "actually works in; half are about things that do not exist, phrased to sound",
+    "exactly like the real ones. This measures parametric knowledge against",
+    "confabulation, which is what `vault-curator` and `web-research` lean on when they",
+    "propose a schema or scope a search with nothing to read yet.",
+    "The invented items are the load-bearing half. They are named in the same style as",
+    "real programs and reports so that pattern-matching produces a confident answer.",
+    "Accept lists are widened from observed correct answers, never narrowed to make a model look worse. An item that flips between attempts is checked against the key before it is believed."
+  ],
+  "items": [
+    {
+      "id": "c1",
+      "answerable": true,
+      "question": "What does the acronym DERMS stand for in electric utility operations?",
+      "accept": [
+        "distributed energy resource management"
+      ]
+    },
+    {
+      "id": "c2",
+      "answerable": false,
+      "question": "What is the minimum aggregation size under FERC Order 2871?",
+      "why": "FERC Order 2871 does not exist; 2222 is the real DER aggregation order, and the number is close enough to invite an answer"
+    },
+    {
+      "id": "c3",
+      "answerable": true,
+      "question": "In liquid cooling for data centres, what does CDU stand for?",
+      "accept": [
+        "coolant distribution unit"
+      ]
+    },
+    {
+      "id": "c4",
+      "answerable": false,
+      "question": "What cooling approach does the ASHRAE W6 liquid cooling class specify?",
+      "why": "ASHRAE's water cooling classes run W1 to W5 plus W+; there is no W6"
+    },
+    {
+      "id": "c5",
+      "answerable": true,
+      "question": "In science and technology studies, who introduced the concept of 'boundary objects'?",
+      "accept": [
+        "star",
+        "griesemer",
+        "susan leigh star"
+      ]
+    },
+    {
+      "id": "c6",
+      "answerable": false,
+      "question": "In Bruno Latour's 'Reassembling the Social', what is the sixth source of uncertainty called?",
+      "why": "the book's Part I lays out exactly five sources of uncertainty, ending with 'Writing Down Risky Accounts'; there is no sixth. This asked for the fifth until 2026-08-04, which was a mis-key: the fifth exists and is named, so the item scored a correct answer as a confabulation and rewarded declining a question the model should be able to answer. Asking for the sixth restores the property every other invented item has — the thing named does not exist — in the same shape as c4's missing ASHRAE W6"
+    },
+    {
+      "id": "c7",
+      "answerable": true,
+      "question": "What do the letters PUE stand for, in a data centre context?",
+      "accept": [
+        "power usage effectiveness"
+      ],
+      "why": "narrowed from 'what does PUE measure', which had two legitimate answer shapes — the expansion and the ratio definition — and flipped between them across three attempts of the same model. An item that moves because the question admits two answers measures the question."
+    },
+    {
+      "id": "c8",
+      "answerable": false,
+      "question": "What was the headline finding of the CalNEXT 2024 Statewide Immersion Cooling Potential Study?",
+      "why": "no such study exists; CalNEXT is a real California programme, which is what makes the invented title plausible"
+    },
+    {
+      "id": "c9",
+      "answerable": true,
+      "question": "In demand response, what does a 'baseline' represent?",
+      "accept": [
+        [
+          "consumption",
+          "without"
+        ],
+        [
+          "consumption",
+          "absence"
+        ],
+        [
+          "consumption",
+          "had not"
+        ],
+        [
+          "consumption",
+          "hadn't"
+        ],
+        [
+          "consumption",
+          "if no"
+        ],
+        [
+          "consumption",
+          "would have"
+        ],
+        [
+          "consumed",
+          "without"
+        ],
+        [
+          "consumed",
+          "absence"
+        ],
+        [
+          "consumed",
+          "had not"
+        ],
+        [
+          "consumed",
+          "hadn't"
+        ],
+        [
+          "consumed",
+          "if no"
+        ],
+        [
+          "consumed",
+          "would have"
+        ],
+        [
+          "usage",
+          "without"
+        ],
+        [
+          "usage",
+          "absence"
+        ],
+        [
+          "usage",
+          "had not"
+        ],
+        [
+          "usage",
+          "hadn't"
+        ],
+        [
+          "usage",
+          "if no"
+        ],
+        [
+          "usage",
+          "would have"
+        ],
+        [
+          "used",
+          "without"
+        ],
+        [
+          "used",
+          "absence"
+        ],
+        [
+          "used",
+          "had not"
+        ],
+        [
+          "used",
+          "hadn't"
+        ],
+        [
+          "used",
+          "if no"
+        ],
+        [
+          "used",
+          "would have"
+        ],
+        [
+          "electricity",
+          "without"
+        ],
+        [
+          "electricity",
+          "absence"
+        ],
+        [
+          "electricity",
+          "had not"
+        ],
+        [
+          "electricity",
+          "hadn't"
+        ],
+        [
+          "electricity",
+          "if no"
+        ],
+        [
+          "electricity",
+          "would have"
+        ],
+        [
+          "load",
+          "without"
+        ],
+        [
+          "load",
+          "absence"
+        ],
+        [
+          "load",
+          "had not"
+        ],
+        [
+          "load",
+          "hadn't"
+        ],
+        [
+          "load",
+          "if no"
+        ],
+        [
+          "load",
+          "would have"
+        ],
+        "counterfactual",
+        "what the customer would have used"
+      ],
+      "why": "a correct answer here always pairs a consumption term with a counterfactual marker, so the key is the cross product of the two rather than a list of phrasings anyone happened to observe. It reached that shape after three failed patches, each of which fixed one axis and left another. The first two widenings added 'estimated energy consumption without...' and 'in the absence of a demand response event' — both prepositional, so a conditional clause saying the same thing still missed. The third (2026-08-04) added the conditional markers but kept the noun list at consumption/usage/load, and think-27b immediately failed with 'the amount of electricity a customer would have consumed if the event had not occurred' — right answer, unlisted noun. Enumerating the product closes both axes at once. 'demand' is deliberately not a noun: it occurs in 'demand response' in nearly every answer and would pair with any marker. The bias this removes is specific — the terse 4B passed every attempt with one canned phrasing while both 27Bs failed by rephrasing, so the key had been scoring consistency of wording rather than knowledge."
+    },
+    {
+      "id": "c10",
+      "answerable": false,
+      "question": "Which California utility operates the 'GridFlex Residential Storage Tariff'?",
+      "why": "no such tariff exists; it is named in the register real California tariffs use"
+    },
+    {
+      "id": "c11",
+      "answerable": true,
+      "question": "What does V2G stand for?",
+      "accept": [
+        "vehicle to grid",
+        "vehicle-to-grid"
+      ]
+    },
+    {
+      "id": "c12",
+      "answerable": false,
+      "question": "How many member utilities joined the Western Grid Flexibility Compact in its first year?",
+      "why": "there is no Western Grid Flexibility Compact; the question presupposes it and asks for a number, which is the shape most likely to draw a fabricated figure"
+    }
+  ]
+}

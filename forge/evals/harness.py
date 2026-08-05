@@ -60,8 +60,24 @@ DENIED_PREFIXES = (
     "04 Technology/4.99 Licenses",
     "10 Sources/10.03 Transcript/Personal",
     "10 Sources/10.03 Transcript/Administration",
+    # The report tree mirrors the transcript tree and was missed when this list
+    # was written: `10.04 Report/Administration/Health` holds surgical records
+    # and a Continuity of Care Document. Found while scoping a fixture set out
+    # of `10.04 Report` — the denial has to follow the material, not the folder
+    # name it happened to be filed under first.
+    "10 Sources/10.04 Report/Personal",
+    "10 Sources/10.04 Report/Administration",
     ".vault-transcripts/duplicates",
 )
+
+
+# Freeze statuses that mean the suite must not run: the fixture the case will
+# read is absent, denied, or not the bytes it was pinned as. Everything else
+# freeze reports — an orphaned file, a copy read from the archive — is
+# information. Kept here because `run` and `freeze` both decide from it, and an
+# earlier version had `run` refuse on any status that was not "ok", which let a
+# purely informational orphan block every run.
+BLOCKING_FREEZE_STATUSES = frozenset({"refused", "missing", "drifted", "stale"})
 
 
 class EvalError(RuntimeError):
@@ -155,8 +171,11 @@ def resolve_model(model_id):
     # router swaps the weights behind it, and nothing in a request says which is
     # loaded — so the entry states what it expects and `check_served` compares.
     service["expectParams"] = entry.get("expectParams")
+    service["expectQuant"] = entry.get("expectQuant")
     service["expectModelPath"] = entry.get("expectModelPath")
     service["fingerprintUrl"] = entry.get("fingerprintUrl")
+    for name in ("tier", "family", "sizeGiB", "coResident"):
+        service[name] = entry.get(name)
     if entry.get("apiKeyEnv"):
         service["apiKey"] = os.environ.get(entry["apiKeyEnv"])
         if not service["apiKey"]:
@@ -223,11 +242,17 @@ def freeze(vault=None, check=False, repin=False):
         if denied:
             report.append((fixture_id, "refused", f"{relative} is under the denied prefix {denied!r}"))
             continue
-        source = root / relative
-        if not source.exists():
-            report.append((fixture_id, "missing", f"no such note: {relative}"))
+        # The vault first, then the archive. A working notebook gets
+        # reorganised — four fixtures were already unreachable from their pinned
+        # paths because the organizer filed them elsewhere — and a fixture that
+        # cannot be read is a case that cannot run. `run.py archive` keeps a
+        # copy outside both the vault and the repository for exactly this.
+        import archive as archiving
+
+        raw, origin = archiving.resolve(fixture_id, spec, root)
+        if raw is None:
+            report.append((fixture_id, "missing", f"{origin or 'no such note'}: {relative}"))
             continue
-        raw = source.read_text(encoding="utf-8")
         digest = sha256_text(raw)
         pinned = spec.get("sha256")
         if pinned and pinned != digest:
@@ -242,17 +267,29 @@ def freeze(vault=None, check=False, repin=False):
         content = excerpt(raw, spec.get("excerpt"))
         if check:
             status = "ok" if target.exists() and target.read_text(encoding="utf-8") == content else "stale"
-            report.append((fixture_id, status, relative))
+            report.append((fixture_id, status, relative + ("  [from archive]" if origin == "archive" else "")))
             continue
         target.write_text(content, encoding="utf-8")
         if not (repin and fixture_id in repinned):
-            report.append((fixture_id, "pinned" if pinned == digest else "written", f"{relative} ({digest[:12]})"))
+            note = f"{relative} ({digest[:12]})" + ("  [from archive]" if origin == "archive" else "")
+            report.append((fixture_id, "pinned" if pinned == digest else "written", note))
     if repinned:
         path = EVALS_ROOT / "fixtures.json"
         document = load_json(path)
         for fixture_id, digest in repinned.items():
             document["fixtures"][fixture_id]["sha256"] = digest
         path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    # A frozen file no entry points at is left over from a fixture set that has
+    # moved on. Nothing rereads it on its own, but `frozen_text` will hand it to
+    # any case that still names it, unpinned and unchecked — a fixture outside
+    # the drift check is exactly the silent comparability break `freeze` exists
+    # to prevent. Reported, never deleted: the file may be the only copy of
+    # something worth re-pinning.
+    if FROZEN.is_dir():
+        known = set(fixtures())
+        for path in sorted(FROZEN.glob("*.md")):
+            if path.stem not in known:
+                report.append((path.stem, "orphan", f"{path.name} has no entry in fixtures.json"))
     return report
 
 
@@ -272,6 +309,60 @@ def case_ids():
     return sorted(
         path.stem.replace("_", "-") for path in (EVALS_ROOT / "cases").glob("*.py") if not path.stem.startswith("_")
     )
+
+
+# Which cases a run includes. `quick` is the cheap gate-only sweep worth running
+# while iterating; `standard` is everything that fits a routine comparison;
+# `full` adds the cases whose cost only makes sense when a decision rests on
+# them. A case declares one with `TIER`, and the tiers nest.
+SUITES = {"quick": ("quick",), "standard": ("quick", "standard"), "full": ("quick", "standard", "full")}
+DEFAULT_SUITE = "standard"
+DEFAULT_TIER = "standard"
+
+
+def case_tier(case):
+    tier = getattr(case, "TIER", DEFAULT_TIER)
+    if tier not in {"quick", "standard", "full"}:
+        raise EvalError(f"unknown TIER {tier!r}; expected quick, standard, or full")
+    return tier
+
+
+def cases_for_suite(suite, case_ids_=None):
+    if suite not in SUITES:
+        raise EvalError(f"unknown suite {suite!r}; expected one of {', '.join(SUITES)}")
+    included = SUITES[suite]
+    return [case_id for case_id in (case_ids_ or case_ids()) if case_tier(load_case(case_id)) in included]
+
+
+def case_min_context(case):
+    """The largest prompt-plus-answer this case needs, before any model headroom.
+
+    Declared with `MIN_CONTEXT_TOKENS` when a case knows its own size, computed
+    from the items otherwise. This is what decides whether a model can be asked
+    the question at all, which is a different fact from whether it answers well.
+    """
+    declared = getattr(case, "MIN_CONTEXT_TOKENS", None)
+    if isinstance(declared, int) and declared > 0:
+        return declared
+    return max(
+        (forge_llm.estimate_prompt_tokens(item["messages"]) + (item.get("max_tokens") or 0) for item in case.items()),
+        default=0,
+    )
+
+
+def applicable(case, service):
+    """Whether this model can be asked this case at all, and why not if it cannot.
+
+    A case that does not fit is skipped and said to be skipped. Running it anyway
+    would record a context overrun as a row of zeroes, and "0 of 8" and "we never
+    asked" are different findings — conflating them is how a suite reports a
+    small model failing at something nobody put to it.
+    """
+    needed = case_min_context(case) + (service.get("outputHeadroom") or 0)
+    ceiling = service.get("contextTokens") or forge_llm.SLOT_CONTEXT_TOKENS
+    if needed <= ceiling:
+        return True, None
+    return False, f"needs about {needed:,} tokens of context, {service['id']} has {ceiling:,}"
 
 
 def load_case(case_id):
@@ -379,6 +470,31 @@ def _quant_from_filename(filename):
         if part.upper() in {"F16", "BF16", "F32"}:
             return part.upper()
     return None
+
+
+def served_params(fingerprint):
+    """The parameter count out of a fingerprint, whatever shape it arrived in.
+
+    `served_fingerprint` nests the server's metadata under `meta` and derives
+    `paramsB` beside it; nothing is stored at the top level. `check_served` used
+    to read `n_params` from the top level, so `expectParams` compared None
+    against the entry's claim and silently passed — the identity check that
+    exists *because* a run labelled `task-9b` was served by a 4B was itself
+    inert. The unit tests missed it by passing a flat dict the server never
+    sends. Reading through one accessor is what stops that recurring.
+    """
+    fingerprint = fingerprint or {}
+    for candidate in (fingerprint.get("meta") or {}).get("n_params"), fingerprint.get("n_params"):
+        if isinstance(candidate, (int, float)):
+            return candidate
+    params_b = fingerprint.get("paramsB")
+    return params_b * 1e9 if isinstance(params_b, (int, float)) else None
+
+
+def served_quant(fingerprint):
+    """The quantization, from the derived field or the raw metadata behind it."""
+    fingerprint = fingerprint or {}
+    return fingerprint.get("quant") or (fingerprint.get("meta") or {}).get("ftype")
 
 
 def requested_settings(service):
@@ -493,7 +609,12 @@ def undecided_cases(documents, baseline_documents=None, tolerance=0.15, floor=0.
     undecided = []
     for case_id, document in documents.items():
         summary = document["summary"]
-        count = summary["items"]
+        # A case the model could not be asked carries an empty summary, so every
+        # field here is read with .get. Indexing crashed the whole run once the
+        # first pass had finished: `run --model task-4b --suite full --stabilize`
+        # skips lcr-80k for not fitting 65,538 tokens, then died here and lost
+        # the repeat phase for the sixteen cases that did run.
+        count = summary.get("items")
         if not count:
             continue
         if summary.get("stability", {}).get("unstableIds"):
@@ -504,8 +625,9 @@ def undecided_cases(documents, baseline_documents=None, tolerance=0.15, floor=0.
         near_floor = abs(rate - floor) <= step
         base = (baseline_documents or {}).get(case_id)
         near_baseline = False
-        if base:
-            delta = rate - base["summary"]["passRate"]
+        base_rate = (base or {}).get("summary", {}).get("passRate")
+        if base_rate is not None:
+            delta = rate - base_rate
             near_baseline = abs(delta) <= step or abs(abs(delta) - tolerance) <= step
         if near_floor or near_baseline:
             undecided.append(case_id)
@@ -515,28 +637,91 @@ def undecided_cases(documents, baseline_documents=None, tolerance=0.15, floor=0.
 def check_served(service, fingerprint=None):
     """Complain if the endpoint is not serving what the entry claims.
 
-    Returns a list of problems. Silence means either that it matches or that the
-    entry made no claim — the difference is visible in `served` on the result.
+    Returns a list of problems. Silence means the entry's claims were checked
+    and matched, or that it made no claim at all — `identity_claims` tells those
+    two apart, and `run.py models` shows which entries have no check.
+
+    Only contradictions are returned, and they stop a run. Whether anything
+    confirmed the identity at all is a separate question with a separate answer
+    — `attribution_warning` — because the two want different responses: a
+    mismatch means the numbers would be attributed to the wrong weights and must
+    not be collected, while an unconfirmed entry is ordinary and just has to say
+    so on the result it produces.
     """
     found = fingerprint if fingerprint is not None else served_fingerprint(service)
-    problems = []
     if found.get("error"):
         return [f"could not read what {service['id']!r} is serving: {found['error']}"]
+
+    problems = []
+
     expected_params = service.get("expectParams")
-    actual_params = found.get("n_params")
-    if expected_params and actual_params:
-        # Quantization and vocab size move the count a little; a different model
-        # moves it a lot. Ten percent separates the two without false alarms.
+    actual_params = served_params(found)
+    # Quantization and vocab size move the count a little; a different model
+    # moves it a lot. Ten percent separates the two without false alarms —
+    # which is also why it cannot catch a requant. That is `expectQuant`.
+    if expected_params and actual_params is not None:
         if abs(actual_params - expected_params) > 0.1 * expected_params:
             problems.append(
                 f"{service['id']!r} expects ~{expected_params / 1e9:.1f}B parameters but the endpoint is "
                 f"serving {actual_params / 1e9:.1f}B — the weights behind {service['url']} are not the ones this entry names"
             )
+
+    expected_quant = service.get("expectQuant")
+    actual_quant = served_quant(found)
+    # Matched as a substring so an entry can assert "Q4" without having to guess
+    # which of Q4_K_M, Q4_K_XL or "Q4_K - Medium" the server will spell it as.
+    if expected_quant and actual_quant:
+        if expected_quant.lower() not in str(actual_quant).lower():
+            problems.append(
+                f"{service['id']!r} expects a {expected_quant} build, endpoint is serving {actual_quant} — "
+                f"same architecture, different weights"
+            )
+
     expected_path = service.get("expectModelPath")
     actual_path = found.get("modelPath")
     if expected_path and actual_path and expected_path != actual_path:
         problems.append(f"{service['id']!r} expects {expected_path}, endpoint is serving {actual_path}")
+
     return problems
+
+
+def identity_claims(service):
+    """Which identity assertions an entry makes. Empty means nothing is checked."""
+    return [name for name in ("expectParams", "expectQuant", "expectModelPath") if service.get(name)]
+
+
+def attribution_warning(service, fingerprint=None):
+    """Why this run's model attribution is unconfirmed, or None if something checked it.
+
+    Distinct from `check_served`, which reports contradictions and stops a run.
+    Nothing here is a contradiction: either the entry asserts no identity, or it
+    asserts one this endpoint cannot answer — a router member reports its launch
+    argv from the preset while asleep but carries no `meta` until something loads
+    it, and the proxy ports report `meta` but never argv.
+
+    Refusing on this would block ordinary work; staying silent is how a run
+    labelled `task-9b` came to be served by a 4B with no way to tell afterwards.
+    So it warns, and rides along on the result document, where it stays attached
+    to the numbers it qualifies.
+    """
+    found = fingerprint if fingerprint is not None else served_fingerprint(service)
+    if found.get("error"):
+        return f"the endpoint could not be read: {found['error']}"
+    claims = identity_claims(service)
+    if not claims:
+        return "the entry asserts no identity, so any weights behind this URL would have been accepted"
+    available = {
+        "expectParams": served_params(found) is not None,
+        "expectQuant": bool(served_quant(found)),
+        "expectModelPath": bool(found.get("modelPath")),
+    }
+    if any(available[claim] for claim in claims):
+        return None
+    missing = ", ".join(sorted(claims))
+    return (
+        f"{found.get('readFrom')} reports nothing this entry asserts ({missing}), "
+        f"so no check could confirm the weights"
+    )
 
 
 def run_case(case_id, service, repeat=1, progress=None, variant=None):
@@ -544,6 +729,9 @@ def run_case(case_id, service, repeat=1, progress=None, variant=None):
     case = load_case(case_id)
     started = time.monotonic()
     fingerprint = served_fingerprint(service)
+    fits, why_not = applicable(case, service)
+    if not fits:
+        return _not_applicable(case_id, case, service, fingerprint, why_not, variant)
     items = apply_variant(case.items(), variant, case_id)
     results = []
     for index, item in enumerate(items, start=1):
@@ -566,13 +754,52 @@ def run_case(case_id, service, repeat=1, progress=None, variant=None):
         # (`served`), what this run asked it to do (`requested`), and what it
         # actually did (`observed` in the summary).
         "served": fingerprint,
+        # Set when nothing checked that these weights are the ones the entry
+        # names. It rides on the document rather than on a console line because
+        # the console scrolls away and the numbers outlive it.
+        "attributionUnconfirmed": attribution_warning(service, fingerprint),
         "variant": (variant or {}).get("name", BASE_VARIANT),
         "variantApplied": variant_applies(variant, case_id),
         "requested": requested_settings(service),
         "repeat": repeat,
+        "tier": case_tier(case),
+        "minContextTokens": case_min_context(case),
+        "notApplicable": None,
         "elapsedMs": elapsed,
         "items": results,
         "summary": summarize_items(results),
+    }
+
+
+def _not_applicable(case_id, case, service, fingerprint, why_not, variant):
+    """A case this model was never asked, recorded as such.
+
+    Written as a real result document so the report can say "not run, and here
+    is why" in the same table as everything else. The alternative — leaving a
+    gap — reads as a case that has not been got to yet, and the difference
+    between "too big for this model" and "not measured yet" is the whole
+    substance of a routing recommendation for a small model.
+    """
+    return {
+        "case": case_id,
+        "dimension": getattr(case, "DIMENSION", "unspecified"),
+        "skill": getattr(case, "SKILL", None),
+        "judged": bool(getattr(case, "JUDGE", False)),
+        "model": service["id"],
+        "modelLabel": service["label"],
+        "endpoint": service["url"],
+        "served": fingerprint,
+        "attributionUnconfirmed": attribution_warning(service, fingerprint),
+        "variant": (variant or {}).get("name", BASE_VARIANT),
+        "variantApplied": variant_applies(variant, case_id),
+        "requested": requested_settings(service),
+        "repeat": 0,
+        "tier": case_tier(case),
+        "minContextTokens": case_min_context(case),
+        "notApplicable": why_not,
+        "elapsedMs": 0,
+        "items": [],
+        "summary": {},
     }
 
 
@@ -777,6 +1004,7 @@ def summarize_items(items):
     hidden = sorted(item["telemetry"].get("hiddenTokens") or 0 for item in items)
     elapsed = [item["telemetry"].get("elapsedMs") or 0 for item in items]
     reasoned = sum(1 for item in items if item["telemetry"].get("reasoned"))
+    speed = _throughput(items)
     return {
         # Counted in fixtures, not attempts. Repeats used to inflate this, so a
         # case run three times reported 9 items and a pass rate averaged across
@@ -812,6 +1040,49 @@ def summarize_items(items):
             "hiddenTokensMax": hidden[-1],
         },
         "elapsedMs": sum(elapsed),
+        # Half of a routing decision. "The 4B passed this case" is not an
+        # argument for moving a stage to it; "passed it and is four times
+        # faster" is, and "passed it and is slower" ends the conversation.
+        "speed": speed,
+    }
+
+
+def _throughput(items):
+    """Prefill and decode rates, from the timings llama.cpp already returns.
+
+    Reported as medians rather than as a total divided by a total. One item that
+    hits a warm prefix cache prefills in almost no time, and averaging that with
+    a cold one describes neither — the median says what a typical call costs.
+    """
+    prefill, decode, prompts, cached = [], [], [], []
+    for item in items:
+        telemetry = item.get("telemetry") or {}
+        prompt_tokens = telemetry.get("promptTokens")
+        prefill_ms = telemetry.get("prefillMs")
+        generated = telemetry.get("generatedTokens")
+        generation_ms = telemetry.get("generationMs")
+        hit = telemetry.get("cachedTokens") or 0
+        if prompt_tokens:
+            prompts.append(prompt_tokens)
+            cached.append(hit)
+        # A cached prefill reports thousands of tokens per second because it did
+        # not do the work. Several cases share one long prefix on purpose, so
+        # including those would report the cache as the model's speed — the
+        # first end-to-end run showed 12,210 tok/s for a model measured at
+        # 1,336 on a cold 60k prompt.
+        if prompt_tokens and prefill_ms and hit < prompt_tokens * 0.5:
+            prefill.append(prompt_tokens / (prefill_ms / 1000))
+        if generated and generation_ms:
+            decode.append(generated / (generation_ms / 1000))
+    if not prompts and not decode:
+        return {}
+    return {
+        "promptTokensTotal": sum(prompts),
+        "promptTokensMedian": round(statistics.median(prompts)) if prompts else None,
+        "cachedTokensTotal": sum(cached),
+        "prefillTokensPerSecond": round(statistics.median(prefill), 1) if prefill else None,
+        "decodeTokensPerSecond": round(statistics.median(decode), 1) if decode else None,
+        "msPerItemMedian": round(statistics.median([i["telemetry"].get("elapsedMs") or 0 for i in items])),
     }
 
 

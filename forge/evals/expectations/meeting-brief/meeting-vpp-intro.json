@@ -1,0 +1,253 @@
+{
+  "meeting": "VPP Insiders session one: defining virtual power plants and why they matter",
+  "note": "A teaching session whose substance is a definitional disagreement that is never resolved. The trap set is the important part: two panellists give incompatible definitions and a brief that reports either as the group's conclusion has misread the meeting. Attributed by speaker label; participants introduce themselves by name and this key does not carry them.",
+  "facts": [
+    {
+      "id": "f1",
+      "kind": "attribution",
+      "canonical": "FERC Order 2222 allows aggregations of DERs to participate in wholesale markets",
+      "aliases": [
+        "FERC Order 2222 lets aggregations of DERs participate in wholesale markets"
+      ],
+      "evidence": "Aggregations of DERs to participate in wholesale markets."
+    },
+    {
+      "id": "f2",
+      "kind": "figure",
+      "canonical": "the minimum aggregation size under FERC Order 2222 is 100 kilowatts, or 0.1 megawatts",
+      "aliases": [
+        "minimum aggregation size is 100 kilowatts"
+      ],
+      "evidence": "In the eyes of FERC Order 2222, I think the minimum aggregation size is 10 100, sorry, 100 kilowatts, 0."
+    },
+    {
+      "id": "f3",
+      "kind": "figure",
+      "canonical": "in CAISO the minimum used to be 0.5 megawatts and is now smaller",
+      "aliases": [
+        "In KAISO it used to be 0.5 megawatts"
+      ],
+      "evidence": "In KAISO it used to be 0."
+    },
+    {
+      "id": "f4",
+      "kind": "attribution",
+      "canonical": "RMI publicly launched the Virtual Power Plant Partnership last month with 10 founding member companies including GM, Google, Ford, SunPower and Sunrun",
+      "aliases": [
+        "launched this partnership last month with 10 founding member companies"
+      ],
+      "evidence": "We publicly launched this partnership last month with 10 founding member companies, GM, Google, Ford, Sunpower, Sunrun, SwitchedIn, VirtualPeaker, etc."
+    },
+    {
+      "id": "f5",
+      "kind": "attribution",
+      "canonical": "RMI defines a VPP broadly as an aggregation of distributed energy resources that are interactive with the grid",
+      "aliases": [
+        "an aggregation of your distributed energy resources that are interactive with the grid"
+      ],
+      "evidence": "The way we define it is it's an aggregation of your distributed energy resources that are interactive with the grid."
+    },
+    {
+      "id": "f6",
+      "kind": "attribution",
+      "canonical": "a competing functional definition holds that a VPP must be dispatchable and able to produce power, which excludes solar on its own",
+      "aliases": [
+        "a virtual power plant is storage or it has storage attached and it can generate power",
+        "solar isn't dispatchable"
+      ],
+      "evidence": "Yeah, it's one of the tradition or one of the accepted definitions that I personally think is the most helpful is that a virtual power plant is storage or it has storage attached and it can generate power."
+    },
+    {
+      "id": "f7",
+      "kind": "attribution",
+      "canonical": "RMI treats demand response as one of the services a VPP can provide rather than a separate thing, with compensation distinguishing it from voluntary DR",
+      "aliases": [
+        "demand response we define as part of a virtual power plant"
+      ],
+      "evidence": "So, demand response we define as part of a virtual power plant."
+    },
+    {
+      "id": "f8",
+      "kind": "attribution",
+      "canonical": "in most markets and programs a VPP aggregator is treated like a legacy power plant",
+      "aliases": [
+        "We are treated like a legacy power plant"
+      ],
+      "evidence": "We are treated like a legacy power plant."
+    },
+    {
+      "id": "f9",
+      "kind": "figure",
+      "canonical": "opt-out enrolment reaches participation rates around 90% where opt-in is around 10%",
+      "aliases": [
+        "participation rates are like way higher, like 90%",
+        "opt-in it's probably like 10%"
+      ],
+      "evidence": "And participation rates are like way higher, like 90%, as compared to if you have opt-in, it's probably like 10%."
+    },
+    {
+      "id": "f10",
+      "kind": "figure",
+      "canonical": "wind has a capacity factor of about 0.3, producing power roughly 30% of the time",
+      "aliases": [
+        "wind its capacity factor is usually like 0.3",
+        "producing power roughly 30% of the time"
+      ],
+      "evidence": "Uh so it's only producing power roughly 30% of the time and that's kind of the average."
+    },
+    {
+      "id": "f11",
+      "kind": "figure",
+      "canonical": "an EV customer can specify a reserve margin such as keeping 40% of the battery, and batteries should not be depleted below 20%",
+      "aliases": [
+        "if they want to keep 40% of their battery",
+        "not going past 20%"
+      ],
+      "evidence": "So if they want to keep 40% of their battery, then you stick to that."
+    },
+    {
+      "id": "f12",
+      "kind": "figure",
+      "canonical": "respecting the reserve margin can dial an EV back from nine kilowatts to six kilowatts over an event",
+      "aliases": [
+        "We might only have it produce six kilowatts",
+        "produce at nine kilowatts"
+      ],
+      "evidence": "We might only have it produce six kilowatts."
+    },
+    {
+      "id": "f13",
+      "kind": "attribution",
+      "canonical": "VPPs are usually restricted to a small geographical region, often a single pricing node, which constrains the size of the aggregation",
+      "aliases": [
+        "restricted to a very small geographical region, usually one CP node"
+      ],
+      "evidence": "A constraint, notable constraint, is that DPPPs in many markets are restricted to a very small geographical region, usually one CP node."
+    },
+    {
+      "id": "f14",
+      "kind": "attribution",
+      "canonical": "commercial fleets such as delivery vehicles or public transit are the best early candidates for EVs as DERs, because they are large and predictable",
+      "aliases": [
+        "a very good candidate for early EVs used as DERs are fleets, commercial fleets"
+      ],
+      "evidence": "uh EVs used as DERs are uh fleets, commercial fleets."
+    },
+    {
+      "id": "f15",
+      "kind": "figure",
+      "canonical": "residential participants typically receive a one-off coupon of about fifty dollars, or ten dollars every three to four months",
+      "aliases": [
+        "a one of fifty dollar coupon",
+        "ten dollars every three to four months"
+      ],
+      "evidence": "You might get a one of fifty dollar coupon or you know like ten dollars every three to four months."
+    },
+    {
+      "id": "f16",
+      "kind": "attribution",
+      "canonical": "the aggregator is paid by the grid and passes a portion of that to the customer",
+      "aliases": [
+        "a portion of that 60% goes to the customer"
+      ],
+      "evidence": "And then a portion of that 60% goes to the customer."
+    },
+    {
+      "id": "f17",
+      "kind": "attribution",
+      "canonical": "real-time VPP control is being approached with reinforcement learning rather than supervised learning, using a purpose-built simulator",
+      "aliases": [
+        "you want to use something called reinforcement learning",
+        "we're developing our own simulator"
+      ],
+      "evidence": "For real-time operation control, you want to use something called reinforcement learning."
+    },
+    {
+      "id": "f18",
+      "kind": "attribution",
+      "canonical": "market integration is fragmented by market, by utility and by state, and generalization across them is extremely difficult",
+      "aliases": [
+        "Generalization is extremely difficult",
+        "it can vary by utility, by power market, by state"
+      ],
+      "evidence": "Generalization is extremely difficult."
+    },
+    {
+      "id": "f19",
+      "kind": "action",
+      "canonical": "the next session will cover the business angles, with a later one on the technology",
+      "aliases": [
+        "Next week we'll have session two about the business angles"
+      ],
+      "evidence": "Next week we'll have session two about the business angles."
+    },
+    {
+      "id": "f20",
+      "kind": "action",
+      "canonical": "join the DR task force Slack and continue the discussion there",
+      "aliases": [
+        "please join the DR task force slack"
+      ],
+      "evidence": "All the questions, please join the DR task force slack if you haven't yet and continue the discussion there."
+    },
+    {
+      "id": "f21",
+      "kind": "action",
+      "canonical": "RMI will work on template roadmaps and business models for regulators and policymakers, and asked for volunteers",
+      "aliases": [
+        "that's something that we're gonna try to work on and if anyone wants to help let me know"
+      ],
+      "evidence": "corporations for different revenue streams that are available in this space and it's like just I it sounds like it's really fragmented and there's a call for integration so that's something that we're gonna try to work on and if anyone wants to help let me know"
+    }
+  ],
+  "traps": [
+    {
+      "id": "t1",
+      "canonical": "the group agreed on a single definition of a virtual power plant",
+      "aliases": [
+        "the group agreed on a definition of a virtual power plant",
+        "settled on a definition of a VPP"
+      ],
+      "why": "two incompatible definitions were given — a deliberately broad one from RMI and a narrower dispatchability-and-storage one — and both speakers explicitly left the disagreement standing"
+    },
+    {
+      "id": "t2",
+      "canonical": "a virtual power plant must include storage",
+      "aliases": [
+        "a VPP must include storage",
+        "storage is required for a virtual power plant"
+      ],
+      "why": "one panellist's personal working definition, offered as 'just opinion from working in the space' and immediately countered by the broader definition that includes demand response and solar"
+    },
+    {
+      "id": "t3",
+      "canonical": "the aggregators will offer equipment repair or servicing insurance to participants",
+      "aliases": [
+        "offer servicing insurance to customers",
+        "will repair a broken EV charger"
+      ],
+      "why": "raised as a question by an attendee and answered 'we don't currently do this' — agreed to be a good idea, not a plan"
+    }
+  ],
+  "notStated": [
+    {
+      "id": "n1",
+      "field": "due",
+      "canonical": "join the DR task force Slack",
+      "aliases": [
+        "join the DR task force slack"
+      ],
+      "why": "asked of everyone with no date"
+    },
+    {
+      "id": "n2",
+      "field": "due",
+      "canonical": "work on template roadmaps for regulators and policymakers",
+      "aliases": [
+        "template roadmaps",
+        "work on the roadmaps"
+      ],
+      "why": "stated as an intention with no timeline"
+    }
+  ]
+}

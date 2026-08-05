@@ -9,13 +9,21 @@ gate is a case production would have accepted.
 
 ```bash
 python3 forge/evals/run.py freeze
-python3 forge/evals/run.py doctor --model task-9b
-python3 forge/evals/run.py run --model task-9b
-python3 forge/evals/run.py report --models chat-27b,task-9b
+python3 forge/evals/run.py models                     # what each endpoint is serving now
+python3 forge/evals/run.py doctor --model task-4b
+python3 forge/evals/run.py run --model task-4b        # the standard suite
+python3 forge/evals/run.py report --models chat-27b,task-4b
 ```
 
-Twelve cases, 47 items, roughly 3-8 minutes per model depending on how fast it
-generates.
+Eighteen cases, 166 items. `--suite quick` is a few minutes, `standard` is the
+default, `full` adds the cases whose cost only makes sense when a decision rests
+on them. Rough single-pass wall time on this deployment:
+
+| | quick | standard | full |
+| --- | --- | --- | --- |
+| `chat-27b` | ~4 min | ~35 min | ~55 min |
+| `task-4b` | ~3 min | ~25 min | ~35 min (two rungs n/a) |
+| `think-27b` | ~12 min | ~90 min | ~2 h |
 
 ## Commands
 
@@ -44,9 +52,25 @@ generates.
 | `enumeration-breadth` | enumeration | `literature-extraction`: how many of fifteen item types get covered |
 | `connection-judgment` | pair judgment | should these two notes be linked, against real `related:` links |
 | `verifier-seeded` | verification | can this model do `think`-tier review, on a set with planted defects |
+| `meeting-brief` | long-form reasoning | a whole two-hour meeting read in one call, against a reference key |
+| `lcr-48k` / `lcr-80k` / `lcr-110k` | long context | one answer from two documents, at three distances |
+| `abstention-grounded` | abstention | half the questions the source does not answer |
+| `abstention-closed-book` | abstention | knowledge against confabulation, with no source at all |
 
-Six of the twelve are also judged: gates cannot settle whether a cleaned
-transcript still sounds like the person who spoke it.
+Seven are also judged: gates cannot settle whether a cleaned transcript still
+sounds like the person who spoke it.
+
+### Suites and applicability
+
+A case declares `TIER` (`quick`, `standard`, `full`) and the suites nest. An
+explicit `--cases` list is obeyed exactly and ignores `--suite`, because a
+selection flag that silently drops something you named is worse than no flag.
+
+A case also declares what context it needs. When a model cannot fit one, the
+case is **skipped and recorded as skipped** — `n/a` in the report, never `0/8`.
+"This model has 65k and the case needs 113k" and "this model got it wrong" are
+different findings, and conflating them is how a suite reports a small model
+failing at something nobody put to it.
 
 ## Testing a change before you make it
 
@@ -75,6 +99,86 @@ is a floor; the metric is the instrument.
 
 That calibration is the prerequisite for trusting any variant result. If the
 suite cannot see a change known to matter, a null result from it means nothing.
+
+### What the calibration runs found
+
+Each new case has a variant that strips something it claims to measure. Run them
+before trusting a null from that case.
+
+Run on `chat-27b`, 2026-08-04:
+
+| Variant | Case | Effect | Verdict |
+| --- | --- | --- | --- |
+| `abstention-permission-removed` | `abstention-closed-book` | Omniscience Index **+0.72 → +0.06**; 5 items of 12 | **detects** |
+| `long-context-no-abstention` | `lcr-48k` | Index **1.00 → 0.70**; exactly 2 items — the number of unanswerable questions in a rung | **detects** |
+| `enumeration-clause-removed` | `enumeration-breadth` | `itemTypesCovered` **10.6 → 8.1**, down on 7 of 8 items; `items` 29.6 → 27.1 | **detects** |
+| `meeting-brief-no-abstention` | `meeting-brief` | `abstainedCorrectly` 0.50 → 0.375; right direction, one item | **weak** |
+
+Note the pass/fail column in each `compare` said `p = 1.0, underpowered` while the
+metrics moved by a third or more. That is the point of leading with metrics.
+
+`meeting-brief`'s abstention half is under-powered by construction:
+`abstainedCorrectly` is only defined for items where the model produced an action
+matching a `notStated` entry, and the keys carry one or two of those each, so the
+statistic has a base of about four. Treat `factRecall`, `inventedNumbers` and
+`trapsHit` as that case's real instruments, and read the abstention number as a
+hint. Adding `notStated` entries would fix it and means re-reading the
+transcripts.
+
+Two things those runs taught, both of which cost a wrong conclusion first:
+
+**A variant must strip an instruction, not an explanation.** The first
+`abstention-permission-removed` removed the sentence *"a confident wrong answer
+is worse than no answer"* and moved nothing across 12 items. That sentence
+justifies the rule; the rule itself — *"write 'I don't know' whenever you are not
+confident"* — was still in the prompt. Pointing the variant at the rule dropped
+the index by two thirds immediately.
+
+**A variant must strip something the prompt is the only source of.** The
+long-context calibration originally removed the warning that several documents
+describe the same project at different times, and moved nothing on two models at
+three sizes. Four of the ten questions say *"the earlier report"* or *"the later
+report"* in their own text, so the warning was redundant and removing it left the
+instruction standing. The replacement strips the permission to answer "Not
+stated", and exactly two items move — the exact number of unanswerable questions
+in a rung.
+
+The pattern in both: **a null result is a claim about the variant before it is a
+claim about the case.** Check what the prompt still says before concluding the
+case is blind.
+
+## The three newest cases
+
+**`meeting-brief`** is the one exception to the rule above, and knowingly so.
+`vault-transcripts` chunks a meeting at 12,000 characters and summarizes it from
+the chunk summaries, so no stage in pi-forge ever reads a long meeting whole —
+which is exactly the gap. Its prompt is therefore assembled here rather than
+imported, though the faithfulness rules and the "Unassigned / Not stated" clause
+are pulled out of the skill's own prompt and the case refuses to build if they
+stop being there. **A pass here is evidence about the model, not the guarantee
+the other cases give that production would have accepted the output.** If the
+case earns its keep, the prompt should graduate into the skill.
+
+It scores against reference keys — 190 facts and 32 traps across eight meetings,
+each fact carrying the verbatim line that supports it, so the key is checkable
+rather than merely trusted. Two tests enforce that: every quote must appear in
+its transcript, and must share a content word with the claim it is attached to.
+Five keys are committed; three cover internal meetings that name real people and
+live in a gitignored `expectations/.private/`, exactly as `.frozen/` already
+works. A clone without them runs five items and says so.
+
+**The `lcr-*` rungs** hold the evidence constant and vary only the distance
+between the two documents that carry it, so a drop from 48k to 110k is
+attributable to distance rather than to having been shown less. The padding is
+same-project on purpose: unrelated filler would let a model find the answer by
+looking for the only document that mentions the subject.
+
+**The `abstention-*` pair** scores the way AA-Omniscience does — a wrong answer
+costs exactly what a right one earns, and declining scores zero. Accuracy would
+rank a confident guesser above a model that admits ignorance, which is backwards
+for every skill here. The grounded half should drive routing; the closed-book
+half explains its results, since a model can be scrupulous about a source it was
+given and confabulate freely without one.
 
 ## Reading a result
 
@@ -120,9 +224,16 @@ summary, and only the text tells them apart.
   `MODEL_ROUTER_MAX=1`.** Measured swap: ~6 s from `embed` to `task`. No case
   calls the embeddings endpoint, and any embedding-derived input is precomputed
   at freeze time, or the suite would be timing the router.
-- **`task` has a 32,768-token context**, a quarter of the `chat` slot. Every
-  prompt in the suite is checked against the smallest ceiling in `models.json`
-  by `tests/test_evals.py`, so a case that overruns is caught before a run.
+- **`task` has a 65,538-token context**, half the `chat` slot. It was recorded
+  as 32,768 for months after the backend moved, which quietly under-budgeted
+  every task-tier prompt; `add-model` exists so that number is read off the
+  server instead of remembered. Every case that a model *can* run is checked
+  against that model's ceiling by `tests/test_evals.py`.
+- **Prefill is paid once per distinct prompt.** Cases that share a long prefix
+  and vary only the tail — the long-context rungs, `abstention-grounded` — cost
+  one prefill for the set. Measured: a 48k rung prefills in 33 s on `chat-27b`
+  and then answers each question in under two. This is the same byte-stability
+  discipline `docs/service-split-handoff.md` §2.2 requires of every skill.
 - **`:8008` reasons in *visible* content.** There is no think block to strip, so
   a `max_tokens` sized for the answer alone gets a reply that is all preamble and
   ends mid-thought. Measured at ~1,900 tokens of preamble on both a
@@ -164,9 +275,47 @@ This repository is public and the notes are not, so only the pointer is
 committed. `run` refuses to start on a drifted fixture: the vault moves, and a
 benchmark that moves with it compares nothing.
 
+### The source archive
+
+The vault is a working notebook. Notes get filed, renamed and reclassified, and
+a fixture whose note has moved is a case that cannot run — four of them were
+already unreachable because `vault-organizer` filed them somewhere else.
+
+```bash
+python3 forge/evals/run.py archive          # copy every fixture's source
+python3 forge/evals/run.py archive --check  # verify it against the pinned hashes
+```
+
+The archive lives at `~/.pi-forge/eval-sources` (override with
+`FORGE_EVAL_ARCHIVE`), holds about 2 MB, and stores the **source** bytes rather
+than the excerpted ones, so a fixture can still be re-excerpted or re-pinned
+from it. `freeze` reads the vault first and falls back to the archive, marking
+any fixture it had to fall back for — the vault always wins when it still has
+the note, so the archive can never mask a deliberate edit.
+
+It is **outside the repository**, not gitignored inside it: these are real
+notes, and a gitignore is one `git add -f` away from publishing them.
+`archive_root` refuses a path inside either the repository or the vault, since a
+backup inside the thing it is backing up is not one. The deny-list applies here
+too — a backup must not become the route by which refused material re-enters.
+
 `freeze` hard-refuses anything under `harness.DENIED_PREFIXES` — therapy notes,
 health records, personal-context cards, and the folder holding live software
-licence keys. `tests/test_evals.py` asserts no fixture points into them.
+licence keys. `tests/test_evals.py` asserts no fixture points into them. The
+list covers the report tree as well as the transcript tree: `10.04 Report/
+Administration/Health` holds surgical records, and the denial has to follow the
+material rather than the folder name it was first written against.
+
+A path rule is not the whole of it. `meeting-kickoff` is excerpted from the call
+to order because its first eight minutes are pre-meeting small talk carrying
+third-party medical detail — a colonoscopy, a medication reaction, childbirth —
+about people who are not the vault owner. Nothing in the deny-list would have
+caught that, and none of it is meeting content.
+
+`freeze` also reports **orphans**: a file in `.frozen/` that no entry points at.
+It is left over from a fixture set that has moved on, and nothing re-checks it,
+so a case that still names it would read unpinned content outside the drift
+check. Reported, never deleted.
 
 ## Adding a case
 
@@ -191,8 +340,24 @@ Modules starting with `_` are shared helpers, not cases.
 
 ## Adding a model
 
-An entry in `models.json` with `url`, `model`, and `contextTokens`. Then, for a
-reasoning backend, one of two things depending on where its reasoning goes:
+Do not write the entry by hand:
+
+```bash
+python3 forge/evals/run.py add-model --url http://llms:8007/v1 --model task --id task-9b --write
+```
+
+It reads `contextTokens`, `expectParams`, `expectQuant`, `expectModelPath` and
+`sizeGiB` off the live endpoint, and probes where the reasoning goes. Hand-written
+entries are how the registry rots: `contextTokens` was wrong by half for months,
+and `expectParams` was asserted by two entries and enforced on neither.
+
+`run.py models` then shows every entry against what each endpoint is serving
+right now, and which are runnable. Several entries may name one URL — the task
+router and the primary backend both swap weights behind a fixed port — so
+swapping weights means changing them in the llm-stack UI and re-running `models`
+to confirm. The suite never writes to the stack.
+
+The fields, if you are reading one:
 
 - into a separate `reasoning_content` field (`:8007`) → set
   `chatTemplateKwargs: {"enable_thinking": false}`, or the reply arrives with
@@ -201,7 +366,17 @@ reasoning backend, one of two things depending on where its reasoning goes:
   or every reply ends mid-thought.
 
 Hosted models take `apiKeyEnv`, and the key is read from the environment, never
-stored here.
+stored here. `tier`, `family`, `sizeGiB` and `coResident` are read by the report
+only; `coResident` means the weights fit in the VRAM left over while the bulk
+tier is loaded, so the model could serve a stage *alongside* it rather than
+instead of it.
+
+An entry should assert an identity that its endpoint can actually check. The
+proxy ports report parameter count and quantization but no launch arguments, so
+`expectModelPath` can never fire there; the router ports report argv. When
+nothing could be checked, `run` says so and labels the results unconfirmed
+rather than refusing — and the warning rides on the result document, because the
+console scrolls away and the numbers outlive it.
 
 Run `doctor` before spending a run on a new entry, and check the first case's
 `finishReason` — a case that truncated is a budget problem, not a result.

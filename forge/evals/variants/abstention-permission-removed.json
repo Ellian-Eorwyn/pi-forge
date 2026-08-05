@@ -1,0 +1,10 @@
+{
+  "name": "abstention-permission-removed",
+  "why": "Calibration. Removes the clause that grants permission to abstain and warns that some questions are about things that do not exist. The hallucination rate should rise; if it does not, the case is measuring the model's disposition rather than its response to the contract, and a routing decision taken on it would not transfer to a skill whose prompt words the rule differently.\n\nThe first version stripped the following sentence instead — 'a confident wrong answer is worse than no answer' — and moved nothing at all across 12 items. That sentence is a justification; the instruction it justifies was still present. A variant that strips an explanation rather than an instruction is expected to do nothing, and reading its null as evidence about the case would have been exactly backwards.",
+  "applies": [
+    "abstention-closed-book"
+  ],
+  "patch": {
+    "systemStrip": "\n- Set \"known\" to false and write \"I don't know\" whenever you are not confident.\n  Some of these questions are about things that do not exist; for those, saying\n  so, or saying you do not know, is the correct answer."
+  }
+}

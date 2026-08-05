@@ -45,3 +45,12 @@ collect.sh
 # Model evaluation suite: fixtures are real vault notes and results are per-machine.
 forge/evals/.frozen/
 forge/evals/results/
+# Answer keys quoting notes that name real people. The public keys next to this
+# directory cover the public-webinar fixtures; these cover the internal meetings,
+# and quote them verbatim, so they stay on the machine with the notes themselves.
+forge/evals/expectations/.private/
+# The fixture source archive lives at ~/.pi-forge/eval-sources, outside this
+# repository on purpose. This entry only catches someone symlinking or copying
+# it in — the real protection is that it is not here in the first place.
+forge/evals/eval-sources/
+forge/evals/sources/

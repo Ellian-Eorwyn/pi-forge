@@ -40,7 +40,7 @@ class ConfigurationTests(unittest.TestCase):
         # reads the user's settings.json.
         service = harness.resolve_model("task-9b")
         self.assertEqual(service["url"], "http://llms:8007/v1/chat/completions")
-        self.assertEqual(service["contextTokens"], 32768)
+        self.assertEqual(service["contextTokens"], 65538)
         self.assertEqual(service["chatTemplateKwargs"], {"enable_thinking": False})
         # Background scheduling would let an interactive turn preempt a call and
         # land it in the results as a model failure.
@@ -104,6 +104,57 @@ class FingerprintTests(unittest.TestCase):
         service = {"id": "whatever", "url": "http://x/v1/chat/completions"}
         self.assertEqual(harness.check_served(service, {"n_params": 1}), [])
 
+    def test_the_parameter_check_reads_the_shape_the_server_really_sends(self):
+        # The bug this pins: `served_fingerprint` nests the server's metadata
+        # under `meta`, `check_served` read `n_params` from the top level, and
+        # the tests fed it a flat dict no server produces. So `expectParams` was
+        # asserted by two entries and enforced on neither for as long as it
+        # existed. Any future test of this must use the nested shape.
+        service = {"id": "chat-27b", "url": "http://x/v1/chat/completions", "expectParams": 27_320_697_856}
+        nested = {"meta": {"n_params": 4_205_751_296, "ftype": "Q6_K"}, "paramsB": 4.21}
+        problems = harness.check_served(service, nested)
+        self.assertTrue(problems, "a 4B behind a 27B entry has to be caught through meta.n_params")
+        self.assertIn("not the ones this entry names", problems[0])
+        self.assertEqual(harness.served_params(nested), 4_205_751_296)
+
+    def test_a_requant_is_caught_by_quantization_where_the_count_cannot_be(self):
+        # Same architecture at a different quant sits inside the 10% parameter
+        # tolerance on purpose, so quant is the only thing that separates them.
+        service = {
+            "id": "chat-27b-q4",
+            "url": "http://x/v1/chat/completions",
+            "expectParams": 27_320_697_856,
+            "expectQuant": "Q4",
+        }
+        served = {"meta": {"n_params": 27_320_697_856, "ftype": "Q6_K"}, "quant": "Q6_K"}
+        self.assertEqual(harness.check_served({**service, "expectQuant": None}, served), [])
+        problems = harness.check_served(service, served)
+        self.assertTrue(problems)
+        self.assertIn("different weights", problems[0])
+        # And a substring match, so "Q4" need not guess the server's spelling.
+        self.assertEqual(harness.check_served(service, {"meta": {"n_params": 27_320_697_856}, "quant": "Q4_K_XL"}), [])
+
+    def test_an_unconfirmed_entry_warns_instead_of_refusing(self):
+        # A claim the endpoint cannot answer is not a contradiction. Refusing
+        # would block every cold task-tier run, since a sleeping router member
+        # reports its argv but carries no meta until something loads it.
+        service = {
+            "id": "task-4b",
+            "url": "http://x/v1/chat/completions",
+            "expectParams": 4_205_751_296,
+            "expectModelPath": "/m/four.gguf",
+        }
+        asleep = {"readFrom": "http://x/v1", "modelPath": "/m/four.gguf", "quant": "Q6_K_XL"}
+        self.assertEqual(harness.check_served(service, asleep), [])
+        self.assertIsNone(harness.attribution_warning(service, asleep), "the path claim did confirm it")
+
+    def test_an_entry_nothing_could_check_says_so(self):
+        service = {"id": "mystery", "url": "http://x/v1/chat/completions", "expectModelPath": "/m/x.gguf"}
+        warning = harness.attribution_warning(service, {"readFrom": "http://x/v1", "meta": {"n_params": 1}})
+        self.assertIn("expectModelPath", warning)
+        naked = harness.attribution_warning({"id": "naked", "url": "u"}, {"readFrom": "http://x/v1"})
+        self.assertIn("asserts no identity", naked)
+
     def test_an_unreachable_endpoint_is_reported_rather_than_passed(self):
         service = {"id": "gone", "url": "http://x/v1/chat/completions", "expectParams": 1}
         problems = harness.check_served(service, {"error": "connection refused"})
@@ -135,17 +186,23 @@ class CaseContractTests(unittest.TestCase):
                 ids = [item["id"] for item in harness.load_case(case_id).items()]
                 self.assertEqual(len(ids), len(set(ids)), f"{case_id} reuses an item id")
 
-    def test_every_prompt_fits_every_model_under_test(self):
-        # The suite compares models. A case that overruns one of them is
-        # measuring context, not capability, and the ceiling is the reason to
-        # find that out here rather than in the results. Checked per model
-        # because output headroom differs: a reasoning backend is given room to
-        # think before it answers, and that room counts against the same ceiling.
+    def test_a_case_that_fits_a_model_fits_every_item_of_it(self):
+        # The guarantee that used to be blanket, now conditioned on
+        # applicability. If `applicable` says a model can be asked a case, every
+        # item of that case must fit: a case half of which overruns would report
+        # the overrun as model failure. What changed is that a case too large
+        # for a model is skipped and said to be skipped, rather than being
+        # forbidden from existing — a long-context rung only the big models can
+        # run is a measurement, not a configuration error.
         for model_id in harness.models():
             service = harness.resolve_model(model_id)
             ceiling = service["contextTokens"]
             for case_id in harness.case_ids():
-                for item in harness.load_case(case_id).items():
+                case = harness.load_case(case_id)
+                fits, _why = harness.applicable(case, service)
+                if not fits:
+                    continue
+                for item in case.items():
                     with self.subTest(model=model_id, case=case_id, item=item["id"]):
                         total = harness.forge_llm.estimate_prompt_tokens(item["messages"]) + (
                             harness._output_budget(item, service) or 0
@@ -153,6 +210,49 @@ class CaseContractTests(unittest.TestCase):
                         self.assertLess(
                             total, ceiling, f"{case_id}/{item['id']} needs {total} tokens on {model_id}, over {ceiling}"
                         )
+
+    def test_every_case_fits_at_least_one_model(self):
+        # A case no registered model can run measures nothing at all, and would
+        # sit in the report as permanently "not run" without anyone noticing it
+        # was never runnable.
+        services = [harness.resolve_model(model_id) for model_id in harness.models()]
+        for case_id in harness.case_ids():
+            case = harness.load_case(case_id)
+            with self.subTest(case=case_id):
+                self.assertTrue(
+                    any(harness.applicable(case, service)[0] for service in services),
+                    f"{case_id} needs {harness.case_min_context(case):,} tokens, more than any model has",
+                )
+
+    def test_a_case_too_large_for_a_model_is_skipped_not_failed(self):
+        case = harness.load_case(harness.case_ids()[0])
+        tiny = {"id": "tiny", "contextTokens": 64, "outputHeadroom": 0}
+        fits, why = harness.applicable(case, tiny)
+        self.assertFalse(fits)
+        self.assertIn("64", why)
+        roomy = {"id": "roomy", "contextTokens": 10_000_000, "outputHeadroom": 0}
+        self.assertEqual(harness.applicable(case, roomy), (True, None))
+
+    def test_output_headroom_counts_against_applicability(self):
+        # A reasoning backend is given room to think, and that room comes out of
+        # the same ceiling. A case that fits without headroom can fail to fit
+        # with it, and finding that out at run time wastes the run.
+        case = harness.load_case(harness.case_ids()[0])
+        needed = harness.case_min_context(case)
+        exact = {"id": "exact", "contextTokens": needed + 100, "outputHeadroom": 0}
+        self.assertTrue(harness.applicable(case, exact)[0])
+        thinking = {"id": "thinking", "contextTokens": needed + 100, "outputHeadroom": 12000}
+        self.assertFalse(harness.applicable(case, thinking)[0])
+
+    def test_suites_nest_and_a_named_case_is_never_dropped(self):
+        quick = harness.cases_for_suite("quick")
+        standard = harness.cases_for_suite("standard")
+        full = harness.cases_for_suite("full")
+        self.assertLessEqual(set(quick), set(standard))
+        self.assertLessEqual(set(standard), set(full))
+        self.assertEqual(set(full), set(harness.case_ids()), "every case belongs to some tier")
+        with self.assertRaises(harness.EvalError):
+            harness.cases_for_suite("everything")
 
     def test_output_headroom_is_added_to_the_case_budget_not_written_into_it(self):
         item = {"max_tokens": 1024}
@@ -496,6 +596,20 @@ class UndecidedCaseTests(unittest.TestCase):
         # something. That is the point: they should not be deciding anything.
         self.assertEqual(harness.undecided_cases({"tiny": self._document(1, 2)}, None), ["tiny"])
 
+    def test_a_case_the_model_could_not_be_asked_is_not_undecided(self):
+        # A skipped case carries an empty summary. This raised KeyError until
+        # 2026-08-05, which killed `run --suite full --stabilize` on task-4b
+        # after the first pass: lcr-80k needs ~82,000 tokens against its 65,538,
+        # so the run skipped it correctly and then died choosing what to repeat.
+        documents = {"fits": self._document(8, 8), "too-big": {"items": [], "summary": {}}}
+        self.assertEqual(harness.undecided_cases(documents, None), [])
+
+    def test_a_skipped_baseline_does_not_decide_a_case_that_ran(self):
+        # The reverse pairing: this model answered the case and the baseline
+        # could not. There is nothing to compare against, so the floor decides.
+        documents = {"c": self._document(8, 8)}
+        self.assertEqual(harness.undecided_cases(documents, {"c": {"items": [], "summary": {}}}), [])
+
 
 class SeverityTests(unittest.TestCase):
     """`silent` is the number that should decide a handoff."""
@@ -589,7 +703,7 @@ class SummaryTests(unittest.TestCase):
         service = harness.resolve_model("task-4b")
         requested = harness.requested_settings(service)
         self.assertEqual(requested["chatTemplateKwargs"], {"enable_thinking": False})
-        self.assertEqual(requested["contextTokens"], 32768)
+        self.assertEqual(requested["contextTokens"], 65538)
         self.assertEqual(requested["temperature"], 0)
         self.assertFalse(requested["backgroundScheduling"])
 
@@ -843,10 +957,6 @@ class FreezeTests(unittest.TestCase):
         self.assertEqual(harness.excerpt(text, {"mode": "lines", "start": 3, "end": 4}), "body line one")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class CaseSizeTests(unittest.TestCase):
     """Nine of twelve cases used to be under the bar a verdict needs."""
 
@@ -854,7 +964,13 @@ class CaseSizeTests(unittest.TestCase):
         reporting = importlib.import_module("report")
         for case_id in harness.case_ids():
             with self.subTest(case=case_id):
-                count = len(harness.load_case(case_id).items())
+                case = harness.load_case(case_id)
+                # `EXPECTED_ITEMS` is the count when every expectation file is
+                # present. A case whose items depend on answer keys that are
+                # deliberately not committed builds fewer of them here, and
+                # checking the local filesystem would turn "these notes are
+                # private" into "this case is undersized".
+                count = getattr(case, "EXPECTED_ITEMS", None) or len(case.items())
                 self.assertGreaterEqual(
                     count,
                     reporting.MIN_ITEMS_FOR_VERDICT,
@@ -882,3 +998,250 @@ class CaseSizeTests(unittest.TestCase):
         thin = summary_transcript._term_coverage(source, "some things were discussed and set aside")
         self.assertGreater(thorough, thin)
         self.assertLess(thin, 0.5)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class MeetingBriefTests(unittest.TestCase):
+    """The reference keys are the case. If they drift from the transcripts, the
+    numbers are confident and wrong, which is the failure mode this whole file
+    exists to prevent."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.meeting = importlib.import_module("_meeting")
+        cls.case = harness.load_case("meeting-brief")
+
+    def test_every_reference_quote_is_verbatim_in_its_transcript(self):
+        for fixture_id in self.case.FIXTURES:
+            key = self.meeting.load_key(fixture_id)
+            if key is None:
+                continue  # a private key, absent on this machine
+            source = harness.frozen_text(fixture_id)
+            flat = " ".join(source.split())
+            for fact in key["facts"]:
+                with self.subTest(fixture=fixture_id, fact=fact["id"]):
+                    quote = fact["evidence"]
+                    self.assertTrue(
+                        quote in source or " ".join(quote.split()) in flat,
+                        f"{fixture_id}/{fact['id']} quotes text that is not in the transcript",
+                    )
+
+    def test_every_reference_quote_supports_the_claim_it_is_attached_to(self):
+        # Verbatim is not enough: a real quote pasted under the wrong fact would
+        # pass the check above. One such quote was caught this way while the
+        # keys were being written.
+        for fixture_id in self.case.FIXTURES:
+            key = self.meeting.load_key(fixture_id)
+            if key is None:
+                continue
+            for fact in key["facts"]:
+                with self.subTest(fixture=fixture_id, fact=fact["id"]):
+                    shared = set(self.meeting._tokens(fact["canonical"])) & set(
+                        self.meeting._tokens(fact["evidence"])
+                    )
+                    self.assertTrue(shared, f"{fixture_id}/{fact['id']} evidence shares no content word with the claim")
+
+    def test_a_fact_is_matched_on_meaning_not_on_the_key_s_wording(self):
+        # The bar this pins: the first version required every content word of
+        # the reference phrasing, and scored a brief that had plainly reported
+        # sixteen figures at 6 of 24.
+        # Uses the real transcript, because the matcher's notion of a
+        # distinctive word is word frequency *in the source*: on a synthetic
+        # one-sentence source every word is equally rare and the test would
+        # measure the tie-break rather than the behaviour.
+        source = harness.frozen_text("meeting-brattle")
+        fact = next(f for f in self.meeting.load_key("meeting-brattle")["facts"] if f["id"] == "f9")
+        self.assertTrue(
+            self.meeting.fact_matched(
+                fact, "34 percent: Forecast share of homes with smart thermostats in 2030", source
+            ),
+            "a model that reported the figure in its own words has covered the fact",
+        )
+        self.assertFalse(
+            self.meeting.fact_matched(fact, "the report discusses smart thermostat adoption", source),
+            "naming the topic without the figure is not covering the fact",
+        )
+
+    def test_numbers_spoken_as_words_are_not_read_as_fabrications(self):
+        # Speech-to-text spells numbers out and a brief writes digits. Without
+        # this, a model that correctly reported "six or seven hundred bucks" was
+        # flagged for inventing 600 and 700 — measured on the first live run.
+        source = "you can pull in like six or seven hundred bucks depending on the events"
+        self.assertEqual(self.meeting.invented_numbers("600 to 700 dollars per year", source), [])
+        self.assertEqual(self.meeting.invented_numbers("4200 dollars per year", source), ["4200"])
+
+    def test_the_prompt_is_still_built_from_the_skill_s_own_rules(self):
+        for phrase in self.meeting._FIDELITY_RULES_USED:
+            self.assertIn(phrase, self.meeting.BRIEF_SYSTEM)
+        self.assertIn("Unassigned", self.meeting.BRIEF_SYSTEM)
+
+    def test_a_missing_private_key_shrinks_the_case_rather_than_failing_it(self):
+        self.assertIsNone(self.meeting.load_key("no-such-meeting"))
+        built = {item["id"] for item in self.case.items()}
+        self.assertTrue(built <= set(self.case.FIXTURES))
+        self.assertTrue(built, "no keys at all is a broken checkout, not a valid state")
+
+
+class AbstentionTests(unittest.TestCase):
+    """A wrong answer costs what a right one earns; declining scores zero."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ab = importlib.import_module("_abstention")
+
+    def _score(self, case_id, item_id, answer, flag, flag_value=True):
+        case = harness.load_case(case_id)
+        item = next(entry for entry in case.items() if entry["id"] == item_id)
+        return case.score(item, json.dumps({"answer": answer, flag: flag_value}), {})
+
+    def test_declining_ranks_above_a_confident_wrong_answer(self):
+        declined = self._score("abstention-closed-book", "c10", "I don't know", "known", False)
+        invented = self._score("abstention-closed-book", "c10", "Pacific Gas and Electric", "known", True)
+        self.assertGreater(declined["metrics"]["omniscienceIndex"], invented["metrics"]["omniscienceIndex"])
+        self.assertTrue(declined["ok"])
+        self.assertFalse(invented["ok"], "asserting a nonexistent tariff's operator has to fail the gate")
+
+    def test_declining_an_answerable_question_is_a_miss_but_not_a_confabulation(self):
+        missed = self._score("abstention-closed-book", "c11", "I don't know", "known", False)
+        self.assertEqual(missed["metrics"]["abstained"], 1.0)
+        self.assertEqual(missed["metrics"]["omniscienceIndex"], 0.0)
+        self.assertTrue(missed["ok"], "declining is not the failure the gate is for")
+
+    def test_an_empty_reply_is_a_broken_contract_not_an_abstention(self):
+        scored = self._score("abstention-closed-book", "c11", "", "known", False)
+        self.assertFalse(scored["ok"])
+        self.assertFalse(scored["gates"].get("answered", True))
+
+    def test_a_definition_matches_however_it_is_worded(self):
+        item = {"accept": [["consumption", "without"], "counterfactual"]}
+        self.assertTrue(self.ab.answer_correct("Estimated energy consumption without demand response", item))
+        self.assertTrue(self.ab.answer_correct("the counterfactual load", item))
+        self.assertFalse(self.ab.answer_correct("a fixed tariff rate", item))
+
+
+class LongContextTests(unittest.TestCase):
+    def test_both_anchor_documents_survive_at_every_rung(self):
+        lc = importlib.import_module("_longcontext")
+        for rung, tokens in lc.RUNGS.items():
+            with self.subTest(rung=rung):
+                corpus = lc.corpus_text(tokens)
+                for anchor in lc.ANCHORS:
+                    self.assertIn(f"=== DOCUMENT: {anchor} ===", corpus)
+                    # Whole, not truncated: an anchor cut short loses evidence
+                    # and turns a harness limit into an apparent model failure.
+                    self.assertIn(harness.frozen_text(anchor).strip()[-400:], corpus)
+
+    def test_a_rung_too_small_for_its_evidence_is_refused(self):
+        lc = importlib.import_module("_longcontext")
+        with self.assertRaises(harness.EvalError):
+            lc.corpus_text(1000)
+
+    def test_the_answers_are_not_findable_in_the_padding(self):
+        # The padding is same-project on purpose, so this is not automatic: if a
+        # distractor started stating one of these, the question would stop
+        # measuring cross-document reading and nobody would notice.
+        lc = importlib.import_module("_longcontext")
+        padding = " ".join(harness.frozen_text(name).lower() for name in lc.PADDING)
+        # Only the anchors whose questions depend on being unique. `q5` is
+        # knowingly weaker: two of its four valid answers also appear in the
+        # market study, so it can be reached without reading both quarters. It
+        # is kept because it still requires the Q6-yes/Q8-no property, and the
+        # weakness is recorded in the key rather than hidden by loosening this.
+        for anchor in ("18/771,285", "gem containers", "0.025 k/w", "ocp summit"):
+            with self.subTest(anchor=anchor):
+                self.assertNotIn(anchor, padding, f"{anchor!r} leaked into the distractor documents")
+
+    def test_no_rung_crosses_the_context_compression_threshold(self):
+        # Above it the stack compresses, and because the anchors sit at the two
+        # ends of the corpus, compression eats the padding between them and
+        # leaves the evidence adjacent. A rung that crosses this measures an
+        # easier task than its label while looking like a clean pass — a 110k
+        # rung scored 10/10 that way before the rungs were resized.
+        lc = importlib.import_module("_longcontext")
+        for case_id in (name for name in harness.case_ids() if name.startswith("lcr-")):
+            case = harness.load_case(case_id)
+            for model_id in harness.models():
+                service = harness.resolve_model(model_id)
+                if not harness.applicable(case, service)[0]:
+                    continue
+                item = case.items()[0]
+                total = harness.forge_llm.estimate_prompt_tokens(item["messages"]) + (
+                    harness._output_budget(item, service) or 0
+                )
+                with self.subTest(case=case_id, model=model_id):
+                    self.assertLess(total, lc.COMPRESSION_THRESHOLD, f"{case_id} on {model_id} would be compressed")
+
+    def test_the_rungs_differ_only_in_distance(self):
+        lc = importlib.import_module("_longcontext")
+        sizes = [len(lc.corpus_text(tokens)) for tokens in lc.RUNGS.values()]
+        self.assertEqual(sizes, sorted(sizes), "rungs must grow")
+        self.assertLess(sizes[0], sizes[-1])
+
+
+class ArchiveTests(unittest.TestCase):
+    """The copy that survives the vault being reorganised."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.archiving = importlib.import_module("archive")
+
+    def test_the_archive_refuses_to_live_where_it_could_be_committed(self):
+        with self.assertRaises(harness.EvalError) as caught:
+            self.archiving.archive_root(harness.EVALS_ROOT / "sources")
+        self.assertIn("repository", str(caught.exception))
+
+    def test_the_archive_refuses_to_live_inside_the_vault(self):
+        with self.assertRaises(harness.EvalError) as caught:
+            self.archiving.archive_root(harness.DEFAULT_VAULT / "backup")
+        self.assertIn("vault", str(caught.exception))
+
+    def test_a_denied_note_is_never_pulled_into_the_archive(self):
+        # The deny-list has to hold on this path too. It would be easy for a
+        # backup to become the way material re-enters the suite after the vault
+        # rule started refusing it.
+        spec = {"path": harness.DENIED_PREFIXES[0] + "/whatever.md", "sha256": "0" * 64}
+        raw, why = self.archiving._from_vault(spec, harness.DEFAULT_VAULT)
+        self.assertIsNone(raw)
+        self.assertIn("denied", why)
+
+    def test_an_excerpted_fixture_is_never_recovered_from_its_frozen_copy(self):
+        # A frozen excerpt is a subset of the source. Archiving it as the source
+        # would look fine and make re-pinning silently wrong later.
+        excerpted = {"excerpt": {"mode": "head", "chars": 100}, "sha256": "0" * 64}
+        raw, why = self.archiving._from_frozen("report-calnext", excerpted)
+        self.assertIsNone(raw)
+        self.assertIn("excerpt", why)
+
+    def test_a_recovered_copy_must_still_match_the_pinned_hash(self):
+        # A real, frozen, full-mode fixture, so the only thing that can fail is
+        # the hash comparison this test is about.
+        fixture_id = next(
+            name for name, spec in harness.fixtures().items()
+            if not spec.get("excerpt") and (harness.FROZEN / f"{name}.md").exists()
+        )
+        raw, why = self.archiving._from_frozen(fixture_id, {"excerpt": None, "sha256": "1" * 64})
+        self.assertIsNone(raw)
+        self.assertIn("hash", why)
+        # And the same fixture with its real hash comes back fine.
+        raw, why = self.archiving._from_frozen(fixture_id, harness.fixtures()[fixture_id])
+        self.assertIsNotNone(raw, why)
+
+    def test_the_vault_wins_when_it_still_has_the_fixture(self):
+        # The archive must not mask a deliberate edit: drift is a finding, and
+        # a backup that quietly supplies the old bytes would hide it.
+        fixtures = harness.fixtures()
+        fixture_id = "vault-schema"
+        raw, origin = self.archiving.resolve(fixture_id, fixtures[fixture_id], harness.DEFAULT_VAULT)
+        if raw is not None:
+            self.assertEqual(origin, "vault")
+
+    def test_an_orphan_never_blocks_a_run(self):
+        # An orphaned frozen file is information. An earlier version had `run`
+        # refuse on any freeze status that was not "ok", so a leftover file
+        # blocked every run until it was deleted.
+        self.assertNotIn("orphan", harness.BLOCKING_FREEZE_STATUSES)
+        self.assertIn("drifted", harness.BLOCKING_FREEZE_STATUSES)
+        self.assertIn("missing", harness.BLOCKING_FREEZE_STATUSES)

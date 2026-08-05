@@ -8,12 +8,18 @@
     "empty content. `outputHeadroom` is extra output tokens a model needs before",
     "it starts answering: a reasoning backend spends them thinking, and without",
     "it every reply is preamble that ends mid-thought.",
-    "Run `run.py doctor --model <id>` after adding an entry.",
+    "Do not hand-write an entry: `run.py add-model --url ... --model ...` reads",
+    "contextTokens, expectParams, expectModelPath and sizeGiB off the live",
+    "endpoint and probes where the reasoning goes. Then `run.py models` shows",
+    "every entry against what each endpoint is serving right now.",
     "`fingerprintUrl` points at somewhere that reports model metadata when the",
     "serving port does not: a proxy answers /v1/models with an id and nothing else,",
     "while the backend it fronts serves the same ids with params, quant, and context.",
     "For a hosted model add \"apiKeyEnv\": \"SOME_ENV_VAR\"; the suite reads the key",
-    "from the environment and never stores it here."
+    "from the environment and never stores it here.",
+    "`tier`, `family`, `sizeGiB` and `coResident` are read by the report only.",
+    "`coResident` means the weights fit in the VRAM left over while the bulk tier",
+    "is loaded, so this model could serve a stage in parallel rather than instead."
   ],
   "models": {
     "chat-27b": {
@@ -22,32 +28,14 @@
       "model": "chat",
       "contextTokens": 131072,
       "chatTemplateKwargs": null,
-      "notes": "The bulk tier every skill uses today. This is the baseline the others are read against.",
+      "tier": "bulk",
+      "family": "qwen3.6-27b",
+      "sizeGiB": 21.3,
+      "coResident": false,
+      "notes": "The bulk tier every skill uses today. This is the baseline the others are read against. Served by chat-backend-dense across both 3090s; :8004 and :8008 are two request-shaping profiles in front of the same llama-server, so this and think-27b address the same weights. No expectModelPath: :8010 reports metadata but not launch argv, so a path claim here could never be checked. expectQuant is what separates this from chat-27b-q4, since a requant falls inside the parameter-count tolerance by design.",
       "fingerprintUrl": "http://llms:8010/v1",
-      "expectParams": 27320697856
-    },
-    "task-9b": {
-      "label": "Qwen3.5-9B-Q4_K_M (task)",
-      "url": "http://llms:8007/v1",
-      "model": "task",
-      "contextTokens": 32768,
-      "chatTemplateKwargs": {
-        "enable_thinking": false
-      },
-      "expectModelPath": "/mnt/LLMs/llamacpp/llm-stack-git/models/Qwen3.5-9B-Q4_K_M.gguf",
-      "notes": "Only servable when the router has these weights loaded; :8007 serves whichever task model is configured, so `run` refuses unless the endpoint matches expectModelPath. No expectParams: this entry was never fingerprinted, and the results under results/task-9b/ predate fingerprinting — treat their model attribution as unconfirmed."
-    },
-    "task-4b": {
-      "label": "Qwen3.5-4B-UD-Q6_K_XL (task)",
-      "url": "http://llms:8007/v1",
-      "model": "task",
-      "contextTokens": 32768,
-      "chatTemplateKwargs": {
-        "enable_thinking": false
-      },
-      "expectParams": 4205751296,
-      "expectModelPath": "/mnt/LLMs/llamacpp/llm-stack-git/models/Qwen3.5-4B-UD-Q6_K_XL.gguf",
-      "notes": "Fingerprinted 2026-08-03: 4.21B params, Q6_K, ctx 32769, 1 slot. Shares a router with embed/ocr/rank at MODEL_ROUTER_MAX=1, so the first call after another member ran pays a swap. chatTemplateKwargs is now redundant here — the router's own preset passes --chat-template-kwargs {\"enable_thinking\":false} — but it is kept because it costs nothing and survives a preset that stops doing so."
+      "expectParams": 27320697856,
+      "expectQuant": "Q6_K"
     },
     "think-27b": {
       "label": "Qwen3.6-27B-Q6_K (code, thinking)",
@@ -56,9 +44,75 @@
       "contextTokens": 131072,
       "chatTemplateKwargs": null,
       "outputHeadroom": 12000,
+      "tier": "verify",
+      "family": "qwen3.6-27b",
+      "sizeGiB": 21.3,
+      "coResident": false,
       "notes": "The verification tier. Same weights as chat-27b with reasoning on, so the gap between the two is the value of thinking rather than of scale. Reasoning consumes the output budget before the answer starts, so every case needs headroom. First set to 3000 from two probe items at ~1,900 tokens; a full run then showed real cases spending 3,500-9,938, truncating items in four of twelve. Raised to cover the observed maximum with margin. A cap costs nothing unless it is reached, so err high: too low silently converts a model failure out of thin air.",
       "fingerprintUrl": "http://llms:8010/v1",
-      "expectParams": 27320697856
+      "expectParams": 27320697856,
+      "expectQuant": "Q6_K"
+    },
+    "task-4b": {
+      "label": "Qwen3.5-4B-UD-Q6_K_XL (task)",
+      "url": "http://llms:8007/v1",
+      "model": "task",
+      "contextTokens": 65538,
+      "chatTemplateKwargs": {
+        "enable_thinking": false
+      },
+      "tier": "small",
+      "family": "qwen3.5-4b",
+      "sizeGiB": 3.86,
+      "coResident": true,
+      "expectParams": 4205751296,
+      "expectModelPath": "/mnt/LLMs/llamacpp/llm-stack-git/models/Qwen3.5-4B-UD-Q6_K_XL.gguf",
+      "notes": "Fingerprinted 2026-08-03: 4.21B params, Q6_K, 1 slot. contextTokens corrected to 65538 on 2026-08-04 from TASK_CTX_SIZE on the live stack; it had been 32768, which under-budgeted every task-tier prompt by half. Shares a router with embed/ocr/rank at MODEL_ROUTER_MAX=1, so the first call after another member ran pays a swap. chatTemplateKwargs is now redundant here — the router's own preset passes --chat-template-kwargs {\"enable_thinking\":false} — but it is kept because it costs nothing and survives a preset that stops doing so."
+    },
+    "task-9b": {
+      "label": "Qwen3.5-9B-Q4_K_M (task)",
+      "url": "http://llms:8007/v1",
+      "model": "task",
+      "contextTokens": 65538,
+      "chatTemplateKwargs": {
+        "enable_thinking": false
+      },
+      "tier": "small",
+      "family": "qwen3.5-9b",
+      "sizeGiB": 5.47,
+      "coResident": true,
+      "expectModelPath": "/mnt/LLMs/llamacpp/llm-stack-git/models/Qwen3.5-9B-Q4_K_M.gguf",
+      "notes": "Only servable when the router has these weights loaded; :8007 serves whichever task model is configured, so `run` refuses unless the endpoint matches expectModelPath. No expectParams yet: this entry has never been fingerprinted. Run `add-model` against it once the weights are up to fill that in — until then expectModelPath is the only discriminator. The results under results/task-9b/ predate fingerprinting entirely; treat their model attribution as unconfirmed."
+    },
+    "moe-35a3b": {
+      "label": "Qwen3.6-35B-A3B-UD-Q4_K_M (chat, MoE)",
+      "url": "http://llms:8004/v1",
+      "model": "chat",
+      "contextTokens": 131072,
+      "chatTemplateKwargs": null,
+      "tier": "bulk",
+      "family": "qwen3.6-35b-a3b",
+      "sizeGiB": 21.11,
+      "coResident": false,
+      "fingerprintUrl": "http://llms:8010/v1",
+      "expectParams": 35000000000,
+      "expectQuant": "Q4",
+      "notes": "35B total, ~3B active. Occupies the same primary-backend slot as chat-27b — `chat-backend-moe` is a variant of the service behind :8004/:8008, not a separate port — so exactly one of this and chat-27b is servable at a time. expectParams is taken from the model's name, not from a fingerprint: nothing has ever loaded these weights here. If the real count sits outside the 10% tolerance the check will refuse a correct load, which is the safe direction to be wrong in — a refusal is visible, a mislabelled result is not. `add-model --id moe-35a3b --write` replaces the estimate with the measured value the first time it is up. The stack reports 255998 context on one slot for this variant; contextTokens is held at 131072 so the long-context rungs measure the same prompt against both."
+    },
+    "chat-27b-q4": {
+      "label": "Qwen3.6-27B-UD-Q4_K_XL (chat, non-thinking)",
+      "url": "http://llms:8004/v1",
+      "model": "chat",
+      "contextTokens": 131072,
+      "chatTemplateKwargs": null,
+      "tier": "bulk",
+      "family": "qwen3.6-27b",
+      "sizeGiB": 16.68,
+      "coResident": false,
+      "fingerprintUrl": "http://llms:8010/v1",
+      "expectParams": 27320697856,
+      "expectQuant": "Q4",
+      "notes": "The same weights as chat-27b at a smaller quant, so the gap between the two is the cost of quantization alone, with scale and reasoning held fixed. Shares the primary-backend slot with chat-27b and moe-35a3b. expectParams cannot separate it from chat-27b — a requant moves the count by less than the 10% tolerance, which is exactly what that tolerance is for — and :8010 reports no argv, so expectModelPath cannot work here either. expectQuant is the whole discriminator, and it is matched as a substring of the reported ftype so that the exact spelling (Q4_K_M, \"Q4_K - Medium\", Q4_K_XL) does not have to be guessed before the weights are ever loaded."
     }
   }
 }

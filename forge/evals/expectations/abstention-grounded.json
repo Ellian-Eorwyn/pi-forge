@@ -1,0 +1,117 @@
+{
+  "readme": [
+    "Questions over frozen transcripts. Half are answered by the source and half are",
+    "genuinely not, and the unanswerable half is the point: a model that answers them",
+    "anyway is doing what `docs/service-split-handoff.md` 7.4 records costing a review",
+    "pass its credibility. Every answerable item's `accept` list was checked against the",
+    "transcript when the meeting-brief key for the same fixture was written.",
+    "The unanswerable ones are deliberately adjacent to what the source does say, so",
+    "that guessing from context is tempting rather than absurd."
+  ],
+  "items": [
+    {
+      "id": "g1",
+      "fixture": "meeting-brattle",
+      "answerable": true,
+      "question": "According to the report discussed, how does the cost of a VPP compare to alternative options for resource adequacy?",
+      "accept": [
+        "40 to 60",
+        "40-60",
+        "40 60"
+      ]
+    },
+    {
+      "id": "g2",
+      "fixture": "meeting-brattle",
+      "answerable": false,
+      "question": "What was the total dollar cost of producing the Brattle report?",
+      "why": "the report's own budget is never mentioned; the meeting discusses the costs the report models, which is a different thing and an easy substitution"
+    },
+    {
+      "id": "g3",
+      "fixture": "meeting-vpp-panel",
+      "answerable": true,
+      "question": "What does the utility's residential battery program pay per kWh dispatched during an event?",
+      "accept": [
+        "1.70",
+        "1 70",
+        "$1.70"
+      ]
+    },
+    {
+      "id": "g4",
+      "fixture": "meeting-vpp-panel",
+      "answerable": false,
+      "question": "How many customers are currently enrolled in the utility's residential battery program?",
+      "why": "the payment rate, the programs and the goals are all given; an enrolment count never is"
+    },
+    {
+      "id": "g5",
+      "fixture": "meeting-vpp-intro",
+      "answerable": true,
+      "question": "What is the minimum aggregation size under FERC Order 2222?",
+      "accept": [
+        "100 kilowatt",
+        "100 kw",
+        "0.1 megawatt"
+      ]
+    },
+    {
+      "id": "g6",
+      "fixture": "meeting-vpp-intro",
+      "answerable": false,
+      "question": "In which year was FERC Order 2222 issued?",
+      "why": "the order is discussed at length and its date is never given, which makes it exactly the fact a model will supply from memory instead of from the source"
+    },
+    {
+      "id": "g7",
+      "fixture": "meeting-vpp-tech",
+      "answerable": true,
+      "question": "In how many different ways is OpenADR implemented across companies, according to the panel?",
+      "accept": [
+        "15",
+        "fifteen"
+      ]
+    },
+    {
+      "id": "g8",
+      "fixture": "meeting-vpp-tech",
+      "answerable": false,
+      "question": "What did Energy Hub pay to acquire Packetized Energy?",
+      "why": "the acquisition is stated; the price is not"
+    },
+    {
+      "id": "g9",
+      "fixture": "meeting-vpp-dr",
+      "answerable": true,
+      "question": "What share of manageable load does HVAC represent, according to the participant who raised it?",
+      "accept": [
+        "50",
+        "fifty"
+      ]
+    },
+    {
+      "id": "g10",
+      "fixture": "meeting-vpp-dr",
+      "answerable": false,
+      "question": "How long does a DRAM reporting spreadsheet take to complete?",
+      "why": "the spreadsheets, their frequency and who receives them are all covered; the time they take is not, though the speaker complains about them enough to imply it"
+    },
+    {
+      "id": "g11",
+      "fixture": "meeting-brattle",
+      "answerable": true,
+      "question": "How many megawatts of DERs does the modelled example use to replace a gas peaker?",
+      "accept": [
+        "400"
+      ]
+    },
+    {
+      "id": "g12",
+      "fixture": "meeting-vpp-panel",
+      "answerable": false,
+      "question": "Which specific battery manufacturers are enrolled in the utility's program?",
+      "why": "batteries, state of charge limits and local controls are discussed throughout without a single manufacturer being named"
+    }
+  ]
+}

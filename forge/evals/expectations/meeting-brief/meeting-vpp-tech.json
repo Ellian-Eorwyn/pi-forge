@@ -1,0 +1,262 @@
+{
+  "meeting": "VPP Insiders session three: the technology stack, integration and measurement",
+  "note": "The last planned session of the learning group. Four vendors with incompatible positions on standards and open source, and three facts that invert if read carelessly: a platform was acquired rather than built, a standards body's protocol is described as not really a standard, and a regulatory pilot's outcome is explicitly unknown to the speaker who raised it. Attributed by speaker label and company.",
+  "facts": [
+    {
+      "id": "f1",
+      "kind": "attribution",
+      "canonical": "this is the last planned session of the VPP learning group, covering the technology aspects",
+      "aliases": [
+        "the last planned session for the VPP Learning Group"
+      ],
+      "evidence": "Well the last planned session for the BPP Learning Group."
+    },
+    {
+      "id": "f2",
+      "kind": "attribution",
+      "canonical": "the homework was a video of two Tesla engineers describing how they built their entire stack",
+      "aliases": [
+        "video about those two Tesla engineers who describe how they built their entire stack"
+      ],
+      "evidence": "Essentially describe how they built their entire stack."
+    },
+    {
+      "id": "f3",
+      "kind": "attribution",
+      "canonical": "OpenADR was chosen as a protocol because market participants already use it, not because it was preferred",
+      "aliases": [
+        "we didn't use it because we wanted to, we used it because so many market participants already do"
+      ],
+      "evidence": "And uh we didn't use it because we wanted to, we used it because so many market participants already do"
+    },
+    {
+      "id": "f4",
+      "kind": "figure",
+      "canonical": "OpenADR is implemented in 15 different ways at 15 different companies, so it functions less as a standard than as a starting point",
+      "aliases": [
+        "OpenADR is implemented in 15 different ways at 15 different companies"
+      ],
+      "evidence": "interpretations of standards take like imp OpenADR is implemented in 15 different ways at 15 different companies."
+    },
+    {
+      "id": "f5",
+      "kind": "attribution",
+      "canonical": "Green Button is a standard that different utilities implement entirely differently",
+      "aliases": [
+        "green buttons another great example",
+        "Can be implemented entirely differently by different utilities"
+      ],
+      "evidence": "Can be implemented entirely differently by different utilities, although there is a standard."
+    },
+    {
+      "id": "f6",
+      "kind": "attribution",
+      "canonical": "Leap is a wholesale markets access platform that deliberately does not send signals directly to end devices",
+      "aliases": [
+        "we do not send signals directly to end devices today",
+        "we're a wholesale markets access platform"
+      ],
+      "evidence": "Um we d we do not send uh signals directly to end devices today."
+    },
+    {
+      "id": "f7",
+      "kind": "figure",
+      "canonical": "Leap is active in four or five wholesale markets and plans to expand across North America over the next year or two",
+      "aliases": [
+        "active in four or five wholesale markets"
+      ],
+      "evidence": "And uh right now we're active in, no, I'm gonna get the number wrong, uh, but four or five wholesale markets and looking to expand to all over the next year or two in in North America."
+    },
+    {
+      "id": "f8",
+      "kind": "attribution",
+      "canonical": "Energy Hub acquired a company called Packetized Energy",
+      "aliases": [
+        "we acquired a company, Packetized Energy"
+      ],
+      "evidence": "So we we acquired a company, Packetized Energy, that"
+    },
+    {
+      "id": "f9",
+      "kind": "attribution",
+      "canonical": "New Hampshire being a cooperative is what allows devices there to be treated as revenue grade",
+      "aliases": [
+        "New Hampshire is a cooperative is allowing to treat these devices as revenue grade"
+      ],
+      "evidence": "Uh we didn't really introduce this, but the fact that New Hampshire is a cooperative is allowing to treat these devices as uh, to Brady's point, revenue gr revenue grade."
+    },
+    {
+      "id": "f10",
+      "kind": "attribution",
+      "canonical": "Baltimore Gas and Electric ran a pilot treating EV chargers as revenue grade, waiving the Code of Maryland regulations for level two home stations",
+      "aliases": [
+        "Baltimore Gas and Electric had a pilot where they treated EV chargers as revenue grade",
+        "waive their Code of Maryland regulations for level two EV home stations"
+      ],
+      "evidence": "I think a couple years ago Baltimore Gas and Electric had a pilot uh where they treated EV chargers as revenue grade."
+    },
+    {
+      "id": "f11",
+      "kind": "attribution",
+      "canonical": "in Texas the market runs measurement and settlement itself using Smart Meter Texas and a regression model",
+      "aliases": [
+        "Texas being a great example, like they do it all themselves",
+        "Texas uses a regression model"
+      ],
+      "evidence": "Texas uses a regression model."
+    },
+    {
+      "id": "f12",
+      "kind": "figure",
+      "canonical": "demand response baselines vary by market, such as four or five days in MISO and 10 of 10 or 5 of 10 in New York",
+      "aliases": [
+        "selecting four or five like days in MISO or 10 of 10 and 5 of 10 in New York"
+      ],
+      "evidence": "baseline is used, whether you're selecting four or five like days in MISO or 10 of 10 and 5 of 10 in New York."
+    },
+    {
+      "id": "f13",
+      "kind": "attribution",
+      "canonical": "whole home meter data at the service delivery point remains the standard practice for measurement and verification, not device telemetry",
+      "aliases": [
+        "whole home meter data is the standard practice",
+        "what really matters is the service delivery point, the meter"
+      ],
+      "evidence": "We're more than happy to compare it to whole home meter data, but what really matters is the service delivery point, the meter."
+    },
+    {
+      "id": "f14",
+      "kind": "figure",
+      "canonical": "performance data latency is measured in months where the utility does the calculations, and roughly daily where meter data access exists",
+      "aliases": [
+        "there's a decent amount of latency actually measured in months",
+        "most places we're getting that daily"
+      ],
+      "evidence": "On the other side where we get the data access to reader data, most places we're getting that daily"
+    },
+    {
+      "id": "f15",
+      "kind": "figure",
+      "canonical": "ancillary services telemetry is far more demanding, measured in seconds between the device and the market",
+      "aliases": [
+        "measured in sort of second round time between the device and the market"
+      ],
+      "evidence": "Um it like measured in sort of second round time between the device and the market."
+    },
+    {
+      "id": "f16",
+      "kind": "figure",
+      "canonical": "whole home revenue grade metering carries a 95 to 98 percent tolerance, which submetered telemetry has yet to match",
+      "aliases": [
+        "whole home 95% 98% tolerance revenue grade metering"
+      ],
+      "evidence": "That is the next frontier, I think, of being able to convince people that sub-metered telemetry is actually as good as using whole home 95% 98% tolerance revenue grade metering."
+    },
+    {
+      "id": "f17",
+      "kind": "attribution",
+      "canonical": "contractual relationships matter more than the technology, so the successful products are the ones that get the agreements right",
+      "aliases": [
+        "most successful companies are the ones who can figure out the right agreements with the right other parties"
+      ],
+      "evidence": "Some of the uh I think most successful companies are the ones and products are the ones who can figure out the right agreements with the right other parties."
+    },
+    {
+      "id": "f18",
+      "kind": "attribution",
+      "canonical": "the main objection to open source here is security, because utilities treat this as critical infrastructure whose code could be studied for exploits",
+      "aliases": [
+        "One of the big concerns with open source is security",
+        "the code can be studied and exploits can be found"
+      ],
+      "evidence": "One of the big concerns with open source is security."
+    },
+    {
+      "id": "f19",
+      "kind": "attribution",
+      "canonical": "measurement and verification methodology is the part participants agreed could reasonably be open sourced, unlike device control",
+      "aliases": [
+        "Methodologies for measurement and verification, 100%",
+        "Open source the crap out of that"
+      ],
+      "evidence": "Methodologies for measurement and verification, 100%."
+    },
+    {
+      "id": "f20",
+      "kind": "attribution",
+      "canonical": "engineers at energy companies do not usually choose their own protocols, which are decided at business level, so bottom-up open source adoption does not work here",
+      "aliases": [
+        "Engineers at energy companies don't typically get to pick what program they participate in or what protocol they use"
+      ],
+      "evidence": "Engineers at energy companies don't typically get to"
+    },
+    {
+      "id": "f21",
+      "kind": "action",
+      "canonical": "a paper on managing V2G dispatch risk is being written and is expected to publish this year",
+      "aliases": [
+        "I'm actually writing a paper on that and I expect to publish that this year"
+      ],
+      "evidence": "I'm actually writing a paper on that and I expect to publish that this year."
+    },
+    {
+      "id": "f22",
+      "kind": "action",
+      "canonical": "the conversation continues on Slack after the final session",
+      "aliases": [
+        "we'll keep going in the conversation on Slack"
+      ],
+      "evidence": "And we'll keep going in the conversation on Slack."
+    }
+  ],
+  "traps": [
+    {
+      "id": "t1",
+      "canonical": "Energy Hub built Packetized Energy",
+      "aliases": [
+        "Energy Hub built Packetized Energy",
+        "developed Packetized Energy in house"
+      ],
+      "why": "they acquired it. A one-word inversion that changes what the company did, and the kind of thing a fluent summary smooths over"
+    },
+    {
+      "id": "t2",
+      "canonical": "OpenADR provides working interoperability across the industry",
+      "aliases": [
+        "OpenADR provides interoperability across the industry",
+        "OpenADR solves interoperability"
+      ],
+      "why": "the opposite was argued: implemented fifteen different ways at fifteen companies, and therefore 'not really standards'"
+    },
+    {
+      "id": "t3",
+      "canonical": "the Baltimore Gas and Electric revenue-grade pilot succeeded",
+      "aliases": [
+        "the BGE pilot succeeded",
+        "the pilot was successful"
+      ],
+      "why": "the speaker who raised it said outright 'I actually don't know where that pilot went' and had found no news since"
+    },
+    {
+      "id": "t4",
+      "canonical": "the panel agreed to open source their platforms",
+      "aliases": [
+        "the panel agreed to open source their platforms",
+        "they will open source their software"
+      ],
+      "why": "open source was discussed sceptically throughout; the only agreement was that M&V methodology could be open, explicitly not device control"
+    }
+  ],
+  "notStated": [
+    {
+      "id": "n1",
+      "field": "owner",
+      "canonical": "continue the conversation on Slack",
+      "aliases": [
+        "keep going in the conversation on Slack",
+        "continue on Slack"
+      ],
+      "why": "addressed to the group with nobody named"
+    }
+  ]
+}

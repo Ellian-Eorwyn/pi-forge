@@ -1,0 +1,155 @@
+{
+  "readme": [
+    "Questions for the three long-context rungs. Each needs two facts from two",
+    "different documents; none can be answered by finding one keyword. Two are",
+    "unanswerable on purpose, and are scored the same way as the abstention cases.",
+    "Every anchor was checked to appear in the document named and nowhere else in",
+    "the corpus; `tests/test_evals.py` re-checks that so a corpus change cannot",
+    "quietly make a question answerable from the wrong place."
+  ],
+  "items": [
+    {
+      "id": "q1",
+      "answerable": true,
+      "documents": [
+        "lcr-arpae-q6",
+        "lcr-arpae-q8"
+      ],
+      "question": "The project demonstrated one scale of prototype in the earlier quarterly report and finalised the design of a much larger one in the later report. What are the two power ratings?",
+      "accept": [
+        [
+          "4",
+          "100"
+        ]
+      ],
+      "why": "the 4 kW mid-phase demonstration is only in Q6 and the 100 kW demo only in Q8"
+    },
+    {
+      "id": "q2",
+      "answerable": true,
+      "documents": [
+        "lcr-arpae-q6",
+        "lcr-arpae-q8"
+      ],
+      "question": "How many months separate the signature dates of the two ARPA-E quarterly reports?",
+      "accept": [
+        "6",
+        "six"
+      ],
+      "why": "04/30/2025 in Q6 and 10/31/2025 in Q8; requires locating both and subtracting"
+    },
+    {
+      "id": "q3",
+      "answerable": true,
+      "documents": [
+        "lcr-arpae-q6",
+        "lcr-arpae-q8"
+      ],
+      "question": "The earlier report describes a stand-alone container unit with a stated megawatt capacity. What is that capacity, and what is the power rating of the demonstration unit whose design the later report finalises?",
+      "accept": [
+        [
+          "1.5",
+          "100"
+        ]
+      ],
+      "why": "replaces an ambiguous container-size question. Q6 mentions both a 40-ft container and a 20 ft x 16 ft footprint, so asking for 'the container size' had two defensible answers and the first live run was marked wrong for giving one of them. Capacity is unambiguous: 1.5 MW appears only in Q6 and 100 kW only in Q8."
+    },
+    {
+      "id": "q4",
+      "answerable": true,
+      "documents": [
+        "lcr-arpae-q8"
+      ],
+      "question": "Which partner did ARPA-E approve as an international vendor, and which quarterly report says so?",
+      "accept": [
+        [
+          "cool-it",
+          "q8"
+        ],
+        [
+          "cool it",
+          "q8"
+        ],
+        [
+          "cool-it",
+          "later"
+        ]
+      ],
+      "why": "stated once, in Q8 only"
+    },
+    {
+      "id": "q5",
+      "answerable": true,
+      "documents": [
+        "lcr-arpae-q6"
+      ],
+      "question": "Which company is named in the earlier quarterly report's technology-to-market activities but appears nowhere in the later quarterly report?",
+      "accept": [
+        "supermicro",
+        "2050 partners",
+        "liquidcoolsolutions",
+        "liquid cool solutions",
+        "pg&e",
+        "pge"
+      ],
+      "why": "one fact, derivable only by reading both reports. Four companies satisfy it — SuperMicro, 2050 Partners, LiquidCoolSolutions and PG&E each appear once in Q6 and not at all in Q8 — and all four are accepted. The first version listed only SuperMicro and marked a correct answer wrong on the live run; a question with several right answers is a weaker discriminator than one with a unique answer, but far better than one whose key is incomplete. Known weakness: SuperMicro and 2050 Partners also appear in the market-study distractor, so two of the four answers are reachable without comparing the quarters. The Q6-yes/Q8-no property still has to hold for the answer to be right, but this item is easier than the others and should not be read as evidence of cross-document reasoning on its own."
+    },
+    {
+      "id": "q6",
+      "answerable": true,
+      "documents": [
+        "lcr-arpae-q6"
+      ],
+      "question": "What are the two numeric targets given for the refined liquid loop system model: system power as a share of IT load, and total thermal resistance from chip to ambient?",
+      "accept": [
+        [
+          "3.5",
+          "0.025"
+        ]
+      ],
+      "why": "both in one milestone row of Q6 and nowhere else"
+    },
+    {
+      "id": "q7",
+      "answerable": true,
+      "documents": [
+        "lcr-arpae-q8"
+      ],
+      "question": "What is the patent application number the team received examiner feedback on?",
+      "accept": [
+        "18/771,285",
+        "18/771285"
+      ],
+      "why": "appears once, in Q8; a distractor-heavy corpus makes finding it a retrieval test at distance"
+    },
+    {
+      "id": "q8",
+      "answerable": true,
+      "documents": [
+        "lcr-arpae-q8"
+      ],
+      "question": "Two team members attended a summit in October 2025. Which one, and on what dates?",
+      "accept": [
+        [
+          "ocp",
+          "21"
+        ]
+      ],
+      "why": "OCP Summit, October 21st to 23rd 2025, stated once in Q8"
+    },
+    {
+      "id": "q9",
+      "answerable": false,
+      "documents": [],
+      "question": "What was the total dollar value of the budgetary quote obtained from GEM Containers?",
+      "why": "the quote is reported as obtained and its value is never given, in either report"
+    },
+    {
+      "id": "q10",
+      "answerable": false,
+      "documents": [],
+      "question": "How many staff are employed on the HoMEDUCS project?",
+      "why": "the corpus names partners, tasks and milestones throughout without ever giving a headcount, which makes a number feel available"
+    }
+  ]
+}

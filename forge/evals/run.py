@@ -2,6 +2,10 @@
 """Evaluate a model against the stages pi-forge skills actually delegate.
 
     run.py freeze [--vault PATH] [--check]   materialize fixtures from the vault
+    run.py archive [--check]                 copy fixture sources outside the vault
+    run.py models                            every entry against what is loaded now
+    run.py add-model --url U --model M       write an entry by reading the endpoint
+    run.py throughput --model ID             prefill and decode rates, for the speed half
     run.py doctor --model ID                 probe one endpoint before spending on it
     run.py run --model ID [--cases a,b]      run the suite, write results/<model>/
     run.py judge --models a,b,c              build the blind comparison bundle
@@ -24,6 +28,9 @@ sys.path.insert(0, str(EVALS_ROOT))
 import harness  # noqa: E402
 import judge as judging  # noqa: E402
 import compare as comparing  # noqa: E402
+import archive as archiving  # noqa: E402
+import registry  # noqa: E402
+import throughput as throughputs  # noqa: E402
 import report as reporting  # noqa: E402
 
 
@@ -31,7 +38,7 @@ def command_freeze(args):
     rows = harness.freeze(vault=args.vault, check=args.check, repin=args.repin)
     problems = 0
     for fixture_id, status, detail in rows:
-        if status in {"refused", "missing", "drifted", "stale"}:
+        if status in harness.BLOCKING_FREEZE_STATUSES:
             problems += 1
         print(f"  {status:>8}  {fixture_id:<32} {detail}")
     verb = "checked" if args.check else "froze"
@@ -41,6 +48,54 @@ def command_freeze(args):
     if args.repin:
         print("Re-pinned. Results taken before this point are no longer comparable with results after it.")
     return 1 if problems and args.check else 0
+
+
+def command_archive(args):
+    root = archiving.archive_root(args.root)
+    rows = archiving.verify(root) if args.check else archiving.capture(vault=args.vault, root=root)
+    problems = 0
+    for fixture_id, status, detail in rows:
+        if status in {"unresolvable", "absent", "corrupt"}:
+            problems += 1
+        if args.verbose or status not in {"current", "ok", "archived"}:
+            print(f"  {status:>12}  {fixture_id:<32} {detail}")
+    verb = "checked" if args.check else "archived"
+    total = sum(path.stat().st_size for path in archiving.sources_dir(root).glob("*.md")) if archiving.sources_dir(root).is_dir() else 0
+    print(f"\n{verb} {len(rows)} fixtures at {root} ({total / 1e6:.1f} MB), {problems} needing attention")
+    if not args.check:
+        print("Outside the vault and outside the repository, so neither a reorganised note nor a")
+        print("stray `git add -f` can reach it. `run.py archive --check` verifies it.")
+    return 1 if problems else 0
+
+
+def command_models(args):
+    rows = registry.survey(args.models.split(",") if args.models else None)
+    print(registry.render_survey(rows))
+    return 0
+
+
+def command_add_model(args):
+    result = registry.probe(
+        args.url,
+        args.model,
+        timeout=args.timeout,
+        fingerprint_url=args.fingerprint_url,
+    )
+    model_id = args.id or args.model
+    print(registry.render_entry(model_id, result["entry"], result["evidence"], result["probe"]))
+    if args.write:
+        path = registry.write_entry(model_id, result["entry"])
+        print(f"\nwrote {model_id} to {path}")
+        print(f"Add a label and notes by hand, then: run.py doctor --model {model_id}")
+    else:
+        print("\nRe-run with --write to add this to models.json.")
+    return 0
+
+
+def command_throughput(args):
+    result = throughputs.measure(args.model, timeout=args.timeout)
+    print(throughputs.render(result))
+    return 0
 
 
 def command_doctor(args):
@@ -68,7 +123,8 @@ def command_doctor(args):
 def command_run(args):
     service = harness.resolve_model(args.model)
     variant = harness.load_variant(getattr(args, "variant", None))
-    drift = [row for row in harness.freeze(vault=args.vault, check=True) if row[1] != "ok"]
+    drift = [row for row in harness.freeze(vault=args.vault, check=True)
+             if row[1] in harness.BLOCKING_FREEZE_STATUSES]
     if drift and not args.allow_drift:
         print("Fixtures are not frozen or have drifted:", file=sys.stderr)
         for fixture_id, status, detail in drift:
@@ -76,11 +132,17 @@ def command_run(args):
         print("\nRun `run.py freeze` first, or pass --allow-drift to measure anyway.", file=sys.stderr)
         return 1
 
-    selected = args.cases.split(",") if args.cases else harness.case_ids()
-    unknown = [case for case in selected if case not in harness.case_ids()]
-    if unknown:
-        print(f"unknown cases: {', '.join(unknown)}", file=sys.stderr)
-        return 1
+    # An explicit --cases list is obeyed exactly. Filtering it by suite would
+    # silently drop a case someone named, which is the one thing a selection
+    # flag must never do.
+    if args.cases:
+        selected = args.cases.split(",")
+        unknown = [case for case in selected if case not in harness.case_ids()]
+        if unknown:
+            print(f"unknown cases: {', '.join(unknown)}", file=sys.stderr)
+            return 1
+    else:
+        selected = harness.cases_for_suite(args.suite)
 
     fingerprint = harness.served_fingerprint(service)
     mismatch = harness.check_served(service, fingerprint)
@@ -91,17 +153,25 @@ def command_run(args):
         return 1
 
     served = ""
-    if fingerprint.get("n_params"):
-        served = f"  [serving {fingerprint['n_params'] / 1e9:.1f}B"
-        served += f", {fingerprint['ftype']}]" if fingerprint.get("ftype") else "]"
+    params = harness.served_params(fingerprint)
+    if params:
+        quant = harness.served_quant(fingerprint)
+        served = f"  [serving {params / 1e9:.1f}B{', ' + quant if quant else ''}]"
+    unconfirmed = harness.attribution_warning(service, fingerprint)
+    if unconfirmed:
+        print(f"warning: {unconfirmed}.", file=sys.stderr)
+        print("         Results will be labelled but the label is unverified.\n", file=sys.stderr)
     mode = f"repeat {args.repeat}" if args.repeat > 1 else f"stabilize {args.stabilize}" if args.stabilize > 1 else "single pass"
-    print(f"{service['label']}  ->  {service['url']}{served}  ({len(selected)} cases, {mode})\n")
+    scope = f"{len(selected)} cases" if args.cases else f"{len(selected)} cases in the {args.suite} suite"
+    print(f"{service['label']}  ->  {service['url']}{served}  ({scope}, {mode})\n")
 
     documents = {}
     failures = 0
     for case_id in selected:
         document = _run_and_report(case_id, service, args.repeat, args, "", variant)
         documents[case_id] = document
+        if document.get("notApplicable"):
+            continue
         if document["summary"]["passed"] != document["summary"]["items"]:
             failures += 1
 
@@ -120,6 +190,9 @@ def command_run(args):
             print("\nNo case sits close enough to a threshold to need repeating.")
 
     print(f"\nwrote {harness.results_dir(args.model, (variant or {}).get('name', harness.BASE_VARIANT))}")
+    skipped = [case for case, d in documents.items() if d.get("notApplicable")]
+    if skipped:
+        print(f"{len(skipped)} case(s) do not fit this model's context and were not run: {', '.join(skipped)}")
     unstable = [case for case, d in documents.items() if d["summary"].get("stability", {}).get("unstableIds")]
     if unstable:
         print(f"{len(unstable)} case(s) have items that flipped between attempts; the report will not clear those.")
@@ -133,6 +206,9 @@ def _run_and_report(case_id, service, repeat, args, indent, variant=None):
         case_id, service, repeat=repeat, progress=_progress if args.verbose else None, variant=variant
     )
     harness.write_result(document)
+    if document.get("notApplicable"):
+        print(f"{indent}  {case_id:<28} {'not run':>7}   {document['notApplicable']}")
+        return document
     summary = document["summary"]
     flag = "" if summary["passed"] == summary["items"] else "  <-"
     unstable = summary.get("stability", {}).get("unstableIds") or []
@@ -196,6 +272,33 @@ def main(argv=None):
     )
     freeze.set_defaults(handler=command_freeze)
 
+    archive = sub.add_parser("archive", help="copy every fixture's source outside the vault and the repository")
+    archive.add_argument("--check", action="store_true", help="verify the archive against the pinned hashes")
+    archive.add_argument("--vault", help="vault root to copy from")
+    archive.add_argument("--root", help="where the archive lives (default ~/.pi-forge/eval-sources or FORGE_EVAL_ARCHIVE)")
+    archive.add_argument("--verbose", action="store_true", help="list every fixture, not just the ones needing attention")
+    archive.set_defaults(handler=command_archive)
+
+    models = sub.add_parser("models", help="every registry entry against what its endpoint is serving now")
+    models.add_argument("--models", help="comma-separated model ids (default: all)")
+    models.set_defaults(handler=command_models)
+
+    add_model = sub.add_parser("add-model", help="write a models.json entry by reading a live endpoint")
+    add_model.add_argument("--url", required=True, help="bare /v1 base or a full chat-completions URL")
+    add_model.add_argument("--model", required=True, help="model id as the endpoint serves it")
+    add_model.add_argument("--id", help="registry key (default: the model id)")
+    add_model.add_argument(
+        "--fingerprint-url", help="where metadata lives when the serving port is a bare proxy, e.g. http://llms:8010/v1"
+    )
+    add_model.add_argument("--timeout", type=float, default=180.0)
+    add_model.add_argument("--write", action="store_true", help="add it to models.json instead of only printing it")
+    add_model.set_defaults(handler=command_add_model)
+
+    throughput = sub.add_parser("throughput", help="prefill and decode rates at the sizes the suite uses")
+    throughput.add_argument("--model", required=True)
+    throughput.add_argument("--timeout", type=float, default=600.0)
+    throughput.set_defaults(handler=command_throughput)
+
     doctor = sub.add_parser("doctor", help="probe one model endpoint")
     doctor.add_argument("--model", required=True)
     doctor.add_argument("--timeout", type=float, default=120.0)
@@ -203,7 +306,13 @@ def main(argv=None):
 
     run = sub.add_parser("run", help="run the suite against one model")
     run.add_argument("--model", required=True)
-    run.add_argument("--cases", help="comma-separated case ids (default: all)")
+    run.add_argument("--cases", help="comma-separated case ids; obeyed exactly, ignoring --suite")
+    run.add_argument(
+        "--suite",
+        default=harness.DEFAULT_SUITE,
+        choices=sorted(harness.SUITES),
+        help="how much to run: quick while iterating, standard for a routine comparison, full when a decision rests on it",
+    )
     run.add_argument("--repeat", type=int, default=1, help="fixed samples per item for every case; usually --stabilize is what you want")
     run.add_argument(
         "--stabilize",

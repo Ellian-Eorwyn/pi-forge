@@ -1,0 +1,181 @@
+{
+  "meeting": "VPP Insiders discussion: demand-response reporting, VPP technologies, storage barriers",
+  "note": "An informal peer discussion group, not a decision meeting. That is why it is here: the correct `decisions` list is empty or nearly so, and a model that manufactures four decisions from a wide-ranging conversation is doing the thing this case exists to catch. Facts are attributed by speaker label, never by the personal names participants use for each other in speech, so this key carries no biographical detail about real people.",
+  "facts": [
+    {
+      "id": "f1",
+      "kind": "attribution",
+      "canonical": "DRAM reporting is done on spreadsheets submitted to the IOUs, PG&E, SCE and SDG&E",
+      "aliases": [
+        "DRAM spreadsheets submitted to the IOUs PG&E SCE SDG&E"
+      ],
+      "evidence": "With DRAM, you submit you you have those spreadsheets to the IOUs, so PGE, S C E, S D G N E, and then they do their own reporting for the for the DR"
+    },
+    {
+      "id": "f2",
+      "kind": "attribution",
+      "canonical": "DRAM reporting must be filed yearly and monthly",
+      "aliases": [
+        "yearly and monthly reporting for the IOU"
+      ],
+      "evidence": "No, it you have to do this on a yearly and a monthly basis for the IOU."
+    },
+    {
+      "id": "f3",
+      "kind": "attribution",
+      "canonical": "the DRAM program is technically still a pilot program, which affected its funding and longevity",
+      "aliases": [
+        "DRAM is still a pilot program"
+      ],
+      "evidence": "Well there's like maybe a nuance that the DRAM program is technically still a pilot program."
+    },
+    {
+      "id": "f4",
+      "kind": "attribution",
+      "canonical": "Tesla registered as a retail energy provider and is entering the Texas market as a VPP",
+      "aliases": [
+        "Tesla registered as a retail energy provider",
+        "Tesla entering the market as a VPP"
+      ],
+      "evidence": "They registered as a retail energy provider or REAP as some people call it."
+    },
+    {
+      "id": "f5",
+      "kind": "figure",
+      "canonical": "HVAC represents perhaps 50% of manageable load",
+      "aliases": [
+        "HVAC is 50% of the manageable load"
+      ],
+      "evidence": "Fascinating to me is that they currently represent perhaps 50% of the manageable load out there."
+    },
+    {
+      "id": "f6",
+      "kind": "figure",
+      "canonical": "a C&I interconnection application takes between three and six months",
+      "aliases": [
+        "interconnection application takes three to six months"
+      ],
+      "evidence": "most of my like last few years in the CNI world and the interconnection application takes like between like three to six months and it's"
+    },
+    {
+      "id": "f7",
+      "kind": "figure",
+      "canonical": "technology companies do not own the assets in about 99% of cases",
+      "aliases": [
+        "technology companies will never own the assets in 99% of cases"
+      ],
+      "evidence": "Like technology companies will never own the assets in like 99% cases"
+    },
+    {
+      "id": "f8",
+      "kind": "figure",
+      "canonical": "a home power wall costs around 11k up front",
+      "aliases": [
+        "fork out 11k for a power wall"
+      ],
+      "evidence": "And it's like, oh, I want to fork out 11k."
+    },
+    {
+      "id": "f9",
+      "kind": "attribution",
+      "canonical": "Hawaii Electric moved from rate basing to performance-based standards",
+      "aliases": [
+        "Hawaii electric company changed to performance based standards"
+      ],
+      "evidence": "their performance based um standards now."
+    },
+    {
+      "id": "f10",
+      "kind": "attribution",
+      "canonical": "utilities rate base capital improvements and are not rewarded for energy savings or efficiency",
+      "aliases": [
+        "utilities are not rewarded for energy savings or energy efficiency"
+      ],
+      "evidence": "you don't get like rewarded for energy savings or for energy efficiency."
+    },
+    {
+      "id": "f11",
+      "kind": "attribution",
+      "canonical": "the DOE runs a program called Connected Communities which recently completed another award cycle",
+      "aliases": [
+        "DOE program called Connected Communities"
+      ],
+      "evidence": "called Connected Communities the DOE has been running."
+    },
+    {
+      "id": "f12",
+      "kind": "attribution",
+      "canonical": "legacy chillers and boilers use refrigerant, oil or gas rather than electricity, so they cannot participate in a VPP",
+      "aliases": [
+        "legacy chillers use refrigerant so they cannot participate"
+      ],
+      "evidence": "So I feel the reason for that is uh the the chillers that have been installed in past like couple of decades, they have they use refrigerant."
+    },
+    {
+      "id": "f13",
+      "kind": "attribution",
+      "canonical": "NEM 3.0 created urgency among customers who wanted to keep the better selling rate under the 2.0 policy",
+      "aliases": [
+        "NEM 3.0 urgency to get the benefit of the 2.0 policy"
+      ],
+      "evidence": "uh extremely lot of urgency that we saw from customers point of view where people really wanted to uh at the have the benefit of the 2."
+    },
+    {
+      "id": "f14",
+      "kind": "attribution",
+      "canonical": "the Matter smart home protocol works without Wi-Fi",
+      "aliases": [
+        "Matter protocol does not require Wi-Fi"
+      ],
+      "evidence": "And the best part I found is that it doesn't even require Wi-Fi."
+    },
+    {
+      "id": "f15",
+      "kind": "action",
+      "canonical": "share the links to the DRAM and resource adequacy reporting spreadsheets",
+      "aliases": [
+        "share the links to the reporting spreadsheets",
+        "get the link so you can see the files"
+      ],
+      "evidence": "But I'll I'll get the link so you can see uh for yourself what those files look like"
+    }
+  ],
+  "traps": [
+    {
+      "id": "t1",
+      "canonical": "Tesla will become a national utility",
+      "aliases": [
+        "Tesla could become a national utility"
+      ],
+      "why": "raised as speculation about an Elon Musk statement and immediately dismissed by another participant as 'the words of someone who doesn't know what they're talking about'"
+    },
+    {
+      "id": "t2",
+      "canonical": "the group agreed to build an open VPP platform",
+      "aliases": [
+        "build an open VPP platform"
+      ],
+      "why": "described by one speaker as a naive idea he once had and then explicitly called not practical"
+    },
+    {
+      "id": "t3",
+      "canonical": "utilities will adopt whole-home retrofit programs",
+      "aliases": [
+        "whole home retrofit program"
+      ],
+      "why": "one participant's vision of what should happen, not anything the group settled or anyone committed to"
+    }
+  ],
+  "notStated": [
+    {
+      "id": "n1",
+      "field": "due",
+      "canonical": "share the links to the reporting spreadsheets",
+      "aliases": [
+        "share the links",
+        "get the link"
+      ],
+      "why": "the speaker promised the links twice and never named a time"
+    }
+  ]
+}

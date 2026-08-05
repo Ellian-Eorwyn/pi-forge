@@ -1,0 +1,10 @@
+{
+  "name": "meeting-brief-no-abstention",
+  "why": "Calibration, not an improvement. Strips the clause the whole abstention half of meeting-brief measures compliance with. If `abstainedCorrectly` does not fall and invented owners do not rise, the scorer cannot see a change known to matter, and every null result it later produces is uninterpretable. Same argument as variants/enumeration-clause-removed.json.",
+  "applies": [
+    "meeting-brief"
+  ],
+  "patch": {
+    "systemStrip": "\n- Write \"Unassigned\" or \"Not stated\" rather than inferring an owner or a deadline."
+  }
+}

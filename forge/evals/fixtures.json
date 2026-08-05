@@ -344,6 +344,80 @@
         "end": 1400
       },
       "note": "A second Speaker-N diarized meeting, so the meeting cleanup case is not eight windows of one conversation. Diarized rather than named, which is why it is usable where a transcript carrying real first names would not be."
+    },
+    "meeting-vpp-intro": {
+      "path": "10 Sources/10.03 Transcript/Work/Market Research/Meeting - Introduction To Virtual Power Plants - Transcript.md",
+      "sha256": "dedb288d720c4e92f20d5eee84c552acf58c72129eb5f092fe482186d16e05a0",
+      "note": "Public VPP Insiders webinar, Speaker N labels. Whole meeting, not the chunk transcript-vpp-chunk takes from it: meeting-brief measures reading a meeting end to end, which is the thing the map-reduce summary path never does."
+    },
+    "meeting-vpp-tech": {
+      "path": "10 Sources/10.03 Transcript/Work/Market Research/Meeting - VPP Insiders Tech Discussion - Transcript.md",
+      "sha256": "1fbf739559ae65707a9259b9478281d237dee167227187c59e93535835dcf567",
+      "note": "Public VPP Insiders webinar on technology integration, Speaker N labels. Panellists name their own companies in speech, which is public webinar material."
+    },
+    "meeting-brattle": {
+      "path": "10 Sources/10.03 Transcript/Work/Market Research/Meeting - Discussion Of Brattle Report On VPP Costs - Transcript.md",
+      "sha256": "0f58621cd6e86f8510450acadbf3cbfd6b9a0b07cb069589a34dff51a22fff68",
+      "note": "Public webinar discussing the Brattle report on VPP costs. Dense with figures and cost comparisons, which is what makes it a good test of invented numbers."
+    },
+    "meeting-vpp-panel": {
+      "path": "10 Sources/10.03 Transcript/Work/Market Research/Meeting - Virtual Power Plant Business Opportunities Panel - Transcript.md",
+      "sha256": "1c7195bb5fc9178a7e43cd9a9a2321b18da358cbf7970cd299e11b1da67b8fb8",
+      "note": "Public VPP business-opportunities panel, Speaker N labels."
+    },
+    "meeting-vpp-dr": {
+      "path": "10 Sources/10.03 Transcript/Work/Market Research/Meeting - VPP Technologies And Demand Response Reporting - Transcript.md",
+      "sha256": "26b2eb2aeae5c9c62540ffa1fdd323114af23ded8eee53827191a0a02d0697c1",
+      "note": "Public webinar on VPP technologies and demand-response reporting. Carries reporting deadlines and program names."
+    },
+    "meeting-kickoff": {
+      "path": "10 Sources/10.03 Transcript/Work/2026-04-29 - Internal Kickoff - Transcript.md",
+      "sha256": "79099bc67a48d786e5da728123cb904dbb327689e9af18955c2ca9d0a77a979f",
+      "note": "Internal project kickoff. Real first names and affiliations as speaker labels, so its answer key lives in the gitignored expectations/.private/. Included because a webinar panel has opinions where a kickoff has owners and deadlines, and owners and deadlines are what the case measures. Excerpted from the call to order: the first eight minutes are pre-meeting small talk carrying third-party medical detail — a colonoscopy, a medication reaction, childbirth — about named people who are not the vault owner. None of that is meeting content, and a benchmark corpus is not the place for it.",
+      "excerpt": {
+        "mode": "lines",
+        "start": 156
+      }
+    },
+    "meeting-aio": {
+      "path": "10 Sources/10.03 Transcript/Work/Data Centers/AIO - 2026-01-07 - Transcript.md",
+      "sha256": "f4565b1072f5e02d017bc3013bda6ff0fdecd23d4fcd3844462f3c55e4845b44",
+      "note": "Internal data-centre project meeting. Real names; private answer key."
+    },
+    "meeting-lbnl": {
+      "path": "10 Sources/10.03 Transcript/Work/Data Centers/LBNL Meeting 2025-12-05 - Transcript.md",
+      "sha256": "6c889d57a1e60a5d0f358400a3196880ba1f75abb5bfd62ffdc413a52da3b64e",
+      "note": "Internal meeting with LBNL collaborators. Real names; private answer key."
+    },
+    "lcr-arpae-q6": {
+      "path": "10 Sources/10.04 Report/Work/Data Centers/ARPA-E Coolerchips Q6_UCDavis_final (1).md",
+      "sha256": "b2f6ae5b22ca4dacd412180f386c4b0d93f3079616731f3542d2f0a668cb1d20",
+      "note": "ARPA-E quarterly report, Q6. Paired with lcr-arpae-q8: same project two quarters apart, which is what makes a cross-document question natural rather than contrived."
+    },
+    "lcr-arpae-q8": {
+      "path": "10 Sources/10.04 Report/Work/Data Centers/ARPA-E Coolerchips Q8_UCDavis_final.md",
+      "sha256": "93b4f93da1c36c163a940262af6b83ac6c8d064dfaa18cb048a45c80a4ab7d10",
+      "note": "ARPA-E quarterly report, Q8. The later half of the pair the long-context questions compare."
+    },
+    "lcr-market": {
+      "path": "10 Sources/10.04 Report/Work/Data Centers/Datacenter Cooling Market Study - Preliminary Findings Report.md",
+      "sha256": "d270ff5c099e2300635c89fe778489003c4130630f785f072edaa22b11153d12",
+      "note": "Distractor. Same domain and register as the pair, no questions of its own; it exists to put distance between them."
+    },
+    "lcr-claude-dc": {
+      "path": "10 Sources/10.04 Report/Work/Data Centers/Claude - Research Report.md",
+      "sha256": "c1e42321e8ab295f982a56c2e03cbfbe4b444041c2859d221ff8fb2939488f94",
+      "note": "Distractor."
+    },
+    "lcr-gemini-dc": {
+      "path": "10 Sources/10.04 Report/Work/Data Centers/Gemini - Research Report.md",
+      "sha256": "37dc14a7b8332bc198c3567bc777a34aa1644b6c51869b84a7f28bf75b1ddeaf",
+      "note": "Distractor."
+    },
+    "lcr-perplexity": {
+      "path": "10 Sources/10.04 Report/Work/Data Centers/Perplexity - Research Report.md",
+      "sha256": "4bf73ab319f9f6f7270eabc98b6188dea208777c5b49729beae9dc364b20d690",
+      "note": "Distractor."
     }
   }
 }

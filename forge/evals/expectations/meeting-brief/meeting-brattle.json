@@ -1,0 +1,286 @@
+{
+  "meeting": "VPP Insiders discussion of the Brattle report on VPP costs",
+  "note": "A critique session on a published report, so it is thick with figures that are easy to half-remember and get wrong — which is the point. Attributed by speaker label only; participants use first names in speech and this key does not carry them.",
+  "facts": [
+    {
+      "id": "f1",
+      "kind": "figure",
+      "canonical": "on resource adequacy alone a VPP is roughly 40 to 60 percent the cost of the alternatives",
+      "aliases": [
+        "VPP is 40 to 60 percent the cost of alternative options"
+      ],
+      "evidence": "Found that looking at resource adequacy alone, that a VVP is roughly 40 to 60 percent the cost of alternative options."
+    },
+    {
+      "id": "f2",
+      "kind": "figure",
+      "canonical": "the modelled case is 400 megawatts of DERs replacing a traditional gas peaker",
+      "aliases": [
+        "400 megawatts of DERs to replace a traditional gas peaker"
+      ],
+      "evidence": "Using the example of I believe a 400 megawatts of um DERs to replace a traditional gas peaker"
+    },
+    {
+      "id": "f3",
+      "kind": "figure",
+      "canonical": "the report assumes one and a half power walls per home",
+      "aliases": [
+        "battery assumption is one and a half power walls per home"
+      ],
+      "evidence": "One and a half power walls per home, um, which is pretty big for only getting paid like 500 bucks a year or something."
+    },
+    {
+      "id": "f4",
+      "kind": "figure",
+      "canonical": "batteries are paid about 500 dollars a year while providing seven and a half kW",
+      "aliases": [
+        "seven and a half kw for 500 bucks"
+      ],
+      "evidence": "Like seven and a half kw for 500 bucks."
+    },
+    {
+      "id": "f5",
+      "kind": "figure",
+      "canonical": "the eligible market is 67% of people having an air conditioner that could be connected to a smart thermostat",
+      "aliases": [
+        "eligible market is 67% of people have an air conditioner"
+      ],
+      "evidence": "So like their eligible market is 67% of people have an air conditioner that is connected, could be connected to a smart thermostat."
+    },
+    {
+      "id": "f6",
+      "kind": "figure",
+      "canonical": "the report assumes capturing 30% of that eligible thermostat market",
+      "aliases": [
+        "they assume you capture 30% of that"
+      ],
+      "evidence": "That's fair from a technical feasibility perspective, but then they assume you capture 30% of that, which means that's not just that 30% of people have smart thermostats, it's that they have smart thermostats and they're participating in a program"
+    },
+    {
+      "id": "f7",
+      "kind": "figure",
+      "canonical": "50% of people have electric water heating and the report assumes capturing 20% of that",
+      "aliases": [
+        "50% of people have electric water heating",
+        "getting like 20% of that"
+      ],
+      "evidence": "50% of people have electric water heating."
+    },
+    {
+      "id": "f8",
+      "kind": "figure",
+      "canonical": "the thermostat incentive is 25 dollars a season, and there are two DR seasons, so about 50 dollars a year",
+      "aliases": [
+        "$25 a season for thermostats"
+      ],
+      "evidence": "um pedestrian um in terms of like how they would you know it's like $25 a season for thermostats and"
+    },
+    {
+      "id": "f9",
+      "kind": "figure",
+      "canonical": "even in 2030 the report forecasts only 34% of homes having smart thermostats",
+      "aliases": [
+        "only their forecast of 34% of homes would have smart thermostats"
+      ],
+      "evidence": "Yeah, for instance, like on their smart thermostat numbers, even in 2030, they assume, you know, only th they're only their forecast of 34% of homes would have smart thermostats."
+    },
+    {
+      "id": "f10",
+      "kind": "figure",
+      "canonical": "residential assets cost roughly 20 dollars per year to operate",
+      "aliases": [
+        "residential assets are in the $20-ish dollars per year range"
+      ],
+      "evidence": "you know, energy hubs or virtual peakers or something or OS, like it's probably residential assets are in the $20-ish dollars per year range."
+    },
+    {
+      "id": "f11",
+      "kind": "figure",
+      "canonical": "California has only about 20% electric water heating",
+      "aliases": [
+        "California only has like 20%"
+      ],
+      "evidence": "only has like 20% or something like that."
+    },
+    {
+      "id": "f12",
+      "kind": "figure",
+      "canonical": "the modelling takes a 7% cutoff on the load duration curve to define loss of load hours",
+      "aliases": [
+        "7% cutoff on the load ration",
+        "this is the loss of load hours"
+      ],
+      "evidence": "They just they take like a sort of 7% cutoff on the load ration and they just say like this is the loss of load hours."
+    },
+    {
+      "id": "f13",
+      "kind": "attribution",
+      "canonical": "the economic analysis counts societal benefits but only utility costs, so customer installation costs fall out of the model",
+      "aliases": [
+        "they take societal benefits, but they only take utility costs"
+      ],
+      "evidence": "they're doing the economic analysis, I would say it's a little lopsided in the sense that they take societal benefits, but they only take utility costs."
+    },
+    {
+      "id": "f14",
+      "kind": "attribution",
+      "canonical": "Brattle did the potential study for Xcel Colorado and this report's synthetic balancing area is essentially Xcel Colorado",
+      "aliases": [
+        "Braddle did the potential study for Excel Colorado",
+        "synthetic BA but it basically is Excel Colorado"
+      ],
+      "evidence": "Braddle is did the potential study for Excel, Colorado."
+    },
+    {
+      "id": "f15",
+      "kind": "attribution",
+      "canonical": "storage is not modelled doing daily load shifting even though thermostats and water heaters are",
+      "aliases": [
+        "the storage doesn't do daily load shifting"
+      ],
+      "evidence": "Well, there was an interesting if we're gonna get dig into the assumptions, you'll notice that the storage doesn't do daily load shifting, which I found really weird."
+    },
+    {
+      "id": "f16",
+      "kind": "attribution",
+      "canonical": "the VPP's reduction in net cost comes predominantly from assumed reductions in emissions and T&D capacity, which utilities rarely recognise",
+      "aliases": [
+        "reduction in net cost is predominantly coming from assumptions around reductions in emissions and T and D capacity"
+      ],
+      "evidence": "What you see here is that the VPP's reduction in net cost is predominantly coming from assumptions around reductions in emissions and T and D capacity."
+    },
+    {
+      "id": "f17",
+      "kind": "attribution",
+      "canonical": "only the water heaters and the batteries provide ancillary services, not the thermostats",
+      "aliases": [
+        "only the water heaters and the batteries provide ancillary services"
+      ],
+      "evidence": "And the ancillary services, the reason that they're pretty low is that only the water heaters and the batteries provide ancillary services, I believe."
+    },
+    {
+      "id": "f18",
+      "kind": "attribution",
+      "canonical": "the study is not a capacity expansion model or an IRP, so interactive effects between new and existing assets are not captured",
+      "aliases": [
+        "this is not like an actual like capacity expansion",
+        "that is not the same thing as like actually building out the model"
+      ],
+      "evidence": "the the power systems geeks out there is just that like just a caveat that this is not like an actual like capacity expansion"
+    },
+    {
+      "id": "f19",
+      "kind": "attribution",
+      "canonical": "the incentive levels resemble Rocky Mountain Power's Wattsmart program, and the Xcel program is not live yet",
+      "aliases": [
+        "it looks a lot like Rocky Mountain Power",
+        "the Excel program's not live yet"
+      ],
+      "evidence": "But it looks a lot like Rocky Mountain Power to me."
+    },
+    {
+      "id": "f20",
+      "kind": "attribution",
+      "canonical": "the portfolio contains no V2G, which would raise both the payments required and the value",
+      "aliases": [
+        "missing V2G in the portfolio"
+      ],
+      "evidence": "They're missing uh V2G in there."
+    },
+    {
+      "id": "f21",
+      "kind": "attribution",
+      "canonical": "Brattle is bearish on building electrification and largely does not assume it happens",
+      "aliases": [
+        "they are pretty bearish on building electrification"
+      ],
+      "evidence": "They I would say in general they are pretty bearish on uh building electrification."
+    },
+    {
+      "id": "f22",
+      "kind": "attribution",
+      "canonical": "carbon is calculated from Cambium, an NREL data source, and the treatment was unclear to the participants",
+      "aliases": [
+        "they used Cambium which is like an NREL data source for carbon"
+      ],
+      "evidence": "if I recall, they used, I think they used Cambium, which is like an NREL data source for carbon."
+    },
+    {
+      "id": "f23",
+      "kind": "action",
+      "canonical": "use the report to persuade the Office of People's Counsel in advocacy before the Public Service Commission",
+      "aliases": [
+        "helpful in persuading our Office of People's Council"
+      ],
+      "evidence": "But this report I think is going to be helpful in persuading our Office of People's Council that"
+    },
+    {
+      "id": "f24",
+      "kind": "action",
+      "canonical": "discuss the Kavala study for California at a future session",
+      "aliases": [
+        "talk about the Cabal study",
+        "talk about the Kavala study",
+        "Kavala study for California"
+      ],
+      "evidence": "Um yeah, we should uh to Rachel's point, we should talk about the Cabal study at some point."
+    }
+  ],
+  "traps": [
+    {
+      "id": "t1",
+      "canonical": "the group decided to take the report to every commission",
+      "aliases": [
+        "take it to every commission"
+      ],
+      "why": "said as a joke — 'slap them across the face with it' — and immediately turned into a genuine question about what the report is actually usable for"
+    },
+    {
+      "id": "t2",
+      "canonical": "the group agreed the Brattle report is unreliable",
+      "aliases": [
+        "the report is unreliable",
+        "the report is flawed and should not be used"
+      ],
+      "why": "the criticism was of specific assumptions; the same speakers called the report awesome, said it did a killer job, and praised the scenario analysis"
+    },
+    {
+      "id": "t3",
+      "canonical": "send the report to Fox News",
+      "aliases": [
+        "send this report to Fox News"
+      ],
+      "why": "an explicit joke, answered with 'we're in the brainstorming phase, there's only good ideas'"
+    },
+    {
+      "id": "t4",
+      "canonical": "RMI will publish a report solving VPP deployment",
+      "aliases": [
+        "RMI is gonna come out with a report"
+      ],
+      "why": "sarcasm about VP3 solving everything, not a reported plan"
+    }
+  ],
+  "notStated": [
+    {
+      "id": "n1",
+      "field": "due",
+      "canonical": "discuss the Kavala study",
+      "aliases": [
+        "talk about the Cabal study",
+        "Kavala study"
+      ],
+      "why": "agreed as a good idea for 'some point' with no session named"
+    },
+    {
+      "id": "n2",
+      "field": "owner",
+      "canonical": "discuss the Kavala study",
+      "aliases": [
+        "talk about the Cabal study",
+        "Kavala study"
+      ],
+      "why": "nobody took it on; it was raised and endorsed generally"
+    }
+  ]
+}

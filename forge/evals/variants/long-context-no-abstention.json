@@ -1,0 +1,12 @@
+{
+  "name": "long-context-no-abstention",
+  "why": "Calibration. Removes the clause permitting the model to answer 'Not stated'. Two of the ten questions per rung have no answer in the corpus, so the hallucination count should rise by up to two items and the Omniscience Index should fall.\n\nThis replaces `long-context-quarter-warning-removed`, which stripped the warning that several documents describe the same project at different times and moved nothing at all — on chat-27b at 48k and 80k, and on task-4b at 48k. The reason is now clear and was a design error, not a finding: four of the questions say 'the earlier report' or 'the later report' in their own text, so the system-prompt warning was redundant with the questions and removing it left the instruction intact. A variant has to strip something the prompt is the only source of.",
+  "applies": [
+    "lcr-48k",
+    "lcr-60k",
+    "lcr-80k"
+  ],
+  "patch": {
+    "systemStrip": "\n- Answer only from the documents. If they do not contain the answer, write\n  \"Not stated\" and leave \"documents\" empty."
+  }
+}
