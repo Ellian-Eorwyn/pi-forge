@@ -10,16 +10,21 @@ import {
 	seedConnectedServicesSettings,
 } from "../lib/connected-services.mjs";
 import { ensureMoshiHook, formatMoshiHookNotice } from "../lib/moshi-hook.mjs";
+import { capacityForUrl, readSnapshot } from "../lib/stack-state.mjs";
 
 // Shared limits for the local code and chat variants. Kept here so every
 // install and `pi-forge-update` writes the same context and output budgets.
 // Both variants are served by one llama-server with two slots, so the window
 // is the per-slot size, not the pool: declaring the pool made compaction
 // trigger at 196608, well past the point where a request is refused.
-const CONTEXT_WINDOW = SLOT_CONTEXT_TOKENS;
+//
+// `SLOT_CONTEXT_TOKENS` is the fallback, not a fact about the deployment. Where
+// the stack publishes a state API, the real per-slot size is read from it below
+// — otherwise a backend reconfigured to a different context leaves five numbers
+// wrong at once (both providers' contextWindow, the compaction reserve, and
+// both services' contextTokens) with nothing to catch it.
 const MAX_OUTPUT_TOKENS = 32768;
 const COMPACTION_TRIGGER_RATIO = 0.75;
-const COMPACTION_RESERVE_TOKENS = CONTEXT_WINDOW - Math.floor(CONTEXT_WINDOW * COMPACTION_TRIGGER_RATIO);
 const CONTEXT_BUDGET_SOFT_RATIO = COMPACTION_TRIGGER_RATIO;
 const CONTEXT_BUDGET_VERBATIM_RECENT_TOKENS = 20000;
 // Matches `MAX_OWNER_FIELD_CHARS` in forge/lib/vault_profile.py and the same
@@ -66,6 +71,14 @@ try {
 	if (error?.code !== "ENOENT") throw error;
 }
 
+// Captured before seeding, which fills every field in and would make a value
+// this install just defaulted indistinguishable from one the owner chose.
+const persistedServices = structuredClone(
+	settings.connectedServices && typeof settings.connectedServices === "object" && !Array.isArray(settings.connectedServices)
+		? settings.connectedServices
+		: {},
+);
+
 const packages = Array.isArray(settings.packages) ? settings.packages : [];
 const retainedPackages = packages.filter((entry) => {
 	if (!previousProfileDirectory) return true;
@@ -90,11 +103,6 @@ const existingContextBudget =
 	settings.contextBudget !== null && typeof settings.contextBudget === "object" && !Array.isArray(settings.contextBudget)
 		? settings.contextBudget
 		: {};
-settings.compaction = {
-	...existingCompaction,
-	enabled: true,
-	reserveTokens: COMPACTION_RESERVE_TOKENS,
-};
 delete settings.taskModel;
 settings.contextBudget = {
 	...existingContextBudget,
@@ -105,7 +113,30 @@ settings.contextBudget = {
 };
 migrateLegacyChatService(settings);
 migrateLegacyChatScheduling(settings);
-seedConnectedServicesSettings(settings);
+const services = seedConnectedServicesSettings(settings);
+
+// Everything below this point may depend on what the deployment actually
+// serves, so the one read happens here. A stack that cannot be reached returns
+// null and every value falls back to the built-in constant, which is the path
+// every install without this API takes.
+const snapshot = await readSnapshot({ settings: services });
+const chatCapacity = capacityForUrl(snapshot, services.chat.baseUrl);
+const thinkCapacity = capacityForUrl(snapshot, services.think.baseUrl);
+adoptServedContext(services.chat, persistedServices.chat, chatCapacity, "connectedServices.chat");
+adoptServedContext(services.think, persistedServices.think, thinkCapacity, "connectedServices.think");
+clampBackgroundSlot(services.chat, chatCapacity, "connectedServices.chat");
+clampBackgroundSlot(services.think, thinkCapacity, "connectedServices.think");
+
+// The agent's own window follows the endpoint it actually talks to, which is
+// the thinking provider. Both providers front one backend today, so this is
+// normally the same number as the chat side.
+const contextWindow = services.think.contextTokens || SLOT_CONTEXT_TOKENS;
+const chatContextWindow = services.chat.contextTokens || SLOT_CONTEXT_TOKENS;
+settings.compaction = {
+	...existingCompaction,
+	enabled: true,
+	reserveTokens: contextWindow - Math.floor(contextWindow * COMPACTION_TRIGGER_RATIO),
+};
 
 let models = {};
 try {
@@ -143,7 +174,7 @@ models.providers["forge-local"] = {
 			reasoning: false,
 			input: ["text"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: CONTEXT_WINDOW,
+			contextWindow,
 			maxTokens: MAX_OUTPUT_TOKENS,
 		},
 	],
@@ -164,7 +195,7 @@ models.providers["forge-chat-local"] = {
 			reasoning: false,
 			input: ["text"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: CONTEXT_WINDOW,
+			contextWindow: chatContextWindow,
 			maxTokens: MAX_OUTPUT_TOKENS,
 		},
 	],
@@ -184,6 +215,55 @@ try {
 	for (const line of notice.err) process.stderr.write(`${line}\n`);
 } catch (error) {
 	process.stderr.write(`Moshi hook: ${error.message}\n`);
+}
+
+/**
+ * Point a service's context ceiling at what its backend actually serves.
+ *
+ * Only a value this install defaulted is replaced. A `contextTokens` that
+ * differs from the built-in constant was typed by someone — most likely to aim
+ * a service at a smaller backend than this one — and a probe must not quietly
+ * undo that. Same rule as `migrateLegacyChatService` below: byte-equal to the
+ * old default means "written by an installer", anything else means "chosen".
+ *
+ * Getting this wrong is not cosmetic in either direction. Too low wastes most
+ * of the window on every call; too high means a skill sends a prompt this
+ * client believes fits and reads the server's rejection as the model failing.
+ */
+function adoptServedContext(service, persisted, capacity, label) {
+	if (!capacity?.contextTokens || capacity.contextTokens === service.contextTokens) return;
+	const chosen = persisted?.contextTokens;
+	if (Number.isInteger(chosen) && chosen > 0 && chosen !== SLOT_CONTEXT_TOKENS) {
+		process.stderr.write(
+			`${label}: the backend serves ${capacity.contextTokens} context tokens per slot but this install sets ` +
+				`${chosen}; leaving your value alone.\n`,
+		);
+		return;
+	}
+	process.stdout.write(`${label}: read ${capacity.contextTokens} context tokens per slot from the stack (was ${service.contextTokens}).\n`);
+	service.contextTokens = capacity.contextTokens;
+}
+
+/**
+ * Keep the pinned background slot inside the range the backend actually has.
+ *
+ * Background work pins a slot so bulk calls cannot evict the interactive
+ * session's prefix cache. A backend running one slot has no slot 1, so the pin
+ * names something that does not exist — and nothing else in forge would ever
+ * notice, because the number is only ever sent, never checked.
+ */
+function clampBackgroundSlot(service, capacity, label) {
+	const total = capacity?.totalSlots;
+	if (!Number.isInteger(total) || total < 1) return;
+	const scheduling = service.scheduling;
+	if (!scheduling?.enabled || !Number.isInteger(scheduling.backgroundSlot) || scheduling.backgroundSlot < total) return;
+	const clamped = total - 1;
+	process.stderr.write(
+		`${label}: the backend runs ${total} slot${total === 1 ? "" : "s"}, so background work cannot pin slot ` +
+			`${scheduling.backgroundSlot}; using slot ${clamped}.\n`,
+	);
+	scheduling.backgroundSlot = clamped;
+	if (scheduling.interactiveSlot >= total) scheduling.interactiveSlot = clamped;
 }
 
 /** One `forgeUser` field, collapsed to a single line, or "" if unusable. */

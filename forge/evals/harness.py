@@ -43,6 +43,7 @@ sys.path.insert(0, str(LIB))
 
 import forge_llm  # noqa: E402
 import run_state  # noqa: E402
+import stack_state  # noqa: E402
 
 DEFAULT_VAULT = Path.home() / "Documents" / "Obsidian" / "Loom"
 
@@ -382,13 +383,59 @@ def served_fingerprint(service):
     """What the endpoint is actually serving, recorded alongside every result.
 
     A model id in ``models.json`` is a label someone typed; the weights behind a
-    port can be swapped without it. This asks the server. Not every profile
-    answers with metadata — the proxy ports return an id and nothing else — so
-    whatever is missing is recorded as missing rather than guessed.
+    port can be swapped without it. This asks, from two sources that know
+    different halves:
+
+    - ``/v1/models`` on the endpoint (or ``fingerprintUrl``) reports ``meta`` —
+      parameter count, quantization, size — and, on the router ports only, the
+      launch argv the weights path can be read out of.
+    - The stack state API reports the launched model path, its quantization, and
+      the llama.cpp build for *every* backend, including the ones behind a proxy.
+
+    The second closes the gap that made ``expectModelPath`` unusable on the proxy
+    ports. Neither is required: whatever is missing is recorded as missing rather
+    than guessed.
 
     Written after a run labelled `task-9b` turned out to have been served by a
     4B, with no way to tell after the fact.
     """
+    return _merge_stack_fingerprint(_http_fingerprint(service), service)
+
+
+def _merge_stack_fingerprint(fingerprint, service):
+    """Fold what the stack state API knows into an endpoint fingerprint.
+
+    Fills only what ``/v1/models`` could not answer, and never overwrites it: the
+    endpoint is the more direct witness where both speak. Where both speak and
+    disagree, that is recorded rather than resolved — two sources contradicting
+    each other about which weights are loaded is exactly the condition this
+    machinery exists to surface, and silently preferring one would hide it.
+
+    ``buildInfo`` has no counterpart in ``/v1/models`` at all. Nothing recorded
+    the llama.cpp build before this, so results compared across weeks could not
+    see the server binary change underneath them.
+    """
+    snapshot = stack_state.read_snapshot()
+    identity = stack_state.identity_for_url(snapshot, service["url"])
+    if not identity:
+        return fingerprint
+    fingerprint["stack"] = identity
+    for source_key, target_key in (("modelPath", "modelPath"), ("quant", "quant"), ("buildInfo", "buildInfo")):
+        value = identity.get(source_key)
+        if not value:
+            continue
+        existing = fingerprint.get(target_key)
+        if not existing:
+            fingerprint[target_key] = value
+            if target_key == "modelPath":
+                fingerprint.setdefault("modelFile", value.rsplit("/", 1)[-1])
+        elif str(existing) != str(value):
+            fingerprint.setdefault("stackConflicts", {})[target_key] = {"endpoint": existing, "stack": value}
+    return fingerprint
+
+
+def _http_fingerprint(service):
+    """The ``/v1/models`` half of a fingerprint."""
     # A proxy port answers /v1/models with an id and nothing else. `fingerprintUrl`
     # points at somewhere that knows more — usually the backend the proxy fronts,
     # which serves the same ids with full metadata attached.
@@ -682,6 +729,15 @@ def check_served(service, fingerprint=None):
     if expected_path and actual_path and expected_path != actual_path:
         problems.append(f"{service['id']!r} expects {expected_path}, endpoint is serving {actual_path}")
 
+    # The endpoint and the stack state API describing different weights is not a
+    # claim failing — it is the two witnesses disagreeing, which makes every
+    # identity check below them untrustworthy. Stop rather than pick a winner.
+    for field, sides in (found.get("stackConflicts") or {}).items():
+        problems.append(
+            f"{service['id']!r}: {service['url']} reports {field} {sides['endpoint']!r} but the stack reports "
+            f"{sides['stack']!r} for the backend behind it — one of them is stale, so attribution cannot be trusted"
+        )
+
     return problems
 
 
@@ -695,9 +751,15 @@ def attribution_warning(service, fingerprint=None):
 
     Distinct from `check_served`, which reports contradictions and stops a run.
     Nothing here is a contradiction: either the entry asserts no identity, or it
-    asserts one this endpoint cannot answer — a router member reports its launch
-    argv from the preset while asleep but carries no `meta` until something loads
-    it, and the proxy ports report `meta` but never argv.
+    asserts one nothing available could answer — a router member reports its
+    launch argv from the preset while asleep but carries no `meta` until
+    something loads it, and the proxy ports report `meta` but never argv.
+
+    That last gap is now usually filled by the stack state API, which reports the
+    launched path for every backend including the proxied ones. So an install
+    that can reach it will see this fall silent on entries that assert
+    `expectModelPath`, where before it always warned. An install that cannot —
+    any deployment without that API — is exactly as it was.
 
     Refusing on this would block ordinary work; staying silent is how a run
     labelled `task-9b` came to be served by a 4B with no way to tell afterwards.

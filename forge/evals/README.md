@@ -252,7 +252,11 @@ A model id in `models.json` is a label someone typed; the weights behind a port
 can be swapped without it. So every result document carries a `served` block
 read from the endpoint at run time: parameter count, quantization, size, context,
 the gguf path, the full launch argv, and the parsed flags — plus the stack's own
-preset text where the endpoint exposes it. A run is self-describing.
+preset text where the endpoint exposes it. Where the deployment publishes a state
+API, that block also carries the backend's `unit`, its launched `modelPath`, and
+`buildInfo` — the llama.cpp build serving it, which nothing recorded before, so
+runs compared weeks apart could not see the server binary change underneath them.
+A run is self-describing.
 
 An entry can also assert its identity with `expectParams` and/or
 `expectModelPath`. `run` and `doctor` compare those against what is actually
@@ -372,11 +376,20 @@ tier is loaded, so the model could serve a stage *alongside* it rather than
 instead of it.
 
 An entry should assert an identity that its endpoint can actually check. The
-proxy ports report parameter count and quantization but no launch arguments, so
-`expectModelPath` can never fire there; the router ports report argv. When
-nothing could be checked, `run` says so and labels the results unconfirmed
-rather than refusing — and the warning rides on the result document, because the
-console scrolls away and the numbers outlive it.
+proxy ports report parameter count and quantization but no launch arguments, and
+the router ports report argv. `expectModelPath` used to be unusable on the proxy
+ports for that reason; it now works there too, because the fingerprint also reads
+the [stack state API](../lib/stack_state.py), which reports the launched path for
+every backend including the proxied ones. On a deployment without that API the
+claim simply goes unchecked, exactly as before. When nothing could be checked,
+`run` says so and labels the results unconfirmed rather than refusing — and the
+warning rides on the result document, because the console scrolls away and the
+numbers outlive it.
+
+Where both sources answer and *disagree* about the same field, that is not a
+claim failing but the two witnesses contradicting each other, which makes every
+check below them untrustworthy. `check_served` reports it as `stackConflicts` and
+stops the run rather than picking a winner.
 
 Run `doctor` before spending a run on a new entry, and check the first case's
 `finishReason` — a case that truncated is a budget problem, not a result.

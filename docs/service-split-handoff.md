@@ -61,6 +61,15 @@ which config an endpoint is running, that is the check, and
   `service_doctor(service, expect_non_thinking=True)` is the endpoint health check.
   The `.mjs` equivalent is `resolveConnectedServices()` in
   `forge/lib/connected-services.mjs`.
+- **`forge/lib/stack_state.py`** (and `stack-state.mjs`) — read-only client for
+  the deployment's state API at `http://llms:8078/api/v1/`. Strictly optional and
+  never on the request path: it tells `service_doctor` which weights are behind a
+  port and why one is down, tells the installer the real per-slot context size
+  instead of a hardcoded constant, and puts the backend's identity plus the
+  stack's own warnings on the first `model_call` record of a run. Every function
+  returns `None` when the stack cannot be read, and every caller must carry on as
+  though it never existed — that is the path any install other than this one
+  takes. `PI_FORGE_SKIP_STACK_DISCOVERY=1` turns it off; tests set it.
 - **`forge/lib/forge_verify.py`** — batched review. `verify_packets` enforces exact
   id coverage and requires a reason on every flag, with one corrective retry that
   shows the model what it broke. `escalate` redoes flagged items individually.

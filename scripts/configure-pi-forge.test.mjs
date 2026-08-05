@@ -8,14 +8,26 @@ import test from "node:test";
 
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
-function configure(agentDirectory) {
+function configure(agentDirectory, extraEnv = {}) {
 	const result = spawnSync(
 		process.execPath,
 		[join(repositoryRoot, "scripts", "configure-pi-forge.mjs"), agentDirectory, join(repositoryRoot, "forge")],
-		// These tests cover settings and models seeding. Left enabled, the optional
-		// Moshi step would invoke the host's real moshi-hook binary and restart its
-		// daemon as a side effect of running the suite.
-		{ encoding: "utf8", env: { ...process.env, PI_FORGE_SKIP_MOSHI_HOOK: "1" } },
+		{
+			encoding: "utf8",
+			env: {
+				...process.env,
+				// These tests cover settings and models seeding. Left enabled, the
+				// optional Moshi step would invoke the host's real moshi-hook binary
+				// and restart its daemon as a side effect of running the suite.
+				PI_FORGE_SKIP_MOSHI_HOOK: "1",
+				// Capacity discovery reads the deployment's state API. On a developer
+				// machine that host is up, which would make these assertions depend on
+				// what it happens to be serving; in CI it is not, which would spend a
+				// timeout per run. Tests that want discovery opt in via extraEnv.
+				PI_FORGE_SKIP_STACK_DISCOVERY: "1",
+				...extraEnv,
+			},
+		},
 	);
 	assert.equal(result.status, 0, result.stderr);
 	return JSON.parse(readFileSync(join(agentDirectory, "settings.json"), "utf8"));

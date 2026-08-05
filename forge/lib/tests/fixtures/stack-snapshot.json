@@ -1,0 +1,948 @@
+{
+	"alerts": [
+		{
+			"code": "host_swap_used",
+			"detail": {
+				"swap_used_pct": 96
+			},
+			"level": "warn",
+			"subject": "host",
+			"text": "Host swap is 96% used (7877 MiB)."
+		},
+		{
+			"code": "host_memory_low",
+			"detail": {
+				"available_pct": 10
+			},
+			"level": "warn",
+			"subject": "host",
+			"text": "Only 3259 MiB of host RAM is available (10%)."
+		},
+		{
+			"code": "api_unauthenticated",
+			"detail": {},
+			"level": "info",
+			"subject": "local-api",
+			"text": "The state API is bound to 10.0.0.1 with no LLM_API_TOKEN set \u2014 anything that can reach this port can read the full stack state."
+		}
+	],
+	"api_version": "1.0",
+	"backends": [
+		{
+			"active": true,
+			"base_url": "http://127.0.0.1:8010",
+			"busy": false,
+			"collector_error": null,
+			"context": {
+				"cached_tokens": 0,
+				"configured_per_slot": 131072,
+				"configured_total": 262144,
+				"free_tokens": 260599,
+				"max_slot_pct": 0.6,
+				"n_ctx_per_slot": 131072,
+				"n_ctx_total": 262144,
+				"slots_busy": 0,
+				"slots_total": 2,
+				"used_pct": 0.6,
+				"used_tokens": 1545
+			},
+			"drift": [],
+			"label": "Primary Backend",
+			"metrics": {
+				"llamacpp:n_busy_slots_per_decode": 1.00138,
+				"llamacpp:n_decode_total": 558918.0,
+				"llamacpp:n_tokens_max": 95759.0,
+				"llamacpp:predicted_tokens_seconds": 70.0762,
+				"llamacpp:prompt_seconds_total": 4195.78,
+				"llamacpp:prompt_tokens_seconds": 1203.65,
+				"llamacpp:prompt_tokens_total": 5050260.0,
+				"llamacpp:requests_deferred": 0.0,
+				"llamacpp:requests_processing": 0.0,
+				"llamacpp:tokens_predicted_seconds_total": 32777.5,
+				"llamacpp:tokens_predicted_total": 2296920.0
+			},
+			"metrics_available": true,
+			"name": "chat-primary",
+			"props": {
+				"build_info": "b10083-846e991ec",
+				"is_sleeping": false,
+				"modalities": {
+					"audio": false,
+					"video": true,
+					"vision": true
+				},
+				"model_alias": "chat-dense",
+				"model_ftype": "Q6_K",
+				"model_path": "/mnt/LLMs/llamacpp/llm-stack-git/models/Qwen3.6-27B-Q6_K.gguf",
+				"n_ctx_per_slot": 131072,
+				"n_ctx_total": 262144,
+				"total_slots": 2
+			},
+			"slots": [
+				{
+					"ctx_pct": 0.6,
+					"id": 0,
+					"is_processing": false,
+					"n_ctx": 131072,
+					"n_prompt_tokens": 764,
+					"n_prompt_tokens_cache": 0,
+					"speculative": true
+				},
+				{
+					"ctx_pct": 0.6,
+					"id": 1,
+					"is_processing": false,
+					"n_ctx": 131072,
+					"n_prompt_tokens": 781,
+					"n_prompt_tokens_cache": 0,
+					"speculative": true
+				}
+			],
+			"stats": {
+				"cache": {
+					"checkpoint_erasures": 0,
+					"checkpoint_mib": {
+						"count": 0,
+						"max": null,
+						"mean": null,
+						"p50": null,
+						"p90": null,
+						"p99": null
+					},
+					"evicted_mib": {
+						"count": 0,
+						"max": null,
+						"mean": null,
+						"p50": null,
+						"p90": null,
+						"p99": null
+					},
+					"evicted_mib_total": 0,
+					"evictions": 0,
+					"evictions_per_launch": null,
+					"launches": 0
+				},
+				"context": {
+					"overflow_count": 0,
+					"overflows": [],
+					"released_tokens": {
+						"count": 0,
+						"max": null,
+						"mean": null,
+						"p50": null,
+						"p90": null,
+						"p99": null
+					}
+				},
+				"events": 0,
+				"scheduling": {
+					"over_1s": 0,
+					"over_1s_pct": null,
+					"over_2s": 0,
+					"over_2s_pct": null,
+					"select_by_id_slots": {},
+					"select_methods": {},
+					"select_to_launch_seconds": {
+						"count": 0,
+						"max": null,
+						"mean": null,
+						"p50": null,
+						"p90": null,
+						"p99": null
+					}
+				},
+				"throughput": {
+					"draft_acceptance": {
+						"count": 0,
+						"max": null,
+						"mean": null,
+						"p50": null,
+						"p90": null,
+						"p99": null
+					},
+					"draft_mean_len": {
+						"count": 0,
+						"max": null,
+						"mean": null,
+						"p50": null,
+						"p90": null,
+						"p99": null
+					},
+					"generation_tps": {
+						"count": 0,
+						"max": null,
+						"mean": null,
+						"p50": null,
+						"p90": null,
+						"p99": null
+					},
+					"last_draft_acceptance": null,
+					"last_generation_tps": null,
+					"last_generation_ts": null,
+					"live_tps": {
+						"count": 0,
+						"max": null,
+						"mean": null,
+						"p50": null,
+						"p90": null,
+						"p99": null
+					},
+					"prompt_tps": {
+						"count": 0,
+						"max": null,
+						"mean": null,
+						"p50": null,
+						"p90": null,
+						"p99": null
+					}
+				},
+				"window_seconds": 3600
+			},
+			"unit": "chat-backend-dense"
+		},
+		{
+			"active": false,
+			"base_url": "http://127.0.0.1:8020",
+			"busy": false,
+			"collector_error": null,
+			"context": {
+				"cached_tokens": 0,
+				"free_tokens": null,
+				"max_slot_pct": null,
+				"n_ctx_per_slot": null,
+				"n_ctx_total": null,
+				"slots_busy": 0,
+				"slots_total": null,
+				"used_pct": null,
+				"used_tokens": 0
+			},
+			"drift": [],
+			"label": "Secondary Backend",
+			"metrics": null,
+			"metrics_available": false,
+			"name": "chat-secondary",
+			"props": null,
+			"slots": null,
+			"stats": null,
+			"unit": null
+		},
+		{
+			"active": false,
+			"base_url": "http://127.0.0.1:8005",
+			"busy": false,
+			"collector_error": null,
+			"context": {
+				"cached_tokens": 0,
+				"free_tokens": null,
+				"max_slot_pct": null,
+				"n_ctx_per_slot": null,
+				"n_ctx_total": null,
+				"slots_busy": 0,
+				"slots_total": null,
+				"used_pct": null,
+				"used_tokens": 0
+			},
+			"drift": [],
+			"label": "Embedding",
+			"metrics": null,
+			"metrics_available": false,
+			"name": "embed",
+			"props": null,
+			"slots": null,
+			"stats": null,
+			"unit": null
+		},
+		{
+			"active": false,
+			"base_url": "http://127.0.0.1:8011",
+			"busy": false,
+			"collector_error": null,
+			"context": {
+				"cached_tokens": 0,
+				"free_tokens": null,
+				"max_slot_pct": null,
+				"n_ctx_per_slot": null,
+				"n_ctx_total": null,
+				"slots_busy": 0,
+				"slots_total": null,
+				"used_pct": null,
+				"used_tokens": 0
+			},
+			"drift": [],
+			"label": "Embedding 2",
+			"metrics": null,
+			"metrics_available": false,
+			"name": "embed2",
+			"props": null,
+			"slots": null,
+			"stats": null,
+			"unit": null
+		},
+		{
+			"active": false,
+			"base_url": "http://127.0.0.1:8006",
+			"busy": false,
+			"collector_error": null,
+			"context": {
+				"cached_tokens": 0,
+				"free_tokens": null,
+				"max_slot_pct": null,
+				"n_ctx_per_slot": null,
+				"n_ctx_total": null,
+				"slots_busy": 0,
+				"slots_total": null,
+				"used_pct": null,
+				"used_tokens": 0
+			},
+			"drift": [],
+			"label": "Reranker",
+			"metrics": null,
+			"metrics_available": false,
+			"name": "rerank",
+			"props": null,
+			"slots": null,
+			"stats": null,
+			"unit": null
+		},
+		{
+			"active": false,
+			"base_url": "http://127.0.0.1:8007",
+			"busy": false,
+			"collector_error": null,
+			"context": {
+				"cached_tokens": 0,
+				"free_tokens": null,
+				"max_slot_pct": null,
+				"n_ctx_per_slot": null,
+				"n_ctx_total": null,
+				"slots_busy": 0,
+				"slots_total": null,
+				"used_pct": null,
+				"used_tokens": 0
+			},
+			"drift": [],
+			"label": "Task Model",
+			"metrics": null,
+			"metrics_available": false,
+			"name": "task",
+			"props": null,
+			"slots": null,
+			"stats": null,
+			"unit": null
+		},
+		{
+			"active": false,
+			"base_url": "http://127.0.0.1:8009",
+			"busy": false,
+			"collector_error": null,
+			"context": {
+				"cached_tokens": 0,
+				"free_tokens": null,
+				"max_slot_pct": null,
+				"n_ctx_per_slot": null,
+				"n_ctx_total": null,
+				"slots_busy": 0,
+				"slots_total": null,
+				"used_pct": null,
+				"used_tokens": 0
+			},
+			"drift": [],
+			"label": "OCR Model",
+			"metrics": null,
+			"metrics_available": false,
+			"name": "ocr",
+			"props": null,
+			"slots": null,
+			"stats": null,
+			"unit": null
+		}
+	],
+	"config": {
+		"Ports": {
+			"AGGREGATE_ENABLED": "on",
+			"CHAT_BACKEND_HOST": "127.0.0.1",
+			"CHAT_BACKEND_PORT": "8010",
+			"CODE_PORT": "8008",
+			"EMBED2_PORT": "8011",
+			"EMBED_PORT": "8005",
+			"LISTEN_HOST": "0.0.0.0",
+			"NOTHINK_PORT": "8004",
+			"RERANK_PORT": "8006",
+			"TASK_PORT": "8007",
+			"THINK_PORT": "8003"
+		},
+		"Secondary Backend": {
+			"AGGREGATE2_ENABLED": "on",
+			"CHAT2_BACKEND_PORT": "8020",
+			"CHAT2_BATCH_SIZE": "2048",
+			"CHAT2_CACHE_IDLE_SLOTS": "on",
+			"CHAT2_CACHE_REUSE": "0",
+			"CHAT2_CACHE_TYPE_K": "q8_0",
+			"CHAT2_CACHE_TYPE_V": "q8_0",
+			"CHAT2_CTX_CHECKPOINTS": "8",
+			"CHAT2_CTX_SIZE": "255998",
+			"CHAT2_CUSTOM_ARGS_JSON": "[]",
+			"CHAT2_FIT": "off",
+			"CHAT2_FIT_CTX": "4096",
+			"CHAT2_FLASH_ATTN": "on",
+			"CHAT2_GPU_VISIBLE_DEVICES": "0,1",
+			"CHAT2_JINJA": "on",
+			"CHAT2_KV_OFFLOAD": "on",
+			"CHAT2_LABEL": "Secondary Backend",
+			"CHAT2_METRICS": "on",
+			"CHAT2_MLOCK": "false",
+			"CHAT2_MMPROJ_OFFLOAD": "on",
+			"CHAT2_MMPROJ_PATH": "/mnt/LLMs/llamacpp/llm-stack-git/models/Gemma4-31B-QAT-Uncensored-HauhauCS-Balanced-Q4_K_M.mmproj.gguf",
+			"CHAT2_MODEL_NAME": "chat-custom2",
+			"CHAT2_MODEL_PATH": "/mnt/LLMs/llamacpp/llm-stack-git/models/Gemma4-31B-QAT-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf",
+			"CHAT2_NO_MMAP": "false",
+			"CHAT2_N_GPU_LAYERS": "-1",
+			"CHAT2_OP_OFFLOAD": "on",
+			"CHAT2_SPEC_DRAFT_DEVICES": "1",
+			"CHAT2_SPEC_DRAFT_N_MAX": "3",
+			"CHAT2_SPEC_DRAFT_N_MIN": "0",
+			"CHAT2_SPEC_DRAFT_TYPE_K": "f16",
+			"CHAT2_SPEC_DRAFT_TYPE_V": "f16",
+			"CHAT2_SPEC_METHOD": "off",
+			"CHAT2_SPEC_NGRAM_MIN_HITS": "1",
+			"CHAT2_SPEC_NGRAM_MOD": "off",
+			"CHAT2_SPEC_NGRAM_SIZE_M": "48",
+			"CHAT2_SPEC_NGRAM_SIZE_N": "12",
+			"CHAT2_SPLIT_MODE": "layer",
+			"CHAT2_SWA_FULL": "off",
+			"CHAT2_TEMPLATE_ID": "Gemma4",
+			"CHAT2_TENSOR_SPLIT": "1,1",
+			"CHAT2_UBATCH_SIZE": "512",
+			"CODE2_PORT": "8108",
+			"NOTHINK2_PORT": "8104",
+			"THINK2_PORT": "8103"
+		}
+	},
+	"deployment": {
+		"branch": "main",
+		"dirty": false,
+		"dirty_paths": [],
+		"is_git_checkout": true,
+		"ok": true,
+		"stack_dir": "/mnt/LLMs/llamacpp/llm-stack-git",
+		"summary": {
+			"message": "redacted for this fixture",
+			"state": "clean"
+		}
+	},
+	"generated_at": 1785949998.6827657,
+	"gpus": [
+		{
+			"busy": false,
+			"clock_mem_mhz": 405,
+			"clock_sm_mhz": 210,
+			"fan_pct": 0,
+			"index": 0,
+			"mem_free": 8454,
+			"mem_pct": 66,
+			"mem_total": 24576,
+			"mem_used": 16122,
+			"mem_util": 1,
+			"models": [
+				{
+					"attribution": "exclusive",
+					"backend": "chat-primary",
+					"model": "/mnt/LLMs/llamacpp/llm-stack-git/models/Qwen3.6-27B-Q6_K.gguf",
+					"model_alias": "chat-dense",
+					"pids": [
+						3056160
+					],
+					"process_names": [
+						"llama-server"
+					],
+					"unit": "chat-backend-dense",
+					"vram_mib": 15560
+				},
+				{
+					"attribution": "router",
+					"backend": null,
+					"model": "/mnt/LLMs/llamacpp/llm-stack-git/models/Qwen3.5-4B-UD-Q6_K_XL.gguf",
+					"model_alias": "task",
+					"pids": [
+						3406554
+					],
+					"process_names": [
+						"llama-server"
+					],
+					"router_resident": false,
+					"unit": "llama-router",
+					"vram_mib": 298
+				}
+			],
+			"name": "NVIDIA GeForce RTX 3090",
+			"power_limit_watts": 420,
+			"power_watts": 20.77,
+			"processes": [
+				{
+					"alias": "chat-dense",
+					"model": "/mnt/LLMs/llamacpp/llm-stack-git/models/Qwen3.6-27B-Q6_K.gguf",
+					"name": "chat-backend-dense",
+					"pid": 3056160,
+					"process_name": "llama-server",
+					"used_memory": 15560
+				},
+				{
+					"alias": "task",
+					"model": "/mnt/LLMs/llamacpp/llm-stack-git/models/Qwen3.5-4B-UD-Q6_K_XL.gguf",
+					"name": "llama-router",
+					"pid": 3406554,
+					"process_name": "llama-server",
+					"used_memory": 298
+				}
+			],
+			"pstate": "P8",
+			"temp": 25,
+			"util": 0,
+			"uuid": "GPU-00000000-0000-0000-0000-000000000001"
+		},
+		{
+			"busy": false,
+			"clock_mem_mhz": 405,
+			"clock_sm_mhz": 210,
+			"fan_pct": 0,
+			"index": 1,
+			"mem_free": 1074,
+			"mem_pct": 96,
+			"mem_total": 24576,
+			"mem_used": 23502,
+			"mem_util": 0,
+			"models": [
+				{
+					"attribution": "exclusive",
+					"backend": "chat-primary",
+					"model": "/mnt/LLMs/llamacpp/llm-stack-git/models/Qwen3.6-27B-Q6_K.gguf",
+					"model_alias": "chat-dense",
+					"pids": [
+						3056160
+					],
+					"process_names": [
+						"llama-server"
+					],
+					"unit": "chat-backend-dense",
+					"vram_mib": 23476
+				}
+			],
+			"name": "NVIDIA GeForce RTX 3090",
+			"power_limit_watts": 420,
+			"power_watts": 12.87,
+			"processes": [
+				{
+					"alias": "chat-dense",
+					"model": "/mnt/LLMs/llamacpp/llm-stack-git/models/Qwen3.6-27B-Q6_K.gguf",
+					"name": "chat-backend-dense",
+					"pid": 3056160,
+					"process_name": "llama-server",
+					"used_memory": 23476
+				}
+			],
+			"pstate": "P8",
+			"temp": 24,
+			"util": 0,
+			"uuid": "GPU-00000000-0000-0000-0000-000000000002"
+		}
+	],
+	"host": {
+		"mem_available_mib": 3259,
+		"mem_available_pct": 10,
+		"mem_total_mib": 32019,
+		"mem_used_mib": 28760,
+		"mem_used_pct": 90,
+		"swap_activity": {
+			"active": false,
+			"available": true,
+			"in_mib_per_second": 0.0,
+			"in_pages_per_second": 0.0,
+			"out_mib_per_second": 0.0,
+			"out_pages_per_second": 0.0
+		},
+		"swap_total_mib": 8192,
+		"swap_used_mib": 7877,
+		"swap_used_pct": 96
+	},
+	"router": {
+		"enabled": true,
+		"max_resident": "1",
+		"models": [
+			{
+				"id": "embed",
+				"path": "",
+				"state": "unloaded"
+			},
+			{
+				"id": "ocr",
+				"path": "",
+				"state": "unloaded"
+			},
+			{
+				"id": "rank",
+				"path": "",
+				"state": "unloaded"
+			},
+			{
+				"id": "task",
+				"path": "",
+				"state": "sleeping"
+			}
+		],
+		"ok": true,
+		"reachable": true
+	},
+	"services": [
+		{
+			"checked_at": null,
+			"description": null,
+			"expected": "unspecified",
+			"group": null,
+			"label": "chat-backend",
+			"name": "chat-backend",
+			"probe": null,
+			"reason": "not running",
+			"restarts": 0,
+			"state": "stopped",
+			"unit_state": "inactive",
+			"upstreams": []
+		},
+		{
+			"checked_at": 1785949996.4331148,
+			"description": "Primary model preset \u00b7 shared proxy",
+			"expected": "on",
+			"group": "chat",
+			"label": "Primary Backend",
+			"name": "chat-backend-dense",
+			"probe": {
+				"checked_at": 1785949996.4331148,
+				"detail": "",
+				"http_status": 200,
+				"ok": true,
+				"target": "http://127.0.0.1:8010/props"
+			},
+			"reason": "",
+			"restarts": 0,
+			"state": "active",
+			"unit_state": "active",
+			"upstreams": []
+		},
+		{
+			"checked_at": null,
+			"description": null,
+			"expected": "unspecified",
+			"group": null,
+			"label": "chat-backend-moe",
+			"name": "chat-backend-moe",
+			"probe": null,
+			"reason": "not running",
+			"restarts": 0,
+			"state": "stopped",
+			"unit_state": "inactive",
+			"upstreams": []
+		},
+		{
+			"checked_at": null,
+			"description": "Secondary model backend",
+			"expected": "unspecified",
+			"group": "chat",
+			"label": "Secondary Backend",
+			"name": "chat-backend2",
+			"probe": null,
+			"reason": "not running",
+			"restarts": 0,
+			"state": "stopped",
+			"unit_state": "inactive",
+			"upstreams": []
+		},
+		{
+			"checked_at": 1785949996.4341245,
+			"description": "Routes primary think/chat/code",
+			"expected": "on",
+			"group": "chat",
+			"label": "Primary Proxy",
+			"name": "chat-proxy",
+			"probe": {
+				"checked_at": 1785949996.4341245,
+				"detail": "",
+				"http_status": 200,
+				"ok": true,
+				"target": "http://127.0.0.1:8004/v1/models"
+			},
+			"reason": "",
+			"restarts": 0,
+			"state": "active",
+			"unit_state": "active",
+			"upstreams": [
+				{
+					"any_of": [
+						"chat-backend-dense",
+						"chat-backend-moe",
+						"chat-backend"
+					],
+					"ok": true,
+					"states": {
+						"chat-backend": "stopped",
+						"chat-backend-dense": "active",
+						"chat-backend-moe": "stopped"
+					}
+				}
+			]
+		},
+		{
+			"checked_at": null,
+			"description": "Routes secondary think/chat/code",
+			"expected": "off",
+			"group": "chat",
+			"label": "Secondary Proxy",
+			"name": "chat-proxy2",
+			"probe": null,
+			"reason": "stopped on purpose",
+			"restarts": 0,
+			"state": "stopped",
+			"unit_state": "inactive",
+			"upstreams": [
+				{
+					"any_of": [
+						"chat-backend2"
+					],
+					"ok": false,
+					"states": {
+						"chat-backend2": "stopped"
+					}
+				}
+			]
+		},
+		{
+			"checked_at": null,
+			"description": "Embedding model",
+			"expected": "off",
+			"group": "auxiliary",
+			"label": "Embedding",
+			"name": "embed",
+			"probe": null,
+			"reason": "held by the model router \u2014 the model loads on demand and is not run as a unit",
+			"restarts": 0,
+			"state": "stopped",
+			"unit_state": "inactive",
+			"upstreams": []
+		},
+		{
+			"checked_at": null,
+			"description": "Second embedding backend",
+			"expected": "unspecified",
+			"group": "auxiliary",
+			"label": "Embedding 2",
+			"name": "embed2",
+			"probe": null,
+			"reason": "not running",
+			"restarts": 0,
+			"state": "stopped",
+			"unit_state": "inactive",
+			"upstreams": []
+		},
+		{
+			"checked_at": 1785949996.4347162,
+			"description": "Local GLM-OCR layout/PDF parser",
+			"expected": "on",
+			"group": "auxiliary",
+			"label": "OCR SDK",
+			"name": "glmocr-sdk",
+			"probe": {
+				"checked_at": 1785949996.4347162,
+				"detail": "",
+				"http_status": 200,
+				"ok": true,
+				"target": "http://127.0.0.1:5002/health"
+			},
+			"reason": "",
+			"restarts": 0,
+			"state": "active",
+			"unit_state": "active",
+			"upstreams": [
+				{
+					"any_of": [
+						"llama-router"
+					],
+					"ok": true,
+					"states": {
+						"llama-router": "active"
+					}
+				}
+			]
+		},
+		{
+			"checked_at": null,
+			"description": "Local Honcho memory API",
+			"expected": "unspecified",
+			"group": "auxiliary",
+			"label": "Honcho API",
+			"name": "honcho-api",
+			"probe": null,
+			"reason": "not running",
+			"restarts": 0,
+			"state": "stopped",
+			"unit_state": "inactive",
+			"upstreams": [
+				{
+					"any_of": [
+						"chat-proxy"
+					],
+					"ok": true,
+					"states": {
+						"chat-proxy": "active"
+					}
+				},
+				{
+					"any_of": [
+						"llama-router",
+						"embed",
+						"embed2"
+					],
+					"ok": true,
+					"states": {
+						"embed": "stopped",
+						"embed2": "stopped",
+						"llama-router": "active"
+					}
+				}
+			]
+		},
+		{
+			"checked_at": null,
+			"description": "Local Honcho background deriver",
+			"expected": "unspecified",
+			"group": "auxiliary",
+			"label": "Honcho Worker",
+			"name": "honcho-deriver",
+			"probe": null,
+			"reason": "not running",
+			"restarts": 0,
+			"state": "stopped",
+			"unit_state": "inactive",
+			"upstreams": [
+				{
+					"any_of": [
+						"honcho-api"
+					],
+					"ok": false,
+					"states": {
+						"honcho-api": "stopped"
+					}
+				}
+			]
+		},
+		{
+			"checked_at": 1785949996.4337442,
+			"description": "Loads the auxiliary models on demand",
+			"expected": "on",
+			"group": "auxiliary",
+			"label": "Model Router",
+			"name": "llama-router",
+			"probe": {
+				"checked_at": 1785949996.4337442,
+				"detail": "",
+				"http_status": 200,
+				"ok": true,
+				"target": "http://127.0.0.1:8013/health"
+			},
+			"reason": "",
+			"restarts": 0,
+			"state": "active",
+			"unit_state": "active",
+			"upstreams": []
+		},
+		{
+			"checked_at": null,
+			"description": "GLM-OCR llama.cpp model backend",
+			"expected": "off",
+			"group": "auxiliary",
+			"label": "OCR Model",
+			"name": "ocr",
+			"probe": null,
+			"reason": "held by the model router \u2014 the model loads on demand and is not run as a unit",
+			"restarts": 0,
+			"state": "stopped",
+			"unit_state": "inactive",
+			"upstreams": []
+		},
+		{
+			"checked_at": 1785949996.4329996,
+			"description": "Remote browser automation WebSocket server",
+			"expected": "unspecified",
+			"group": "auxiliary",
+			"label": "Playwright",
+			"name": "playwright-server",
+			"probe": {
+				"checked_at": 1785949996.4329996,
+				"detail": "",
+				"http_status": null,
+				"ok": true,
+				"target": "127.0.0.1:3001"
+			},
+			"reason": "",
+			"restarts": 0,
+			"state": "active",
+			"unit_state": "active",
+			"upstreams": []
+		},
+		{
+			"checked_at": null,
+			"description": "Reranker model",
+			"expected": "off",
+			"group": "auxiliary",
+			"label": "Reranker",
+			"name": "rerank",
+			"probe": null,
+			"reason": "held by the model router \u2014 the model loads on demand and is not run as a unit",
+			"restarts": 0,
+			"state": "stopped",
+			"unit_state": "inactive",
+			"upstreams": []
+		},
+		{
+			"checked_at": null,
+			"description": "Local metasearch engine via uWSGI/nginx",
+			"expected": "unspecified",
+			"group": "auxiliary",
+			"label": "SearXNG",
+			"name": "searxng",
+			"probe": null,
+			"reason": "",
+			"restarts": 0,
+			"state": "active",
+			"unit_state": "active",
+			"upstreams": []
+		},
+		{
+			"checked_at": null,
+			"description": "Small fast task model",
+			"expected": "off",
+			"group": "auxiliary",
+			"label": "Task",
+			"name": "task",
+			"probe": null,
+			"reason": "held by the model router \u2014 the model loads on demand and is not run as a unit",
+			"restarts": 0,
+			"state": "stopped",
+			"unit_state": "inactive",
+			"upstreams": []
+		}
+	],
+	"stack": {
+		"alert_counts": {
+			"error": 0,
+			"info": 1,
+			"warn": 2
+		},
+		"api_version": "1.0",
+		"backends_active": 1,
+		"busy": false,
+		"hostname": "LLMs",
+		"router_enabled": true,
+		"services_active": 6,
+		"services_total": 17,
+		"stack_dir": "/mnt/LLMs/llamacpp/llm-stack-git"
+	},
+	"window_seconds": 3600
+}

@@ -19,6 +19,15 @@ export const DEFAULT_CONNECTED_SERVICES = Object.freeze({
 		enabled: true,
 		wsEndpoint: "ws://llms/playwright",
 	}),
+	// Read-only state API for the inference deployment: which weights each port
+	// is serving, how much context a slot has, and why a service is down. Purely
+	// additive — nothing here is required to run, and every reader degrades to
+	// the built-in constants when it is absent, which is what happens on any
+	// install that is not this deployment. See `stack-state.mjs`.
+	stackState: Object.freeze({
+		enabled: true,
+		baseUrl: "http://llms:8078",
+	}),
 	// Bulk per-file work: the non-thinking configuration of the same weights.
 	// Batch skills spend no hidden reasoning tokens here. Scheduling is on
 	// because this endpoint is not a separate server — see the note on `think`.
@@ -126,6 +135,8 @@ export function seedConnectedServicesSettings(settings) {
 		current.playwright && typeof current.playwright === "object" && !Array.isArray(current.playwright)
 			? current.playwright
 			: {};
+	const stackState =
+		current.stackState && typeof current.stackState === "object" && !Array.isArray(current.stackState) ? current.stackState : {};
 	const chat = current.chat && typeof current.chat === "object" && !Array.isArray(current.chat) ? current.chat : {};
 	const think = current.think && typeof current.think === "object" && !Array.isArray(current.think) ? current.think : {};
 	const embeddings =
@@ -141,6 +152,10 @@ export function seedConnectedServicesSettings(settings) {
 		playwright: {
 			enabled: playwright.enabled ?? DEFAULT_CONNECTED_SERVICES.playwright.enabled,
 			wsEndpoint: normalizeWsEndpoint(playwright.wsEndpoint) ?? DEFAULT_CONNECTED_SERVICES.playwright.wsEndpoint,
+		},
+		stackState: {
+			enabled: stackState.enabled ?? DEFAULT_CONNECTED_SERVICES.stackState.enabled,
+			baseUrl: normalizeHttpBaseUrl(stackState.baseUrl) ?? DEFAULT_CONNECTED_SERVICES.stackState.baseUrl,
 		},
 		chat: seedInferenceService(chat, DEFAULT_CONNECTED_SERVICES.chat),
 		think: seedInferenceService(think, DEFAULT_CONNECTED_SERVICES.think),
@@ -216,12 +231,15 @@ export function resolveConnectedServices(options = {}) {
 	const envEmbeddings = normalizeHttpBaseUrl(env.FORGE_EMBEDDINGS_URL);
 	const envEmbeddingsModel = normalizeServiceName(env.FORGE_EMBEDDINGS_MODEL);
 	const searxngEnvPresent = Object.hasOwn(env, "FORGE_SEARXNG_URL");
+	const envStackState = normalizeHttpBaseUrl(env.FORGE_STACK_STATE_URL);
 	const playwrightEnvPresent = Object.hasOwn(env, "FORGE_PLAYWRIGHT_WS_ENDPOINT");
+	const stackStateEnvPresent = Object.hasOwn(env, "FORGE_STACK_STATE_URL");
 	const chatEnvPresent = Object.hasOwn(env, "FORGE_BASE_CHAT_URL") || Object.hasOwn(env, "FORGE_CHAT_URL");
 	const thinkEnvPresent = Object.hasOwn(env, "FORGE_THINK_URL");
 	const embeddingsEnvPresent = Object.hasOwn(env, "FORGE_EMBEDDINGS_URL");
 	const explicitSearxng = normalizeHttpBaseUrl(options.searxngUrl);
 	const explicitPlaywright = normalizeWsEndpoint(options.playwrightWsEndpoint);
+	const explicitStackState = normalizeHttpBaseUrl(options.stackStateUrl);
 	const explicitChat = normalizeHttpBaseUrl(options.chatUrl);
 	const explicitChatModel = normalizeServiceName(options.chatModel);
 	const explicitThink = normalizeHttpBaseUrl(options.thinkUrl);
@@ -244,6 +262,10 @@ export function resolveConnectedServices(options = {}) {
 		playwright: {
 			enabled: explicitPlaywright ? true : playwrightEnvPresent ? Boolean(envPlaywright) : seeded.playwright.enabled,
 			wsEndpoint: explicitPlaywright ?? envPlaywright ?? seeded.playwright.wsEndpoint,
+		},
+		stackState: {
+			enabled: explicitStackState ? true : stackStateEnvPresent ? Boolean(envStackState) : seeded.stackState.enabled,
+			baseUrl: explicitStackState ?? envStackState ?? seeded.stackState.baseUrl,
 		},
 		chat: {
 			enabled: explicitChat ? true : chatEnvPresent ? Boolean(envChat) : seeded.chat.enabled,

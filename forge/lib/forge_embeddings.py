@@ -33,6 +33,8 @@ import os
 import urllib.error
 import urllib.request
 
+import stack_state
+
 DEFAULT_EMBEDDINGS_URL = "http://llms:8005/v1/embeddings"
 DEFAULT_EMBEDDINGS_MODEL = "embed"
 DEFAULT_TIMEOUT = 30.0
@@ -97,8 +99,14 @@ def embed_texts(texts, url=None, model=None, timeout=DEFAULT_TIMEOUT, batch_size
     }
 
 
-def embeddings_doctor(url=None, model=None, timeout=5.0):
-    """Probe the endpoint with a tiny request and report reachability."""
+def embeddings_doctor(url=None, model=None, timeout=5.0, env=None):
+    """Probe the endpoint with a tiny request and report reachability.
+
+    The embedding model is normally held by the stack's model router rather than
+    run as a service of its own, so a cold endpoint is the ordinary case and not
+    a fault. Where the deployment publishes a state API, say that instead of
+    reporting a bare connection error against a port nothing is listening on.
+    """
     resolved_url = endpoint_url(url)
     result = embed_texts(["ping"], url=resolved_url, model=model, timeout=timeout)
     if result["ok"]:
@@ -110,13 +118,18 @@ def embeddings_doctor(url=None, model=None, timeout=5.0):
             "dimensions": result["dimensions"],
             "detail": f"reachable ({result['dimensions']}-dimensional vectors)",
         }
-    return {
+    report = {
         "configured": True,
         "reachable": False,
         "url": resolved_url,
         "model": model_name(model),
         "detail": result["reason"],
     }
+    explanation = stack_state.explain_unreachable(stack_state.read_snapshot(env=env), resolved_url)
+    if explanation:
+        report["stackDetail"] = explanation
+        report["detail"] = f"{report['detail']} — {explanation}"
+    return report
 
 
 def normalize(vector):

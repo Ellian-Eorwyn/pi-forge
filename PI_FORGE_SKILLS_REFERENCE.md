@@ -141,3 +141,9 @@ The installed forge profile defaults to local services unless overridden in
 - Embeddings: `http://llms:8005` with model `embed`.
 - SearXNG search: `connectedServices.searxng.baseUrl` defaults to `http://llms/searxng`.
 - Playwright rendered browsing: `connectedServices.playwright.wsEndpoint` defaults to `ws://llms/playwright`.
+- Stack state: `connectedServices.stackState.baseUrl` defaults to `http://llms:8078`.
+  Read-only and entirely optional — it reports which weights each port is
+  serving, the real per-slot context size, and why a service is down. Where it
+  is absent every consumer falls back to the built-in constants, so an install
+  that has no such API behaves exactly as it did before it existed. Disable with
+  `PI_FORGE_SKIP_STACK_DISCOVERY=1` or an empty `FORGE_STACK_STATE_URL`.

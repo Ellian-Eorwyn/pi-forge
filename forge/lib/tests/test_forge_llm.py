@@ -15,6 +15,9 @@ sys.path.insert(0, str(LIB))
 spec = importlib.util.spec_from_file_location("forge_llm", LIB / "forge_llm.py")
 forge_llm = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(forge_llm)
+# The same module object `forge_llm` imported, so clearing its cache in a test
+# actually clears the one the code under test reads.
+stack_state = sys.modules["stack_state"]
 
 
 class FakeChatServer:
@@ -61,7 +64,8 @@ class FakeChatServer:
                 self.wfile.write(body)
 
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}/v1/chat/completions"
+        self.port = self.httpd.server_address[1]
+        self.url = f"http://127.0.0.1:{self.port}/v1/chat/completions"
 
     def __enter__(self):
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
@@ -308,6 +312,144 @@ class DoctorTests(unittest.TestCase):
     def test_doctor_reports_an_unreachable_endpoint(self):
         report = forge_llm.service_doctor(service("http://127.0.0.1:9/v1/chat/completions"), timeout=1.0)
         self.assertFalse(report["reachable"])
+
+
+class FakeStackServer:
+    """A state API whose primary backend claims to live on ``chat_port``.
+
+    Rewriting the port is what lets a doctor test resolve a throwaway stub on
+    127.0.0.1 to a backend in the captured fixture.
+    """
+
+    def __init__(self, chat_port, context_tokens=131072, total_slots=2, active=True):
+        snapshot = json.loads((Path(__file__).resolve().parent / "fixtures" / "stack-snapshot.json").read_text(encoding="utf-8"))
+        for backend in snapshot["backends"]:
+            if backend["name"] == "chat-primary":
+                backend["base_url"] = f"http://127.0.0.1:{chat_port}"
+                backend["active"] = active
+                backend["props"]["n_ctx_per_slot"] = context_tokens
+                backend["props"]["total_slots"] = total_slots
+        # The fixture's own port map would otherwise claim this port for a
+        # different role and defeat the rewrite above.
+        snapshot["config"] = {}
+        body = json.dumps(snapshot).encode("utf-8")
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.env = {"FORGE_STACK_STATE_URL": f"http://127.0.0.1:{self.httpd.server_port}"}
+
+    def __enter__(self):
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        stack_state.clear_cache()
+        return self
+
+    def __exit__(self, *_exc):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        stack_state.clear_cache()
+
+
+class StackAwareDoctorTests(unittest.TestCase):
+    """What the doctor gains where the deployment publishes a state API.
+
+    All of it is additive. The final test is the one that matters most: on an
+    install with no such API, the report is exactly what it always was.
+    """
+
+    def test_doctor_names_the_weights_behind_the_endpoint(self):
+        # The model id proves nothing — llama.cpp answers to whatever name it is
+        # sent regardless of what is loaded — so the doctor reports the launched
+        # path, its quantization, and the llama.cpp build instead.
+        with FakeChatServer(responses=["ready"]) as chat, FakeStackServer(chat.port) as stack:
+            report = forge_llm.service_doctor(service(chat.url), env=stack.env)
+            self.assertEqual(report["backend"]["quant"], "Q6_K")
+            self.assertEqual(report["backend"]["buildInfo"], "b10083-846e991ec")
+            self.assertTrue(report["backend"]["modelPath"].endswith(".gguf"))
+
+    def test_doctor_explains_why_an_endpoint_is_down(self):
+        with FakeChatServer(responses=["ready"]) as chat:
+            port = chat.port
+        # `chat` is closed here, so the doctor's probe genuinely fails while the
+        # stack still describes the backend that used to be on that port.
+        with FakeStackServer(port, active=False) as stack:
+            report = forge_llm.service_doctor(service(f"http://127.0.0.1:{port}/v1/chat/completions"), timeout=1.0, env=stack.env)
+            self.assertFalse(report["reachable"])
+            self.assertIn("stackDetail", report)
+            self.assertIn(report["stackDetail"], report["detail"])
+
+    def test_doctor_warns_when_the_configured_context_does_not_match_the_slot(self):
+        # Configured too high, a skill sends a prompt this client believes fits
+        # and reads the server's rejection as the model failing the task.
+        with FakeChatServer(responses=["ready"]) as chat, FakeStackServer(chat.port, context_tokens=65536) as stack:
+            report = forge_llm.service_doctor(service(chat.url), env=stack.env)
+            self.assertTrue(report["contextMismatch"])
+            self.assertEqual(report["servedContextTokens"], 65536)
+            self.assertIn("65536", report["contextWarning"])
+            self.assertIn(report["contextWarning"], forge_llm.doctor_warnings(report))
+
+    def test_doctor_warns_when_the_pinned_slot_does_not_exist(self):
+        # Nothing else in forge checks this: the slot number is only ever sent,
+        # never validated, so a backend moving to `--parallel 1` would leave
+        # every background call naming slot 1 forever.
+        with FakeChatServer(responses=["ready"]) as chat, FakeStackServer(chat.port, total_slots=1) as stack:
+            report = forge_llm.service_doctor(service(chat.url, scheduling_enabled=True), env=stack.env)
+            self.assertIn("slot 1", report["slotWarning"])
+            self.assertIn("1 slot", report["slotWarning"])
+
+    def test_a_matching_deployment_produces_no_warnings(self):
+        with FakeChatServer(responses=["ready"]) as chat, FakeStackServer(chat.port) as stack:
+            report = forge_llm.service_doctor(service(chat.url, scheduling_enabled=True), env=stack.env)
+            self.assertEqual(forge_llm.doctor_warnings(report), [])
+
+    def test_the_report_is_unchanged_without_a_stack(self):
+        # The degradation guarantee: every install that is not this deployment.
+        with FakeChatServer(responses=["ready", "ready"]) as chat:
+            without = forge_llm.service_doctor(service(chat.url), env={"PI_FORGE_SKIP_STACK_DISCOVERY": "1"})
+            unreachable = forge_llm.service_doctor(service(chat.url), env={"FORGE_STACK_STATE_URL": "http://127.0.0.1:1"})
+        for report in (without, unreachable):
+            report.pop("elapsedMs", None)
+            self.assertNotIn("backend", report)
+            self.assertNotIn("stackDetail", report)
+            self.assertNotIn("contextWarning", report)
+            self.assertNotIn("slotWarning", report)
+        self.assertEqual(without, unreachable)
+
+
+class StackConditionTests(unittest.TestCase):
+    """Backend provenance on the call records skills journal into a run."""
+
+    def test_the_first_record_carries_the_backend_and_the_stack_warnings(self):
+        forge_llm.reset_stack_conditions()
+        with FakeChatServer(responses=["ok", "ok"]) as chat, FakeStackServer(chat.port) as stack:
+            _, first = forge_llm.call(service(chat.url), [{"role": "user", "content": "hi"}], env=stack.env)
+            _, second = forge_llm.call(service(chat.url), [{"role": "user", "content": "hi"}], env=stack.env)
+        self.assertTrue(first["backend"]["modelPath"].endswith(".gguf"))
+        self.assertTrue(any("swap" in text.lower() for text in first["stackWarnings"]))
+        # A 500-item batch should say which weights it ran against once, not
+        # five hundred times.
+        self.assertNotIn("backend", second)
+        self.assertNotIn("stackWarnings", second)
+        forge_llm.reset_stack_conditions()
+
+    def test_records_are_unchanged_without_a_stack(self):
+        forge_llm.reset_stack_conditions()
+        with FakeChatServer(responses=["ok"]) as chat:
+            _, record = forge_llm.call(
+                service(chat.url), [{"role": "user", "content": "hi"}], env={"PI_FORGE_SKIP_STACK_DISCOVERY": "1"}
+            )
+        self.assertNotIn("backend", record)
+        self.assertNotIn("stackWarnings", record)
+        forge_llm.reset_stack_conditions()
 
 
 if __name__ == "__main__":

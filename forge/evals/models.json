@@ -32,8 +32,9 @@
       "family": "qwen3.6-27b",
       "sizeGiB": 21.3,
       "coResident": false,
-      "notes": "The bulk tier every skill uses today. This is the baseline the others are read against. Served by chat-backend-dense across both 3090s; :8004 and :8008 are two request-shaping profiles in front of the same llama-server, so this and think-27b address the same weights. No expectModelPath: :8010 reports metadata but not launch argv, so a path claim here could never be checked. expectQuant is what separates this from chat-27b-q4, since a requant falls inside the parameter-count tolerance by design.",
+      "notes": "The bulk tier every skill uses today. This is the baseline the others are read against. Served by chat-backend-dense across both 3090s; :8004 and :8008 are two request-shaping profiles in front of the same llama-server, so this and think-27b address the same weights. expectModelPath is checkable here only because the stack state API reports the launched path for proxied backends; :8010 itself reports metadata but not launch argv, so on a deployment without that API this claim goes unchecked rather than failing. expectQuant is what separates this from chat-27b-q4, since a requant falls inside the parameter-count tolerance by design.",
       "fingerprintUrl": "http://llms:8010/v1",
+      "expectModelPath": "/mnt/LLMs/llamacpp/llm-stack-git/models/Qwen3.6-27B-Q6_K.gguf",
       "expectParams": 27320697856,
       "expectQuant": "Q6_K"
     },
@@ -50,6 +51,7 @@
       "coResident": false,
       "notes": "The verification tier. Same weights as chat-27b with reasoning on, so the gap between the two is the value of thinking rather than of scale. Reasoning consumes the output budget before the answer starts, so every case needs headroom. First set to 3000 from two probe items at ~1,900 tokens; a full run then showed real cases spending 3,500-9,938, truncating items in four of twelve. Raised to cover the observed maximum with margin. A cap costs nothing unless it is reached, so err high: too low silently converts a model failure out of thin air.",
       "fingerprintUrl": "http://llms:8010/v1",
+      "expectModelPath": "/mnt/LLMs/llamacpp/llm-stack-git/models/Qwen3.6-27B-Q6_K.gguf",
       "expectParams": 27320697856,
       "expectQuant": "Q6_K"
     },
@@ -112,7 +114,7 @@
       "fingerprintUrl": "http://llms:8010/v1",
       "expectParams": 27320697856,
       "expectQuant": "Q4",
-      "notes": "The same weights as chat-27b at a smaller quant, so the gap between the two is the cost of quantization alone, with scale and reasoning held fixed. Shares the primary-backend slot with chat-27b and moe-35a3b. expectParams cannot separate it from chat-27b — a requant moves the count by less than the 10% tolerance, which is exactly what that tolerance is for — and :8010 reports no argv, so expectModelPath cannot work here either. expectQuant is the whole discriminator, and it is matched as a substring of the reported ftype so that the exact spelling (Q4_K_M, \"Q4_K - Medium\", Q4_K_XL) does not have to be guessed before the weights are ever loaded."
+      "notes": "The same weights as chat-27b at a smaller quant, so the gap between the two is the cost of quantization alone, with scale and reasoning held fixed. Shares the primary-backend slot with chat-27b and moe-35a3b. expectParams cannot separate it from chat-27b — a requant moves the count by less than the 10% tolerance, which is exactly what that tolerance is for. expectQuant is the discriminator that always works; expectModelPath is left unset because these weights have never been loaded here, so there is no measured path to assert. It is matched as a substring of the reported ftype so that the exact spelling (Q4_K_M, \"Q4_K - Medium\", Q4_K_XL) does not have to be guessed before the weights are ever loaded."
     }
   }
 }

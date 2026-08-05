@@ -54,6 +54,7 @@ import urllib.request
 from pathlib import Path
 
 import run_state
+import stack_state
 
 # Mirrors SLOT_CONTEXT_TOKENS in connected-services.mjs. One llama-server runs
 # with `--ctx-size 262144 --parallel 2` and llama.cpp splits the context evenly
@@ -144,6 +145,52 @@ CHARACTERS_PER_TOKEN = 3.0
 # against observed promptTokens and converges near 3.42 — and is used to decide
 # whether a prompt fits a slot.
 PROMPT_CHARACTERS_PER_TOKEN = 3.42
+
+
+# Which service URLs have already had their backend identity written to a
+# record in this process. A 500-item batch should say which weights it ran
+# against once, not five hundred times.
+_reported_conditions = set()
+_conditions_lock = threading.Lock()
+
+
+def stack_conditions(service, env=None):
+    """Backend identity and stack warnings to attach to this call's record, once.
+
+    Skills journal every ``model_call`` record into their run directory, so this
+    is how a run comes to say which weights produced its output and what shape
+    the host was in at the time. A batch that crawled because the inference host
+    was at 97% swap should read that way in its own journal, rather than looking
+    like the model got slow.
+
+    Returns ``None`` on every call after the first for a given endpoint, and on
+    any install where the state API is absent. The snapshot read is cached and
+    happens at most once per endpoint per process — the preflight that every
+    batch skill already runs usually warms it, so by the time real work starts
+    this costs nothing.
+    """
+    url = service["url"]
+    with _conditions_lock:
+        if url in _reported_conditions:
+            return None
+        _reported_conditions.add(url)
+    snapshot = stack_state.read_snapshot(env=env)
+    if snapshot is None:
+        return None
+    conditions = {}
+    identity = stack_state.identity_for_url(snapshot, url)
+    if identity:
+        conditions["backend"] = identity
+    warnings = stack_state.health_warnings(snapshot)
+    if warnings:
+        conditions["stackWarnings"] = warnings
+    return conditions or None
+
+
+def reset_stack_conditions():
+    """Forget which endpoints have been reported. For tests."""
+    with _conditions_lock:
+        _reported_conditions.clear()
 
 
 def hidden_token_count(generated_tokens, content):
@@ -564,6 +611,9 @@ def call(
         "reasoned": bool(message.get("reasoning_content") or message.get("reasoning"))
         or (hidden is not None and hidden > HIDDEN_TOKEN_MARGIN),
     }
+    conditions = stack_conditions(service, env)
+    if conditions:
+        record.update(conditions)
     return content, record
 
 
@@ -606,13 +656,78 @@ def served_models(service, timeout=5.0):
     return [entry.get("id") for entry in (payload.get("data") or []) if entry.get("id")]
 
 
-def service_doctor(service, expect_non_thinking=False, timeout=30.0):
+def doctor_warnings(report):
+    """Every warning in a ``service_doctor`` report, in reporting order.
+
+    The report carries several independent warnings under separate keys, because
+    a single ``warning`` field means the last writer silently wins. Callers that
+    surface warnings to a person should read this rather than one key.
+    """
+    # `stackDetail` is deliberately absent: it is already folded into `detail`,
+    # and a caller printing both would say the same thing twice.
+    keys = ("warning", "contextWarning", "slotWarning")
+    return [report[key] for key in keys if isinstance(report.get(key), str) and report[key].strip()]
+
+
+def _describe_backend(report, snapshot, service):
+    """Add what the stack knows about this endpoint to a doctor report.
+
+    Three separate findings, each independently useful:
+
+    - ``backend`` names the weights, quantization, and llama.cpp build. The model
+      id in the config cannot do that, because llama.cpp answers to whatever name
+      it is sent regardless of what is loaded.
+    - ``contextMismatch`` catches a configured ceiling that no longer matches the
+      slot. Too high and a skill sends a prompt this client believes fits, then
+      reads the server's rejection as the model failing the task.
+    - ``slotWarning`` catches pinning a slot that does not exist. Nothing else
+      checks this: a deployment moving to ``--parallel 1`` leaves every
+      background call in forge naming slot 1 forever.
+
+    Each finding gets its own key rather than sharing ``warning``, which the
+    probe below overwrites. ``doctor_warnings`` collects them all.
+    """
+    if snapshot is None:
+        return
+    identity = stack_state.identity_for_url(snapshot, service["url"])
+    if identity:
+        report["backend"] = identity
+    capacity = stack_state.capacity_for_url(snapshot, service["url"])
+    if not capacity:
+        return
+    report["servedContextTokens"] = capacity["contextTokens"]
+    configured = service.get("contextTokens") or SLOT_CONTEXT_TOKENS
+    if configured != capacity["contextTokens"]:
+        report["contextMismatch"] = True
+        report["contextWarning"] = (
+            f"this service is configured for {configured} context tokens but the backend serves "
+            f"{capacity['contextTokens']} per slot; run the installer to re-read the deployment, or set "
+            "contextTokens in connectedServices"
+        )
+    scheduling = service.get("scheduling") or {}
+    total_slots = capacity.get("totalSlots")
+    background_slot = scheduling.get("backgroundSlot")
+    if scheduling.get("enabled") and isinstance(total_slots, int) and isinstance(background_slot, int):
+        if background_slot >= total_slots:
+            report["slotWarning"] = (
+                f"background work pins slot {background_slot} but the backend runs {total_slots} "
+                f"slot{'s' if total_slots != 1 else ''}; every background call is naming a slot that does not exist"
+            )
+
+
+def service_doctor(service, expect_non_thinking=False, timeout=30.0, env=None):
     """Probe a service and report reachability, served model, and — for the batch
     service — whether it actually answers without thinking.
 
     A wrong model name is worth reporting: llama.cpp serves whatever is loaded
     regardless of the id sent, so a stale name stays invisible until someone
     points the same config at a server that validates it.
+
+    Where the deployment publishes a state API, two more things are reported: the
+    weights actually behind the endpoint (a model id proves nothing, a launched
+    path does), and — when the probe fails — why, instead of a bare transport
+    error. Both are absent on an install without that API, and nothing else
+    changes when they are.
     """
     report = {
         "service": service["name"],
@@ -627,6 +742,8 @@ def service_doctor(service, expect_non_thinking=False, timeout=30.0):
         return report
     if service.get("fallback"):
         report["fallback"] = service["fallback"]
+    snapshot = stack_state.read_snapshot(env=env)
+    _describe_backend(report, snapshot, service)
     try:
         available = served_models(service, timeout=min(timeout, 10.0))
         report["servedModels"] = available
@@ -644,6 +761,13 @@ def service_doctor(service, expect_non_thinking=False, timeout=30.0):
         )
     except (ChatError, InterruptedError, OSError) as error:
         report["detail"] = f"{type(error).__name__}: {error}"
+        # The transport error says the call did not land. The stack says why,
+        # which is the difference between "connection refused" and "the primary
+        # proxy is up but every backend behind it is stopped".
+        explanation = stack_state.explain_unreachable(snapshot, service["url"])
+        if explanation:
+            report["stackDetail"] = explanation
+            report["detail"] = f"{report['detail']} — {explanation}"
         return report
     report["reachable"] = True
     report["elapsedMs"] = record["elapsedMs"]

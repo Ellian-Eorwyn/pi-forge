@@ -58,6 +58,8 @@ const required = [
 	"lib/moshi-hook.mjs",
 	"lib/run-state.mjs",
 	"lib/run_state.py",
+	"lib/stack-state.mjs",
+	"lib/stack_state.py",
 	"scripts/configure-pi-forge.mjs",
 	"scripts/pi-forge-mcp-server.mjs",
 	"scripts/runtime-env.mjs",

@@ -23,6 +23,7 @@ import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { join } from "node:path";
 import { getForgeAgentDir, resolveConnectedServices, resolveThinkOrChat, SLOT_CONTEXT_TOKENS } from "./connected-services.mjs";
 import { isTransientFailure } from "./run-state.mjs";
+import { capacityForUrl, explainUnreachable, healthWarnings, identityForUrl, readSnapshot } from "./stack-state.mjs";
 
 // A thinking backend that was asked not to think can still emit a stray block.
 // Strip it defensively everywhere rather than trusting any one server's config.
@@ -332,6 +333,42 @@ async function postPreemptible(url, body, timeoutMs, lease, scheduling) {
  * for verification against the thinking backend, which is the same server the
  * interactive session is using.
  */
+// Which service URLs have already had their backend identity written to a
+// record in this process. A 500-item batch should say which weights it ran
+// against once, not five hundred times.
+const reportedConditions = new Set();
+
+/**
+ * Backend identity and stack warnings to attach to this call's record, once.
+ *
+ * Skills journal every `model_call` record into their run directory, so this is
+ * how a run comes to say which weights produced its output and what shape the
+ * host was in at the time. A batch that crawled because the inference host was
+ * at 97% swap should read that way in its own journal, rather than looking like
+ * the model got slow.
+ *
+ * Returns null on every call after the first for a given endpoint, and on any
+ * install where the state API is absent. Mirrors `stack_conditions` in
+ * `forge_llm.py`.
+ */
+export async function stackConditions(service, env = process.env) {
+	if (reportedConditions.has(service.url)) return null;
+	reportedConditions.add(service.url);
+	const snapshot = await readSnapshot({ env });
+	if (!snapshot) return null;
+	const conditions = {};
+	const identity = identityForUrl(snapshot, service.url);
+	if (identity) conditions.backend = identity;
+	const warnings = healthWarnings(snapshot);
+	if (warnings.length) conditions.stackWarnings = warnings;
+	return Object.keys(conditions).length ? conditions : null;
+}
+
+/** Forget which endpoints have been reported. For tests. */
+export function resetStackConditions() {
+	reportedConditions.clear();
+}
+
 export async function call(service, messages, options = {}) {
 	const {
 		temperature = 0,
@@ -342,6 +379,7 @@ export async function call(service, messages, options = {}) {
 		session = null,
 		timeoutMs = DEFAULT_TIMEOUT_MS,
 		task = null,
+		env = process.env,
 	} = options;
 	const scheduling = service.scheduling ?? {};
 	const request = { model: service.model, messages, temperature, stream: false };
@@ -407,6 +445,7 @@ export async function call(service, messages, options = {}) {
 		finishReason: choices.length ? (choices[0].finish_reason ?? null) : null,
 		reasoned: Boolean(message.reasoning_content || message.reasoning) || (hidden !== null && hidden > HIDDEN_TOKEN_MARGIN),
 	};
+	Object.assign(record, (await stackConditions(service, env)) ?? {});
 	return { content, record };
 }
 
@@ -482,7 +521,62 @@ export async function servedModels(service, timeoutMs = 5000) {
  * useful signal here: a bulk endpoint that is quietly reasoning costs a few
  * hundred wasted tokens on every item and nothing else reveals it.
  */
-export async function serviceDoctor(service, { expectNonThinking = false, timeoutMs = 30_000 } = {}) {
+/**
+ * Every warning in a `serviceDoctor` report, in reporting order.
+ *
+ * The report carries several independent warnings under separate keys, because a
+ * single `warning` field means the last writer silently wins. Callers that
+ * surface warnings to a person should read this rather than one key.
+ *
+ * `stackDetail` is deliberately absent: it is already folded into `detail`, and a
+ * caller printing both would say the same thing twice.
+ */
+export function doctorWarnings(report) {
+	return ["warning", "contextWarning", "slotWarning"].map((key) => report?.[key]).filter((value) => typeof value === "string" && value.trim());
+}
+
+/**
+ * Add what the stack knows about this endpoint to a doctor report.
+ *
+ * Three separate findings, each independently useful:
+ *
+ * - `backend` names the weights, quantization, and llama.cpp build. The model id
+ *   in the config cannot do that, because llama.cpp answers to whatever name it
+ *   is sent regardless of what is loaded.
+ * - `contextMismatch` catches a configured ceiling that no longer matches the
+ *   slot. Too high and a skill sends a prompt this client believes fits, then
+ *   reads the server's rejection as the model failing the task.
+ * - `slotWarning` catches pinning a slot that does not exist. Nothing else checks
+ *   this: a deployment moving to `--parallel 1` leaves every background call in
+ *   forge naming slot 1 forever.
+ *
+ * Each finding gets its own key rather than sharing `warning`, which the probe
+ * below overwrites. Mirrors `_describe_backend` in `forge_llm.py`.
+ */
+function describeBackend(report, snapshot, service) {
+	if (!snapshot) return;
+	const identity = identityForUrl(snapshot, service.url);
+	if (identity) report.backend = identity;
+	const capacity = capacityForUrl(snapshot, service.url);
+	if (!capacity) return;
+	report.servedContextTokens = capacity.contextTokens;
+	const configured = service.contextTokens || SLOT_CONTEXT_TOKENS;
+	if (configured !== capacity.contextTokens) {
+		report.contextMismatch = true;
+		report.contextWarning =
+			`this service is configured for ${configured} context tokens but the backend serves ${capacity.contextTokens} ` +
+			`per slot; run the installer to re-read the deployment, or set contextTokens in connectedServices`;
+	}
+	const scheduling = service.scheduling ?? {};
+	const totalSlots = capacity.totalSlots;
+	if (scheduling.enabled && Number.isInteger(totalSlots) && Number.isInteger(scheduling.backgroundSlot) && scheduling.backgroundSlot >= totalSlots) {
+		report.slotWarning =
+			`background work pins slot ${scheduling.backgroundSlot} but the backend runs ${totalSlots} ` +
+			`slot${totalSlots === 1 ? "" : "s"}; every background call is naming a slot that does not exist`;
+	}
+}
+
+export async function serviceDoctor(service, { expectNonThinking = false, timeoutMs = 30_000, env = process.env } = {}) {
 	const report = {
 		service: service.name,
 		url: service.url,
@@ -496,6 +590,8 @@ export async function serviceDoctor(service, { expectNonThinking = false, timeou
 		return report;
 	}
 	if (service.fallback) report.fallback = service.fallback;
+	const snapshot = await readSnapshot({ env });
+	describeBackend(report, snapshot, service);
 	try {
 		const available = await servedModels(service, Math.min(timeoutMs, 10_000));
 		report.servedModels = available;
@@ -513,6 +609,14 @@ export async function serviceDoctor(service, { expectNonThinking = false, timeou
 		({ content, record } = await call(service, [{ role: "user", content: "Reply with the single word: ready" }], { timeoutMs }));
 	} catch (error) {
 		report.detail = `${error.name}: ${error.message}`;
+		// The transport error says the call did not land. The stack says why,
+		// which is the difference between "connection refused" and "the primary
+		// proxy is up but every backend behind it is stopped".
+		const explanation = explainUnreachable(snapshot, service.url);
+		if (explanation) {
+			report.stackDetail = explanation;
+			report.detail = `${report.detail} — ${explanation}`;
+		}
 		return report;
 	}
 	report.reachable = true;

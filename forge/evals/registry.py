@@ -179,7 +179,15 @@ def probe(url, model, timeout=180.0, chat_template_kwargs=None, fingerprint_url=
         evidence["expectQuant"] = "ftype reported by the endpoint"
     if fingerprint.get("modelPath"):
         entry["expectModelPath"] = fingerprint["modelPath"]
-        evidence["expectModelPath"] = "first .gguf in the launch arguments"
+        # Two sources can supply this and they are not equally direct, so the
+        # evidence line has to say which one did. A proxy port has no launch
+        # argv to read; only the stack state API can name the weights behind it.
+        from_stack = (fingerprint.get("stack") or {}).get("modelPath") == fingerprint["modelPath"]
+        evidence["expectModelPath"] = (
+            "model_path reported by the stack state API for the backend behind this port"
+            if from_stack and not fingerprint.get("args")
+            else "first .gguf in the launch arguments"
+        )
     if fingerprint.get("sizeGiB"):
         entry["sizeGiB"] = fingerprint["sizeGiB"]
         evidence["sizeGiB"] = "model size reported by the endpoint"

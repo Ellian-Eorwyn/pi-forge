@@ -1,14 +1,23 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+// `call` and `serviceDoctor` describe the backend behind an endpoint by reading
+// the deployment's state API. That read is optional everywhere, but a test suite
+// must not depend on whether a particular host is up: on a developer machine it
+// is, so these assertions would quietly vary with whatever it happens to be
+// serving, and in CI it is not, so every call would spend its timeout. The
+// behaviour itself is covered against a stub in `stack-state.test.mjs`.
+process.env.PI_FORGE_SKIP_STACK_DISCOVERY = "1";
+
 const libraryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const { call, callJsonWithRetry, ChatError, ContextBudgetError, estimatePromptTokens, extractJsonContent, hiddenTokenCount, parseJsonContent, PreemptedError, resolveService, resolveThinkService, serviceDoctor, activeInteractiveLeases, LEASE_STALE_MS } = await import(join(libraryRoot, "forge-llm.mjs"));
+const { call, callJsonWithRetry, ChatError, ContextBudgetError, doctorWarnings, estimatePromptTokens, extractJsonContent, hiddenTokenCount, parseJsonContent, PreemptedError, resetStackConditions, resolveService, resolveThinkService, serviceDoctor, activeInteractiveLeases, LEASE_STALE_MS } = await import(join(libraryRoot, "forge-llm.mjs"));
+const { clearStackStateCache } = await import(join(libraryRoot, "stack-state.mjs"));
 const { SLOT_CONTEXT_TOKENS } = await import(join(libraryRoot, "connected-services.mjs"));
 const { buildPackets, escalate, summarize, verifyPackets, VerificationError, VERDICT_FLAG } = await import(join(libraryRoot, "forge-verify.mjs"));
 
@@ -434,4 +443,127 @@ test("a failed escalation becomes a human review item", async () => {
 	const summary = summarize({ a: { verdict: VERDICT_FLAG, reason: "wrong" } }, results);
 	assert.equal(summary.needsReview, 1);
 	assert.equal(summary.escalated, 0);
+});
+
+/**
+ * A state API whose primary backend claims to live on `chatPort`.
+ *
+ * Rewriting the port is what lets these tests resolve a throwaway stub on
+ * 127.0.0.1 to a backend in the captured fixture. Mirrors `FakeStackServer` in
+ * `test_forge_llm.py`.
+ */
+async function startStackStub(chatPort, { contextTokens = 131_072, totalSlots = 2, active = true } = {}) {
+	const snapshot = JSON.parse(readFileSync(join(libraryRoot, "tests", "fixtures", "stack-snapshot.json"), "utf8"));
+	for (const backend of snapshot.backends) {
+		if (backend.name !== "chat-primary") continue;
+		backend.base_url = `http://127.0.0.1:${chatPort}`;
+		backend.active = active;
+		backend.props.n_ctx_per_slot = contextTokens;
+		backend.props.total_slots = totalSlots;
+	}
+	// The fixture's own port map would otherwise claim this port for a different
+	// role and defeat the rewrite above.
+	snapshot.config = {};
+	const server = createServer((_request, response) => {
+		response.writeHead(200, { "Content-Type": "application/json" });
+		response.end(JSON.stringify(snapshot));
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	clearStackStateCache();
+	return {
+		env: { FORGE_STACK_STATE_URL: `http://127.0.0.1:${server.address().port}` },
+		close: async () => {
+			clearStackStateCache();
+			await new Promise((done) => server.close(done));
+		},
+	};
+}
+
+const portOfStub = (url) => Number(new URL(url).port);
+
+test("the doctor names the weights behind the endpoint", async () => {
+	// The model id proves nothing — llama.cpp answers to whatever name it is sent
+	// regardless of what is loaded — so the doctor reports the launched path, its
+	// quantization, and the llama.cpp build instead.
+	const stub = await startStub(() => ({ content: "ready" }));
+	let stack;
+	try {
+		stack = await startStackStub(portOfStub(stub.url));
+		const report = await serviceDoctor(service(stub.url), { env: stack.env });
+		assert.equal(report.backend.quant, "Q6_K");
+		assert.equal(report.backend.buildInfo, "b10083-846e991ec");
+		assert.equal(doctorWarnings(report).length, 0);
+	} finally {
+		await stack?.close();
+		await stub.close();
+	}
+});
+
+test("the doctor warns when the configured context does not match the slot", async () => {
+	const stub = await startStub(() => ({ content: "ready" }));
+	let stack;
+	try {
+		stack = await startStackStub(portOfStub(stub.url), { contextTokens: 65_536 });
+		const report = await serviceDoctor(service(stub.url), { env: stack.env });
+		assert.equal(report.contextMismatch, true);
+		assert.equal(report.servedContextTokens, 65_536);
+		assert.ok(doctorWarnings(report).includes(report.contextWarning));
+	} finally {
+		await stack?.close();
+		await stub.close();
+	}
+});
+
+test("the doctor warns when the pinned slot does not exist", async () => {
+	// Nothing else in forge checks this: the slot number is only ever sent, never
+	// validated, so a backend moving to `--parallel 1` would leave every
+	// background call naming slot 1 forever.
+	const stub = await startStub(() => ({ content: "ready" }));
+	let stack;
+	try {
+		stack = await startStackStub(portOfStub(stub.url), { totalSlots: 1 });
+		const report = await serviceDoctor({ ...service(stub.url), scheduling: { ...service(stub.url).scheduling, enabled: true } }, { env: stack.env });
+		assert.match(report.slotWarning, /slot 1/);
+		assert.match(report.slotWarning, /1 slot/);
+	} finally {
+		await stack?.close();
+		await stub.close();
+	}
+});
+
+test("the first record carries the backend and the stack warnings", async () => {
+	resetStackConditions();
+	const stub = await startStub(() => ({ content: "{}" }));
+	let stack;
+	try {
+		stack = await startStackStub(portOfStub(stub.url));
+		const first = await call(service(stub.url), [{ role: "user", content: "hi" }], { env: stack.env });
+		const second = await call(service(stub.url), [{ role: "user", content: "hi" }], { env: stack.env });
+		assert.ok(first.record.backend.modelPath.endsWith(".gguf"));
+		assert.ok(first.record.stackWarnings.some((text) => text.toLowerCase().includes("swap")));
+		// A 500-item batch should say which weights it ran against once, not five
+		// hundred times.
+		assert.equal(second.record.backend, undefined);
+		assert.equal(second.record.stackWarnings, undefined);
+	} finally {
+		resetStackConditions();
+		await stack?.close();
+		await stub.close();
+	}
+});
+
+test("reports and records are unchanged without a stack", async () => {
+	// The degradation guarantee: every install that is not this deployment.
+	resetStackConditions();
+	const stub = await startStub(() => ({ content: "{}" }));
+	try {
+		const report = await serviceDoctor(service(stub.url), { env: { PI_FORGE_SKIP_STACK_DISCOVERY: "1" } });
+		const { record } = await call(service(stub.url), [{ role: "user", content: "hi" }], { env: { FORGE_STACK_STATE_URL: "http://127.0.0.1:1" } });
+		for (const key of ["backend", "stackDetail", "contextWarning", "slotWarning"]) assert.equal(report[key], undefined, key);
+		assert.equal(record.backend, undefined);
+		assert.equal(record.stackWarnings, undefined);
+	} finally {
+		resetStackConditions();
+		await stub.close();
+	}
 });
