@@ -82,6 +82,21 @@ Everything runs on the local LAN endpoints. Nothing is sent anywhere.
 }
 ```
 
+For `research`, name the run instead of transcribing it — the claims and the
+quotes under them are already on disk, and a spec that restated them would be a
+spec that could restate them wrong:
+
+```json
+{"version": 1, "intent": "research", "request": "...", "researchRun": "<deep-research run directory>", "sources": []}
+```
+
+Each surviving claim becomes one source: the claim's own wording followed by the
+quotes supporting it, carrying the URL those quotes came from. A claim the
+research run's *own* reviewer flagged is dropped, and so is one whose every quote
+was flagged — a claim with nothing behind it is exactly what a research note
+should not repeat. `claimLimit` caps how many are offered; `includeUnsupported`
+keeps the unsupported ones, marked.
+
 `label` is what a citation is credited to. `wikilink` and `url` are what that
 unit *licenses* the note to link: a `[[link]]` or URL no source carries holds the
 note back. `origin` is for the provenance block and is never read by a check.

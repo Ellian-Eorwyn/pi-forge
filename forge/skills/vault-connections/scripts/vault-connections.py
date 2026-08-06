@@ -34,6 +34,7 @@ import forge_verify
 import obsidian_cli
 import run_state
 import vault_profile
+from vault_research import claim_detail, deep_run_claims, deep_run_sources, flagged_ids  # noqa: F401
 import vault_voice
 import vault_wiki
 from vault_classification import (
@@ -1733,77 +1734,6 @@ VERIFY_NOTES_SYSTEM = (
     "Do not flag a note because you would have grouped the claims differently, written the summary differently, or "
     "included more. A narrow, hedged note is doing its job."
 )
-
-
-def deep_run_sources(run_directory):
-    """Source id -> {url, title}, so a note can say where a quote came from."""
-    path = run_directory / "source_index.json"
-    if not path.is_file():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    sources = {}
-    for source in payload.get("sources") or []:
-        source_id = source.get("sourceId")
-        if source_id:
-            sources[source_id] = {
-                "url": source.get("finalUrl") or source.get("sourceUrl") or "",
-                "title": source.get("title") or "",
-            }
-    return sources
-
-
-def deep_run_claims(records):
-    claims = {record["id"]: record for record in records if record.get("kind") == "claim"}
-    evidence = {record["id"]: record for record in records if record.get("kind") == "evidence"}
-    return claims, evidence
-
-
-def flagged_ids(records):
-    """Records the source run's own reviewer rejected."""
-    return {
-        record["id"]
-        for record in records
-        if (record.get("verification") or {}).get("verdict") == "flag"
-    }
-
-
-def claim_detail(claim, evidence, sources, flagged=frozenset()):
-    """One claim with the quotes and URLs behind it, for a prompt or a note.
-
-    Evidence the source run's reviewer rejected is dropped here rather than
-    carried into a note. A flag on an evidence item is a finding about the claim
-    that cites it: the claim itself may have passed review only because the
-    reviewer was judging its wording, not the extraction underneath it.
-    """
-    quotes = []
-    dropped = []
-    for evidence_id in claim.get("evidenceIds") or []:
-        item = evidence.get(evidence_id)
-        if not item:
-            continue
-        if evidence_id in flagged:
-            dropped.append(evidence_id)
-            continue
-        quote = (item.get("quote") or "").strip()
-        source_id = (item.get("sourceIds") or [None])[0]
-        quotes.append(
-            {
-                "evidenceId": evidence_id,
-                "quote": quote or (item.get("text") or "").strip(),
-                "exact": bool(quote),
-                "url": sources.get(source_id, {}).get("url", ""),
-                "sourceId": source_id or "",
-            }
-        )
-    return {
-        "claimId": claim["id"],
-        "text": claim.get("text") or "",
-        "quotes": quotes,
-        "droppedEvidenceIds": dropped,
-    }
 
 
 def validate_topic_notes(value, claims, limit):

@@ -425,6 +425,104 @@ class ComposeTests(unittest.TestCase):
                 self.compose(server)
         self.assertIn("Block order", str(caught.exception))
 
+    def deep_run(self, **overrides):
+        """A minimal completed deep-research run on disk."""
+        directory = self.vault / "research"
+        directory.mkdir(exist_ok=True)
+        claims = overrides.get(
+            "claims",
+            [
+                {"claimId": "c-1", "text": "Local models can apply a codebook consistently.", "evidenceIds": ["e-1"]},
+                {"claimId": "c-2", "text": "Chunking a document loses surrounding context.", "evidenceIds": ["e-2"]},
+            ],
+        )
+        evidence = overrides.get(
+            "evidence",
+            [
+                {"evidenceId": "e-1", "directQuote": "A codebook applied by a small model stayed consistent.", "sourceId": "s-1"},
+                {"evidenceId": "e-2", "directQuote": "Sentence-level chunking discards adjacent context.", "sourceId": "s-1"},
+            ],
+        )
+        (directory / "claim_register.jsonl").write_text(
+            "\n".join(json.dumps(row) for row in claims), encoding="utf-8"
+        )
+        (directory / "evidence_items.jsonl").write_text(
+            "\n".join(json.dumps(row) for row in evidence), encoding="utf-8"
+        )
+        (directory / "source_index.json").write_text(
+            json.dumps(
+                {"sources": [{"sourceId": "s-1", "finalUrl": "https://example.com/coding", "title": "Coding Study"}]}
+            ),
+            encoding="utf-8",
+        )
+        return directory
+
+    def test_a_research_run_becomes_sources_without_being_retyped(self):
+        """The claims and quotes are already on disk; a spec that restated them
+        would be a spec that could restate them wrong."""
+        directory = self.deep_run()
+        spec = self.write_spec(intent="research", sources=[], researchRun=str(directory))
+        with StubServer() as server:
+            server.script(
+                "outline",
+                {"notes": [{"title": "Codebook Consistency", "blocks": [{"block": "body", "sourceIds": ["s-0001", "s-0002"]}]}]},
+            )
+            server.script(
+                "draft",
+                {
+                    "blocks": {
+                        "body": [
+                            "A codebook applied by a small model stayed consistent across a document, which is "
+                            "the result that makes local models usable for this at all.",
+                            "",
+                            "Sentence-level chunking discards adjacent context, and that is the tradeoff: "
+                            "consistency comes from small units, while meaning often needs the surrounding ones. "
+                            "See https://example.com/coding for the study behind both claims.",
+                        ]
+                    }
+                },
+            )
+            result = self.compose(server, spec)
+        self.assertEqual(result["data"]["counts"]["sources"], 2)
+        record = result["data"]["proposals"][0]
+        # The URL came from the run's source index, so citing it is grounded.
+        self.assertEqual(record["review"], [])
+
+    def test_a_claim_the_research_reviewer_flagged_is_dropped(self):
+        directory = self.deep_run(
+            claims=[
+                {"claimId": "c-1", "text": "Local models can apply a codebook consistently.", "evidenceIds": ["e-1"]},
+                {
+                    "claimId": "c-2",
+                    "text": "A doubted claim.",
+                    "evidenceIds": ["e-2"],
+                    "verification": {"verdict": "flag", "reason": "unsupported"},
+                },
+            ]
+        )
+        spec = self.write_spec(intent="research", sources=[], researchRun=str(directory))
+        with StubServer() as server:
+            result = self.compose(server, spec)
+        self.assertEqual(result["data"]["counts"]["sources"], 1)
+        self.assertTrue(any("reviewer flagged it" in line for line in result["warnings"]))
+
+    def test_a_claim_with_no_surviving_quote_is_dropped(self):
+        directory = self.deep_run(
+            claims=[{"claimId": "c-1", "text": "A claim with nothing behind it.", "evidenceIds": []}]
+        )
+        spec = self.write_spec(intent="research", sources=[], researchRun=str(directory))
+        with StubServer() as server:
+            with self.assertRaises(vcs.UserError) as caught:
+                self.compose(server, spec)
+        self.assertIn("every claim", str(caught.exception))
+
+    def test_a_research_run_is_only_for_the_research_intent(self):
+        directory = self.deep_run()
+        spec = self.write_spec(intent="synthesis", researchRun=str(directory))
+        with StubServer() as server:
+            with self.assertRaises(vcs.UserError):
+                self.compose(server, spec)
+
     def test_a_spec_with_no_sources_is_refused(self):
         spec = self.write_spec(sources=[])
         with StubServer() as server:

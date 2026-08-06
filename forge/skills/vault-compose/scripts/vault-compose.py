@@ -39,6 +39,7 @@ import vault_compose
 import vault_format
 import vault_lexicon
 import vault_profile
+import vault_research
 import vault_voice
 from vault_schema import (
     INBOX_DIR,
@@ -145,6 +146,20 @@ def load_spec(path):
     if not request:
         raise UserError("the run spec has no request; a note needs to know what it is for")
     units = raw.get("sources")
+    warnings = []
+    if raw.get("researchRun"):
+        # A deep-research run is named rather than transcribed: the claims and
+        # the quotes under them are already on disk, and a spec that restated
+        # them would be a spec that could restate them wrong.
+        if intent != INTENT_RESEARCH:
+            raise UserError("researchRun is only for intent 'research'")
+        try:
+            harvested, warnings = vault_research.claim_source_units(
+                raw["researchRun"], limit=raw.get("claimLimit"), include_unsupported=bool(raw.get("includeUnsupported"))
+            )
+        except ValueError as error:
+            raise UserError(str(error)) from error
+        units = list(harvested) + list(units or [])
     if not isinstance(units, list) or not units:
         raise UserError("the run spec has no sources")
     permitted = INTENT_KINDS[intent]
@@ -184,6 +199,7 @@ def load_spec(path):
         "date": date,
         "maxNotes": max_notes,
         "sources": vault_compose.source_set(built),
+        "warnings": warnings,
     }
 
 
@@ -566,6 +582,7 @@ def compose(args):
     if not vault.is_dir():
         raise UserError(f"vault root does not exist: {vault}")
     spec = load_spec(args.spec)
+    warnings = list(spec["warnings"])
     schema_path = resolve_schema_path(vault, args.schema)
     schema, schema_hash = compiled_schema_for(vault, schema_path, cache_dir=vault / STATE_DIR / "cache")
     format_path = vault_format.resolve_format_path(vault, args.format, disabled=args.no_format)
@@ -578,7 +595,6 @@ def compose(args):
     voice_path = vault_voice.resolve_voice_path(vault, args.voice, disabled=args.no_voice)
     voice, voice_hash = vault_voice.compiled_voice_for(vault, voice_path, cache_dir=vault / STATE_DIR / "cache")
     args.compiled_voice = voice
-    warnings = []
 
     run_dir = Path(args.run).expanduser().resolve() if args.run else unique_run_directory(vault)
     configuration = {
