@@ -26,18 +26,29 @@ export const STAGE_SERVICES = Object.freeze({
 	"split-braindump": "think",
 });
 
-/** Measured, and deliberately left on `chat`. Nothing reads this at runtime. */
+/**
+ * Measured, and deliberately left on `chat`. Nothing reads this at runtime.
+ *
+ * Every key is the label a call site actually passes as `task`. Seven once named
+ * the eval case instead, which made an override written against one of those
+ * names parse, validate, and do nothing.
+ */
 export const STAGES_HELD_ON_CHAT = Object.freeze({
 	"classify-note":
 		"better on think in isolation (5/8 vs 3/8), but vault-organizer verifies and escalates on think already, so routing classification there leaves one profile reviewing its own work; run the classify-* variants first",
 	"summarize-transcript": "thinking ties on gates (8/8) and carries 2 silent failures; the small model 3",
-	"summarize-report": "same: gates tie, silent failures do not",
-	"meeting-brief": "small model 2/8 with 0.11 fact recall; thinking carries a silent failure",
-	"ground-draft": "every candidate either gate-blocked or unstable across repeats",
-	"enumerate-items": "small model 1/8 against 3/8, and slower per call on this prompt size",
-	"clean-document-chunk": "no candidate cleared; thinking flipped on 4 items between attempts",
-	"abstention-grounded": "thinking ties exactly (12/12); the tie rule takes 5.8s over 14.7s",
-	"verify-packet": "all three tie, so the case cannot tell them apart; stays on think until it is strengthened",
+	"draft-note": "measured as `grounding-draft`: every candidate either gate-blocked or unstable across repeats",
+	"clean-chunk": "measured as `doc-cleanup-ocr`: no candidate cleared; thinking flipped on 4 items between attempts",
+	verify: "measured as `verifier-seeded`: all three tie, so the case cannot tell them apart; stays on think until it is strengthened",
+	"verify-repair": "the corrective retry of `verify`, and it goes wherever `verify` goes",
+});
+
+/** Capabilities the suite measures that no production stage corresponds to. */
+export const CAPABILITIES_MEASURED = Object.freeze({
+	"summarize-report": "summarizing a report document: gates tie, silent failures do not",
+	"meeting-brief": "synthesis over a whole meeting: small model 2/8 with 0.11 fact recall; thinking carries a silent failure",
+	"enumerate-items": "breadth: small model 1/8 against 3/8, and slower per call on this prompt size",
+	"abstention-grounded": "answering from a source: thinking ties exactly (12/12); the tie rule takes 5.8s over 14.7s",
 });
 
 export const DEFAULT_SERVICE = "chat";

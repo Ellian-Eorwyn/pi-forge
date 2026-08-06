@@ -5,7 +5,6 @@
 	"description": "Assemble polished deliverables from processed outputs.",
 	"skill_file": "SKILL.md",
 	"scripts_dir": "scripts",
-	"schemas_dir": "schemas",
 	"references_dir": "references",
 	"tools": [
 		{

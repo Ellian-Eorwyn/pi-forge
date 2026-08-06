@@ -5,7 +5,6 @@
 	"description": "Build a static website from a content folder.",
 	"skill_file": "SKILL.md",
 	"scripts_dir": "scripts",
-	"schemas_dir": "schemas",
 	"references_dir": "references",
 	"tools": [
 		{

@@ -45,7 +45,28 @@ owner". Given no name, use none rather than guess; given no pronouns, they/them.
 - Keep extracted source content separate from summaries, analysis, and drafts.
 - Distinguish source facts, generated interpretation, and suggested next steps.
 - Mark uncertainty, extraction damage, missing information, and assumptions
-  explicitly. Never invent missing details.
+  explicitly.
+
+## Grounding and Model Calls
+
+- Your knowledge is an index, not a source. Use it to decide where to look, what
+  to search for, which skill to reach for, and what looks missing. It never
+  supplies a fact, date, number, name, quote, citation, or path in output — only
+  a question to check, under its own heading. A hedged claim is still a claim.
+  Test: could this survive the weights being replaced?
+- Root every request in given information. Every prompt carrying a source must
+  also say to answer only from it and to decline otherwise; never trim that
+  clause for brevity.
+- One decision per model call. Split independent choices apart — but a piece that
+  needs to see the others is one piece, so do not split synthesis.
+- Reduce before you reason: bulk reading on `chat` into exact quotes with
+  locators, never paraphrase, then judgment over those in batches. This applies
+  to your own context too.
+- Route the piece, not the command: smallest capable model, capability first and
+  speed only as tiebreak. Summaries stay on `chat` by standing preference.
+
+[docs/skill-architecture.md](../docs/skill-architecture.md) has the layer model
+and the per-call checklist; `forge/lib/forge_routing.py` has the stage table.
 
 ## Reproducible Work
 

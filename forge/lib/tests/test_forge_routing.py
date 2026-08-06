@@ -185,6 +185,52 @@ class TableIntegrityTests(unittest.TestCase):
         # measured "no" belongs.
         self.assertNotIn("chat", forge_routing.STAGE_SERVICES.values())
 
+    def test_every_table_key_is_a_label_some_call_site_passes(self):
+        """A stage name nobody passes is a record that joins to nothing.
+
+        Six entries in the held list once named the eval case rather than the
+        `task=` string: `verify-packet` for what `forge_verify` passes as
+        `verify`, `clean-document-chunk` for `document-ingest`'s `clean-chunk`,
+        `ground-draft` for `vault-capture`'s `draft-note`. Nothing reads the
+        held list at runtime, so nothing broke — but the reason a decision was
+        made stopped pointing at the code it was about, and an override written
+        against one of those names would have silently done nothing.
+
+        `CAPABILITIES_MEASURED` is deliberately exempt: those measure what a
+        tier is for, and no call site is expected to pass them.
+        """
+        import re
+
+        forge = LIB.parent
+        sources = [
+            path.read_text(encoding="utf-8")
+            for path in [*forge.glob("skills/*/scripts/*.py"), *forge.glob("skills/*/scripts/*.mjs"), *LIB.glob("*.py"), *LIB.glob("*.mjs")]
+            if path.name not in {"forge_routing.py", "forge-routing.mjs"}
+        ]
+        def passed_somewhere(label):
+            pattern = re.compile(rf'["\'`]{re.escape(label)}["\'`]')
+            if any(pattern.search(source) for source in sources):
+                return True
+            # A corrective retry is built as `f"{stage}-repair"`, so the literal
+            # never appears. Accept it when its base stage does and some call
+            # site composes the suffix that way.
+            base, _, suffix = label.rpartition("-")
+            return bool(base) and suffix == "repair" and passed_somewhere(base) and any('-repair"' in source for source in sources)
+
+        declared = {*forge_routing.STAGE_SERVICES, *forge_routing.STAGES_HELD_ON_CHAT}
+        for stage in sorted(declared):
+            self.assertTrue(
+                passed_somewhere(stage),
+                f"`{stage}` is in a routing table but no call site passes it as a stage label. "
+                f"Either the table should name the label the code uses, or the entry belongs in "
+                f"CAPABILITIES_MEASURED.",
+            )
+
+    def test_capabilities_are_not_also_stages(self):
+        for name in forge_routing.CAPABILITIES_MEASURED:
+            self.assertNotIn(name, forge_routing.STAGE_SERVICES, name)
+            self.assertNotIn(name, forge_routing.STAGES_HELD_ON_CHAT, name)
+
     def test_the_javascript_twin_routes_identically(self):
         # Two tables in two languages is the arrangement; two tables that
         # disagree is a bug that would show up as one skill routing a stage

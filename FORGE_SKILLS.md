@@ -12,12 +12,12 @@
 |---|---:|
 | Base system prompt (intro, tools list, guidelines, connected services) | 438 |
 | Tool JSON schemas (15 tools) | 3525 |
-| Managed instructions (`AGENTS.md` with its `<project_context>` wrapper) | 1894 |
+| Managed instructions (`AGENTS.md` with its `<project_context>` wrapper) | 2193 |
 | Skills menu (metadata for all model-visible skills) | 3921 |
-| **Total launch context (always processed)** | **9778** |
-| Maximum if every `SKILL.md` body is also loaded at once | 75104 |
+| **Total launch context (always processed)** | **10077** |
+| Maximum if every `SKILL.md` body is also loaded at once | 75671 |
 
-Of that total, the forge profile itself owns 5815 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
+Of that total, the forge profile itself owns 6114 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
 
 Of the skills menu above, the shared wrapper (instructions and XML envelope, independent of skill count) is ~92 tokens; the rest scales with the number of skills.
 
@@ -64,7 +64,7 @@ Sorted by launch cost. `Prompt lines` counts a tool's `promptSnippet` and `promp
 | [`report-output`](forge/skills/report-output/SKILL.md) | Assemble polished deliverables from processed outputs | 140 | 773 | 887 | Model-visible |
 | [`reviewer-2`](forge/skills/reviewer-2/SKILL.md) | Peer-review a scholarly article note in an Obsidian vault the way a constructive Reviewer 2 w... | 145 | 2019 | 2139 | Model-visible |
 | [`site-builder`](forge/skills/site-builder/SKILL.md) | Build a static website from a content folder | 134 | 1364 | 1472 | Model-visible |
-| [`skill-builder`](forge/skills/skill-builder/SKILL.md) | Create and validate portable Agent Skills | 141 | 742 | 858 | Model-visible |
+| [`skill-builder`](forge/skills/skill-builder/SKILL.md) | Create and validate portable Agent Skills | 141 | 1010 | 1126 | Model-visible |
 | [`skill-tuner`](forge/skills/skill-tuner/SKILL.md) | Mine session logs for pain points that improve skills | 143 | 1879 | 1997 | Model-visible |
 | [`spreadsheet-analysis`](forge/skills/spreadsheet-analysis/SKILL.md) | Analyze and enrich tabular datasets | 129 | 2233 | 2334 | Model-visible |
 | [`transcript-cleanup`](forge/skills/transcript-cleanup/SKILL.md) | Clean and structure raw transcripts | 144 | 1174 | 1291 | Model-visible |

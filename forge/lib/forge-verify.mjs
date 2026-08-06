@@ -34,6 +34,12 @@ export const VERDICT_CONTRACT = `Return exactly one JSON object and nothing else
 Include one verdict for every id you were given, and no ids you were not given.
 Flag an item only when it is actually wrong or unjustifiable on the evidence
 shown. Do not flag an item merely because you would have phrased it differently.
+
+The evidence shown is the only evidence. What you happen to know about the
+subject is not part of it: an item that matches what you would have expected is
+not thereby supported, and one that surprises you is not thereby wrong. Judge
+each item against what it was given, and where that is not enough to tell, flag
+it and say so rather than deciding from memory.
 `;
 
 export class VerificationError extends Error {

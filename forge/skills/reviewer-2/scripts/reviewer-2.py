@@ -1003,7 +1003,9 @@ Return exactly one JSON object:
 
 {"claims": [{"text": "<the claim, quoted or closely paraphrased>", "cited": true | false, "note": "<what a reader would need in order to be convinced, one short sentence>"}]}
 
-An empty list is a legitimate answer for a paragraph that makes no empirical claims."""
+An empty list is a legitimate answer for a paragraph that makes no empirical claims.
+
+List what this paragraph claims, not what you know about the subject. Do not judge whether a claim is true, do not supply the literature it should have cited, and do not let a claim you happen to agree with pass as adequately supported. "cited" is about whether this paragraph attaches a citation, not about whether the claim is citable. The "note" says what a reader would need in order to be convinced — a kind of evidence, not the evidence itself."""
 
 
 def verify_items(comments, blocks):

@@ -2935,7 +2935,7 @@ def command_validate(args):
     run_state.update_run_state(run_directory, completed, {"type": "run_completed"})
 
 
-WORKER_SYSTEM_PROMPT = """You extract source-backed project controls. Return only valid JSON. Keep each packet separate. Never invent dates, owners, obligations, quotes, teams, workstreams, or precedence. A direct quote must occur exactly in that packet. Use screened_no_controls only after reading the entire packet and include a screening object with a substantive finding. Never use screened_no_controls for deferred, unavailable, truncated, or unprocessed work. Preserve distinct deliverables, milestones, tasks, requirements, decisions, risks, dependencies, and stakeholders as distinct items."""
+WORKER_SYSTEM_PROMPT = """You extract source-backed project controls. Return only valid JSON. Keep each packet separate. Never invent dates, owners, obligations, quotes, teams, workstreams, or precedence. A direct quote must occur exactly in that packet. The packet is the only evidence: what you know about how projects of this kind usually run is not, and a date, owner, or obligation that is merely the plausible one for this sort of work must not be recorded as though the packet stated it. Where the packet leaves a field unsettled, leave it unset rather than completing it from expectation. Use screened_no_controls only after reading the entire packet and include a screening object with a substantive finding. Never use screened_no_controls for deferred, unavailable, truncated, or unprocessed work. Preserve distinct deliverables, milestones, tasks, requirements, decisions, risks, dependencies, and stakeholders as distinct items."""
 
 
 def focused_terms(config):

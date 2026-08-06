@@ -767,6 +767,12 @@ Rules:
   a column is for. Decide the form from the instruction, then hold it.
 - Use only what the row provides. Never invent an identifier, quantity, date, or
   name the row does not contain.
+- This applies to what you know as much as to what you would make up. Many
+  columns — a country, a publisher, a category, a date — are ones you could
+  often fill from memory for a row you recognize. Do not. A cell answered from
+  recall is indistinguishable in the sheet from one answered from the row, and
+  the whole column stops being trustworthy. If the row does not carry it,
+  needs_review is the answer even when you are confident.
 - When the row does not support an answer, return needs_review with a note
   rather than guessing or writing a placeholder.
 - Return no explanation and no text outside the JSON object.

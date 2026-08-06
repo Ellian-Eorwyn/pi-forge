@@ -39,7 +39,24 @@ workflow judgment and bundled resources as deterministic support.
      UI, transport, or runtime changes.
    - Use `AGENTS.md` only for stable instructions that apply broadly to the
      repository or profile.
-5. Scaffold only after the shape is clear:
+
+   Declare only directories that exist. A `manifest.json` pointing at a
+   directory the skill never grew is a promise the validator has to warn about
+   forever.
+5. Design any model call against
+   [docs/skill-architecture.md](../../../docs/skill-architecture.md), which has
+   the layer model and the full checklist. The questions that decide the shape:
+   - Does one call make more than one independent decision? Split it — unless a
+     later decision needs an earlier one to be right, in which case it is one
+     piece. Do not split synthesis.
+   - Does the prompt need a fact the model would have to recall? Fetch it, or
+     write it as a question for review. Every prompt carrying a source also says
+     to answer only from it and to decline otherwise.
+   - Does the stage label name what the call *is*, rather than what helper it
+     borrows? Routing keys on that string, and an unnamed stage runs on `chat`.
+   - Would the thinking model otherwise read raw material? Reduce it on `chat`
+     into exact quotes with locators first, then judge those in batches.
+6. Scaffold only after the shape is clear:
 
    ```bash
    node <skill-directory>/scripts/skill-builder.mjs scaffold <name> \
@@ -52,10 +69,10 @@ workflow judgment and bundled resources as deterministic support.
    User skills default to `~/.agents/skills/<name>/`. Forge-bundled skills live
    under `forge/skills/<name>/` and need `manifest.json` plus
    `agents/openai.yaml`.
-6. Write `SKILL.md` as a compact operational map. Put trigger language and
+7. Write `SKILL.md` as a compact operational map. Put trigger language and
    exclusions in the frontmatter `description`; the body loads only after the
    skill is selected.
-7. Add positive and negative trigger examples under `tests/triggers.json` when
+8. Add positive and negative trigger examples under `tests/triggers.json` when
    trigger behavior matters. Use `check-triggers` to compare against neighboring
    skills:
 
@@ -63,7 +80,7 @@ workflow judgment and bundled resources as deterministic support.
    node <skill-directory>/scripts/skill-builder.mjs check-triggers <skill-dir> \
      --against <skills-root>
    ```
-8. Validate before completion:
+9. Validate before completion:
 
    ```bash
    node <skill-directory>/scripts/skill-builder.mjs validate <skill-dir>

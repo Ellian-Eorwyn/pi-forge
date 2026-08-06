@@ -5,7 +5,6 @@
 	"description": "Quick web search and page reading for information lookup.",
 	"skill_file": "SKILL.md",
 	"scripts_dir": "scripts",
-	"schemas_dir": "schemas",
 	"references_dir": "references",
 	"run_state_contract": "../../RUN_STATE_CONTRACT.md",
 	"restart_safe": true,

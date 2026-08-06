@@ -403,7 +403,7 @@ def routing_table(model_ids, baseline=None, prefer="capability"):
 
         winner = min(candidates, key=rank)
         document = loaded[winner][case_id]
-        table[case_id] = {
+        entry = {
             "model": winner,
             "tier": registry.get(winner, {}).get("tier"),
             "skill": document.get("skill"),
@@ -411,6 +411,28 @@ def routing_table(model_ids, baseline=None, prefer="capability"):
             "passRate": round(document["summary"]["passRate"], 4),
             "isBaseline": winner == baseline,
         }
+        # A model can be kept out of `candidates` for reasons that are not about
+        # the work: the loudest is having no grade, which `_recommendation`
+        # holds on rather than blocks. When such a model scored strictly better
+        # on the gates, crowning the runner-up records a preference the evidence
+        # never expressed. This happened: a partial grading pass left
+        # `think-27b` ungraded and `transcript-cleanup-memo` was recorded as a
+        # `small`-tier case at 0.875 over an ungraded 1.000. `judge.scored` now
+        # folds comparable archived passes back in, which fixes that instance;
+        # this names the shape so the next one is visible rather than silent.
+        # `.get` throughout: a case a model could not run carries a summary with
+        # no passRate, and that is not a better result.
+        won_at = document["summary"]["passRate"]
+        outscored = [
+            model_id
+            for model_id in present
+            if model_id not in candidates
+            and isinstance((loaded[model_id].get(case_id, {}).get("summary") or {}).get("passRate"), (int, float))
+            and loaded[model_id][case_id]["summary"]["passRate"] > won_at
+        ]
+        if outscored:
+            entry["betterButNotCandidates"] = sorted(outscored)
+        table[case_id] = entry
     return {"baseline": baseline, "prefer": prefer, "models": present, "cases": table}
 
 

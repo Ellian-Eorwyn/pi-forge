@@ -66,6 +66,14 @@ STAGE_SERVICES = {
 # Stages measured and deliberately left on `chat`, with the reason. Nothing
 # reads this at runtime — it exists so that "not in the table" and "measured,
 # and the answer was no" are different states in the file a person reads.
+#
+# Every key is the label a call site actually passes as `task=`, checked by
+# `test_forge_routing.py`. That check exists because seven of these once named the
+# eval case instead: `verify-packet` for what `forge_verify` passes as `verify`,
+# `clean-document-chunk` for `document-ingest`'s `clean-chunk`, `ground-draft`
+# for `vault-capture`'s `draft-note`. A reader took the record as read; an
+# override written against one of those names would have parsed, validated, and
+# done nothing, because `service_name_for` looks up the call site's string.
 STAGES_HELD_ON_CHAT = {
     "classify-note": (
         "the thinking profile is better on the stage in isolation — 5/8 against 3/8, no silent "
@@ -80,18 +88,33 @@ STAGES_HELD_ON_CHAT = {
         "first; if they do not close it, revisit this with the pipeline in view rather than the stage."
     ),
     "summarize-transcript": "thinking ties on gates (8/8) and carries 2 silent failures; the small model 3",
-    "summarize-report": "same: gates tie, silent failures do not",
-    "meeting-brief": "small model 2/8 with 0.11 fact recall; thinking carries a silent failure",
-    "ground-draft": "every candidate either gate-blocked or unstable across repeats",
-    "enumerate-items": "small model 1/8 against 3/8, and slower per call on this prompt size",
-    "clean-document-chunk": "no candidate cleared; thinking flipped on 4 items between attempts",
-    "abstention-grounded": "thinking ties exactly (12/12); the tie rule takes 5.8s over 14.7s",
-    "verify-packet": (
-        "all three tie (7/8, 6/8, 7/8; precision 1.00/0.92/1.00), so the case cannot tell them "
-        "apart — that is a statement about the case, not the models. Verification stays on `think` "
-        "until `verifier-seeded` is strengthened. The small model stays out regardless: 0.25 false "
-        "flags each buy a per-item escalation, the most expensive call in the pipeline."
+    "draft-note": (
+        "measured as the `grounding-draft` case: every candidate either gate-blocked or unstable "
+        "across repeats. Note that case's scorer raised on every item before commit 1d0eac08f, so "
+        "re-run it before treating this entry as current."
     ),
+    "clean-chunk": "measured as `doc-cleanup-ocr`: no candidate cleared; thinking flipped on 4 items between attempts",
+    "verify": (
+        "measured as `verifier-seeded`: all three tie (7/8, 6/8, 7/8; precision 1.00/0.92/1.00), so "
+        "the case cannot tell them apart — that is a statement about the case, not the models. "
+        "Verification stays on `think` until `verifier-seeded` is strengthened. The small model "
+        "stays out regardless: 0.25 false flags each buy a per-item escalation, the most expensive "
+        "call in the pipeline."
+    ),
+    "verify-repair": "the corrective retry of `verify`, and it goes wherever `verify` goes",
+}
+
+# Capabilities the suite measures that no production stage corresponds to. These
+# were in STAGES_HELD_ON_CHAT, which made the table read as if a call site
+# somewhere passed `meeting-brief` as a stage. None does. They are kept because
+# they say what a tier is *for* — the evidence behind the tier shapes described
+# in `docs/skill-architecture.md` — and losing that would cost more than the
+# confusion of filing them as stages did.
+CAPABILITIES_MEASURED = {
+    "summarize-report": "summarizing a report document: gates tie, silent failures do not",
+    "meeting-brief": "synthesis over a whole meeting: small model 2/8 with 0.11 fact recall; thinking carries a silent failure",
+    "enumerate-items": "breadth: small model 1/8 against 3/8, and slower per call on this prompt size",
+    "abstention-grounded": "answering from a source: thinking ties exactly (12/12); the tie rule takes 5.8s over 14.7s",
 }
 
 # Which eval case measured each routed stage, and which model tier each service

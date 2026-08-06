@@ -57,3 +57,16 @@ Failure result shape:
 `data` is tool-specific structured payload. Keep core execution facts, machine
 readable summaries, parsed metadata, and counts there instead of requiring
 agents to parse logs or Markdown reports.
+
+## Bound what you return
+
+A script's stdout is spent directly out of the calling agent's context window,
+so size is part of the contract. Return counts, ids, artifact paths, warnings,
+and the exceptions — the items that failed, were skipped, or need review. Write
+the full material to a declared artifact and name its path in `artifacts`.
+
+Per-item detail belongs in the run directory, not in the session. A script that
+prints one summary per processed file spends the agent's window on material it
+can read back on demand, and a large batch can exhaust that window before the
+agent gets to act on any of it. Where a caller genuinely needs the whole set,
+give it an explicit flag rather than making it the default.

@@ -797,6 +797,9 @@ Return a JSON array of item objects and nothing else. Every item has exactly the
 
 Rules:
 - Never invent details the document does not support, and never present inference as fact.
+- The document is the only evidence. What you already know about this subject, these authors,
+  or this literature is not: an item you could have written without reading the document does
+  not belong in the output, however sure you are of it. Extracting less is the right outcome.
 - A direct_quotes value must appear verbatim in the document. If you cannot copy it exactly, use null.
 - Extract what the document actually contains. An empty array is the right answer for a
   document with nothing extractable.

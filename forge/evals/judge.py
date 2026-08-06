@@ -207,6 +207,83 @@ def score(verdicts_path):
     return {"summary": document["summary"], "path": path}
 
 
+CALIBRATION_AXIS_TOLERANCE = 0.5
+
+
+def _prior_gradings():
+    """Archived grading passes, newest first.
+
+    A grading pass grades the models that run asked about, and writing
+    `scored.json` replaces the file rather than adding to it. So the overnight
+    MoE/9B pass graded `chat-27b` and the three new profiles, and the previous
+    pass's `think-27b` and `task-4b` grades moved to an archive folder — leaving
+    two models that no longer had a judge mean.
+
+    That is not a cosmetic loss. `_recommendation` holds any judged case where a
+    model has no grade ("gates hold up, but the quality was never graded"), so
+    `think-27b` stopped being a routing candidate everywhere, and
+    `routing_table` quietly crowned the runner-up. On `transcript-cleanup-memo`
+    that meant a model scoring 0.875 was recorded as what the report supports
+    over one scoring 1.000 with no silent failures — because of missing grades,
+    not because of anything measured.
+    """
+    return sorted(JUDGE_DIR.glob("_prior-grading-*/scored.json"), reverse=True)
+
+
+def comparable(current_summary, prior_summary):
+    """Whether two grading passes can be read together, on their shared models.
+
+    The criterion is `merge-verdicts.calibrate`'s and the reasoning is its: a
+    model graded by both passes differs only by grader, so the gap between its
+    two sets of axis means is the calibration between the passes. Within
+    tolerance on every shared model and axis, the passes are directly
+    comparable; past it they are two different rulers and must not be mixed.
+    """
+    shared = [
+        model_id
+        for model_id in prior_summary
+        if not model_id.startswith("_") and isinstance(current_summary.get(model_id), dict)
+    ]
+    if not shared:
+        return False
+    for model_id in shared:
+        for axis in AXES:
+            now, then = current_summary[model_id].get(axis), prior_summary[model_id].get(axis)
+            if not (isinstance(now, (int, float)) and isinstance(then, (int, float))):
+                continue
+            if abs(now - then) > CALIBRATION_AXIS_TOLERANCE:
+                return False
+    return True
+
+
 def scored():
+    """The current grading, with comparable archived passes folded in.
+
+    Models the current pass graded always win — a fresh grade supersedes an old
+    one for the same model. Archived grades are only consulted for models the
+    current pass did not cover at all, and only from passes that calibrate
+    against it. Anything folded in is recorded under `_mergedFrom` so a reader
+    can see that a mean did not come from the latest run.
+    """
     path = JUDGE_DIR / "scored.json"
-    return harness.load_json(path) if path.exists() else None
+    if not path.exists():
+        return None
+    document = harness.load_json(path)
+    summary = document.get("summary")
+    if not isinstance(summary, dict):
+        return document
+
+    merged_from = {}
+    for prior_path in _prior_gradings():
+        prior = harness.load_json(prior_path) or {}
+        prior_summary = prior.get("summary")
+        if not isinstance(prior_summary, dict) or not comparable(summary, prior_summary):
+            continue
+        for model_id, axes in prior_summary.items():
+            if model_id.startswith("_") or model_id in summary:
+                continue
+            summary[model_id] = axes
+            merged_from[model_id] = prior_path.parent.name
+    if merged_from:
+        summary["_mergedFrom"] = merged_from
+    return document
