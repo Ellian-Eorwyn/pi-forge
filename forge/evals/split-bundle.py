@@ -27,9 +27,19 @@ def split(path, target=TARGET_BYTES):
     header, _, body = text.partition("\n---\n")
     header = header + "\n---\n"
     # Items start at a level-2 heading; everything under one belongs together.
-    blocks, current = [], []
+    #
+    # The fence tracking is not decoration. Every output is wrapped in a ```text
+    # block, and a cleaned transcript legitimately contains its own `## ` section
+    # headings — so a naive line-prefix split cuts an item in half. It did: one
+    # grader received a part that opened mid-output with no `###` label heading
+    # above it and without the `<details>Source</details>` block, which had
+    # stayed with the previous part. It could not grade what it could not
+    # attribute, and graded the rest against a proxy for a source it never saw.
+    blocks, current, in_fence = [], [], False
     for line in body.splitlines(keepends=True):
-        if line.startswith("## ") and current:
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+        if line.startswith("## ") and current and not in_fence:
             blocks.append("".join(current))
             current = []
         current.append(line)

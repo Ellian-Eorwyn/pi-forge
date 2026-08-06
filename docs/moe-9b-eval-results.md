@@ -118,6 +118,33 @@ weights, so on a MoE deployment they become the within-MoE comparison above:
 
 One line in `forge/lib/forge_routing.py`, and only if the MoE stays.
 
+## Graded quality — it corroborates the gates
+
+Twelve subagents graded the blind bundle; 174 of 256 outputs are in at time of
+writing, 43–44 per model, which is enough to read.
+
+| Model | Voice | Faithfulness | Coverage | Usability |
+| --- | --- | --- | --- | --- |
+| `chat-27b` | 3.57 | 4.07 | 3.93 | 3.73 |
+| `moe-35a3b-think` | **3.64** | 4.00 | 3.80 | 3.73 |
+| `task-9b` | 3.56 | **4.12** | 3.70 | 3.49 |
+| `moe-35a3b` | **3.21** | **3.72** | **3.74** | **3.42** |
+
+`moe-35a3b` is last on every axis, which is the same verdict its gates gave. The
+MoE thinking profile lands level with the dense baseline on judged quality — and
+costs 36.1 s/attempt against 10.8 to get there.
+
+`task-9b` scores the **highest faithfulness of any model** (4.12) while sitting
+low on coverage and usability. Careful and thin, consistent with generating 473
+tokens per attempt against the 4B's 859: it asserts less, so it invents less, and
+it also says less.
+
+**The two grading passes are comparable.** `chat-27b` was graded in both, and the
+subagents came within −0.45 (voice), −0.05 (faithfulness) and −0.26 (coverage) of
+Ellie's own earlier scores — inside the ±0.5 band the merge script checks for.
+That is what makes it legitimate to read these numbers beside the earlier
+`task-4b` / `think-27b` grades.
+
 ## Grading
 
 Twelve subagents are grading the blind bundle now — one per case, with
@@ -150,6 +177,46 @@ python3 forge/evals/run.py report --models chat-27b,task-4b,think-27b,moe-35a3b,
 `merge-verdicts.py` validates every verdict against the key, refuses duplicates
 and out-of-range scores, and reports what went ungraded — an ungraded output
 reads as `unknown`, never as clean.
+
+## Three defects in the harness, found by graders reading closely
+
+**1. A false positive in the invented-number check.** See below.
+
+**2. The coverage check misses accurate paraphrase.** On `meeting-vpp-tech` the
+gate reported "3 of 22 reference facts covered" for one output and "0 of 22" for
+another; a grader reading both found several reference facts clearly present in
+each, paraphrased rather than quoted. `factsCovered` appears to match strings.
+That understates coverage across the whole `meeting-brief` case and, because the
+brief tells graders to trust the flags, it propagates into the judged scores too.
+
+**3. My bundle splitter cut an item in half.** `split-bundle.py` broke on lines
+starting with `## ` — including ones inside the ```` ```text ```` fences, because
+a cleaned transcript legitimately contains its own markdown headings. One
+`transcript-cleanup-meeting` part opened mid-output with no label heading above
+it and without the source block, which had stayed in the previous part. That
+grader could not attribute the fragment and graded the rest against a proxy. **So
+`transcript-cleanup-meeting` grades are the least trustworthy in this run** —
+about two items' worth. Fixed (the splitter now tracks fence state), but the
+grading was already done against the broken split.
+
+One more, less severe: on `transcript-cleanup-memo` / `transcript-vaultintegration`
+the `**Reference**` block contains a three-point feature list that does not
+appear in that item's source at all. The grader correctly graded against the
+source rather than the reference, but the reference is wrong for that item.
+
+## A false positive in the deterministic checks
+
+`meeting-brief` / `meeting-kickoff` label C was flagged by the gate for an
+invented number, "118". A grader reading the transcript found it there — spelled
+out in words rather than digits. The gate's number check compares digit strings,
+so a figure the speaker said aloud reads as fabricated.
+
+That is the opposite of the failure the suite is built around and it is worth
+fixing: a false flag costs a per-item escalation, which is the most expensive
+call in the pipeline, and it also teaches a grader to distrust the flags the
+brief tells them to believe. The grader followed the instruction and capped the
+score anyway, so this run's numbers are very slightly harsh on whichever model
+produced that item.
 
 ## An unrelated finding the grading turned up, and it is worth more than the model comparison
 
