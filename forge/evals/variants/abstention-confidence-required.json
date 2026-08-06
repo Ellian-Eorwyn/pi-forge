@@ -1,0 +1,10 @@
+{
+  "name": "abstention-confidence-required",
+  "why": "Aimed at the one abstention weakness the numbers actually show: closed-book confabulation. On `abstention-closed-book` the baseline is `incorrect` 0.17 with an index of +0.67, the thinking profile 0.23 and +0.54, and `task-4b` 0.58 and **-0.17** — it asserts something false more often than it is right. The grounded half needs no help: both 27B profiles score 12/12 with an index of 1.00.\n\nNote what `abstained` does *not* mean here, because it reads backwards at a glance. `_abstention.score_reply` scores a decline on an *unanswerable* question as `correct`; `abstained` counts only declines of questions the source does answer — a false decline, a miss. So `abstained` 0.00 across all three models is a good result, not evidence that the permission to decline goes unused. The permission is in fact load-bearing: `abstention-permission-removed` takes the index from +0.72 to +0.06.\n\nSo this is not \"make a dead clause live\". The clause already carries the case. The question is whether making the judgement structural rather than permitted carries it further: commit to a confidence before answering, and let the low branch be the decline. If it works, `incorrect` falls without `abstained` rising — the model declines the questions it was getting wrong, rather than declining more broadly.\n\nA rise in `abstained` alongside the fall in `incorrect` is the failure mode to watch for, and it is a real cost: a model that has learned to hedge scores well here and is useless in a skill.",
+  "applies": [
+    "abstention-closed-book"
+  ],
+  "patch": {
+    "systemSuffix": "Before you answer, decide whether you could name where you learned this. If you could not — if the answer feels familiar rather than known, or if the subject may not exist at all — that is the case \"known\": false is for. Recognising a question's shape is not the same as knowing its answer, and this set contains questions built to feel answerable."
+  }
+}

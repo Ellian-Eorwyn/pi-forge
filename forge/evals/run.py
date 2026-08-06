@@ -251,12 +251,22 @@ def command_compare(args):
 
 def command_report(args):
     model_ids = args.models.split(",") if args.models else sorted(harness.models())
-    text = reporting.render(model_ids, baseline=args.baseline)
+    text = reporting.render(model_ids, baseline=args.baseline, prefer=args.prefer)
     if args.out:
         Path(args.out).write_text(text, encoding="utf-8")
         print(f"wrote {args.out}")
     else:
         print(text)
+    # The stage table as data, beside the results it was computed from. A test
+    # checks the committed routing table against this, so a stage cannot stay
+    # routed somewhere the evidence stopped supporting.
+    routing_path = harness.RESULTS / "routing.json"
+    routing_path.parent.mkdir(parents=True, exist_ok=True)
+    routing_path.write_text(
+        json.dumps(reporting.routing_table(model_ids, baseline=args.baseline, prefer=args.prefer), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(f"wrote {routing_path}", file=sys.stderr)
     return 0
 
 
@@ -350,6 +360,13 @@ def main(argv=None):
     report = sub.add_parser("report", help="comparison table and routing recommendation")
     report.add_argument("--models", help="comma-separated model ids (default: all in models.json)")
     report.add_argument("--baseline", default="chat-27b", help="model the others are read against")
+    report.add_argument(
+        "--prefer",
+        choices=("capability", "size"),
+        default="capability",
+        help="how to break a tie between models that both cleared a stage "
+        "(default: capability — pass rate, then no silent failures, then speed)",
+    )
     report.add_argument("--out", help="write to a file instead of stdout")
     report.set_defaults(handler=command_report)
 

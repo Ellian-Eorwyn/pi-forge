@@ -132,6 +132,20 @@ member of the corpus it copies.
 Prefer handing over the folder and its `_corpus.json` when the agent can read
 files. Packing is for a model that only takes text.
 
+**Read a packed corpus on the thinking model.** This skill calls no model
+itself, so the only thing that decides how well a corpus is read is which model
+is holding it. Measured across two documents at three distances, the thinking
+profile answers 10 of 10 at 48k, 60k and 80k tokens with an omniscience index of
+1.00; the non-thinking profile drops one answer at 60k and one at 80k and scores
+0.80, meaning it is confidently wrong rather than declining. The cost is about
+14 seconds per question — the two profiles are one set of weights behind a
+proxy, so there is no swap to pay, only latency.
+
+In the vault workflow that means: read the corpus during `/plan` or `/verify`,
+both of which already run on `forge-local`. The `/execute` phase deliberately
+drops to `forge-chat-local`, which is right for applying a vetted diff and wrong
+for answering questions from 60k tokens of project history.
+
 ## What to relay to the user
 
 - **Projects with no hub are the headline.** A project without a hub note has no

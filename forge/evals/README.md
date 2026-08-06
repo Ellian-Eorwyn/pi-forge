@@ -180,6 +180,32 @@ for every skill here. The grounded half should drive routing; the closed-book
 half explains its results, since a model can be scrupulous about a source it was
 given and confabulate freely without one.
 
+## From a result to a routing decision
+
+`report` ends with the stage table, and `results/routing.json` is that table as
+data, in the shape `forge/lib/forge_routing.py` consumes.
+`tests/test_evals.py::RoutingTableTests` refuses a stage routed somewhere the
+results on disk do not support, so a routing decision cannot outlive the run
+that justified it.
+
+**Candidates rank by capability, then by speed** — `--prefer capability`, the
+default. Pass rate first, then carrying no silent failures, then the median item
+time. `--prefer size` restores the older "smallest model that cleared" ordering,
+which is only meaningful for the genuinely smaller tier: `chat` and `think` are
+one set of weights behind a proxy and report the same `sizeGiB`, so ranking them
+by size ranks them by nothing.
+
+That was a real defect rather than a preference. The baseline was never a
+candidate at all — `cleared_by_model` was only filled for the *other* models —
+so on a case both 27B profiles passed 12/12 the table recommended moving to the
+slower one. It named `think-27b` for `abstention-grounded` at "6.9x slower" and
+for `lcr-48k` at "10.5x slower", both against a baseline that scored identically.
+
+**Ratios are reported with the absolute per-item difference beside them.**
+"10.5x slower" and "+15s per item" are the same fact and lead to opposite
+decisions; a ratio on a five-second base makes the cheapest upgrades in the suite
+look like the most expensive.
+
 ## Reading a result
 
 Three tiers, in decreasing order of how much they should be trusted.
@@ -245,6 +271,18 @@ summary, and only the text tells them apart.
 - **Temperature 0 is not determinism.** One item flipped between a parse failure
   and a pass across two runs of the same model. Use `--repeat 3` on anything a
   decision rests on.
+- **Wall time is not comparable between models.** `--stabilize` repeats the cases
+  a single item could have decided, and it repeats *different* cases for each
+  model: across one three-model run the attempts-per-fixture ratio was 1.39,
+  2.64 and 2.33. The Cost table's `s/attempt` column is the comparable figure.
+  Dividing wall time by fixtures instead reported the 4B as 1.7x slower than the
+  27B when it is in fact about 12% faster per call.
+- **The small tier is not a throughput strategy.** Measured across the real
+  prompt mix: 9.5 s/attempt against the baseline's 10.8. A 2x decode rate is
+  almost entirely eaten by generating 859 tokens per attempt against 540, and on
+  the longest-prompt case (`enumeration-breadth`) it is *slower* than the 27B —
+  82.5 s/attempt against 52.4 — while scoring 1/8 against 3/8. Route to it where
+  it is measurably **better**, not to go faster.
 
 ## What a result records about the model
 

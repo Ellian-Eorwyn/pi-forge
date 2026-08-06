@@ -76,6 +76,36 @@ export const DEFAULT_CONNECTED_SERVICES = Object.freeze({
 			backgroundOutputTokens: 4096,
 		}),
 	}),
+	// A genuinely smaller model, for the stages measured to be *better* on one:
+	// faithful cleanup of diarized speech and yes/no pair judgment, where the
+	// answer is close to a copy of the input. It is not a cheaper `chat` — across
+	// the real prompt mix it is only ~12% faster per call, and slower on long
+	// prompts, because it generates half again as many tokens per item.
+	//
+	// Off by default. Unlike `chat` and `think`, which are two profiles in front
+	// of one llama-server, this is a separate backend behind a router at
+	// MODEL_ROUTER_MAX=1 shared with embed/ocr/rank, so a stage that alternates
+	// with embeddings pays a model swap each time. An install that has not
+	// deliberately configured it should never silently start paying that.
+	task: Object.freeze({
+		enabled: false,
+		baseUrl: "http://llms:8007/v1/chat/completions",
+		model: "task",
+		// Half the chat slot. Recorded as 32,768 for months after the backend
+		// moved, which quietly under-budgeted every task-tier prompt.
+		contextTokens: 65538,
+		// Without this the backend answers into `reasoning_content` and returns
+		// empty `content`. `reasoning_budget: 0` and `/no_think` do nothing.
+		chatTemplateKwargs: Object.freeze({ enable_thinking: false }),
+		scheduling: Object.freeze({
+			enabled: true,
+			interactiveSlot: 0,
+			backgroundSlot: 1,
+			idleGraceMs: 2000,
+			yieldMs: 1000,
+			backgroundOutputTokens: 4096,
+		}),
+	}),
 	embeddings: Object.freeze({
 		enabled: true,
 		url: "http://llms:8005/v1/embeddings",
@@ -139,6 +169,7 @@ export function seedConnectedServicesSettings(settings) {
 		current.stackState && typeof current.stackState === "object" && !Array.isArray(current.stackState) ? current.stackState : {};
 	const chat = current.chat && typeof current.chat === "object" && !Array.isArray(current.chat) ? current.chat : {};
 	const think = current.think && typeof current.think === "object" && !Array.isArray(current.think) ? current.think : {};
+	const task = current.task && typeof current.task === "object" && !Array.isArray(current.task) ? current.task : {};
 	const embeddings =
 		current.embeddings && typeof current.embeddings === "object" && !Array.isArray(current.embeddings)
 			? current.embeddings
@@ -159,15 +190,36 @@ export function seedConnectedServicesSettings(settings) {
 		},
 		chat: seedInferenceService(chat, DEFAULT_CONNECTED_SERVICES.chat),
 		think: seedInferenceService(think, DEFAULT_CONNECTED_SERVICES.think),
+		task: seedInferenceService(task, DEFAULT_CONNECTED_SERVICES.task),
 		embeddings: {
 			enabled: embeddings.enabled ?? DEFAULT_CONNECTED_SERVICES.embeddings.enabled,
 			url: normalizeHttpBaseUrl(embeddings.url) ?? DEFAULT_CONNECTED_SERVICES.embeddings.url,
 			model: normalizeServiceName(embeddings.model) ?? DEFAULT_CONNECTED_SERVICES.embeddings.model,
 		},
+		routing: normalizeRouting(current.routing),
 		apiKeys: normalizeApiKeys(current.apiKeys),
 	};
 	return settings.connectedServices;
 }
+
+/**
+ * Per-stage service overrides: `{ "<stage label>": "chat" | "think" | "task" }`.
+ *
+ * An entry naming a service that does not exist is dropped rather than kept.
+ * A typo here would otherwise route a stage into nothing, and the failure would
+ * surface as that stage silently not running rather than as a bad setting.
+ */
+function normalizeRouting(current) {
+	if (!current || typeof current !== "object" || Array.isArray(current)) return {};
+	const routing = {};
+	for (const [stage, service] of Object.entries(current)) {
+		const name = normalizeServiceName(service);
+		if (name && ROUTABLE_SERVICES.has(name)) routing[stage] = name;
+	}
+	return routing;
+}
+
+const ROUTABLE_SERVICES = new Set(["chat", "think", "task"]);
 
 /**
  * Keep only non-empty string values. A key persisted as null, a number, or the
@@ -228,6 +280,8 @@ export function resolveConnectedServices(options = {}) {
 	const envChatModel = normalizeServiceName(env.FORGE_BASE_MODEL);
 	const envThink = normalizeHttpBaseUrl(env.FORGE_THINK_URL);
 	const envThinkModel = normalizeServiceName(env.FORGE_THINK_MODEL);
+	const envTask = normalizeHttpBaseUrl(env.FORGE_TASK_URL);
+	const envTaskModel = normalizeServiceName(env.FORGE_TASK_MODEL);
 	const envEmbeddings = normalizeHttpBaseUrl(env.FORGE_EMBEDDINGS_URL);
 	const envEmbeddingsModel = normalizeServiceName(env.FORGE_EMBEDDINGS_MODEL);
 	const searxngEnvPresent = Object.hasOwn(env, "FORGE_SEARXNG_URL");
@@ -236,6 +290,7 @@ export function resolveConnectedServices(options = {}) {
 	const stackStateEnvPresent = Object.hasOwn(env, "FORGE_STACK_STATE_URL");
 	const chatEnvPresent = Object.hasOwn(env, "FORGE_BASE_CHAT_URL") || Object.hasOwn(env, "FORGE_CHAT_URL");
 	const thinkEnvPresent = Object.hasOwn(env, "FORGE_THINK_URL");
+	const taskEnvPresent = Object.hasOwn(env, "FORGE_TASK_URL");
 	const embeddingsEnvPresent = Object.hasOwn(env, "FORGE_EMBEDDINGS_URL");
 	const explicitSearxng = normalizeHttpBaseUrl(options.searxngUrl);
 	const explicitPlaywright = normalizeWsEndpoint(options.playwrightWsEndpoint);
@@ -244,16 +299,22 @@ export function resolveConnectedServices(options = {}) {
 	const explicitChatModel = normalizeServiceName(options.chatModel);
 	const explicitThink = normalizeHttpBaseUrl(options.thinkUrl);
 	const explicitThinkModel = normalizeServiceName(options.thinkModel);
+	const explicitTask = normalizeHttpBaseUrl(options.taskUrl);
+	const explicitTaskModel = normalizeServiceName(options.taskModel);
 	const explicitEmbeddings = normalizeHttpBaseUrl(options.embeddingsUrl);
 	const explicitEmbeddingsModel = normalizeServiceName(options.embeddingsModel);
 	const envChatContext = normalizePositiveInteger(parseInteger(env.FORGE_BASE_CHAT_CONTEXT_TOKENS), undefined);
 	const envThinkContext = normalizePositiveInteger(parseInteger(env.FORGE_THINK_CONTEXT_TOKENS), undefined);
 	const envChatTemplate = normalizeTemplateKwargs(env.FORGE_BASE_CHAT_TEMPLATE_KWARGS);
 	const envThinkTemplate = normalizeTemplateKwargs(env.FORGE_THINK_TEMPLATE_KWARGS);
+	const envTaskContext = normalizePositiveInteger(parseInteger(env.FORGE_TASK_CONTEXT_TOKENS), undefined);
+	const envTaskTemplate = normalizeTemplateKwargs(env.FORGE_TASK_TEMPLATE_KWARGS);
 	const explicitChatContext = normalizePositiveInteger(parseInteger(options.chatContextTokens), undefined);
 	const explicitThinkContext = normalizePositiveInteger(parseInteger(options.thinkContextTokens), undefined);
 	const explicitChatTemplate = normalizeTemplateKwargs(options.chatTemplateKwargs);
 	const explicitThinkTemplate = normalizeTemplateKwargs(options.thinkTemplateKwargs);
+	const explicitTaskContext = normalizePositiveInteger(parseInteger(options.taskContextTokens), undefined);
+	const explicitTaskTemplate = normalizeTemplateKwargs(options.taskTemplateKwargs);
 	return {
 		searxng: {
 			enabled: explicitSearxng ? true : searxngEnvPresent ? Boolean(envSearxng) : seeded.searxng.enabled,
@@ -283,11 +344,20 @@ export function resolveConnectedServices(options = {}) {
 			chatTemplateKwargs: explicitThinkTemplate ?? envThinkTemplate ?? seeded.think.chatTemplateKwargs,
 			scheduling: seeded.think.scheduling,
 		},
+		task: {
+			enabled: explicitTask ? true : taskEnvPresent ? Boolean(envTask) : seeded.task.enabled,
+			baseUrl: explicitTask ?? envTask ?? seeded.task.baseUrl,
+			model: explicitTaskModel ?? envTaskModel ?? seeded.task.model,
+			contextTokens: explicitTaskContext ?? envTaskContext ?? seeded.task.contextTokens,
+			chatTemplateKwargs: explicitTaskTemplate ?? envTaskTemplate ?? seeded.task.chatTemplateKwargs,
+			scheduling: seeded.task.scheduling,
+		},
 		embeddings: {
 			enabled: explicitEmbeddings ? true : embeddingsEnvPresent ? Boolean(envEmbeddings) : seeded.embeddings.enabled,
 			url: explicitEmbeddings ?? envEmbeddings ?? seeded.embeddings.url,
 			model: explicitEmbeddingsModel ?? envEmbeddingsModel ?? seeded.embeddings.model,
 		},
+		routing: { ...seeded.routing, ...(options.routing ?? {}) },
 		apiKeys: resolveApiKeys(seeded.apiKeys, env, options.apiKeys),
 	};
 }
@@ -331,6 +401,17 @@ export function resolveApiKey(provider, options = {}) {
  */
 export function resolveThinkOrChat(services) {
 	return services.think?.enabled ? services.think : services.chat;
+}
+
+/**
+ * The small tier, falling back to `chat` when it is not configured — which is
+ * the default. The fallback direction matches `resolveThinkOrChat`: an
+ * unconfigured tier degrades *toward* the 27B, never away from it. A stage is
+ * routed here because a small model was measured to do it better, but "better"
+ * was measured against `chat`, so `chat` is always an acceptable answer.
+ */
+export function resolveTaskOrChat(services) {
+	return services.task?.enabled ? services.task : services.chat;
 }
 
 function normalizeHttpBaseUrl(value) {

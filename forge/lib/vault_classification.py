@@ -3,6 +3,7 @@
 import json
 
 import forge_llm
+import forge_routing
 import run_state
 from vault_schema import (
     UserError,
@@ -120,26 +121,20 @@ def extract_json_content(content):
 
 
 def chat_service(args):
-    return {
-        "name": "chat",
-        "enabled": True,
-        "url": args.base_url,
-        "model": args.model,
-        "scheduling": forge_llm.DEFAULT_SERVICES["chat"]["scheduling"],
-    }
+    return forge_llm.service_from_args(args, "chat")
 
 
-def request_json_with_retry(args, messages, service=None):
+def request_json_with_retry(args, messages, service=None, stage="classify-note"):
     try:
         value, _record = forge_llm.call_json_with_retry(
-            service or chat_service(args),
+            service or forge_routing.service_for(stage, args),
             messages,
             attempts=MAX_TRANSIENT_ATTEMPTS,
             response_format={"type": "json_object"},
             cache_prompt=args.cache_prompt,
             timeout=args.request_timeout,
             api_key=args.api_key,
-            task="classify",
+            task=stage,
         )
     except forge_llm.ChatError as error:
         raise UserError(str(error)) from error

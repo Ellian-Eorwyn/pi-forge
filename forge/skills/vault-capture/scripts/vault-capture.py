@@ -39,6 +39,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import forge_llm
+import forge_routing
 import forge_verify
 import run_state
 import vault_compose
@@ -365,8 +366,13 @@ def call_json(args, service, system, payload, task, background=False, extra=None
     ]
     if extra:
         messages.append({"role": "user", "content": json.dumps(extra, ensure_ascii=False)})
+    # A caller that names a service gets it: the escalation path deliberately
+    # redoes a flagged note on the thinking service, and routing must not
+    # second-guess that. Passing `None` asks for the stage's route instead, where
+    # `task` is the routing key — and a stage the table does not name resolves to
+    # `chat`, which is what the caller would have passed anyway.
     value, _record = forge_llm.call_json_with_retry(
-        service,
+        service or forge_routing.service_for(task, args),
         messages,
         temperature=0,
         cache_prompt=args.cache_prompt,
@@ -390,7 +396,10 @@ def split_items(args, service, items, run_dir):
         started = time.time()
         record = {"at": run_state.utc_now(), "id": item["id"], "source": item["source"]}
         try:
-            value = call_json(args, service, SPLIT_SYSTEM, split_payload(item, args.max_notes), "split-braindump")
+            # None, not `service`: splitting is routed, and the report put it on
+            # the thinking profile (7/8 against 4/8, and it clears a silent
+            # failure the bulk model carries on the same fixture).
+            value = call_json(args, None, SPLIT_SYSTEM, split_payload(item, args.max_notes), "split-braindump")
             notes, needs_review, reason = validate_split(value, args.max_notes)
             record.update({"status": "ok", "notes": notes, "needs_review": needs_review, "review_reason": reason})
         except (UserError, forge_llm.ChatError) as error:
@@ -1242,12 +1251,27 @@ def verify_records(args, schema, system, items_by_id, records, run_dir):
             background=True,
             timeout=args.request_timeout,
             progress=progress,
+            # Coverage asks whether these notes account for the braindump, which
+            # is a review of the split — and the split is routed to the thinking
+            # service, the same one reviewing here. Naming the producer lets a
+            # clean verdict be recorded as non-independent rather than read as a
+            # second opinion it is not.
+            produced_by=forge_routing.service_for("split-braindump", args),
         )
     except forge_verify.VerificationError as error:
         # An unreachable reviewer must not read as approval.
         warnings.append(f"verification skipped: {error}")
         summary["skipped"] = str(error)
         return summary, warnings
+
+    # A clean verdict from the model that produced the item is not evidence, and
+    # the report must not let it read as one.
+    coverage_independence = forge_verify.independence_warning(coverage_verdicts)
+    if coverage_independence:
+        warnings.append(f"coverage check: {coverage_independence}")
+        summary["notIndependentlyVerified"] = sum(
+            1 for verdict in coverage_verdicts.values() if not verdict.get("independent", True)
+        )
 
     flagged = [
         (next(entry for entry in note_items if entry["id"] == identifier), verdict["reason"])
@@ -1781,13 +1805,7 @@ def apply_preferences(args, vault, voice_path, voice, current_hash):
 
 
 def chat_service(args):
-    return {
-        "name": "chat",
-        "enabled": True,
-        "url": args.base_url,
-        "model": args.model,
-        "scheduling": forge_llm.DEFAULT_SERVICES["chat"]["scheduling"],
-    }
+    return forge_llm.service_from_args(args, "chat")
 
 
 def resolved_options(args):
@@ -1907,6 +1925,14 @@ def capture(args):
                 warnings.append(f"{item['label']}: {item['held']}")
 
         service = chat_service(args)
+        # Splitting is routed off the bulk service, so a dead target has to be
+        # found here rather than mid-run: one probe, and the run continues on
+        # `chat` with the substitution stated instead of dying at the first note.
+        warnings.extend(
+            forge_routing.disable_unreachable(
+                args, ["split-braindump"], timeout=min(args.request_timeout, 60)
+            )
+        )
         phase(run_dir, "split")
         results, split_warnings = split_items(args, service, items, run_dir)
         warnings.extend(split_warnings)

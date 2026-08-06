@@ -455,45 +455,28 @@ def forge_agent_directory():
     return Path(explicit).expanduser() if explicit else Path.home() / ".pi-forge" / "agent"
 
 
-SERVICE_DEFAULTS = {
-    # Extraction is per-packet bulk work and runs without reasoning.
-    "chat": {"url": "http://llms:8004/v1/chat/completions", "model": "chat", "scheduling_enabled": False},
-    # Reconciliation and relationship review are judgment: they weigh evidence
-    # across packets and decide what supersedes or conflicts with what.
-    "think": {"url": "http://llms:8008/v1/chat/completions", "model": "code", "scheduling_enabled": True},
-}
-SERVICE_ENVIRONMENT = {
-    "chat": (("FORGE_BASE_CHAT_URL", "FORGE_CHAT_URL"), ("FORGE_BASE_MODEL",)),
-    "think": (("FORGE_THINK_URL",), ("FORGE_THINK_MODEL",)),
-}
+# Whether each service schedules against a slot when nothing is persisted.
+# This is the one part of the resolution that is a fact about *this skill*
+# rather than about the endpoint: extraction is serial foreground work by
+# default, while reconciliation and relationship review run in the background
+# against the thinking server the interactive session also uses.
+SERVICE_SCHEDULING_DEFAULT = {"chat": False, "think": True}
 
 
 def service_configuration(name="chat"):
-    settings_path = forge_agent_directory() / "settings.json"
-    try:
-        settings = json.loads(settings_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        settings = {}
-    service = ((settings.get("connectedServices") or {}).get(name) or {})
-    scheduling = service.get("scheduling") or {}
-    defaults = SERVICE_DEFAULTS[name]
-    url_keys, model_keys = SERVICE_ENVIRONMENT[name]
-    environment_url = next((os.environ[key] for key in url_keys if os.environ.get(key)), None)
-    environment_model = next((os.environ[key] for key in model_keys if os.environ.get(key)), None)
-    return {
-        "name": name,
-        "enabled": bool(service.get("enabled", True)),
-        "url": environment_url or service.get("baseUrl") or defaults["url"],
-        "model": environment_model or service.get("model") or defaults["model"],
-        "scheduling": {
-            "enabled": bool(scheduling.get("enabled", defaults["scheduling_enabled"])),
-            "interactiveSlot": int(scheduling.get("interactiveSlot", 0)),
-            "backgroundSlot": int(scheduling.get("backgroundSlot", 1)),
-            "idleGraceMs": int(scheduling.get("idleGraceMs", 2000)),
-            "yieldMs": int(scheduling.get("yieldMs", 1000)),
-            "backgroundOutputTokens": int(scheduling.get("backgroundOutputTokens", 4096)),
-        },
-    }
+    """The resolved service, with this skill's own scheduling default.
+
+    Everything except scheduling comes from ``forge_llm.resolve_service``. This
+    function used to re-implement the resolution ladder, which meant it never
+    picked up ``contextTokens`` or ``chatTemplateKwargs`` and so could not be
+    pointed at a backend that needed either — a divergence `forge/evals/README.md`
+    had been carrying as a known gap.
+    """
+    resolved = forge_llm.resolve_service(name)
+    persisted = forge_llm.load_connected_services().get(name)
+    scheduling = (persisted or {}).get("scheduling") if isinstance(persisted, dict) else None
+    enabled = (scheduling or {}).get("enabled", SERVICE_SCHEDULING_DEFAULT[name])
+    return {**resolved, "scheduling": {**resolved["scheduling"], "enabled": bool(enabled)}}
 
 
 def chat_configuration():

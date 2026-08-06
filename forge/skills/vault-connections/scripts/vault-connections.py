@@ -30,6 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import forge_embeddings
 import forge_llm
+import forge_routing
 import forge_verify
 import obsidian_cli
 import run_state
@@ -706,17 +707,17 @@ def extract_json_content(content):
     return json.loads(text[start:end + 1])
 
 
-def request_with_retry(args, messages, service=None):
+def request_with_retry(args, messages, service=None, stage="judge"):
     last = None
     for attempt in range(1, MAX_TRANSIENT_ATTEMPTS + 1):
         try:
             content, _record = forge_llm.call(
-                service or chat_service(args),
+                service or forge_routing.service_for(stage, args),
                 messages,
                 cache_prompt=args.cache_prompt,
                 timeout=args.request_timeout,
                 api_key=args.api_key,
-                task="judge",
+                task=stage,
             )
             return extract_json_content(content)
         except (forge_llm.ChatError, UserError, json.JSONDecodeError) as error:
@@ -882,7 +883,11 @@ def judge_pair(args, vault, left, right):
             {"role": "user", "content": user},
         ],
     )
-    return validate_judgment(request_with_retry(args, messages))
+    # The pair judgment is the one stage here the small model does better:
+    # 16/16 against the baseline's 14/16 with no false negatives, and 3.4x
+    # faster per pair. The answer is a decision about the two notes rather than
+    # prose composed from them, which is the shape it holds up on.
+    return validate_judgment(request_with_retry(args, messages, stage="connection-judgment"))
 
 
 def validate_judgment(raw):
@@ -1886,6 +1891,10 @@ def harvest_subtopic_notes(args, run_directory, records, fingerprint, limit=None
                 ),
             },
         ],
+        # Grouping claims into topic notes reuses the classifier's transport but
+        # is not note classification, so it must not inherit that stage's route.
+        # Nothing has measured this one; it stays where it is.
+        stage="group-topic-notes",
     )
     notes = validate_topic_notes(grouping, usable, limit or DEFAULT_SUBTOPIC_NOTES)
     built = []
@@ -1909,6 +1918,9 @@ def harvest_subtopic_notes(args, run_directory, records, fingerprint, limit=None
                     ),
                 },
             ],
+            # Composing a note summary, not classifying one. Summarization is a
+            # stage the report explicitly held on `chat`.
+            stage="summarize-topic-note",
         )
         summary = summary_value.get("summary") if isinstance(summary_value, dict) else None
         summary = summary.strip() if isinstance(summary, str) else ""

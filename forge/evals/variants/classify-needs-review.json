@@ -1,0 +1,11 @@
+{
+  "name": "classify-needs-review",
+  "why": "`needsReview` is 0.00 on both classification cases for `task-4b` and `think-27b`, and 0.08 for `chat-27b` — across every model and both cases, the classifier essentially never declines. The skill's prompt already permits it (\"Use needs_review true when required classification is genuinely ambiguous\"), so the permission is present and unused, which is the same shape as the abstention finding: every model scores `abstained` 0.00 on both abstention cases while the prompt explicitly allows it.\n\nA classifier that is wrong 15% of the time per property and flags 0% of notes is confidently wrong, and confidently wrong is the expensive kind — it produces a filed note nobody looks at again. A classifier that is wrong 15% of the time and flags the ambiguous ones is a work queue.\n\nThe patch makes the decision explicit rather than available: state the runner-up value and why it lost, and set needs_review when the two were close. Naming the alternative is the part expected to matter — a model asked only \"were you sure?\" says yes.\n\nRead `needsReview` against `routingPropertiesCorrect`. The variant succeeds if flagged notes are disproportionately the wrong ones; it fails if `needsReview` rises across the board, which is a model that has learned to hedge rather than to discriminate.",
+  "applies": [
+    "classify-notes",
+    "classify-hard"
+  ],
+  "patch": {
+    "systemSuffix": "For each routing property, name to yourself the value you nearly chose instead and what decided between them. When that decision rested on little — when the note would sit as plausibly under the other value — set needs_review true. Flagging a note is not a failure to classify it: it is the correct answer for a note the schema does not cleanly cover, and a wrong value filed with confidence costs more than a flagged one."
+  }
+}

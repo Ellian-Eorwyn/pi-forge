@@ -2575,7 +2575,19 @@ async function callLocalJsonModel(runDirectory, task, prompt, fallback, runtime 
 		temperature: 0.1,
 	};
 	const record = { id: callId, task, startedAt, endedAt: null, endpoint: baseChatUrl, model, request, response: null, status: "failed", error: null };
-	const service = { name: "chat", enabled: true, url: baseChatUrl, model, scheduling: chat.scheduling ?? {} };
+	// contextTokens and chatTemplateKwargs have to survive the reshape from the
+	// connected-services shape into the client's. Dropped, `call` falls back to a
+	// 131,072-token ceiling and sends no template kwargs, so pointing this at a
+	// smaller or reasoning backend overfills the slot and parses empty content.
+	const service = {
+		name: "chat",
+		enabled: true,
+		url: baseChatUrl,
+		model,
+		contextTokens: chat.contextTokens,
+		chatTemplateKwargs: chat.chatTemplateKwargs,
+		scheduling: chat.scheduling ?? {},
+	};
 	const execute = async () => {
 		// The shared client owns transport, retry, and think-tag stripping; the
 		// queue, the budget, and the JSON fallback stay here.

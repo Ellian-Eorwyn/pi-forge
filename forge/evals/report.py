@@ -100,7 +100,7 @@ def _load(model_ids):
     return {model_id: harness.read_results(model_id) for model_id in model_ids}
 
 
-def render(model_ids, baseline=None):
+def render(model_ids, baseline=None, prefer="capability"):
     loaded = _load(model_ids)
     present = [model_id for model_id in model_ids if loaded.get(model_id)]
     missing = [model_id for model_id in model_ids if not loaded.get(model_id)]
@@ -264,17 +264,25 @@ def render(model_ids, baseline=None):
         [
             "## Cost",
             "",
+            "**Read the per-attempt column, not wall time.** `--stabilize` repeats the cases a",
+            "single item could have decided, and it repeats *different* cases for each model, so",
+            "the wall times below cover different amounts of work and are not comparable to each",
+            "other. Attempts is what actually ran; fixtures is how many distinct questions were",
+            "asked. Dividing wall time by fixtures across models is how a model that repeated",
+            "twice as often reads as half as fast.",
+            "",
             "Wall time is measured on an otherwise idle GPU, so it is a latency figure, not",
-            "throughput. Tokens per item is the one that scales: a model generating half again",
+            "throughput. Tokens per attempt is the one that scales: a model generating half again",
             "as much finishes a single item faster and a 500-note batch slower. A `task` batch",
             "also pays roughly 6s of router swap whenever it alternates with `embed`.",
             "",
         ]
     )
     lines.append(
-        "| Model | Items | Generated tokens | Tokens/item | Items/min | Prefill tok/s | Decode tok/s | Hidden reasoning | Wall time |"
+        "| Model | Fixtures | Attempts | Generated tokens | Tokens/attempt | **s/attempt** | "
+        "Items/min | Prefill tok/s | Decode tok/s | Hidden reasoning | Wall time |"
     )
-    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for model_id in present:
         # A skipped case contributes no items and no time. Including its empty
         # summary in these sums would be harmless; including it in the rates
@@ -297,8 +305,10 @@ def render(model_ids, baseline=None):
             for d in documents
             if (d["summary"].get("speed") or {}).get("decodeTokensPerSecond")
         ]
+        seconds_per_attempt = (elapsed / 1000) / attempts if attempts else 0
         lines.append(
-            f"| `{model_id}` | {items} | {generated:,} | {per_item:,} | {per_minute} | "
+            f"| `{model_id}` | {items} | {attempts} | {generated:,} | {per_item:,} | "
+            f"**{seconds_per_attempt:.1f}** | {per_minute} | "
             f"{_fmt(statistics.median(prefill), 0) if prefill else '—'} | "
             f"{_fmt(statistics.median(decode), 1) if decode else '—'} | "
             f"{hidden:,} | {elapsed / 1000:.0f}s |"
@@ -345,55 +355,172 @@ def render(model_ids, baseline=None):
 
     cleared_by_model = {}
     recommendation = _recommendation(loaded, present, baseline, graded, cleared_by_model)
-    lines.extend(_stage_routing(loaded, present, baseline, cleared_by_model))
+    # The baseline is a candidate for its own stages. Filled after the loop above
+    # because that loop only ever walks the *other* models.
+    cleared_by_model[baseline] = baseline_cleared(loaded, baseline, graded)
+    lines.extend(_stage_routing(loaded, present, baseline, cleared_by_model, graded, prefer=prefer))
     lines.extend(recommendation)
     return "\n".join(lines) + "\n"
 
 
-def _stage_routing(loaded, present, baseline, cleared_by_model):
-    """One row per pi-forge stage: the smallest model that does it, and the speedup.
+def routing_table(model_ids, baseline=None, prefer="capability"):
+    """The stage table as data, in the shape ``forge_routing`` consumes.
 
-    The routing recommendation below says, per case, whether a candidate held
-    up. This says the thing a person actually acts on — for each stage of real
-    work, what is the cheapest model that does it, and what does moving buy.
-    A case that no candidate cleared stays on the baseline and says so.
+    The report is prose and the deployment is a dict, and nothing kept them
+    honest with each other. This is the join: `tests/test_evals.py` asserts the
+    committed routing table only sends a stage somewhere the latest report
+    supports, so a routing decision cannot outlive the evidence for it.
+    """
+    loaded = _load(model_ids)
+    present = [model_id for model_id in model_ids if loaded.get(model_id)]
+    if not present:
+        return {}
+    if baseline not in present:
+        baseline = present[0]
+    graded = judging.scored()
+    cleared_by_model = {}
+    _recommendation(loaded, present, baseline, graded, cleared_by_model)
+    cleared_by_model[baseline] = baseline_cleared(loaded, baseline, graded)
+
+    registry = harness.models()
+    silent_by_case = {model_id: severity_for(loaded[model_id], graded, model_id)[2] for model_id in present}
+    table = {}
+    for case_id in sorted({case for documents in loaded.values() for case in documents}):
+        candidates = [
+            model_id
+            for model_id in present
+            if case_id in cleared_by_model.get(model_id, set()) and case_id in loaded[model_id]
+        ]
+        if not candidates:
+            continue
+
+        def rank(model_id, case_id=case_id):
+            silent = (silent_by_case[model_id].get(case_id) or {}).get("silent", 0)
+            speed = _median_ms(loaded, model_id, case_id) or float("inf")
+            if prefer == "size":
+                return (registry.get(model_id, {}).get("sizeGiB") or float("inf"), speed)
+            return (-loaded[model_id][case_id]["summary"]["passRate"], silent, speed)
+
+        winner = min(candidates, key=rank)
+        document = loaded[winner][case_id]
+        table[case_id] = {
+            "model": winner,
+            "tier": registry.get(winner, {}).get("tier"),
+            "skill": document.get("skill"),
+            "dimension": document["dimension"],
+            "passRate": round(document["summary"]["passRate"], 4),
+            "isBaseline": winner == baseline,
+        }
+    return {"baseline": baseline, "prefer": prefer, "models": present, "cases": table}
+
+
+def baseline_cleared(loaded, baseline, graded):
+    """Cases the baseline does well enough to keep, judged on its own terms.
+
+    ``_recommendation`` only ever evaluates candidates *against* the baseline, so
+    nothing recorded whether the baseline cleared its own cases, and it was never
+    a candidate in the stage table. On this deployment that was not cosmetic:
+    `chat` and `think` are one set of weights behind a proxy and therefore the
+    same size, so every tie went to `think` on sort order alone. The table
+    recommended `abstention-grounded` (12/12 against the baseline's 12/12) at
+    6.9x slower, and `lcr-48k` (10/10 against 10/10) at 10.5x slower — pure cost
+    for no measured gain.
+
+    The criteria are the absolute half of the ones applied to a candidate: the
+    result has to be repeatable, carry enough fixtures to mean anything, be free
+    of silent failures, and clear the floor. There is no relative half, because
+    there is nothing above the baseline to compare it against.
+    """
+    _counts, _detail, severity_by_case = severity_for(loaded[baseline], graded, baseline)
+    cleared = set()
+    for case_id, document in loaded[baseline].items():
+        if document.get("notApplicable"):
+            continue
+        summary = document["summary"]
+        if summary["items"] < MIN_ITEMS_FOR_VERDICT:
+            continue
+        if summary.get("stability", {}).get("unstableIds"):
+            continue
+        if (severity_by_case.get(case_id) or {}).get("silent"):
+            continue
+        if summary["passRate"] < GATE_FLOOR:
+            continue
+        cleared.add(case_id)
+    return cleared
+
+
+def _median_ms(loaded, model_id, case_id):
+    return ((loaded.get(model_id, {}).get(case_id) or {}).get("summary", {}).get("speed") or {}).get("msPerItemMedian")
+
+
+def _stage_routing(loaded, present, baseline, cleared_by_model, graded, prefer="capability"):
+    """One row per pi-forge stage: the model that should run it, and what that costs.
+
+    The old premise was "the smallest model that cleared", which is the wrong
+    question on a deployment where the two 27B profiles are one set of weights
+    behind a proxy — "smaller" does not describe the choice between them at all.
+
+    The ordering is the routing rule read in both directions: where a model is
+    better take it even when it is slower, and where capability ties take the
+    faster one. So candidates rank by gate pass rate, then by carrying no silent
+    failures, and only then by speed. ``--prefer size`` restores the old ordering
+    for the genuinely smaller tier, where weights and VRAM do differ.
     """
     lines = [
         "## Stage routing",
         "",
-        "The smallest model that cleared each stage, and what moving there buys.",
-        "Speed is the median item time on that case, so it includes prompt size:",
-        "a stage with a long prompt gains less from a faster decoder than one with a short prompt.",
+        f"The model that should run each stage, ranked by {'size' if prefer == 'size' else 'capability'},",
+        "and what running it there costs.",
         "",
-        "| Stage | Case | Smallest model that cleared | vs baseline |",
+        "Ratios carry the absolute per-item difference beside them, because a ratio on a five-second",
+        'base makes a cheap upgrade look expensive: "10.5x slower" and "+15s per item" are the same',
+        "fact and lead to opposite decisions.",
+        "",
+        "| Stage | Case | Runs on | vs baseline |",
         "| --- | --- | --- | --- |",
     ]
-    # Smallest first, so the first model that cleared a case is the cheapest one
-    # that did. Size comes from the registry, not from the id, because an id is
-    # a label someone typed.
     registry = harness.models()
-    ordered = sorted(present, key=lambda m: registry.get(m, {}).get("sizeGiB") or 1e9)
+    silent_by_case = {model_id: severity_for(loaded[model_id], graded, model_id)[2] for model_id in present}
+
+    def rank(model_id, case_id):
+        document = loaded[model_id][case_id]
+        silent = (silent_by_case[model_id].get(case_id) or {}).get("silent", 0)
+        speed = _median_ms(loaded, model_id, case_id) or float("inf")
+        if prefer == "size":
+            return (registry.get(model_id, {}).get("sizeGiB") or float("inf"), speed)
+        return (-document["summary"]["passRate"], silent, speed)
+
     for case_id in sorted({case for documents in loaded.values() for case in documents}):
         document = next((loaded[m][case_id] for m in present if case_id in loaded[m]), None)
         if not document:
             continue
         stage = f"`{document.get('skill') or '—'}` / {document['dimension']}"
-        winner, detail = None, ""
-        for model_id in ordered:
-            if case_id in cleared_by_model.get(model_id, set()):
-                winner = model_id
-                break
-        if winner is None:
-            winner = f"`{baseline}` only"
+        candidates = [
+            model_id
+            for model_id in present
+            if case_id in cleared_by_model.get(model_id, set()) and case_id in loaded[model_id]
+        ]
+        if not candidates:
+            # Not "stays on the baseline": the baseline did not clear it either.
+            lines.append(f"| {stage} | `{case_id}` | nothing cleared it | — |")
+            continue
+        winner = min(candidates, key=lambda model_id: rank(model_id, case_id))
+        if winner == baseline:
+            detail = "baseline"
         else:
-            base_ms = ((loaded[baseline].get(case_id) or {}).get("summary", {}).get("speed") or {}).get("msPerItemMedian")
-            here_ms = ((loaded[winner].get(case_id) or {}).get("summary", {}).get("speed") or {}).get("msPerItemMedian")
+            base_ms, here_ms = _median_ms(loaded, baseline, case_id), _median_ms(loaded, winner, case_id)
+            detail = "—"
             if base_ms and here_ms:
-                detail = f"{base_ms / here_ms:.1f}x faster" if here_ms < base_ms else f"{here_ms / base_ms:.1f}x slower"
-            winner = f"`{winner}`"
-        lines.append(f"| {stage} | `{case_id}` | {winner} | {detail or '—'} |")
+                seconds = abs(here_ms - base_ms) / 1000
+                detail = (
+                    f"{base_ms / here_ms:.1f}x faster (−{seconds:.1f}s/item)"
+                    if here_ms < base_ms
+                    else f"{here_ms / base_ms:.1f}x slower (+{seconds:.1f}s/item)"
+                )
+        lines.append(f"| {stage} | `{case_id}` | `{winner}` | {detail} |")
     lines.append("")
     return lines
+
 
 
 def _recommendation(loaded, present, baseline, graded, cleared_by_model=None):

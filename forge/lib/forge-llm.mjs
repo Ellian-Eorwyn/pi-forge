@@ -21,7 +21,7 @@
 
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { getForgeAgentDir, resolveConnectedServices, resolveThinkOrChat, SLOT_CONTEXT_TOKENS } from "./connected-services.mjs";
+import { getForgeAgentDir, resolveConnectedServices, resolveTaskOrChat, resolveThinkOrChat, SLOT_CONTEXT_TOKENS } from "./connected-services.mjs";
 import { isTransientFailure } from "./run-state.mjs";
 import { capacityForUrl, explainUnreachable, healthWarnings, identityForUrl, readSnapshot } from "./stack-state.mjs";
 
@@ -126,9 +126,14 @@ export function normalizeChatUrl(value) {
  * `connected-services.mjs` speaks `{enabled, baseUrl, model, scheduling}`;
  * everything here and in `forge_llm.py` speaks `{name, url, model, ...}`.
  */
+const INFERENCE_SERVICES = new Set(["chat", "think", "task"]);
+
 export function resolveService(name, options = {}) {
 	const services = resolveConnectedServices(options);
-	const service = name === "think" ? services.think : services.chat;
+	// Only the inference services have this shape. `embeddings` carries `url`
+	// rather than `baseUrl`, so falling through to it would produce a service
+	// with an undefined endpoint rather than an error.
+	const service = INFERENCE_SERVICES.has(name) ? services[name] : services.chat;
 	return {
 		name,
 		enabled: Boolean(service.enabled),
@@ -152,6 +157,26 @@ export function resolveThinkService(options = {}) {
 	const isFallback = chosen === services.chat;
 	return {
 		name: "think",
+		enabled: Boolean(chosen.enabled),
+		url: normalizeChatUrl(chosen.baseUrl),
+		model: chosen.model,
+		contextTokens: chosen.contextTokens,
+		chatTemplateKwargs: chosen.chatTemplateKwargs,
+		scheduling: chosen.scheduling,
+		...(isFallback ? { fallback: "chat" } : {}),
+	};
+}
+
+/**
+ * The small tier, falling back to `chat` when it is not configured — which is
+ * the default, so most installs get `chat` here and nothing changes for them.
+ */
+export function resolveTaskService(options = {}) {
+	const services = resolveConnectedServices(options);
+	const chosen = resolveTaskOrChat(services);
+	const isFallback = chosen === services.chat;
+	return {
+		name: "task",
 		enabled: Boolean(chosen.enabled),
 		url: normalizeChatUrl(chosen.baseUrl),
 		model: chosen.model,

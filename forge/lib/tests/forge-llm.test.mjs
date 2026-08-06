@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 process.env.PI_FORGE_SKIP_STACK_DISCOVERY = "1";
 
 const libraryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const { call, callJsonWithRetry, ChatError, ContextBudgetError, doctorWarnings, estimatePromptTokens, extractJsonContent, hiddenTokenCount, parseJsonContent, PreemptedError, resetStackConditions, resolveService, resolveThinkService, serviceDoctor, activeInteractiveLeases, LEASE_STALE_MS } = await import(join(libraryRoot, "forge-llm.mjs"));
+const { call, callJsonWithRetry, ChatError, ContextBudgetError, doctorWarnings, estimatePromptTokens, extractJsonContent, hiddenTokenCount, parseJsonContent, PreemptedError, resetStackConditions, resolveService, resolveTaskService, resolveThinkService, serviceDoctor, activeInteractiveLeases, LEASE_STALE_MS } = await import(join(libraryRoot, "forge-llm.mjs"));
 const { clearStackStateCache } = await import(join(libraryRoot, "stack-state.mjs"));
 const { SLOT_CONTEXT_TOKENS } = await import(join(libraryRoot, "connected-services.mjs"));
 const { buildPackets, escalate, summarize, verifyPackets, VerificationError, VERDICT_FLAG } = await import(join(libraryRoot, "forge-verify.mjs"));
@@ -307,6 +307,26 @@ test("think falls back to chat when no thinking backend is configured", () => {
 		if (previous === undefined) delete process.env.FORGE_THINK_URL;
 		else process.env.FORGE_THINK_URL = previous;
 	}
+});
+
+test("the task tier is off by default and falls back up to chat", () => {
+	// Off because it is a separate backend behind a swapping router, not another
+	// profile in front of the one already loaded. An install that never asked for
+	// it should not start paying model swaps.
+	const task = resolveTaskService({});
+	assert.equal(task.name, "task");
+	assert.equal(task.fallback, "chat");
+	assert.equal(task.url, resolveService("chat", {}).url);
+});
+
+test("a configured task tier keeps its own ceiling and template kwargs", () => {
+	const task = resolveTaskService({ taskUrl: "http://127.0.0.1:7/v1" });
+	assert.equal(task.url, "http://127.0.0.1:7/v1/chat/completions");
+	assert.equal(task.fallback, undefined);
+	// The two fields that make a non-default backend usable at all: half the
+	// chat slot, and the kwarg without which it answers into reasoning_content.
+	assert.equal(task.contextTokens, 65538);
+	assert.deepEqual(task.chatTemplateKwargs, { enable_thinking: false });
 });
 
 test("leases written by the Python client are honored by this one, and the reverse", () => {

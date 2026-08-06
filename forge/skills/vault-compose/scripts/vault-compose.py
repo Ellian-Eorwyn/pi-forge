@@ -102,13 +102,7 @@ def progress(message):
 
 
 def chat_service(args):
-    return {
-        "name": "chat",
-        "enabled": True,
-        "url": args.base_url,
-        "model": args.model,
-        "scheduling": forge_llm.DEFAULT_SERVICES["chat"]["scheduling"],
-    }
+    return forge_llm.service_from_args(args, "chat")
 
 
 def unique_run_directory(vault):

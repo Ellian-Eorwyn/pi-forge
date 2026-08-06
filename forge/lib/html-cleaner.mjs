@@ -43,7 +43,13 @@ export async function htmlToCleanMarkdown(buffer, url) {
 
 	// Boilerplate stripping is mechanical and runs once per fetched page, so it
 	// belongs on the bulk service like every other per-document call.
-	const { baseUrl: baseChatUrl, model: baseModel } = resolveConnectedServices().chat;
+	//
+	// This posts directly rather than through the shared client, so
+	// `chatTemplateKwargs` has to be forwarded by hand. Without it a backend
+	// running `--reasoning-format deepseek` answers into `reasoning_content` and
+	// returns empty `content`, and the catch below would read that as the
+	// endpoint being unreachable and hand back the uncleaned markdown.
+	const { baseUrl: baseChatUrl, model: baseModel, chatTemplateKwargs } = resolveConnectedServices().chat;
 
 	let instruction = "";
 	if (isReadabilityPass) {
@@ -63,7 +69,8 @@ export async function htmlToCleanMarkdown(buffer, url) {
 					{ role: "system", content: "You are an expert web scraper assistant that cleans raw webpage extracts into crisp, readable markdown." },
 					{ role: "user", content: `${instruction}\n\n=== EXTRACTED MARKDOWN ===\n${rawMarkdown.substring(0, 100000)}` }
 				],
-				temperature: 0.1
+				temperature: 0.1,
+				...(chatTemplateKwargs ? { chat_template_kwargs: chatTemplateKwargs } : {})
 			})
 		});
 		if (!response.ok) throw new Error(`LLM returned HTTP ${response.status}`);

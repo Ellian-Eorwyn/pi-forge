@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import importlib.util
 import json
 import sys
@@ -181,6 +182,102 @@ class ResolutionTests(unittest.TestCase):
             resolved = forge_llm.resolve_service("chat", env={"PI_FORGE_AGENT_DIR": str(agent)})
             self.assertEqual(resolved["url"], "http://persisted:4/v1/chat/completions")
             self.assertEqual(resolved["model"], "persisted")
+
+
+class TaskServiceTests(unittest.TestCase):
+    """The small tier. Off unless configured, and it degrades toward the 27B."""
+
+    def test_the_default_carries_the_smaller_ceiling_and_disables_thinking(self):
+        task = forge_llm.resolve_service("task", env={}, settings={})
+        self.assertEqual(task["url"], "http://llms:8007/v1/chat/completions")
+        self.assertEqual(task["contextTokens"], 65538)
+        self.assertEqual(task["chatTemplateKwargs"], {"enable_thinking": False})
+
+    def test_it_is_off_until_someone_turns_it_on(self):
+        # A separate backend behind a swapping router. An install that never
+        # asked for it should not start paying model swaps.
+        self.assertFalse(forge_llm.resolve_service("task", env={}, settings={})["enabled"])
+        enabled = forge_llm.resolve_service("task", env={}, settings={"task": {"enabled": True}})
+        self.assertTrue(enabled["enabled"])
+
+    def test_an_unconfigured_task_tier_falls_back_up_to_chat(self):
+        resolved = forge_llm.resolve_task_or_chat(env={}, settings={})
+        self.assertEqual(resolved["url"], "http://llms:8004/v1/chat/completions")
+        self.assertEqual(resolved["fallback"], "chat")
+        self.assertEqual(resolved["name"], "task")
+
+    def test_a_configured_task_tier_is_used(self):
+        settings = {"task": {"enabled": True, "baseUrl": "http://small:7/v1", "model": "small"}}
+        resolved = forge_llm.resolve_task_or_chat(env={}, settings=settings)
+        self.assertEqual(resolved["url"], "http://small:7/v1/chat/completions")
+        self.assertNotIn("fallback", resolved)
+
+    def test_its_endpoint_resolves_through_every_layer(self):
+        settings = {"task": {"enabled": True, "baseUrl": "http://settings:1/v1", "model": "from-settings"}}
+        self.assertEqual(forge_llm.resolve_service("task", env={}, settings=settings)["model"], "from-settings")
+
+        environment = {"FORGE_TASK_URL": "http://env:2/v1", "FORGE_TASK_MODEL": "from-env"}
+        from_environment = forge_llm.resolve_service("task", env=environment, settings=settings)
+        self.assertEqual(from_environment["url"], "http://env:2/v1/chat/completions")
+        self.assertEqual(from_environment["model"], "from-env")
+
+        explicit = forge_llm.resolve_service(
+            "task", base_url="http://explicit:3/v1", model="from-argument", env=environment, settings=settings
+        )
+        self.assertEqual(explicit["url"], "http://explicit:3/v1/chat/completions")
+        self.assertEqual(explicit["model"], "from-argument")
+
+    def test_its_ceiling_and_template_kwargs_are_overridable(self):
+        environment = {"FORGE_TASK_CONTEXT_TOKENS": "32768", "FORGE_TASK_TEMPLATE_KWARGS": '{"enable_thinking": true}'}
+        resolved = forge_llm.resolve_service("task", env=environment, settings={})
+        self.assertEqual(resolved["contextTokens"], 32768)
+        self.assertEqual(resolved["chatTemplateKwargs"], {"enable_thinking": True})
+
+
+class ServiceFromArgumentsTests(unittest.TestCase):
+    """Rebuilding a service mid-run must not lose what resolution established.
+
+    Four skills rebuilt one by hand from ``args.base_url`` and ``args.model``,
+    which silently dropped the two fields that make a non-default backend usable.
+    """
+
+    def arguments(self, **fields):
+        return argparse.Namespace(**{"base_url": None, "model": None, "think_url": None, "think_model": None, **fields})
+
+    def test_a_rebuilt_service_keeps_its_context_ceiling_and_template_kwargs(self):
+        settings = {"chat": {"contextTokens": 65538, "chatTemplateKwargs": {"enable_thinking": False}}}
+        service = forge_llm.service_from_args(self.arguments(), "chat", env={}, settings=settings)
+        self.assertEqual(service["contextTokens"], 65538)
+        self.assertEqual(service["chatTemplateKwargs"], {"enable_thinking": False})
+
+    def test_a_prompt_over_the_rebuilt_ceiling_is_refused_before_it_is_sent(self):
+        # The whole point of carrying contextTokens. A 100k prompt against a
+        # 65,538-token backend used to sail through the preflight against the
+        # 131,072 default and come back as an HTTP error that read like the
+        # model failing the task.
+        settings = {"chat": {"contextTokens": 65538}}
+        service = forge_llm.service_from_args(self.arguments(), "chat", env={}, settings=settings)
+        messages = [{"role": "user", "content": "x" * (100_000 * 3)}]
+        with self.assertRaises(forge_llm.ContextBudgetError):
+            forge_llm.call(service, messages, env={})
+
+    def test_the_resolution_is_cached_on_the_arguments(self):
+        args = self.arguments()
+        first = forge_llm.service_from_args(args, "chat", env={}, settings={})
+        second = forge_llm.service_from_args(args, "chat", env={}, settings={"chat": {"model": "ignored"}})
+        self.assertIs(first, second)
+
+    def test_the_endpoint_a_command_already_resolved_wins(self):
+        args = self.arguments(base_url="http://resolved:9/v1", model="resolved")
+        service = forge_llm.service_from_args(args, "chat", env={}, settings={"chat": {"model": "from-settings"}})
+        self.assertEqual(service["url"], "http://resolved:9/v1/chat/completions")
+        self.assertEqual(service["model"], "resolved")
+
+    def test_think_reads_its_own_argument_names(self):
+        args = self.arguments(think_url="http://thinker:8/v1", think_model="thinker")
+        service = forge_llm.service_from_args(args, "think", env={}, settings={})
+        self.assertEqual(service["url"], "http://thinker:8/v1/chat/completions")
+        self.assertEqual(service["model"], "thinker")
 
 
 class ResponseParsingTests(unittest.TestCase):

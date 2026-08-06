@@ -1,0 +1,11 @@
+{
+  "name": "classify-per-property",
+  "why": "The gap this exists to explain: `routingPropertiesCorrect` sits at 0.84-0.89 for all three models while the case pass rate is 3/8, 4/8 and 5/8 — around 40%. The gate is all-or-nothing across several routing properties, so per-property accuracy of ~0.85 compounds into a note that is wrong more often than not. That is a decomposition problem before it is a model problem, and no model in the suite clears `classify-hard` at all.\n\nThe patch adds a procedure, not a schema: decide each routing property separately, on its own evidence, before assembling the object. The output contract is untouched, because a variant that changed the response shape would fail the skill's own validator and score zero — measuring the harness rather than the prompt.\n\nThe precedent is docs/service-split-handoff.md 2.1, where telling a non-thinking model to walk a list of item types explicitly took it from 4 types to 12. The same model does not spontaneously decompose a decision it was handed whole.\n\nRead `routingPropertiesCorrect`, not the pass rate. The pass rate is a floor over several properties at once and moves last; per-property accuracy is the instrument, and an improvement there is what would justify changing the skill.",
+  "applies": [
+    "classify-notes",
+    "classify-hard"
+  ],
+  "patch": {
+    "systemSuffix": "Decide one property at a time. For each property in the approved schema, in the order given: name the evidence in this note that bears on it, choose the value that evidence supports, and move on. Do not let a choice you have already made decide a later one; a note can be filed under one domain and still take a subdomain that does not usually accompany it. Assemble the JSON object only once every property has been decided on its own."
+  }
+}

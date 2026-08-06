@@ -443,3 +443,107 @@ it changes a user-visible quality track rather than an internal pipeline, so the
 - `web-collection`'s LLM link filter is reachable only through an interactive
   readline prompt, so its guard against following URLs the page never linked to
   has no automated test. Making `spider` scriptable would fix both.
+
+## 8. The third tier, and per-stage routing
+
+The split this document describes is `chat` vs `think`, chosen once per command.
+`forge/evals` then measured stages rather than commands, and found the two facts
+that broke that arrangement:
+
+- **A single command wants both directions at once.** `vault-transcripts` cleanup
+  is the case: on diarized multi-speaker material the small model is the only one
+  that clears the gate (7/8 against the baseline's 1/8) while the thinking model
+  scores 0/8, rewriting and compressing away a quarter of the transcript. On a
+  single voice that reverses exactly — thinking takes 2/8 to 8/8 and invented
+  words from 4.38 to 0.00. Same stage, opposite models, decided per chunk by the
+  speaker count.
+- **Rebuilding a service dict by hand lost the fields that make a non-default
+  backend work.** Six sites did it, dropping `contextTokens` and
+  `chatTemplateKwargs`, so a preflight would pass a prompt at twice a small
+  backend's real ceiling and no `enable_thinking: false` would be sent. Both are
+  invisible until a service points somewhere other than this deployment — which
+  is exactly what routing does. `forge_llm.service_from_args` is the fix; use it
+  rather than composing a dict from `args.base_url`.
+
+So there are now three named services and a table. `task` (:8007) is **off by
+default**: unlike `chat` and `think`, which are two request-shaping profiles in
+front of one llama-server, it is a separate backend behind a router at
+`MODEL_ROUTER_MAX=1` shared with `embed`/`ocr`/`rank`, so a stage that alternates
+with embeddings pays a swap each time. Moving up to `think` costs latency and
+nothing else; moving out to `task` costs a swap.
+
+`forge/lib/forge_routing.py` (and its `.mjs` twin) maps a stage label to a
+service. The label is the `task=` argument call sites already passed and that was
+only ever journaled. Anything not in the table runs on `chat`, because a stage
+nobody measured is a stage with no evidence behind moving it.
+
+### What this corrects about §2.1
+
+§2.1 says a non-thinking model does not enumerate categories on its own, and that
+telling it to walk the list explicitly took it from 4 item types to 12. That
+holds. What the eval adds is that **the fix does not transfer by making the model
+bigger or by turning reasoning on**: on `enumeration-breadth` the thinking profile
+covers more item types (13.0 against 10.1) and returns far fewer items (19.0
+against 32.9), and neither profile clears the case. Enumeration breadth is a
+prompt property, not a model property.
+
+### The trap this arrangement introduces
+
+A stage label is now load-bearing, so a call that reuses another stage's
+transport inherits its route. Two calls in `vault-connections` did exactly this —
+grouping claims into topic notes and composing a note summary both went through
+the classifier's helper — and would have silently moved to the thinking model at
+20x the cost because the *classifier* moved there. They now pass their own stage
+names. When adding a call, ask what stage it is, not what function it borrows.
+
+A stage that resolves to a disabled or unconfigured service falls back to `chat`
+and says so: the resolved service carries `fallback`, and `routing_record()`
+reports `routedTo` beside `ranOn`. A run whose stage silently ran somewhere other
+than intended is the failure this whole arrangement has to make impossible.
+
+### 8.1 Routing to `think` disables the verification it is checked by
+
+Found while wiring §8, and it is the sharpest consequence of the whole
+arrangement. **Every skill verifies on `think`.** So the moment a bulk stage is
+*also* routed there, the reviewer is the model that wrote the thing:
+
+- `vault-capture` splits a braindump, then asks `think` whether the notes cover
+  the braindump — a review of the split.
+- `vault-transcripts` cleans a chunk, then asks `think` to compare the cleaned
+  text against the raw transcript — a review of the cleanup.
+- `vault-organizer` classifies, then asks `think` to review the classification,
+  then escalates flagged notes back to `think`.
+
+Routing to `task` has the opposite effect and is strictly better than what
+existed before: a 4B doing the work and a 27B reviewing it is *more* independent
+than the 27B-non-thinking / 27B-thinking pair, which was always the same weights.
+
+`verify_packets` now takes `produced_by` — one service for the batch, or
+`{item id: service}` where a stage routes per item — and marks each verdict
+`independent`. A flag from a non-independent reviewer still counts and is still
+escalated: a reasoning pass over its own output can catch a contract violation.
+An **"ok" stops reading as approval**, and `independence_warning()` puts that in
+the run report. This is the existing rule — an unreachable verifier must never
+read as approval — applied to a verifier that is present but not impartial.
+
+`classify-note` is held on `chat` for this reason among others: its whole
+verification is of the classification, so routing it would leave nothing
+checking the organizer at all. `summarize-transcript` is held despite the report
+clearing it for `task`, because `summary-report` is not and the two share a
+contract.
+
+### 8.2 Two traps this cost before they were caught
+
+**A routed stage that cannot reach its service used to kill the run.** `think`
+previously carried only verification, and an unreachable one degraded politely.
+Once a bulk stage routes there, the same dead endpoint takes down work that used
+to complete. `forge_routing.disable_unreachable()` probes each routed service
+once at the start of a run and pins the dead ones to `chat` with a warning that
+says the substitution happened — the same shape as the verifier's own
+degradation, and better than the marginally-worse model it routed away from.
+
+**Routing must never override a service the caller named.** The first wiring had
+`call_json` prefer the route over its `service` argument, which silently sent
+`vault-capture`'s escalation — the path whose entire purpose is redoing a flagged
+note *with reasoning* — to the bulk model. The convention is now uniform: pass a
+service to insist on it, pass `None` to ask for the stage's route.

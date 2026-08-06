@@ -1245,3 +1245,59 @@ class ArchiveTests(unittest.TestCase):
         self.assertNotIn("orphan", harness.BLOCKING_FREEZE_STATUSES)
         self.assertIn("drifted", harness.BLOCKING_FREEZE_STATUSES)
         self.assertIn("missing", harness.BLOCKING_FREEZE_STATUSES)
+
+
+class RoutingTableTests(unittest.TestCase):
+    """The committed routing table against the evidence that justifies it.
+
+    `forge/lib/forge_routing.py` decides where production sends each stage, and
+    the report decides what the measurements support. Nothing kept the two
+    honest with each other, so a stage could stay routed to a model long after
+    the run that justified it stopped saying so. This is the join.
+    """
+
+    def setUp(self):
+        sys.path.insert(0, str(EVALS.parent / "lib"))
+        self.routing = importlib.import_module("forge_routing")
+        self.reporting = importlib.import_module("report")
+
+    def _supported(self):
+        """What the results on disk currently support, as case -> model tier."""
+        models = [model_id for model_id in sorted(harness.models()) if harness.read_results(model_id)]
+        if not models:
+            self.skipTest("no results on disk to check the routing table against")
+        table = self.reporting.routing_table(models, baseline="chat-27b")
+        return {case: entry["tier"] for case, entry in (table.get("cases") or {}).items()}
+
+    def test_every_routed_stage_names_the_case_that_measured_it(self):
+        # A stage in the table with no case behind it is a routing decision with
+        # no evidence, which is the thing this file exists to prevent.
+        for stage in self.routing.STAGE_SERVICES:
+            self.assertIn(stage, self.routing.STAGE_EVAL_CASES, stage)
+
+    def test_every_named_case_exists_in_the_suite(self):
+        available = set(harness.case_ids()) if hasattr(harness, "case_ids") else None
+        if available is None:
+            self.skipTest("harness does not enumerate cases")
+        for stage, case_id in self.routing.STAGE_EVAL_CASES.items():
+            self.assertIn(case_id, available, f"{stage} names a case that does not exist")
+
+    def test_no_stage_is_routed_somewhere_the_report_does_not_support(self):
+        supported = self._supported()
+        for stage, service in self.routing.STAGE_SERVICES.items():
+            case_id = self.routing.STAGE_EVAL_CASES[stage]
+            if case_id not in supported:
+                # Nothing cleared that case. Routing away from the default on a
+                # case no model cleared is exactly the move to refuse.
+                self.assertEqual(
+                    service,
+                    self.routing.DEFAULT_SERVICE,
+                    f"{stage} is routed to `{service}` but no model cleared `{case_id}`",
+                )
+                continue
+            self.assertEqual(
+                self.routing.SERVICE_TIERS[service],
+                supported[case_id],
+                f"{stage} is routed to `{service}` but the report puts `{case_id}` on the "
+                f"`{supported[case_id]}` tier. Re-run the report, or change the table.",
+            )

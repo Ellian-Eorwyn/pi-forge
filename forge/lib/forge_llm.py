@@ -110,20 +110,59 @@ DEFAULT_SERVICES = {
             "backgroundOutputTokens": 4096,
         },
     },
+    # A genuinely smaller model, for the stages measured to be *better* on one:
+    # faithful cleanup of diarized speech and yes/no pair judgment, where the
+    # answer is close to a copy of the input. It is not a cheaper `chat` — on
+    # this deployment it is only ~12% faster per call across the real prompt mix,
+    # and slower on long prompts, because it generates half again as many tokens.
+    #
+    # Off by default. Unlike `chat` and `think`, which are two request-shaping
+    # profiles in front of one llama-server, this is a separate backend behind a
+    # router at MODEL_ROUTER_MAX=1 shared with embed/ocr/rank, so a stage that
+    # alternates with embeddings pays a model swap each time. An install that has
+    # not deliberately configured it should never silently start paying that.
+    "task": {
+        "enabled": False,
+        "url": "http://llms:8007/v1/chat/completions",
+        "model": "task",
+        # Half the chat slot, and read off the live stack rather than assumed:
+        # this was recorded as 32,768 for months after the backend moved, which
+        # quietly under-budgeted every task-tier prompt.
+        "contextTokens": 65538,
+        # This backend reasons into `reasoning_content` and returns empty
+        # `content` without it. `reasoning_budget: 0` and a `/no_think` suffix
+        # were both tried against the same server and neither did anything.
+        "chatTemplateKwargs": {"enable_thinking": False},
+        "scheduling": {
+            "enabled": True,
+            "interactiveSlot": 0,
+            "backgroundSlot": 1,
+            "idleGraceMs": 2000,
+            "yieldMs": 1000,
+            "backgroundOutputTokens": 4096,
+        },
+    },
 }
 
 SERVICE_URL_ENVIRONMENT = {
     "chat": ("FORGE_BASE_CHAT_URL", "FORGE_CHAT_URL"),
     "think": ("FORGE_THINK_URL",),
+    "task": ("FORGE_TASK_URL",),
 }
-SERVICE_MODEL_ENVIRONMENT = {"chat": ("FORGE_BASE_MODEL",), "think": ("FORGE_THINK_MODEL",)}
+SERVICE_MODEL_ENVIRONMENT = {
+    "chat": ("FORGE_BASE_MODEL",),
+    "think": ("FORGE_THINK_MODEL",),
+    "task": ("FORGE_TASK_MODEL",),
+}
 SERVICE_CONTEXT_ENVIRONMENT = {
     "chat": ("FORGE_BASE_CHAT_CONTEXT_TOKENS",),
     "think": ("FORGE_THINK_CONTEXT_TOKENS",),
+    "task": ("FORGE_TASK_CONTEXT_TOKENS",),
 }
 SERVICE_TEMPLATE_KWARGS_ENVIRONMENT = {
     "chat": ("FORGE_BASE_CHAT_TEMPLATE_KWARGS",),
     "think": ("FORGE_THINK_TEMPLATE_KWARGS",),
+    "task": ("FORGE_TASK_TEMPLATE_KWARGS",),
 }
 
 # A thinking backend that was asked not to think can still emit a stray block.
@@ -346,6 +385,76 @@ def resolve_think_or_chat(base_url=None, model=None, env=None, settings=None):
     fallback["name"] = "think"
     fallback["fallback"] = "chat"
     return fallback
+
+
+# Where each service's endpoint lands on a command's parsed arguments. Skills
+# resolve once in ``parse_args`` and write the result back onto these, so a
+# rebuild later has to read the same names to pick the resolution up again.
+def resolve_task_or_chat(base_url=None, model=None, env=None, settings=None):
+    """The service to use for a stage measured better on a small model, falling
+    back to ``chat`` when no task backend is configured.
+
+    The fallback direction is deliberate and matches ``resolve_think_or_chat``:
+    an unconfigured tier degrades *toward* the 27B, never away from it. A stage
+    routed here is one a small model does better, but "better" was measured
+    against `chat`, so `chat` is always an acceptable answer — whereas silently
+    demoting `chat` work to a 4B is a quality regression nobody asked for.
+    """
+    task = resolve_service("task", base_url=base_url, model=model, env=env, settings=settings)
+    if task["enabled"] and task["url"]:
+        return task
+    fallback = resolve_service("chat", env=env, settings=settings)
+    fallback["name"] = "task"
+    fallback["fallback"] = "chat"
+    return fallback
+
+
+SERVICE_ARGUMENT_NAMES = {
+    "chat": ("base_url", "model"),
+    "think": ("think_url", "think_model"),
+    "task": ("task_url", "task_model"),
+}
+
+
+def service_from_args(args, name="chat", env=None, settings=None):
+    """A fully resolved service for ``name``, cached on ``args``.
+
+    Skills resolve their endpoint once at parse time and then rebuild a service
+    dict wherever one is needed, often inside a per-item loop. Rebuilt by hand
+    that dict carried only ``url``, ``model`` and ``scheduling``, so
+    ``contextTokens`` and ``chatTemplateKwargs`` were silently dropped and
+    ``call`` fell back to a 131,072-token ceiling with no template kwargs.
+
+    Both losses are invisible until the service points somewhere other than the
+    deployment those defaults describe. Then the preflight passes a prompt at
+    twice the backend's real limit and the server's rejection reads as the model
+    failing the task, and a backend that reasons into ``reasoning_content``
+    returns empty ``content`` with nothing to parse. Those are the two failure
+    modes ``evals/registry.py`` exists to keep out of the registry, and they were
+    reachable from four skills at once.
+
+    The result is cached on ``args`` because callers are hot loops and
+    ``resolve_service`` reads ``settings.json`` on every call.
+    """
+    attribute = f"_forge_service_{name}"
+    cached = getattr(args, attribute, None)
+    if cached is not None:
+        return cached
+    url_name, model_name = SERVICE_ARGUMENT_NAMES.get(name, (None, None))
+    resolved = resolve_service(
+        name,
+        base_url=getattr(args, url_name, None) if url_name else None,
+        model=getattr(args, model_name, None) if model_name else None,
+        env=env,
+        settings=settings,
+    )
+    try:
+        setattr(args, attribute, resolved)
+    except AttributeError:
+        # A caller passing something that will not take an attribute still gets
+        # a correct service; it just pays the resolution every time.
+        pass
+    return resolved
 
 
 def extract_json_content(content):

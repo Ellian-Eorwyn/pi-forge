@@ -36,6 +36,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import forge_llm
+import forge_routing
 import forge_verify
 import obsidian_cli
 import run_state
@@ -1722,16 +1723,43 @@ def clean_chunk_once(args, service, messages, source, speaker_map, drop_labels, 
     return cleaned, chunk_summary.strip(), problems
 
 
+def cleanup_stage(speaker_map, drop_labels):
+    """Which cleanup stage this chunk is, which is what decides its model.
+
+    The two directions were measured separately and they disagree. On diarized
+    multi-speaker material the small model is the only one that clears the gate
+    — 7/8 against the baseline's 1/8, 0.12 invented words, 0.99 rare-word
+    retention — while the thinking model scores 0/8, rewriting and compressing
+    away a quarter of the transcript. On a single voice that reverses: thinking
+    takes 2/8 to 8/8 and invented words from 4.38 to 0.00, and the small model
+    is blocked by a silent failure.
+
+    So the routing key is the speaker count, which is already known here.
+    `drop_labels` means the labels are not used even when several were detected,
+    so it reads as single-speaker for this purpose.
+    """
+    single = drop_labels or len([value for value in (speaker_map or {}).values() if value]) <= 1
+    return "clean-transcript-chunk-single" if single else "clean-transcript-chunk-multi"
+
+
 def clean_one_chunk(args, service, payload, source, speaker_map, drop_labels, tiny, system=CLEANUP_SYSTEM):
     """One chunk, with a single corrective retry that shows the model its own
-    violation. Raises UserError when the retry fails too."""
+    violation. Raises UserError when the retry fails too.
+
+    Pass ``service=None`` to use the per-chunk route, which is what ordinary
+    cleanup wants: the model that cleans a meeting well is not the one that
+    cleans a memo well. A caller that names a service gets it, so an escalation
+    can still insist on a particular backend.
+    """
     messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
     glossary = payload.get("glossary", ())
+    stage = cleanup_stage(speaker_map, drop_labels)
+    service = service or forge_routing.service_for(stage, args)
     cleaned, summary, problems = clean_chunk_once(
-        args, service, messages, source, speaker_map, drop_labels, tiny, "clean-transcript-chunk", glossary
+        args, service, messages, source, speaker_map, drop_labels, tiny, stage, glossary
     )
     if not problems:
         return cleaned, summary
@@ -1755,7 +1783,7 @@ def clean_one_chunk(args, service, payload, source, speaker_map, drop_labels, ti
         }
     ]
     cleaned, summary, retry_problems = clean_chunk_once(
-        args, service, repair, source, speaker_map, drop_labels, tiny, "clean-transcript-chunk-repair", glossary
+        args, service, repair, source, speaker_map, drop_labels, tiny, f"{stage}-repair", glossary
     )
     if retry_problems:
         raise UserError(retry_problems[0])
@@ -1782,7 +1810,13 @@ def accepted_corrections(source, cleaned, glossary):
 
 
 def clean_items(args, vault, items, class_records, run_dir, skip):
-    """Clean every chunk of every transcript, one chunk per chat call."""
+    """Clean every chunk of every transcript, one call per chunk.
+
+    The call does not always go to the same service: single-speaker chunks are
+    routed to the thinking profile and diarized ones to the small model, because
+    the two directions were measured to want opposite things. ``clean_one_chunk``
+    makes that choice per chunk.
+    """
     journal_path = run_dir / "cleaned.jsonl"
     prior, _ = run_state.read_jsonl_recover_tail(journal_path, repair=True)
     journal = {}
@@ -1792,7 +1826,16 @@ def clean_items(args, vault, items, class_records, run_dir, skip):
     service = chat_service(args)
     artifacts = run_dir / "cleaned"
     artifacts.mkdir(exist_ok=True)
-    warnings = []
+    # Cleanup is routed off the bulk service, so a dead target has to be found
+    # here rather than at the first chunk: one probe per service, and the run
+    # continues on `chat` with the substitution stated.
+    warnings = list(
+        forge_routing.disable_unreachable(
+            args,
+            ["clean-transcript-chunk-single", "clean-transcript-chunk-multi"],
+            timeout=min(args.request_timeout, 60),
+        )
+    )
     results = {}
     plans = []
     for item in items:
@@ -1865,7 +1908,7 @@ def clean_items(args, vault, items, class_records, run_dir, skip):
             try:
                 cleaned, chunk_summary = clean_one_chunk(
                     args,
-                    service,
+                    None,
                     payload,
                     source,
                     speaker_map,
@@ -1908,6 +1951,14 @@ def clean_items(args, vault, items, class_records, run_dir, skip):
                     "cleaned_sha256": sha256_text(cleaned),
                     "chunk_summary": chunk_summary,
                     "proposals": accepted,
+                    # Which model actually cleaned this chunk. The two cleanup
+                    # directions go to different services, so a run whose
+                    # meeting reads like a rewrite and whose memo reads like a
+                    # transcript is diagnosable from the journal rather than by
+                    # re-deriving the split months later.
+                    "routing": forge_routing.routing_record(
+                        forge_routing.service_for(cleanup_stage(speaker_map, drop_labels), args)
+                    ),
                     "seconds": elapsed,
                 },
             )
@@ -3362,7 +3413,7 @@ def clean_daily_group(args, group, merged, run_dir, journal_key):
             getattr(args, "compiled_voice", None), getattr(args, "compiled_lexicon", None),
         )
         cleaned, _summary = clean_one_chunk(
-            args, service, payload, source, {}, False, tiny,
+            args, None, payload, source, {}, False, tiny,
             system=cleanup_system(getattr(args, "compiled_voice", None), vault_voice.CONTEXT_OWNER),
         )
         name = f"{sha256_text(journal_key)[:12]}-{index:04d}.md"
@@ -3668,6 +3719,27 @@ def verify_note_payload(vault, record, item):
     return payload
 
 
+def fidelity_producers(fidelity_items, run_dir):
+    """Which service cleaned the file each sampled utterance came from.
+
+    The two cleanup directions go to different services, so this cannot be one
+    answer for the run. `cleaned.jsonl` records the routing decision per chunk;
+    fidelity items are keyed `<source>#s<n>`, so the lookup is by the source they
+    were sampled from.
+    """
+    by_path = {}
+    rows, _warnings = run_state.read_jsonl_recover_tail(run_dir / "cleaned.jsonl", repair=True)
+    for row in rows:
+        routing = row.get("routing")
+        if row.get("path") and isinstance(routing, dict) and routing.get("url"):
+            by_path[row["path"]] = {"url": routing["url"], "model": routing.get("model")}
+    return {
+        item["id"]: by_path[item["id"].split("#s", 1)[0]]
+        for item in fidelity_items
+        if item["id"].split("#s", 1)[0] in by_path
+    }
+
+
 def fidelity_payloads(vault, record, run_dir, lexicon=None):
     """One packet item per sampled utterance, paired with the cleaned window it
     should appear in. Long files are sampled rather than re-read whole.
@@ -3755,6 +3827,12 @@ def verify_records(args, vault, items_by_path, records, run_dir):
                 background=True,
                 timeout=args.request_timeout,
                 progress=progress,
+                # Fidelity compares cleaned text against the raw transcript, so
+                # it reviews the cleanup — and single-speaker cleanup is routed
+                # to the thinking service, the same one verifying here. Naming
+                # the producer per item is what lets those verdicts be recorded
+                # as non-independent instead of reading as a clean bill.
+                produced_by=fidelity_producers(fidelity_items, run_dir),
             )
             if fidelity_items
             else {}
@@ -3764,6 +3842,15 @@ def verify_records(args, vault, items_by_path, records, run_dir):
         warnings.append(f"verification skipped: {error}")
         summary["skipped"] = str(error)
         return summary, warnings
+
+    # A clean verdict from the model that produced the item is not evidence, and
+    # the report must not let it read as one.
+    fidelity_independence = forge_verify.independence_warning(fidelity_verdicts)
+    if fidelity_independence:
+        warnings.append(f"fidelity check: {fidelity_independence}")
+        summary["notIndependentlyVerified"] = sum(
+            1 for verdict in fidelity_verdicts.values() if not verdict.get("independent", True)
+        )
 
     flagged = [
         (next(entry for entry in note_items if entry["id"] == path), verdict["reason"])
@@ -4451,13 +4538,7 @@ def apply_records(vault, run_dir, records, counts, mover=None):
 
 
 def chat_service(args):
-    return {
-        "name": "chat",
-        "enabled": True,
-        "url": args.base_url,
-        "model": args.model,
-        "scheduling": forge_llm.DEFAULT_SERVICES["chat"]["scheduling"],
-    }
+    return forge_llm.service_from_args(args, "chat")
 
 
 def dictionary_path(args):

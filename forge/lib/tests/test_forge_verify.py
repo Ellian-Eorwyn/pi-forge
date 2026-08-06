@@ -15,7 +15,7 @@ forge_verify = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(forge_verify)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_forge_llm import FakeChatServer, service  # noqa: E402
+from test_forge_llm import FakeChatServer, forge_llm, service  # noqa: E402
 
 
 def verdicts(*pairs):
@@ -185,3 +185,49 @@ class EscalationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IndependenceTests(unittest.TestCase):
+    """Stage routing made self-review reachable, so a verdict has to say whether
+    the reviewer was the model that wrote the thing."""
+
+    def setUp(self):
+        self.service = {
+            "name": "think", "enabled": True, "url": "http://llms:8008/v1/chat/completions",
+            "model": "code", "scheduling": forge_llm.DEFAULT_SERVICES["think"]["scheduling"],
+        }
+
+    def test_two_names_for_one_backend_are_not_independent(self):
+        # The comparison is on endpoint and model, not on the service name:
+        # names are a routing concept and the backend decides independence.
+        producer = {**self.service, "name": "task"}
+        self.assertTrue(forge_verify.same_backend(self.service, producer))
+
+    def test_a_different_endpoint_is_independent(self):
+        producer = {**self.service, "name": "chat", "url": "http://llms:8004/v1/chat/completions", "model": "chat"}
+        self.assertFalse(forge_verify.same_backend(self.service, producer))
+
+    def test_an_unknown_producer_is_treated_as_independent(self):
+        # Absence of information is not evidence of self-review; a caller that
+        # says nothing gets the behaviour it had before this existed.
+        self.assertFalse(forge_verify.same_backend(self.service, None))
+
+    def test_a_clean_verdict_from_the_author_is_not_evidence(self):
+        verdicts = {
+            "a": {"verdict": "ok", "reason": "", "independent": False},
+            "b": {"verdict": "ok", "reason": "", "independent": True},
+        }
+        warning = forge_verify.independence_warning(verdicts)
+        self.assertIn("1 item(s)", warning)
+        self.assertIn("not independent evidence", warning)
+
+    def test_a_flag_from_the_author_still_counts(self):
+        # A reasoning pass over its own output can still catch a contract
+        # violation, and anything it flags is escalated as before. Only "ok"
+        # loses its standing.
+        verdicts = {"a": {"verdict": "flag", "reason": "wrong", "independent": False}}
+        self.assertIsNone(forge_verify.independence_warning(verdicts))
+
+    def test_an_ordinary_run_says_nothing(self):
+        verdicts = {"a": {"verdict": "ok", "reason": "", "independent": True}}
+        self.assertIsNone(forge_verify.independence_warning(verdicts))
