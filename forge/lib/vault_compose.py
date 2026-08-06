@@ -261,6 +261,15 @@ def _rooted(token, source_lower, source_words):
     folded = fold_diacritics(token).casefold().replace("'", "").replace("’", "")
     if folded in source_lower or folded in source_words:
         return True
+    # The plural of a rooted token is rooted. The stem rule below covers this for
+    # ordinary words but not for short acronyms: a source saying "PC" and a note
+    # saying "PCs" was reported as an invented name, because "pcs" is three
+    # characters and the stem rule starts at four. Pluralizing a term the source
+    # used is writing, not invention.
+    if folded.endswith("s") and len(folded) >= 3:
+        singular = folded[:-1]
+        if singular in source_lower or singular in source_words:
+            return True
     # A word the draft derived from one that was spoken ("order" -> "ordering")
     # shares a stem; a fabricated name shares nothing.
     return len(folded) >= 4 and any(folded[:length] in source_words for length in range(4, len(folded) + 1))

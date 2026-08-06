@@ -1,0 +1,28 @@
+{
+	"name": "vault-compose",
+	"type": "pi-forge-skill",
+	"version": "0.1.0",
+	"description": "Compose a note in an Obsidian vault from a set of sources the run is holding - research claims, existing vault notes, or a conversation - assembled in the block order the vault's own note-format note declares, and proposed for approval before anything is written.",
+	"skill_file": "SKILL.md",
+	"scripts_dir": "scripts",
+	"references_dir": "references",
+	"restart_safe": true,
+	"tools": [
+		{
+			"name": "vault_compose",
+			"description": "Compose notes from a typed source set (chat excerpts, vault notes, research claims), assembling each in the vault's declared block order with its voice policy applied, checking every name, link and wikilink against the sources the block cites, and writing a code-authored provenance block. Proposes with ids and writes nothing until 'apply --accept'. Inspectable with status/doctor.",
+			"command": "python3 scripts/vault-compose.py",
+			"destructive": true
+		}
+	],
+	"safety": {
+		"destructive_by_default": false,
+		"requires_review_for_filesystem_changes": true,
+		"preserve_provenance_when_applicable": true,
+		"never_deletes_notes": true,
+		"never_modifies_existing_notes": true,
+		"creates_new_inbox_notes_only": true,
+		"grounds_every_specific_in_a_source": true,
+		"marks_generated_notes": true
+	}
+}

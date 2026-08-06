@@ -30,7 +30,7 @@ in `forge/SCRIPT_TOOL_CONTRACT.md`.
 
 <!-- forge:skills-list start -->
 
-The live skill inventory currently contains 26 capability workflows, listed
+The live skill inventory currently contains 27 capability workflows, listed
 here with the one-line descriptions maintained in `forge/CAPABILITIES.md`:
 
 - `coding`: Inspect repositories and ship small, reviewable code changes.
@@ -50,6 +50,7 @@ here with the one-line descriptions maintained in `forge/CAPABILITIES.md`:
 - `transcript-cleanup`: Clean raw transcripts into readable, structured documents.
 - `transcription`: Transcribe audio/video with per-chunk checkpoints, then correct and clean the transcript.
 - `vault-capture`: Turn an owner-authored typed or spoken braindump into schema-valid notes in `00 Inbox`, applying the vault's scoped voice policy, adding vault-first journal reflection, marking output `capture_type: generated`, and keeping the braindump verbatim; for transcription exports use `vault-transcripts` instead.
+- `vault-compose`: Compose a note from a typed set of sources the run is holding — research claims, existing vault notes, or excerpts of the conversation — assembled in the block order the vault's note-format note declares and written under its voice policy, with every name, link, and wikilink checked against the sources the block cites so a note whose sections are each plausible cannot be collectively a collage; the provenance block is written in code, no `domain` is guessed, and nothing reaches the vault until the user accepts a proposal id.
 - `vault-connections`: Search an Obsidian vault by meaning, propose note links for per-id approval, validate completed literature/meta-literature/deep-research runs, preserve imported report bodies, turn deep research into source-policy `Synthesis` notes with quotes and provenance (`--notes`), and create evidence-backed wiki notes from vault-owned templates.
 - `vault-curator`: Research how a field actually catalogues its records through `web-research`, reconcile that against the compiled schema using a closed set of moves, and propose the smallest legal way to hold it — schema rows whose numbers are chosen by code and which are proved against a candidate copy of the schema note before they are shown, plus wiki kind specs, templates, and body-table sections as patch files; applying is per-id and additive only, and a run with no field sources proposes nothing.
 - `vault-naturalist`: Compile the region-scoped `Phenology` tables on animal, plant, and fungus wiki cards into a queryable index, report which species are expected in the owner's declared home region in a given month, and record a single field observation as a schema-valid note linked to its species card; deterministic throughout, and `sourced`/`inferred` windows stay distinguishable from `observed` ones.
