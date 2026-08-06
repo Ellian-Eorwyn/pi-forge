@@ -75,31 +75,34 @@
       "label": "Qwen3.5-9B-Q4_K_M (task)",
       "url": "http://llms:8007/v1",
       "model": "task",
-      "contextTokens": 65538,
+      "contextTokens": 65792,
       "chatTemplateKwargs": {
         "enable_thinking": false
       },
       "tier": "small",
       "family": "qwen3.5-9b",
-      "sizeGiB": 5.47,
+      "sizeGiB": 5.46,
       "coResident": true,
+      "expectParams": 9197093888,
+      "expectQuant": "Q4_K - Medium",
       "expectModelPath": "/mnt/LLMs/llamacpp/llm-stack-git/models/Qwen3.5-9B-Q4_K_M.gguf",
-      "notes": "Only servable when the router has these weights loaded; :8007 serves whichever task model is configured, so `run` refuses unless the endpoint matches expectModelPath. No expectParams yet: this entry has never been fingerprinted. Run `add-model` against it once the weights are up to fill that in — until then expectModelPath is the only discriminator. The results under results/task-9b/ predate fingerprinting entirely; treat their model attribution as unconfirmed."
+      "notes": "Fingerprinted 2026-08-05: 9.20B params, Q4_K - Medium, 5.46 GiB, and contextTokens read as 65792 rather than the 65538 the 4B reports — the two task models are not launched identically. **65792 is what it serves beside the 35B-A3B MoE, and is not a property of this model alone.** Those two co-reside comfortably; beside the 27B dense the KV cache does not fit and this model has to be relaunched below 65k. So re-run `add-model --write` after any change to what occupies the primary backend, or every task-tier prompt is budgeted against a ceiling the server no longer has — the same failure that left contextTokens at 32768 for months, in the other direction. Only servable when the router has these weights loaded; :8007 serves whichever task model is configured, so `run` refuses unless the endpoint matches expectModelPath, and task-4b and this entry can never both be runnable. The probe answers in visible content, so no outputHeadroom is needed; chatTemplateKwargs is kept because it costs nothing and survives a router preset that stops passing it. Earlier results under results/task-9b/ predated fingerprinting and could not be attributed, so they were moved to results/_unattributed-task-9b-preflight/ rather than compared against."
     },
     "moe-35a3b": {
-      "label": "Qwen3.6-35B-A3B-UD-Q4_K_M (chat, MoE)",
+      "label": "Qwen3.6-35B-A3B-UD-Q6_K (chat, MoE)",
       "url": "http://llms:8004/v1",
       "model": "chat",
       "contextTokens": 131072,
       "chatTemplateKwargs": null,
       "tier": "bulk",
       "family": "qwen3.6-35b-a3b",
-      "sizeGiB": 21.11,
+      "sizeGiB": 27.94,
       "coResident": false,
       "fingerprintUrl": "http://llms:8010/v1",
-      "expectParams": 35000000000,
-      "expectQuant": "Q4",
-      "notes": "35B total, ~3B active. Occupies the same primary-backend slot as chat-27b — `chat-backend-moe` is a variant of the service behind :8004/:8008, not a separate port — so exactly one of this and chat-27b is servable at a time. expectParams is taken from the model's name, not from a fingerprint: nothing has ever loaded these weights here. If the real count sits outside the 10% tolerance the check will refuse a correct load, which is the safe direction to be wrong in — a refusal is visible, a mislabelled result is not. `add-model --id moe-35a3b --write` replaces the estimate with the measured value the first time it is up. The stack reports 255998 context on one slot for this variant; contextTokens is held at 131072 so the long-context rungs measure the same prompt against both."
+      "expectParams": 35505251456,
+      "expectQuant": "Q6_K",
+      "expectModelPath": "/mnt/LLMs/llamacpp/llm-stack-git/models/Qwen3.6-35B-A3B-UD-Q6_K.gguf",
+      "notes": "35B total, ~3B active. Fingerprinted 2026-08-05: 35.51B params, Q6_K, 27.94 GiB. The entry previously described a Q4_K_M build estimated from the model's name; the weights actually loaded are Q6_K, which is the better comparison — chat-27b is also Q6_K, so the gap between them is architecture (35B-A3B sparse against 27B dense) with quantization held fixed. It is also 6.6 GiB larger than chat-27b rather than smaller. Occupies the same primary-backend slot as chat-27b — `chat-backend-moe` is a variant of the service behind :8004/:8008, not a separate port — so exactly one of this and chat-27b is servable at a time, and loading it takes think-27b down too. The stack reports 255998 context on one slot for this variant; contextTokens is held at 131072 so the long-context rungs measure the same prompt against both."
     },
     "chat-27b-q4": {
       "label": "Qwen3.6-27B-UD-Q4_K_XL (chat, non-thinking)",
@@ -115,6 +118,22 @@
       "expectParams": 27320697856,
       "expectQuant": "Q4",
       "notes": "The same weights as chat-27b at a smaller quant, so the gap between the two is the cost of quantization alone, with scale and reasoning held fixed. Shares the primary-backend slot with chat-27b and moe-35a3b. expectParams cannot separate it from chat-27b — a requant moves the count by less than the 10% tolerance, which is exactly what that tolerance is for. expectQuant is the discriminator that always works; expectModelPath is left unset because these weights have never been loaded here, so there is no measured path to assert. It is matched as a substring of the reported ftype so that the exact spelling (Q4_K_M, \"Q4_K - Medium\", Q4_K_XL) does not have to be guessed before the weights are ever loaded."
+    },
+    "moe-35a3b-think": {
+      "label": "Qwen3.6-35B-A3B-UD-Q6_K (code, thinking, MoE)",
+      "url": "http://llms:8008/v1",
+      "model": "code",
+      "contextTokens": 131072,
+      "outputHeadroom": 12000,
+      "tier": "verify",
+      "family": "qwen3.6-35b-a3b",
+      "sizeGiB": 27.94,
+      "coResident": false,
+      "fingerprintUrl": "http://llms:8010/v1",
+      "expectParams": 35505251456,
+      "expectQuant": "Q6_K",
+      "expectModelPath": "/mnt/LLMs/llamacpp/llm-stack-git/models/Qwen3.6-35B-A3B-UD-Q6_K.gguf",
+      "notes": "Added 2026-08-05, because loading the MoE takes :8008 with it: the thinking profile a deployment running this variant actually gets is this, not think-27b. That matters more than it looks — `forge/lib/forge_routing.py` sends single-speaker cleanup and braindump splitting to `think`, and both decisions were measured on the 27B. If the MoE stays the primary backend, those two rows rest on weights that are no longer loaded. Same weights as moe-35a3b with reasoning on, so the gap between them is the value of thinking with architecture held fixed, exactly as think-27b is to chat-27b. The probe reasoned 303 tokens against the 27B profile's ~1,900; outputHeadroom is nonetheless held at the 12000 floor measured across a full run, because a one-question probe cannot size a real case and a cap costs nothing unless it is reached."
     }
   }
 }
