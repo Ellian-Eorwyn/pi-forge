@@ -123,7 +123,13 @@ def score(item, content, record=None):
 
     source = item["source"]
     invented = capture.invented_specifics(source, body, allowed_urls=())
-    coverage = capture.coverage_ratio(source, [body])
+    # `coverage_ratio` is defined in `vault_compose`, which `vault-capture`
+    # imports and calls; it was never an attribute of the skill module. Reaching
+    # for it here raised AttributeError on every item of every run — the scorer
+    # caught it and recorded the exception as a note, so the case reported
+    # numbers all along rather than failing loudly. Every `grounding-draft`
+    # result predating this fix is missing its coverage metric.
+    coverage = _common.harness.load_lib("vault_compose").coverage_ratio(source, [body])
 
     gates = {
         "parsed": True,

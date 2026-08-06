@@ -118,32 +118,53 @@ weights, so on a MoE deployment they become the within-MoE comparison above:
 
 One line in `forge/lib/forge_routing.py`, and only if the MoE stays.
 
-## Graded quality — it corroborates the gates
+## Graded quality — complete, and it softens one verdict
 
-Twelve subagents graded the blind bundle; 174 of 256 outputs are in at time of
-writing, 43–44 per model, which is enough to read.
+Twelve subagents graded the blind bundle. **All 256 outputs graded, 64 per
+model.**
 
 | Model | Voice | Faithfulness | Coverage | Usability |
 | --- | --- | --- | --- | --- |
-| `chat-27b` | 3.57 | 4.07 | 3.93 | 3.73 |
-| `moe-35a3b-think` | **3.64** | 4.00 | 3.80 | 3.73 |
-| `task-9b` | 3.56 | **4.12** | 3.70 | 3.49 |
-| `moe-35a3b` | **3.21** | **3.72** | **3.74** | **3.42** |
+| `moe-35a3b-think` | 3.73 | **4.28** | 4.08 | **3.88** |
+| `chat-27b` | 3.73 | 4.08 | **4.11** | 3.69 |
+| `task-9b` | 3.70 | 4.20 | 3.75 | 3.38 |
+| `moe-35a3b` | **3.27** | **3.83** | **3.80** | **3.44** |
 
-`moe-35a3b` is last on every axis, which is the same verdict its gates gave. The
-MoE thinking profile lands level with the dense baseline on judged quality — and
-costs 36.1 s/attempt against 10.8 to get there.
+**The two passes are comparable.** `chat-27b` was graded in both and the
+subagents came within −0.15 (voice) and −0.21 (faithfulness) of Ellie's own
+earlier scores — well inside the ±0.5 band.
 
-`task-9b` scores the **highest faithfulness of any model** (4.12) while sitting
-low on coverage and usability. Careful and thin, consistent with generating 473
-tokens per attempt against the 4B's 859: it asserts less, so it invents less, and
-it also says less.
+`moe-35a3b` is last on every axis, exactly as its gates said. `task-9b` is
+careful and thin: high faithfulness, low coverage and usability, consistent with
+473 tokens per attempt against the 4B's 859 — it asserts less, so it invents
+less, and it also says less.
 
-**The two grading passes are comparable.** `chat-27b` was graded in both, and the
-subagents came within −0.45 (voice), −0.05 (faithfulness) and −0.26 (coverage) of
-Ellie's own earlier scores — inside the ±0.5 band the merge script checks for.
-That is what makes it legitimate to read these numbers beside the earlier
-`task-4b` / `think-27b` grades.
+**`moe-35a3b-think` has the best judged means and the worst silent-failure
+count.** Both are true, and the second is the one the routing rule reads:
+
+| Model | Gated | **Silent** | Unknown | Clean |
+| --- | --- | --- | --- | --- |
+| `moe-35a3b-think` | 62 | **10** | 0 | 94 |
+| `task-9b` | 57 | **7** | 0 | 92 |
+| `chat-27b` | 52 | **5** | 0 | 109 |
+| `moe-35a3b` | 80 | **5** | 0 | 81 |
+
+A silent failure is output that passed every deterministic check and a grader
+still marked unfaithful — the failure nothing downstream sees. The MoE thinking
+profile produces the most of them, twice the baseline's, while averaging the
+highest faithfulness score. It is usually more faithful and, when it is wrong,
+wrong invisibly. That is the worse of the two ways to be wrong for a pipeline
+whose whole safety argument is that gates catch what the bulk model gets wrong.
+
+So the verdict holds: **do not adopt it.** Its only solid gate loss is
+`transcript-cleanup-memo` 8/8 → 2/8 (its other, `grounding-draft`, is on the
+broken case below and cannot be read), and it is faster per attempt than the
+dense profile at 36.1 against 50.2 — but ten silent failures is the number that
+decides, and it has them.
+
+`task-4b` and `think-27b` show 0 silent / 41 unknown because they were not in
+this grading pass. That is "nobody looked", not "nothing found" — their earlier
+grades are in `_prior-grading-2026-08-05/`.
 
 ## Grading
 
@@ -178,7 +199,23 @@ python3 forge/evals/run.py report --models chat-27b,task-4b,think-27b,moe-35a3b,
 and out-of-range scores, and reports what went ungraded — an ungraded output
 reads as `unknown`, never as clean.
 
-## Three defects in the harness, found by graders reading closely
+## Four defects in the harness, found by graders reading closely
+
+**0. `grounding-draft` has been scoring against a crash — in every run, for
+every model, including the report that drove the routing decisions.** Every
+output in the bundle carried
+`scorer raised AttributeError: module 'eval_skill_vault_capture' has no
+attribute 'coverage_ratio'`. The case called `capture.coverage_ratio(...)`, but
+that function lives in `vault_compose`, which the skill imports and calls — it
+was never an attribute of the skill module. The scorer caught the exception and
+recorded it as a note, so the case kept reporting pass rates instead of failing
+loudly, and its `coverage` metric was simply absent.
+
+Confirmed pre-existing: absent from `vault-capture.py` at `313b16540`, before any
+of this week's changes. **Every `grounding-draft` number in this document and in
+the earlier three-model report is unreliable** — which is a large part of why
+that case reads as "nothing cleared it" throughout. Fixed here; the case needs
+re-running before anything is concluded from it.
 
 **1. A false positive in the invented-number check.** See below.
 
