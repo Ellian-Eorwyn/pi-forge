@@ -151,6 +151,39 @@ python3 forge/evals/run.py report --models chat-27b,task-4b,think-27b,moe-35a3b,
 and out-of-range scores, and reports what went ungraded — an ungraded output
 reads as `unknown`, never as clean.
 
+## An unrelated finding the grading turned up, and it is worth more than the model comparison
+
+On `summary-transcript` / `raw-asr-piforge`, **all four models wrote "PyForge"**
+— and the source transcript contains the speaker correcting the transcriber
+outright: *"I can build into PyForge. Pi is spelled P I, not P Y."*
+
+So this is not a model failure. Every model faithfully reproduced what the
+cleaned text handed it, and the mistranscription was already in the cleaned
+text. The transcriber renders "Pi Forge" as "PyForge", nothing corrects it, and
+it propagates:
+
+- **54 notes in the vault contain "PyForge"**, including at least one note
+  *title* — `2026-07-24 - Memo - PyForge Obsidian Vault Integration Feature`.
+- `~/.pi-forge/transcription/dictionary.json` has **no forge-related entry at
+  all**, so the lexicon layer that exists precisely for this never fires.
+
+The fix is one dictionary entry, in the shape the file already uses:
+
+```json
+{"correct": "Pi Forge", "variants": ["PyForge", "Py Forge", "PieForge"],
+ "category": "name", "case_sensitive": false, "whole_word": true}
+```
+
+Two cautions before applying it. Some of those 54 notes may be your own writing
+rather than transcript output, so a blanket rename is not safe — check before
+touching filed notes. And `vault-lexicon` gates new terms on transcript
+evidence; this one has it, in the clearest possible form, since the speaker
+spells the correction out loud.
+
+This is the kind of thing only a careful reader finds. No deterministic check
+looks for a product name contradicting its own spelling correction, and every
+model scored well on the summary that contained it.
+
 ## Registry changes committed
 
 `d1ddd032e`. The MoE turned out to be **Q6_K, not the Q4_K_M** the entry claimed
