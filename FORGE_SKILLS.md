@@ -6,16 +6,16 @@
 
 - Available skills: 27
 - Model-visible skills at launch: 27
-- Tools offered at launch: 13
+- Tools offered at launch: 15
 
 | Launch context block | Tokens |
 |---|---:|
-| Base system prompt (intro, tools list, guidelines, connected services) | 406 |
-| Tool JSON schemas (13 tools) | 2947 |
+| Base system prompt (intro, tools list, guidelines, connected services) | 438 |
+| Tool JSON schemas (15 tools) | 3525 |
 | Managed instructions (`AGENTS.md` with its `<project_context>` wrapper) | 1894 |
 | Skills menu (metadata for all model-visible skills) | 3921 |
-| **Total launch context (always processed)** | **9168** |
-| Maximum if every `SKILL.md` body is also loaded at once | 74080 |
+| **Total launch context (always processed)** | **9778** |
+| Maximum if every `SKILL.md` body is also loaded at once | 74690 |
 
 Of that total, the forge profile itself owns 5815 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
 
@@ -35,8 +35,10 @@ Sorted by launch cost. `Prompt lines` counts a tool's `promptSnippet` and `promp
 |---|---|---:|---:|---:|
 | `forge_deep_web_research` | forge extension | 10 | 397 | 19 |
 | `forge_web_search` | forge extension | 11 | 373 | 41 |
+| `forge_vault_compose` | forge extension | 7 | 308 | 17 |
 | `edit` | built-in | 2 | 302 | 153 |
 | `forge_web_read` | forge extension | 6 | 281 | 12 |
+| `forge_vault_capture_source` | forge extension | 5 | 270 | 70 |
 | `forge_web_discover` | forge extension | 5 | 254 | 18 |
 | `forge_academic_web_research` | forge extension | 6 | 253 | 19 |
 | `grep` | built-in | 7 | 253 | 16 |

@@ -545,7 +545,10 @@ export function vaultContextMessage(vault: VaultInfo): string {
 		"- Proposing links between notes, filling `related`, or maintaining the wiki layer -> skills/vault-connections/SKILL.md.",
 		"- Classifying, filing, de-duplicating, or processing the inbox -> skills/vault-organizer/SKILL.md.",
 		"- Raw voice-note or meeting transcripts in the inbox -> skills/vault-transcripts/SKILL.md **before** vault-organizer processes them: it names, cleans, and summarizes each recording and writes advisory frontmatter, and the organizer then classifies and files the result.",
+		"- Several short voice memos from the same day -> skills/vault-transcripts/SKILL.md, `daily`. It merges the day onto one clock and writes one log plus the recordings, instead of a note per fragment.",
+		"- Making a note out of research, out of existing notes, or out of this conversation -> the `forge_vault_capture_source` and `forge_vault_compose` tools, or skills/vault-compose/SKILL.md for the CLI. Collect the sources, then compose; it proposes and writes nothing until you accept an id.",
 		"",
+		"Never write a note into the vault with the write tool: it is blocked, because nothing would check that note against anything. Run artifacts under a `.forge-workspace` directory are exempt.",
 		"Both skills dry-run by default and need explicit approval before `--apply`. Never hand-edit the schema note or note frontmatter; let the skills write them.",
 	);
 	return lines.join("\n");
