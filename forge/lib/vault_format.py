@@ -8,26 +8,65 @@ emits them, and the templates that use them -- and none of the three can see the
 others. A callout added to one and forgotten in the rest renders as stock blue with
 a pencil icon, which looks like a design choice rather than a mistake.
 
-So unlike its siblings, this module does not compile a prompt prefix. `vault_voice`
-and `vault_profile` exist to tell a model something; this one exists to prove four
-files still say the same thing. `check_agreement` is the whole point, and the
-parsing below is in service of it.
+The note also declares a *block grammar*: which blocks a note is assembled from,
+in what order, and which of them a machine may write. That half is compiled into a
+prompt prefix, like `vault_voice` and `vault_profile` do with theirs.
+
+This module used to say it deliberately did not do that -- the registry was "a
+contract rather than more prompt budget", because every generator emitted a fixed
+section set and could be checked against the registry without ever being told
+about it. That reasoning holds exactly as long as no model *chooses* which blocks
+a note gets. A composer does choose, so the grammar has to reach the drafting call
+as well as the check. The registry half is unchanged and still checked, never
+prompted.
 
 The registry is deliberately read from the note rather than from the stylesheet.
 The note is the authority a person edits and a model reads; making the CSS
 authoritative would put the vault's vocabulary somewhere neither of them looks.
 """
 
+import json
 import re
 from pathlib import Path
 
-from vault_schema import INBOX_DIR, PROTECTED_DIRS, UserError, table_after
+from vault_schema import (
+    INBOX_DIR,
+    PROTECTED_DIRS,
+    UserError,
+    section_bounds,
+    sha256_file,
+    table_after,
+)
+from vault_voice import append_group
 
 DEFAULT_FORMAT = "99 Meta/99.02 Schemas/0.04 Note Format.md"
 FORMAT_BASENAME = "0.04 Note Format.md"
+COMPILED_FORMAT_VERSION = 1
 
 REGISTRY_SECTION = "Callout registry"
 REGISTRY_COLUMNS = ("Callout", "Means", "Accent", "Icon", "Folded", "Not for")
+
+GRAMMAR_SECTION = "Block grammar"
+GRAMMAR_SUBSECTION = "Block order"
+GRAMMAR_COLUMNS = ("Block", "Syntax", "Required", "Written by", "Means")
+SHAPES_SECTION = "Per-type shapes"
+SHAPES_COLUMNS = ("Type", "Shape")
+NEVER_SECTION = "Never do"
+
+# Who may put content in a block. `schema` means the block is serialized from
+# frontmatter rather than authored at all; `owner` means a generator must leave it
+# alone in both directions, which is what `## Notes` needs.
+WRITTEN_BY_OWNER = "owner"
+WRITTEN_BY_MACHINE = "machine"
+WRITTEN_BY_EITHER = "either"
+WRITTEN_BY_SCHEMA = "schema"
+WRITTEN_BY = (WRITTEN_BY_OWNER, WRITTEN_BY_MACHINE, WRITTEN_BY_EITHER, WRITTEN_BY_SCHEMA)
+
+# Sized so the shipped note's three groups all fit. `append_group` drops trailing
+# bullets to stay inside the budget, and the groups are appended in order, so a
+# budget that fits only the first two silently spends the whole prefix on the
+# block list and never states a single prohibition.
+DEFAULT_PREFIX_BUDGET = 2400
 
 # Obsidian's own callout aliases, not a vault invention: `[!tldr]` and `[!summary]`
 # are the same built-in, so the stylesheet names all of them to keep one accent
@@ -63,6 +102,7 @@ def is_namespaced(name):
     return str(name).lower().startswith(NAMESPACE_PREFIXES)
 
 CALLOUT_USE_RE = re.compile(r"^\s*>\s*\[!([a-z][a-z0-9-]*)\]", re.IGNORECASE | re.MULTILINE)
+BULLET_RE = re.compile(r"^\s*[-*]\s+(.+?)\s*$")
 _CSS_BLOCK_RE = re.compile(r"([^{}]+)\{([^{}]*)\}")
 _CSS_SELECTOR_RE = re.compile(r'data-callout="([a-z0-9-]+)"')
 _CSS_COLOR_RE = re.compile(r"--callout-color:\s*var\(\s*(--[a-z0-9-]+)\s*\)")
@@ -144,6 +184,249 @@ def parse_format_note(text):
             "not_for": row["Not for"].strip(),
         }
     return registry
+
+
+def _fence_syntax_tokens(text):
+    """The syntax column of the `## Block grammar` fence, in order.
+
+    Each fence line is a syntax token, two or more spaces, then a description.
+    Only the token is taken: the description is prose that may be reworded, while
+    the token is the thing the table has to agree with.
+
+    Deliberately not bounded with `section_bounds`. The fence's own content
+    includes `# Title`, `## Sources` and `## Notes`, so a heading-aware scan ends
+    the section three lines in, inside the block it was trying to read. Find the
+    heading, then take the first fenced block after it and stop at its close.
+    """
+    lines = str(text).splitlines()
+    heading = re.compile(r"^##\s+" + re.escape(GRAMMAR_SECTION) + r"\s*$")
+    start = next((index for index, line in enumerate(lines) if heading.match(line)), None)
+    if start is None:
+        return []
+    tokens = []
+    inside = False
+    for line in lines[start + 1:]:
+        if line.strip().startswith("```"):
+            if inside:
+                break
+            inside = True
+            continue
+        if not inside:
+            continue
+        if not line.strip():
+            continue
+        tokens.append(re.split(r"\s{2,}", line.strip(), maxsplit=1)[0].strip())
+    return tokens
+
+
+def _wrapped_bullets(lines, heading, level=2):
+    """Bullets from a section, with wrapped continuation lines folded back in.
+
+    `vault_schema.optional_bullet_lines` reads one bullet per line, which is right
+    for the voice note, whose rules are each written on a single long line. This
+    note's prohibitions are hard-wrapped, so reading them line-wise yields
+    "Never use inline HTML for styling. No `<span style=`, no `<div class=`. The CSS"
+    -- a rule that stops mid-sentence, which is worse than no rule at all.
+    """
+    try:
+        start, end = section_bounds(lines, heading, level)
+    except UserError:
+        return []
+    bullets = []
+    for line in lines[start + 1:end]:
+        match = BULLET_RE.match(line)
+        if match:
+            bullets.append(match.group(1).strip())
+        elif bullets and line.strip() and not line.strip().startswith("#"):
+            bullets[-1] = f"{bullets[-1]} {line.strip()}"
+    return bullets
+
+
+def _has_section(lines, heading, level):
+    """Whether the note declares a section at all.
+
+    Absence and malformation are different findings here: a vault that has not
+    adopted the block grammar is not a vault with a broken one. Told apart by
+    looking for the heading rather than by matching the text of an exception,
+    which is a contract nobody agreed to.
+    """
+    try:
+        section_bounds(lines, heading, level)
+    except UserError:
+        return False
+    return True
+
+
+def parse_block_grammar(text):
+    """The ordered blocks a note is assembled from, as declared by the note.
+
+    Row order is block order: the table *is* the grammar, not a description of one.
+    The fence above it is checked against the table's `Syntax` column, the same
+    move the callout registry makes against the stylesheet -- two statements of the
+    same thing in one file drift silently otherwise, and the fence is the half a
+    person actually reads.
+
+    Returns ``[]`` when the vault has not declared a block order. That is not a
+    malformed note; it is a vault that has not adopted the grammar, which is the
+    state every vault starts in. A malformed *declared* order still fails closed.
+    """
+    lines = str(text).splitlines()
+    if not _has_section(lines, GRAMMAR_SUBSECTION, 3):
+        return []
+    rows = table_after(lines, GRAMMAR_SUBSECTION, GRAMMAR_COLUMNS, level=3)
+    blocks = []
+    seen = set()
+    for row in rows:
+        name = row["Block"].strip().strip("`").lower()
+        if not name:
+            raise UserError(f"{GRAMMAR_SUBSECTION}: a row has no block name")
+        if name in seen:
+            raise UserError(f"{GRAMMAR_SUBSECTION}: '{name}' is listed twice")
+        seen.add(name)
+        written_by = row["Written by"].strip().strip("`").lower()
+        if written_by not in WRITTEN_BY:
+            raise UserError(
+                f"{GRAMMAR_SUBSECTION}: '{name}' has Written by '{written_by}', expected one of "
+                + ", ".join(WRITTEN_BY)
+            )
+        required = row["Required"].strip().lower()
+        if required not in ("yes", "no"):
+            raise UserError(f"{GRAMMAR_SUBSECTION}: '{name}' has Required '{required}', expected yes or no")
+        blocks.append(
+            {
+                "block": name,
+                "syntax": row["Syntax"].strip().strip("`"),
+                "required": required == "yes",
+                "written_by": written_by,
+                "means": row["Means"].strip(),
+            }
+        )
+    fence = _fence_syntax_tokens(text)
+    if fence:
+        declared = [entry["syntax"] for entry in blocks]
+        if fence != declared:
+            raise UserError(
+                f"{GRAMMAR_SECTION}: the fence and the {GRAMMAR_SUBSECTION} table disagree; "
+                f"fence has [{', '.join(fence)}], table has [{', '.join(declared)}]"
+            )
+    return blocks
+
+
+def parse_type_shapes(text):
+    """How each note type arranges the blocks, keyed by the `type` property.
+
+    A row may name more than one type (`concept / wiki card`), so the first
+    backticked value is the key and the rest of the cell is kept as the label.
+    """
+    lines = str(text).splitlines()
+    if not _has_section(lines, SHAPES_SECTION, 2):
+        return {}
+    rows = table_after(lines, SHAPES_SECTION, SHAPES_COLUMNS, level=2)
+    shapes = {}
+    for row in rows:
+        label = row["Type"].strip()
+        match = re.search(r"`([^`]+)`", label)
+        name = (match.group(1) if match else label).strip().lower()
+        if not name:
+            raise UserError(f"{SHAPES_SECTION}: a row has no type")
+        if name in shapes:
+            raise UserError(f"{SHAPES_SECTION}: '{name}' is listed twice")
+        shapes[name] = {"type": name, "label": label, "shape": row["Shape"].strip()}
+    return shapes
+
+
+def parse_format(text):
+    """Everything the note declares: the callout registry, the grammar, the shapes."""
+    return {
+        "callouts": parse_format_note(text),
+        "blocks": parse_block_grammar(text),
+        "shapes": parse_type_shapes(text),
+        "never": _wrapped_bullets(str(text).splitlines(), NEVER_SECTION, level=2),
+    }
+
+
+def compiled_format_for(vault, format_path, cache_dir=None):
+    """Parse the policy, caching the complete compiled representation by hash."""
+    if format_path is None:
+        return None, None
+    format_path = Path(format_path)
+    format_hash = sha256_file(format_path)
+    cache_path = Path(cache_dir) / "compiled-format.json" if cache_dir else None
+    if cache_path and cache_path.is_file():
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            if cached.get("version") == COMPILED_FORMAT_VERSION and cached.get("format_hash") == format_hash:
+                return cached["format"], format_hash
+        except (OSError, json.JSONDecodeError, KeyError):
+            pass
+    compiled = parse_format(format_path.read_text(encoding="utf-8"))
+    if cache_path:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(
+                json.dumps(
+                    {"version": COMPILED_FORMAT_VERSION, "format_hash": format_hash, "format": compiled},
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+    return compiled, format_hash
+
+
+def block_index(fmt):
+    """``{block name: position}``, for checking that a note's blocks are in order."""
+    return {entry["block"]: position for position, entry in enumerate(fmt.get("blocks", []))}
+
+
+def writable_blocks(fmt):
+    """Blocks a generator may put content in, in declared order."""
+    return [
+        entry
+        for entry in fmt.get("blocks", [])
+        if entry["written_by"] in (WRITTEN_BY_MACHINE, WRITTEN_BY_EITHER)
+    ]
+
+
+def format_state(format_path, format_hash):
+    """Serializable policy identity used by resumable workflows."""
+    return {
+        "format_path": str(format_path) if format_path else None,
+        "format_hash": format_hash,
+        "format_compiler_version": COMPILED_FORMAT_VERSION,
+    }
+
+
+def prompt_prefix(fmt, note_type=None, budget=DEFAULT_PREFIX_BUDGET):
+    """The block grammar as a context prefix, excluding per-item material.
+
+    Only the blocks a generator may write are listed: telling a model about
+    `## Notes` is how a model comes to write one. The registry's accents and icons
+    are deliberately absent -- they are a rendering contract with the stylesheet,
+    and a model that cannot write CSS has no use for them.
+    """
+    if not fmt or not fmt.get("blocks"):
+        return ""
+    lines = [
+        "Note format policy for this vault. A note is assembled from the blocks below, "
+        "in this order. Every block is optional except the title, and none is ever reordered. "
+        "A note that needs only a title and three paragraphs is a finished note."
+    ]
+    used = len(lines[0])
+    used = append_group(
+        lines,
+        used,
+        "Blocks, in order:",
+        [f"{entry['block']} ({entry['syntax']}) — {entry['means']}" for entry in writable_blocks(fmt)],
+        budget,
+    )
+    shape = fmt.get("shapes", {}).get(str(note_type or "").lower())
+    if shape:
+        used = append_group(lines, used, f"Shape for `{shape['type']}`:", [shape["shape"]], budget)
+    if fmt.get("never"):
+        used = append_group(lines, used, "Never do:", fmt["never"], budget)
+    return "\n".join(lines)
 
 
 def parse_stylesheet(text):
@@ -259,18 +542,39 @@ def load_and_check(vault, css_path=None, templates_dir=None, raw_format=None):
 
 __all__ = [
     "ALIASES",
+    "COMPILED_FORMAT_VERSION",
     "DEFAULT_FORMAT",
+    "DEFAULT_PREFIX_BUDGET",
     "FORMAT_BASENAME",
+    "GRAMMAR_COLUMNS",
+    "GRAMMAR_SECTION",
+    "GRAMMAR_SUBSECTION",
     "NAMESPACE_PREFIXES",
+    "NEVER_SECTION",
     "REGISTRY_COLUMNS",
     "REGISTRY_SECTION",
+    "SHAPES_COLUMNS",
+    "SHAPES_SECTION",
     "STOCK_CALLOUTS",
+    "WRITTEN_BY",
+    "WRITTEN_BY_EITHER",
+    "WRITTEN_BY_MACHINE",
+    "WRITTEN_BY_OWNER",
+    "WRITTEN_BY_SCHEMA",
+    "block_index",
     "callouts_used",
     "canonical",
     "check_agreement",
+    "compiled_format_for",
+    "format_state",
     "is_namespaced",
     "load_and_check",
+    "parse_block_grammar",
+    "parse_format",
     "parse_format_note",
     "parse_stylesheet",
+    "parse_type_shapes",
+    "prompt_prefix",
     "resolve_format_path",
+    "writable_blocks",
 ]

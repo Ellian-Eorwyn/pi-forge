@@ -766,6 +766,27 @@ class ExemplarTests(unittest.TestCase):
         exemplars, _warning = vc.collect_exemplars(self.vault, "gasket")
         self.assertEqual(exemplars, [])
 
+    def test_a_provenance_block_marks_a_note_as_machine_written(self):
+        """The frontmatter test alone does not hold. `capture_type` records the
+        channel a note arrived by, so a generated voice-memo note correctly says
+        `voice`; and `processed_by` is dropped entirely by a vault whose schema
+        never approved it, which is the state this vault is in. Every
+        transcript-derived note read as owner-authored until this check existed."""
+        generated = self.write(
+            "01 Personal/Day Log.md",
+            "type: journal\nstatus: raw\ncapture_type: voice",
+            self.prose() + "\n\n> [!provenance]- How this note was made\n> Composed from six recordings.\n",
+        )
+        self.stub_search(generated)
+        self.assertEqual(vc.collect_exemplars(self.vault, "gasket")[0], [])
+
+    def test_a_hand_written_voice_note_is_still_imitated(self):
+        """A note the owner typed up from a recording is theirs, and the channel
+        property alone must not disqualify it."""
+        mine = self.write("01 Personal/Mine.md", "type: journal\nstatus: active\ncapture_type: voice", self.prose())
+        self.stub_search(mine)
+        self.assertEqual([row["note"] for row in vc.collect_exemplars(self.vault, "gasket")[0]], ["Mine"])
+
     def test_inbox_notes_are_not_exemplars(self):
         unfiled = self.write("00 Inbox/Unfiled.md", "type: note\nstatus: raw", self.prose())
         self.stub_search(unfiled)

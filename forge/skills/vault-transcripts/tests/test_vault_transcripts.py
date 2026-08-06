@@ -507,15 +507,15 @@ class ParsingTests(unittest.TestCase):
     def test_filename_patterns(self):
         self.assertEqual(
             vt.parse_filename("20260724 131748-9788991C.md"),
-            {"date": "2026-07-24", "time_hhmm": "1317", "recording_id": "9788991C"},
+            {"date": "2026-07-24", "time_hhmm": "1317", "time_hhmmss": "13:17:48", "recording_id": "9788991C"},
         )
         self.assertEqual(
             vt.parse_filename("20260724 110913-A2F4CD8A 2026-07-24 11_11_29.md"),
-            {"date": "2026-07-24", "time_hhmm": "1109", "recording_id": "A2F4CD8A"},
+            {"date": "2026-07-24", "time_hhmm": "1109", "time_hhmmss": "11:09:13", "recording_id": "A2F4CD8A"},
         )
         self.assertEqual(
             vt.parse_filename("20260616 092230.md"),
-            {"date": "2026-06-16", "time_hhmm": "0922", "recording_id": None},
+            {"date": "2026-06-16", "time_hhmm": "0922", "time_hhmmss": "09:22:30", "recording_id": None},
         )
         for undated in ("New Recording 41.md", "VPP Insiders #1: Intro to VPPs.md", "IMG_1836.md"):
             self.assertIsNone(vt.parse_filename(undated)["date"], undated)
@@ -2605,6 +2605,246 @@ class ReprocessTests(unittest.TestCase):
             result = self.reprocess(server.url, "--apply")
             self.assertEqual(server.requests, [])
         self.assertEqual(result["data"]["counts"]["selected"], 0)
+
+
+class DailyLogTests(unittest.TestCase):
+    """Fan-in: several short recordings from one day becoming one note.
+
+    Verified against a real hand-built log — `2026-08-03 — Thoughts & To-Dos` —
+    whose six recordings, section markers, and ordering are what these assert.
+    """
+
+    def members(self, *stamps):
+        items = []
+        for stamp in stamps:
+            date, time_hhmmss = stamp.split(" ")
+            compact = time_hhmmss.replace(":", "")
+            name = f"{date.replace('-', '')} {compact}-DEADBEEF.md"
+            items.append(
+                {
+                    "path": name,
+                    "is_transcript": True,
+                    "date": date,
+                    "time_hhmm": compact[:4],
+                    "time_hhmmss": time_hhmmss,
+                    "recording_id": "DEADBEEF",
+                }
+            )
+        return items
+
+    def records(self, items, recording_type="memo", role="owner-authored"):
+        return {item["path"]: {"recording_type": recording_type, "material_role": role} for item in items}
+
+    def test_the_seconds_a_filename_carries_are_kept(self):
+        """Parsed and discarded until fan-in needed them: two memos begun in the
+        same minute have to stay in the order they were spoken."""
+        parsed = vt.parse_filename("20260803 103810-23F0FD21 2026-08-03 10_38_43.md")
+        self.assertEqual(parsed["date"], "2026-08-03")
+        self.assertEqual(parsed["time_hhmm"], "1038")
+        self.assertEqual(parsed["time_hhmmss"], "10:38:10")
+
+    def test_a_filename_with_no_stamp_carries_no_time(self):
+        self.assertIsNone(vt.parse_filename("Some Recording.md")["time_hhmmss"])
+
+    def test_a_days_memos_group_in_the_order_spoken(self):
+        items = self.members("2026-08-03 10:38:10", "2026-08-03 09:36:50", "2026-08-03 10:41:36")
+        groups = vt.group_daily(items, self.records(items))
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(
+            [item["time_hhmmss"] for item in groups[0]["members"]], ["09:36:50", "10:38:10", "10:41:36"]
+        )
+
+    def test_a_lone_recording_is_not_a_group(self):
+        items = self.members("2026-08-03 09:36:50")
+        self.assertEqual(vt.group_daily(items, self.records(items)), [])
+
+    def test_different_days_never_merge(self):
+        items = self.members("2026-08-03 09:36:50", "2026-08-04 09:36:50")
+        self.assertEqual(vt.group_daily(items, self.records(items)), [])
+
+    def test_a_meeting_is_a_document_not_a_page_of_a_day(self):
+        for recording_type in ("conversation", "meeting", "therapy", "lecture"):
+            items = self.members("2026-08-03 09:36:50", "2026-08-03 10:38:10")
+            groups = vt.group_daily(items, self.records(items, recording_type=recording_type))
+            self.assertEqual(groups, [], f"{recording_type} should never group")
+
+    def test_a_recording_with_someone_else_in_it_never_groups(self):
+        items = self.members("2026-08-03 09:36:50", "2026-08-03 10:38:10")
+        self.assertEqual(vt.group_daily(items, self.records(items, role="personal-exchange")), [])
+
+    def test_a_recording_with_no_filename_date_never_groups(self):
+        items = self.members("2026-08-03 09:36:50", "2026-08-03 10:38:10")
+        items[1]["date"] = None
+        self.assertEqual(vt.group_daily(items, self.records(items)), [])
+
+    def test_offsets_are_rebased_onto_one_monotone_clock(self):
+        """Each recording's `*MM:SS*` restarts at zero, so concatenating them raw
+        produces a day that starts over once per recording."""
+        items = self.members("2026-08-03 09:36:50", "2026-08-03 10:38:10")
+        parsed = {
+            items[0]["path"]: vt.parse_transcript(transcript([block("First thing.", 0), block("Second thing.", 9)])),
+            items[1]["path"]: vt.parse_transcript(transcript([block("Later thing.", 0)])),
+        }
+        merged = vt.merge_transcripts(items, parsed)
+        self.assertEqual([entry["clock"] for entry in merged], ["09:36:50", "09:36:59", "10:38:10"])
+        self.assertEqual([entry["unit_id"] for entry in merged], ["s-0001", "s-0001", "s-0002"])
+        self.assertTrue(all(merged[i]["seconds"] <= merged[i + 1]["seconds"] for i in range(len(merged) - 1)))
+
+    def test_the_merged_transcript_names_each_recording(self):
+        items = self.members("2026-08-03 09:36:50", "2026-08-03 10:38:10")
+        parsed = {
+            items[0]["path"]: vt.parse_transcript(transcript([block("First thing.", 0)])),
+            items[1]["path"]: vt.parse_transcript(transcript([block("Later thing.", 0)])),
+        }
+        rendered = vt.render_merged_transcript(vt.merge_transcripts(items, parsed))
+        self.assertIn("--- recording s-0001 ---", rendered)
+        self.assertIn("--- recording s-0002 ---", rendered)
+        self.assertLess(rendered.index("First thing."), rendered.index("--- recording s-0002 ---"))
+
+    def test_section_markers_are_computed_from_filenames(self):
+        """The exact markers the hand-built log carries. A time is a fact about a
+        file; asking a model for one invites an invented one."""
+        items = self.members(
+            "2026-08-03 09:36:50", "2026-08-03 10:34:16", "2026-08-03 10:38:10",
+            "2026-08-03 10:38:44", "2026-08-03 10:39:35", "2026-08-03 10:41:36",
+        )
+        self.assertEqual(vt.daily_marker(items, ["s-0001"]), "(~09:36)")
+        self.assertEqual(vt.daily_marker(items, ["s-0002"]), "(~10:34)")
+        self.assertEqual(vt.daily_marker(items, ["s-0003", "s-0004"]), "(~10:38)")
+        self.assertEqual(vt.daily_marker(items, ["s-0005", "s-0006"]), "(~10:39–10:41)")
+
+    def test_a_marker_spanning_one_minute_does_not_read_as_a_range(self):
+        items = self.members("2026-08-03 10:38:10", "2026-08-03 10:38:44")
+        self.assertEqual(vt.daily_marker(items, ["s-0001", "s-0002"]), "(~10:38)")
+
+    def test_the_heading_names_the_day_in_words(self):
+        """The filename carries the ISO date and Obsidian shows it above the note,
+        so repeating it inside would say the same thing twice in two formats."""
+        self.assertEqual(vt.daily_title("2026-08-03", "Thoughts & To-Dos"), "August 3 — Thoughts & To-Dos")
+
+
+class DailyNoteBuildingTests(unittest.TestCase):
+    """The assembled log, and the gates that decide whether it may be written."""
+
+    FORMAT = (Path(__file__).resolve().parents[3] / "lib" / "vault-format" / "note-format.md").read_text(
+        encoding="utf-8"
+    )
+
+    def setUp(self):
+        import vault_compose
+        import vault_format
+        import vault_schema
+
+        self.vc = vault_compose
+        self.fmt = vault_format.parse_format(self.FORMAT)
+        self.schema = vault_schema.parse_schema_note(SCHEMA)
+        self.group = {
+            "date": "2026-08-03",
+            "recording_type": "memo",
+            "members": [
+                {"path": "a.md", "time_hhmmss": "09:36:50"},
+                {"path": "b.md", "time_hhmmss": "10:38:10"},
+            ],
+        }
+        self.sources = self.vc.source_set(
+            [
+                self.vc.source_unit(self.vc.KIND_TRANSCRIPT, "a", "A qualitative coding tool for interviews."),
+                self.vc.source_unit(self.vc.KIND_TRANSCRIPT, "b", "Order yogurt and other groceries this week."),
+            ]
+        )
+        self.raw_names = {"a.md": "a - Transcript.md", "b.md": "b - Transcript.md"}
+
+    def composition(self, **overrides):
+        base = {
+            "title": "Thoughts & To-Dos",
+            "summary": "A coding tool idea and the groceries.",
+            "sections": [
+                {"heading": "Coding tool", "sourceIds": ["s-0001"], "lines": ["A qualitative coding tool for interviews."]},
+                {"heading": "Errands", "sourceIds": ["s-0002"], "lines": ["Order yogurt and other groceries this week."]},
+            ],
+        }
+        base.update(overrides)
+        return base
+
+    def build(self, composition=None):
+        return vt.build_daily_note(
+            self.fmt, self.schema, self.group, composition or self.composition(), self.sources,
+            self.raw_names, "/tmp/run-x",
+        )
+
+    def test_the_log_carries_the_channel_and_the_machines_hand_separately(self):
+        """`capture_type` says how the material arrived; the provenance block says
+        who wrote the note. One property cannot answer both."""
+        text = self.build()
+        self.assertIn("capture_type: voice", text)
+        self.assertIn("> [!provenance]- How this note was made", text)
+
+    def test_the_lead_is_prose_rather_than_a_callout(self):
+        """The note format's `journal` row asks for the owner's language first."""
+        text = self.build()
+        self.assertNotIn("[!summary]", text)
+        self.assertLess(text.index("A coding tool idea"), text.index("## Coding tool"))
+
+    def test_every_recording_is_listed_with_its_time(self):
+        text = self.build()
+        self.assertIn("## Source Recordings", text)
+        self.assertIn("- [[a - Transcript]] (~09:36)", text)
+        self.assertIn("- [[b - Transcript]] (~10:38)", text)
+
+    def test_recordings_are_linked_by_basename(self):
+        """Filing moves a recording into the sources tree; a full-path link does
+        not survive that and a basename one does."""
+        self.assertNotIn("[[10 Sources/", self.build())
+
+    def test_the_assembled_log_satisfies_the_grammar(self):
+        body = self.build().split("---\n", 2)[2]
+        self.assertEqual(self.vc.check_grammar(self.fmt, body), [])
+
+    def test_a_section_citing_no_recording_is_held(self):
+        composition = self.composition()
+        composition["sections"][0]["sourceIds"] = []
+        review = vt.check_daily_note(self.fmt, self.sources, self.build(composition), composition, self.group["members"])
+        self.assertTrue(any("cites no recording" in line for line in review))
+
+    def test_a_section_citing_an_unknown_recording_is_held(self):
+        composition = self.composition()
+        composition["sections"][0]["sourceIds"] = ["s-9999"]
+        review = vt.check_daily_note(self.fmt, self.sources, self.build(composition), composition, self.group["members"])
+        self.assertTrue(any("unknown recordings" in line for line in review))
+
+    def test_a_dropped_recording_is_held(self):
+        """The failure fan-in produces: a day's log built from one of two
+        recordings, with nothing about it looking wrong."""
+        composition = self.composition(
+            summary="A coding tool idea.",
+            sections=[{"heading": "Coding tool", "sourceIds": ["s-0001"], "lines": ["A qualitative coding tool."]}],
+        )
+        review = vt.check_daily_note(self.fmt, self.sources, self.build(composition), composition, self.group["members"])
+        self.assertTrue(any("s-0002" in line and "did not reach the note" in line for line in review))
+
+    def test_a_recording_summarized_hard_is_not_reported_as_dropped(self):
+        """The floor is deliberately low. A recording that contributed one clause
+        to a day has genuinely been used, and holding the log for that would make
+        the check unusable on exactly the short fragments it exists to serve."""
+        composition = self.composition(
+            summary="A coding tool idea and the groceries.",
+            sections=[{"heading": "Coding tool", "sourceIds": ["s-0001"], "lines": ["A qualitative coding tool."]}],
+        )
+        review = vt.check_daily_note(self.fmt, self.sources, self.build(composition), composition, self.group["members"])
+        self.assertFalse(any("did not reach the note" in line for line in review))
+
+    def test_an_invented_name_is_held(self):
+        composition = self.composition()
+        composition["sections"][0]["lines"] = ["A coding tool that Priya suggested for interviews."]
+        review = vt.check_daily_note(self.fmt, self.sources, self.build(composition), composition, self.group["members"])
+        self.assertTrue(any("name not in any recording: Priya" in line for line in review))
+
+    def test_a_faithful_log_passes_every_gate(self):
+        composition = self.composition()
+        self.assertEqual(
+            vt.check_daily_note(self.fmt, self.sources, self.build(composition), composition, self.group["members"]),
+            [],
+        )
 
 
 if __name__ == "__main__":

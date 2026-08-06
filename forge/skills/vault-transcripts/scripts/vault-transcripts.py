@@ -39,6 +39,8 @@ import forge_llm
 import forge_verify
 import obsidian_cli
 import run_state
+import vault_compose
+import vault_format
 import vault_lexicon
 from vault_moves import PlainMover, resolve_mover
 import vault_profile
@@ -352,15 +354,26 @@ def parse_filename(name):
     stem = name[:-3] if name.lower().endswith(".md") else name
     match = FILENAME_STAMP_RE.match(stem)
     if not match:
-        return {"date": None, "time_hhmm": None, "recording_id": None}
-    year, month, day, hour, minute, _second, recording_id = match.groups()
+        return {"date": None, "time_hhmm": None, "time_hhmmss": None, "recording_id": None}
+    year, month, day, hour, minute, second, recording_id = match.groups()
     try:
         date = datetime.date(int(year), int(month), int(day)).isoformat()
     except ValueError:
-        return {"date": None, "time_hhmm": None, "recording_id": None}
+        return {"date": None, "time_hhmm": None, "time_hhmmss": None, "recording_id": None}
     if not (0 <= int(hour) < 24 and 0 <= int(minute) < 60):
-        return {"date": date, "time_hhmm": None, "recording_id": recording_id}
-    return {"date": date, "time_hhmm": f"{hour}{minute}", "recording_id": recording_id}
+        return {"date": date, "time_hhmm": None, "time_hhmmss": None, "recording_id": recording_id}
+    # Seconds were parsed and discarded until `daily` needed them. Merging a day's
+    # recordings rebases each one's offsets onto its own start, and two memos
+    # begun in the same minute have to stay in the order they were spoken.
+    time_hhmmss = None
+    if 0 <= int(second) < 60:
+        time_hhmmss = f"{hour}:{minute}:{second}"
+    return {
+        "date": date,
+        "time_hhmm": f"{hour}{minute}",
+        "time_hhmmss": time_hhmmss,
+        "recording_id": recording_id,
+    }
 
 
 def filename_title_hint(name):
@@ -2967,6 +2980,256 @@ def scan_existing_names(vault):
         for filename in filenames:
             names.add(relative_path(vault, dirpath / filename).casefold())
     return names
+
+
+# --------------------------------------------------------------------------
+# Daily log
+# --------------------------------------------------------------------------
+
+# Which recordings a day's log may absorb. A memo and a journal entry are pages
+# of someone's day; a meeting, a conversation, a lecture and a therapy session
+# are each a document in their own right, and folding one into a to-do list
+# destroys it. Therapy is additionally carved out of reprocessing elsewhere for
+# the same reason.
+DAILY_TYPES = ("memo", "journal")
+DAILY_ROLE = "owner-authored"
+DEFAULT_DAILY_MIN_RECORDINGS = 2
+# The heading the day's recordings are listed under. Not a declared grammar
+# block: it is a plain `##` section, legal under `body`, and the note format's
+# `journal` row is where a shape convention belongs rather than the block table.
+SOURCE_RECORDINGS_HEADING = "Source Recordings"
+# `2026-08-03` -> `# August 3 — …`. An em dash, matching the hand-built log.
+DAILY_TITLE_DASH = "—"
+# `(~10:39–10:41)`. An en dash: it is a range, not a break.
+DAILY_RANGE_DASH = "–"
+
+
+def group_daily(items, records, minimum=DEFAULT_DAILY_MIN_RECORDINGS):
+    """Same-day owner recordings that belong in one log, in the order spoken.
+
+    The grouping key is deliberately the *day*, not similarity of content. The
+    hand-built log this reproduces spans a qualitative-coding tool, a to-do list,
+    groceries and two feature ideas -- a similarity threshold would have split
+    exactly the group a person sat down and made on purpose. What makes a day's
+    memos one note is that they are one day's thinking, not one topic.
+
+    Returns ``[{"date", "recording_type", "members": [item, ...]}]``; days with
+    fewer than ``minimum`` recordings are not groups and fall through to ordinary
+    per-recording processing.
+    """
+    buckets = {}
+    for item in items:
+        if not item.get("is_transcript") or not item.get("date"):
+            continue
+        record = records.get(item["path"])
+        if not record:
+            continue
+        if record.get("recording_type") not in DAILY_TYPES:
+            continue
+        # A recording with another person in it is not a page of someone's day.
+        if record.get("material_role") != DAILY_ROLE:
+            continue
+        buckets.setdefault((item["date"], record["recording_type"]), []).append(item)
+    groups = []
+    for (date, recording_type), members in sorted(buckets.items()):
+        if len(members) < minimum:
+            continue
+        members.sort(key=lambda item: (item.get("time_hhmmss") or "", item["path"]))
+        groups.append({"date": date, "recording_type": recording_type, "members": members})
+    return groups
+
+
+def _clock_seconds(time_hhmmss):
+    if not time_hhmmss:
+        return 0
+    hours, minutes, seconds = (int(part) for part in str(time_hhmmss).split(":"))
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def merge_transcripts(members, parsed_by_path):
+    """One recording's blocks after another, rebased onto wall-clock time.
+
+    Each member's ``*MM:SS*`` offsets are relative to its own start, so
+    concatenating them raw produces a transcript that restarts at zero once per
+    recording. Rebasing onto the filename's start stamp gives one monotone clock,
+    which is both what makes the merged text readable as a day and what lets a
+    section's ``(~HH:MM)`` marker be computed rather than guessed.
+
+    Returns ``[{"unit_id", "path", "clock", "seconds", "speaker", "text"}]``.
+    """
+    merged = []
+    for position, item in enumerate(members, start=1):
+        unit_id = "s-%04d" % position
+        base = _clock_seconds(item.get("time_hhmmss"))
+        for block in parsed_by_path[item["path"]]["blocks"]:
+            absolute = base + int(block.get("seconds") or 0)
+            merged.append(
+                {
+                    "unit_id": unit_id,
+                    "path": item["path"],
+                    "seconds": absolute,
+                    "clock": "%02d:%02d:%02d" % (absolute // 3600, (absolute % 3600) // 60, absolute % 60),
+                    "speaker": block.get("speaker"),
+                    "text": block.get("text", ""),
+                }
+            )
+    return merged
+
+
+def render_merged_transcript(merged):
+    """The merged day as one transcript, with a divider naming each recording.
+
+    This is what cleanup reads. The divider is what lets the composing call map a
+    section back to the recordings it came from -- without it the day is one
+    undifferentiated wall and every `(~HH:MM)` marker would be a guess.
+    """
+    lines = []
+    current = None
+    for block in merged:
+        if block["unit_id"] != current:
+            current = block["unit_id"]
+            if lines:
+                lines.append("")
+            lines.append(f"--- recording {current} ---")
+            lines.append("")
+        lines.append(f"*{block['clock']}*")
+        lines.append(block["text"])
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
+
+
+def daily_marker(members, unit_ids):
+    """``(~09:36)`` or ``(~10:39–10:41)`` for the recordings a section came from.
+
+    Computed from the filename start stamps, never from the model: a time is a
+    fact about a file, and asking for it invites an invented one. Equal endpoints
+    collapse to a single marker rather than reading as a zero-length range.
+    """
+    by_id = {"s-%04d" % position: item for position, item in enumerate(members, start=1)}
+    stamps = sorted(
+        (by_id[unit_id].get("time_hhmmss") or "")[:5] for unit_id in unit_ids if unit_id in by_id
+    )
+    stamps = [stamp for stamp in stamps if stamp]
+    if not stamps:
+        return ""
+    if stamps[0] == stamps[-1]:
+        return f"(~{stamps[0]})"
+    return f"(~{stamps[0]}{DAILY_RANGE_DASH}{stamps[-1]})"
+
+
+def daily_title(date, title):
+    """``2026-08-03`` + ``Thoughts & To-Dos`` -> ``August 3 — Thoughts & To-Dos``.
+
+    The note's own heading names the day in words; the filename carries the ISO
+    date. Obsidian shows a filename above the note, so repeating `2026-08-03`
+    inside it would say the same thing twice in two formats.
+    """
+    parsed = datetime.date.fromisoformat(date)
+    spoken = f"{parsed.strftime('%B')} {parsed.day}"
+    return f"{spoken} {DAILY_TITLE_DASH} {title}"
+
+
+def daily_source_lines(members, raw_names):
+    """The `## Source Recordings` bullets, in the order the day was spoken.
+
+    Basename wikilinks, not the full paths the hand-built log used: filing moves
+    a recording into the sources tree, and a full-path link does not survive that
+    while a basename one does.
+    """
+    lines = []
+    for position, item in enumerate(members, start=1):
+        unit_id = "s-%04d" % position
+        stem = Path(raw_names[item["path"]]).stem
+        marker = daily_marker(members, [unit_id])
+        lines.append(f"- [[{stem}]] {marker}".rstrip())
+    return lines
+
+
+def daily_metadata(schema, date):
+    """Frontmatter for a day's log.
+
+    ``capture_type`` records the channel the material arrived by -- these were
+    spoken -- and the machine's hand in the note is recorded by the mandatory
+    provenance block instead. Overloading one property to mean both leaves a
+    reader unable to tell a voice log from a research note without opening it.
+    """
+    metadata = {"type": "journal", "status": "raw", "capture_type": "voice", "date": date}
+    if metadata["type"] not in schema["types"]:
+        raise UserError("schema does not define note type 'journal'; a day's log cannot be written")
+    if metadata["status"] not in schema["statuses"]:
+        metadata["status"] = "raw" if "raw" in schema["statuses"] else next(iter(schema["statuses"]))
+    if metadata["capture_type"] not in schema["capture_types"]:
+        metadata.pop("capture_type")
+    return {key: value for key, value in metadata.items() if key in schema["properties"]}
+
+
+def daily_provenance(group, sources, run_directory):
+    """How the log was made. Written by code, never by the model.
+
+    `0.04 Note Format.md` requires this block to be accurate about what made a
+    note, and a model cannot be accurate about that.
+    """
+    lines = [
+        f"Composed from {len(group['members'])} {group['recording_type']} recordings made on {group['date']}, "
+        "merged into one transcript and cleaned as a whole.",
+        "",
+        f"Source set `{sources['fingerprint'][:12]}`; run `{Path(run_directory).name}`.",
+    ]
+    return {"title": "How this note was made", "lines": lines}
+
+
+def build_daily_note(fmt, schema, group, composition, sources, raw_names, run_directory):
+    """A day's log, assembled in the order the vault's note format declares.
+
+    The model supplies a title, a summary paragraph, and which recordings each
+    section drew on. Everything that has to be exact -- the heading, the time
+    markers, the recording list, the provenance -- is written here.
+    """
+    members = group["members"]
+    body = []
+    for section in composition["sections"]:
+        marker = daily_marker(members, section.get("sourceIds") or [])
+        heading = f"{section['heading']} {marker}".strip()
+        body.append({"heading": heading, "lines": section["lines"]})
+    body.append({"heading": SOURCE_RECORDINGS_HEADING, "lines": daily_source_lines(members, raw_names)})
+    blocks = {
+        "title": daily_title(group["date"], composition["title"]),
+        "body": body,
+        "provenance": daily_provenance(group, sources, run_directory),
+    }
+    if composition.get("summary"):
+        # A plain paragraph, not a `> [!summary]` callout: the note format's
+        # `journal` row asks for the owner's language first, and the hand-built
+        # log leads with prose.
+        blocks["body"] = [composition["summary"], ""] + blocks["body"]
+    return vault_compose.render_note(fmt, schema, daily_metadata(schema, group["date"]), blocks)
+
+
+def check_daily_note(fmt, sources, text, composition, members):
+    """Deterministic findings against a composed day's log."""
+    review = []
+    known = {unit["id"] for unit in sources["units"]}
+    for section in composition["sections"]:
+        unknown = [unit_id for unit_id in section.get("sourceIds") or [] if unit_id not in known]
+        if unknown:
+            review.append(f"section {section['heading']!r} cites unknown recordings: {', '.join(unknown)}")
+        if not section.get("sourceIds"):
+            review.append(f"section {section['heading']!r} cites no recording")
+    # A day's log built from five of six recordings is worse than no log, because
+    # nothing about it looks wrong.
+    for dropped in vault_compose.dropped_units(sources, text):
+        review.append(f"recording {dropped['id']} ({dropped['label']}) did not reach the note")
+    found = vault_compose.ungrounded_specifics(sources, text)
+    for name in found["names"]:
+        review.append(f"name not in any recording: {name}")
+    for link in found["links"]:
+        review.append(f"link not in any recording: {link}")
+    for severity, message in vault_compose.check_grammar(fmt, text):
+        if severity == "error":
+            review.append(f"note format: {message}")
+    if len(composition["sections"]) > len(members) * 3:
+        review.append("more sections than the day plausibly held; the log is fragmenting")
+    return review
 
 
 # --------------------------------------------------------------------------

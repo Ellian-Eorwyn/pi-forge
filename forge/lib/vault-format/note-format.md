@@ -48,6 +48,35 @@ Footnote definitions trail the last heading with no heading of their own. Obsidi
 hoists them into its own rendered footnote area, so putting them under `## Sources`
 leaves a visibly empty heading in reading mode.
 
+### Block order
+
+The same grammar, in the form a generator can read. Row order is block order, and
+`vault_format.py` checks these rows against the fence above — two statements of one
+thing in a single file drift silently otherwise, and the fence is the half a person
+actually reads.
+
+`Written by` says who may put content in a block. `schema` is serialized from
+frontmatter rather than authored. `machine` marks apparatus a hand-written note
+does not get. `owner` is off limits in both directions: never written, never read.
+
+| Block | Syntax | Required | Written by | Means |
+| --- | --- | --- | --- | --- |
+| `frontmatter` | `frontmatter` | no | schema | schema-controlled; see 0.00 Vault Schema |
+| `title` | `# Title` | yes | either | exactly one level-one heading |
+| `summary` | `> [!summary]` | no | either | the lead — what this note is |
+| `body` | `<body>` | no | either | prose and ## sections, per 0.01 Voice and Style |
+| `key` | `> [!key]` | no | either | the claims worth carrying away |
+| `define` | `> [!define]` | no | either | terms this note stipulates |
+| `evidence` | `> [!evidence]` | no | either | sourced material, with its citation |
+| `caution` | `> [!caution]` | no | either | limits and misuse |
+| `question` | `> [!question]` | no | either | what is still open |
+| `reflection` | `> [!reflection]-` | no | machine | generated interpretation |
+| `connections` | `> [!connections]-` | no | machine | links out |
+| `provenance` | `> [!provenance]-` | no | machine | how this note was made |
+| `sources` | `## Sources` | no | either | a plain bullet list of links |
+| `notes` | `## Notes` | no | owner | owner-authored; never written, never read |
+| `footnotes` | `[^1]: …` | no | either | footnote definitions, unheaded, at the end of the file |
+
 ## Callout registry
 
 The vault's whole visual vocabulary. Colour carries epistemic status; the quiet
@@ -101,8 +130,11 @@ once.
   visible heading text, so renaming a heading moves the section out of reach.
   Aliases exist for this reason — a note saying `Key Ideas` where a spec says
   `Key Points` is recognised and updated in place rather than growing a duplicate.
-- `## Sources` and `## Notes` are the two reserved names. `## Notes` is
-  owner-authored: never written, never read, never quoted back.
+- `## Sources`, `## Notes`, and `## Corpus` are the reserved names. `## Notes` is
+  owner-authored: never written, never read, never quoted back. `## Corpus`
+  appears only on a project hub, where it is both the human map of the project
+  and the machine-readable definition of what an agent may read — see
+  [[Project corpus rules]]. Renaming it silently empties a project's scope.
 
 Headings carry a left rule from `loom-notes.css` so a section start is visible
 while scrolling. That treatment is uniform because CSS cannot read a heading's
@@ -146,7 +178,7 @@ the arrangement.
 | `task` | The action first, in plain prose, then bullets. No lead callout — a task short enough to act on does not need summarising. |
 | `journal` | The owner's language first and unaltered, then `reflection` sections in the order `Observations`, `Interpretations`, `Open questions`, then `connections`. |
 | `source` | The source on its own terms. `evidence` for what it establishes, `## Synthesis` and `## Critique` only when they contribute something. Never a `reflection`. |
-| `project` | Lead, then purpose, state, next actions, decisions, risks. `question` for what is genuinely undecided. |
+| `project` | Lead, then purpose, state, next actions, decisions, risks. `question` for what is genuinely undecided. A registered project's hub adds `## Corpus` after the prose and before `## Notes`: `###` subsections by role, each bullet a link and an em-dash line on why it belongs. Files already in the project folder are members without being listed. See [[Project corpus rules]]. |
 | `concept` / wiki card | Lead as `summary` — `vault-wiki` writes it as `[!abstract]`, which is the same callout — then the kind's sections from `wiki-kinds.json` as `##` headings, then `## Sources`, `## Notes`, footnotes. A card is skimmed, so it stays short. |
 | `index` | A hub. `> [!hero]` and `> [!card]` from [[Dashboard editing rules]] apply here and nowhere else, and require `cssclasses: [loom-dashboard]`. |
 

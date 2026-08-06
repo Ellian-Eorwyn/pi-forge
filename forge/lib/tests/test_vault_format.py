@@ -248,5 +248,176 @@ class LiveVaultTests(unittest.TestCase):
         self.assertNotIn("--color-red-rgb", {entry["accent"] for entry in registry.values()})
 
 
+GRAMMAR_NOTE = """# Note Format
+
+## Block grammar
+
+A note is assembled from the blocks below.
+
+```
+frontmatter          schema-controlled
+# Title              exactly one level-one heading
+> [!summary]         the lead
+<body>               prose and ## sections
+> [!provenance]-     how this note was made
+## Notes             owner-authored; never written, never read
+```
+
+### Block order
+
+| Block | Syntax | Required | Written by | Means |
+| --- | --- | --- | --- | --- |
+| `frontmatter` | `frontmatter` | no | schema | schema-controlled |
+| `title` | `# Title` | yes | either | exactly one level-one heading |
+| `summary` | `> [!summary]` | no | either | the lead |
+| `body` | `<body>` | no | either | prose and ## sections |
+| `provenance` | `> [!provenance]-` | no | machine | how this note was made |
+| `notes` | `## Notes` | no | owner | owner-authored; never written, never read |
+
+## Callout registry
+
+| Callout | Means | Accent | Icon | Folded | Not for |
+| --- | --- | --- | --- | --- | --- |
+| `summary` | Orientation | cyan `--color-cyan-rgb` | `lucide-align-left` | no | A second lead |
+| `provenance` | How it was made | quiet `--callout-quote` | `lucide-history` | yes | Anything a reader needs |
+
+## Per-type shapes
+
+| Type | Shape |
+| --- | --- |
+| `note` | Lead, then prose. |
+| `concept` / wiki card | Lead as `summary`, then the kind's sections. |
+
+## Never do
+
+- Never invent a callout type. Add it to the registry above
+  first, or use prose.
+"""
+
+
+class BlockGrammarTests(unittest.TestCase):
+    def test_the_grammar_parses_in_row_order(self):
+        blocks = vf.parse_block_grammar(GRAMMAR_NOTE)
+        self.assertEqual(
+            [entry["block"] for entry in blocks],
+            ["frontmatter", "title", "summary", "body", "provenance", "notes"],
+        )
+        self.assertTrue(blocks[1]["required"])
+        self.assertEqual(blocks[4]["written_by"], vf.WRITTEN_BY_MACHINE)
+        self.assertEqual(vf.block_index(vf.parse_format(GRAMMAR_NOTE))["notes"], 5)
+
+    def test_a_vault_that_has_not_declared_an_order_is_not_a_broken_vault(self):
+        """Absence and malformation are different findings: every vault started
+        without a block order, and none of them was malformed for it."""
+        self.assertEqual(vf.parse_block_grammar(NOTE), [])
+        self.assertEqual(vf.parse_format(NOTE)["blocks"], [])
+        self.assertEqual(vf.prompt_prefix(vf.parse_format(NOTE)), "")
+
+    def test_the_fence_and_the_table_must_agree(self):
+        """Two statements of the same thing in one file drift silently, and the
+        fence is the half a person actually reads."""
+        reordered = GRAMMAR_NOTE.replace(
+            "| `summary` | `> [!summary]` | no | either | the lead |\n"
+            "| `body` | `<body>` | no | either | prose and ## sections |\n",
+            "| `body` | `<body>` | no | either | prose and ## sections |\n"
+            "| `summary` | `> [!summary]` | no | either | the lead |\n",
+        )
+        with self.assertRaises(UserError) as caught:
+            vf.parse_block_grammar(reordered)
+        self.assertIn("fence and the Block order table disagree", str(caught.exception))
+
+    def test_a_declared_order_still_fails_closed(self):
+        for broken, expected in (
+            ("| `notes` | `## Notes` | no | owner |", "malformed row"),
+            ("| `notes` | `## Notes` | maybe | owner | owner-authored; never written, never read |", "Required"),
+            ("| `notes` | `## Notes` | no | nobody | owner-authored; never written, never read |", "Written by"),
+        ):
+            note = GRAMMAR_NOTE.replace(
+                "| `notes` | `## Notes` | no | owner | owner-authored; never written, never read |", broken
+            )
+            with self.assertRaises(UserError) as caught:
+                vf.parse_block_grammar(note)
+            self.assertIn(expected, str(caught.exception))
+
+    def test_a_duplicate_block_is_refused(self):
+        note = GRAMMAR_NOTE.replace(
+            "| `notes` | `## Notes` | no | owner | owner-authored; never written, never read |",
+            "| `notes` | `## Notes` | no | owner | owner-authored |\n"
+            "| `notes` | `## Notes` | no | owner | owner-authored |",
+        )
+        with self.assertRaises(UserError):
+            vf.parse_block_grammar(note)
+
+
+class TypeShapeTests(unittest.TestCase):
+    def test_shapes_key_on_the_first_backticked_type(self):
+        shapes = vf.parse_type_shapes(GRAMMAR_NOTE)
+        self.assertEqual(sorted(shapes), ["concept", "note"])
+        self.assertEqual(shapes["concept"]["label"], "`concept` / wiki card")
+
+    def test_the_shipped_note_already_declares_shapes(self):
+        """This table needs no vault edit -- it parses as shipped."""
+        assets = Path(__file__).resolve().parents[1] / "vault-format"
+        shapes = vf.parse_type_shapes((assets / "note-format.md").read_text(encoding="utf-8"))
+        self.assertIn("journal", shapes)
+        self.assertIn("reflection", shapes["journal"]["shape"])
+
+
+class PromptPrefixTests(unittest.TestCase):
+    def test_the_prefix_lists_only_blocks_a_generator_may_write(self):
+        """Telling a model about `## Notes` is how a model comes to write one."""
+        prefix = vf.prompt_prefix(vf.parse_format(GRAMMAR_NOTE), "note")
+        self.assertIn("summary (> [!summary])", prefix)
+        self.assertIn("provenance", prefix)
+        self.assertNotIn("## Notes", prefix)
+        self.assertNotIn("frontmatter", prefix)
+
+    def test_the_named_type_brings_its_own_shape(self):
+        prefix = vf.prompt_prefix(vf.parse_format(GRAMMAR_NOTE), "note")
+        self.assertIn("Shape for `note`", prefix)
+        self.assertNotIn("wiki card", prefix)
+
+    def test_a_wrapped_prohibition_survives_whole(self):
+        """A rule that stops mid-sentence is worse than no rule at all."""
+        prefix = vf.prompt_prefix(vf.parse_format(GRAMMAR_NOTE))
+        self.assertIn("Add it to the registry above first, or use prose.", prefix)
+
+    def test_the_shipped_note_fits_its_own_budget(self):
+        """The groups are appended in order, so a budget that fits only the first
+        two spends the whole prefix on the block list and states no prohibition."""
+        assets = Path(__file__).resolve().parents[1] / "vault-format"
+        text = (assets / "note-format.md").read_text(encoding="utf-8")
+        fmt = vf.parse_format(text)
+        if not fmt["blocks"]:
+            self.skipTest("the shipped note has not adopted the block order table yet")
+        prefix = vf.prompt_prefix(fmt, "journal")
+        self.assertIn("Never do:", prefix)
+        self.assertLessEqual(len(prefix), vf.DEFAULT_PREFIX_BUDGET)
+
+
+class CompiledFormatTests(unittest.TestCase):
+    def test_the_cache_is_keyed_by_the_note_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            note = root / "0.04 Note Format.md"
+            note.write_text(GRAMMAR_NOTE, encoding="utf-8")
+            cache = root / "cache"
+            first, first_hash = vf.compiled_format_for(root, note, cache_dir=cache)
+            self.assertTrue((cache / "compiled-format.json").is_file())
+            cached, cached_hash = vf.compiled_format_for(root, note, cache_dir=cache)
+            self.assertEqual(cached, first)
+            self.assertEqual(cached_hash, first_hash)
+
+            note.write_text(GRAMMAR_NOTE.replace("the lead", "the opening"), encoding="utf-8")
+            changed, changed_hash = vf.compiled_format_for(root, note, cache_dir=cache)
+            self.assertNotEqual(changed_hash, first_hash)
+            self.assertEqual(changed["blocks"][2]["means"], "the opening")
+
+    def test_format_state_is_serializable(self):
+        state = vf.format_state("/vault/0.04 Note Format.md", "abc123")
+        self.assertEqual(state["format_compiler_version"], vf.COMPILED_FORMAT_VERSION)
+        self.assertEqual(state["format_hash"], "abc123")
+
+
 if __name__ == "__main__":
     unittest.main()

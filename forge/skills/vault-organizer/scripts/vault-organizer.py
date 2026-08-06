@@ -20,6 +20,7 @@ import forge_verify
 import obsidian_cli
 import run_state
 import vault_dates
+import vault_format
 import vault_profile
 from vault_moves import PlainMover, backup_once, resolve_mover
 import vault_voice
@@ -3443,6 +3444,52 @@ def status(args):
     )
 
 
+def format_check(vault, warnings):
+    """Whether the vault's callout registry and its implementations still agree.
+
+    The registry is declared by a note, styled by a stylesheet, emitted by
+    `vault_reflection`, and used by the templates, and none of the four can see
+    the others. A callout added to one and forgotten in the rest renders as stock
+    blue with a pencil icon, which reads as a design choice rather than a defect.
+    Nothing ran this check before, so it could only ever be run by hand.
+
+    A vault with no format note, or no stylesheet, is not a broken vault -- it is
+    a vault that has not adopted the registry, which is the state every vault
+    started in. That reports `configured: false` and never fails. Only a vault
+    that declares a registry and then contradicts it is an error.
+    """
+    try:
+        format_path = vault_format.resolve_format_path(vault)
+    except UserError as error:
+        return {"ok": False, "configured": True, "detail": str(error)}
+    if format_path is None:
+        return {
+            "ok": True,
+            "configured": False,
+            "detail": f"no note-format note; default is {vault_format.DEFAULT_FORMAT}",
+        }
+    try:
+        findings = vault_format.load_and_check(vault, raw_format=str(format_path))
+    except UserError as error:
+        # The stylesheet is the usual absentee here, and a vault can legitimately
+        # declare the registry before writing one.
+        return {"ok": True, "configured": True, "path": str(format_path), "detail": str(error)}
+    errors = [message for severity, message in findings if severity == "error"]
+    notices = [message for severity, message in findings if severity != "error"]
+    for message in errors:
+        warnings.append(f"note format [error] {message}")
+    for message in notices:
+        warnings.append(f"note format [warning] {message}")
+    return {
+        "ok": not errors,
+        "configured": True,
+        "path": str(format_path),
+        "callouts": len(vault_format.parse_format_note(format_path.read_text(encoding="utf-8"))),
+        "errors": errors,
+        "notices": notices,
+    }
+
+
 def doctor(args):
     vault = Path(args.vault).expanduser().resolve()
     checks = {}
@@ -3497,6 +3544,8 @@ def doctor(args):
             ),
         }
     warnings.extend(getattr(args, "profile_warnings", []) or [])
+    checks["format"] = format_check(vault, warnings)
+    ok = ok and checks["format"]["ok"]
 
     cli_session = obsidian_cli.probe(vault)
     if schema_check["ok"]:

@@ -26,6 +26,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 const CONTEXT_CUSTOM_TYPE = "vault-context";
 const DEFAULT_SCHEMA_RELATIVE = join("99 Meta", "99.02 Schemas", "0.00 Vault Schema.md");
 const DEFAULT_PROFILE_RELATIVE = join("99 Meta", "99.02 Schemas", "0.03 Personal Context.md");
+const DEFAULT_FORMAT_RELATIVE = join("99 Meta", "99.02 Schemas", "0.04 Note Format.md");
 /** Matches `MAX_OWNER_FIELD_CHARS` in `forge/lib/vault_profile.py`: a name, not a biography. */
 const MAX_OWNER_FIELD_CHARS = 40;
 const SKIPPED_DIRECTORIES = new Set([".obsidian", ".git", ".vault-organizer", ".vault-connections", "node_modules"]);
@@ -71,6 +72,8 @@ interface VaultInfo {
 	noteCount: number;
 	truncated: boolean;
 	schemaNote?: string;
+	/** The note declaring how a note's body is arranged, when the vault has adopted one. */
+	formatNote?: string;
 	/** Declared by the personal-context register's `## Owner` section, when it has one. */
 	owner?: VaultOwner;
 	wikiDomain: boolean;
@@ -432,6 +435,7 @@ export function inspectVault(cwd: string): VaultInfo | undefined {
 		noteCount: count,
 		truncated,
 		schemaNote,
+		formatNote: findConfigNote(root, DEFAULT_FORMAT_RELATIVE),
 		owner: readOwner(root),
 		wikiDomain: hasWikiDomain(root, schemaNote),
 		organizerState: existsSync(join(root, ".vault-organizer")),
@@ -496,6 +500,12 @@ export function vaultContextMessage(vault: VaultInfo): string {
 		lines.push(`- Schema note (sole source of truth for folders and frontmatter): ${vault.schemaNote}`);
 	} else {
 		lines.push("- Schema note: NOT FOUND. vault-organizer cannot file notes until one exists; say so before attempting it.");
+	}
+	// The schema says how a note is *filed*; this says how its body is *arranged*.
+	// A model that has never been told the second one exists writes notes that
+	// pass every check and still do not look like the vault's own.
+	if (vault.formatNote) {
+		lines.push(`- Note format (block order and the callout registry — read before writing or editing a note's body): ${vault.formatNote}`);
 	}
 
 	lines.push(

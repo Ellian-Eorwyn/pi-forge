@@ -41,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import forge_llm
 import forge_verify
 import run_state
+import vault_compose
 import vault_lexicon
 import vault_profile
 import vault_reflection
@@ -145,11 +146,8 @@ EXEMPLAR_SEARCH_TIMEOUT = 120
 PREFS_RUN_CONTEXT_CHARS = 6000
 
 BRAINDUMP_HEADING = "# Braindump"
-WORD_RE = re.compile(r"[a-z][a-z-]{2,}")
 URL_RE = vault_reflection.URL_RE
 WIKILINK_RE = re.compile(r"\[\[[^\]]+\]\]")
-NUMBER_RE = re.compile(r"\d+(?:[.,:/]\d+)*")
-PROPER_NOUN_RE = re.compile(r"\b([A-Z][a-zA-Z]*(?:['’][a-zA-Z]+)?)\b")
 TIMESTAMP_LINE_RE = re.compile(r"^\*\d{1,2}(?::\d{2}){1,2}\*$")
 SPEAKER_LINE_RE = re.compile(r"^\*\*(.+)\*\*$")
 # What counts as a section of a drafted body. The checks read the body through
@@ -157,37 +155,6 @@ SPEAKER_LINE_RE = re.compile(r"^\*\*(.+)\*\*$")
 # a section starts.
 SECTION_HEADING_RE = re.compile(r"^##+\s+(.*)$")
 BULLET_RE = re.compile(r"^[-*+]\s+")
-SENTENCE_START_RE = re.compile(r"(?:^|[.!?:;]\s+|[\n\r]\s*|[-*]\s+|[\"“(\[]\s*)$")
-
-# Words that open a sentence in English and would otherwise read as names.
-COMMON_CAPITALS = {
-    "i", "a", "an", "the", "it", "its", "this", "that", "these", "those", "there", "then",
-    "and", "but", "or", "so", "if", "when", "while", "because", "after", "before", "since",
-    "we", "our", "you", "your", "they", "their", "he", "she", "his", "her", "him", "them",
-    "my", "me", "mine", "us", "who", "what", "why", "how", "where", "which", "not", "no",
-    "yes", "ok", "okay", "maybe", "also", "still", "just", "one", "two", "three", "some",
-    "any", "all", "each", "every", "both", "for", "from", "with", "without", "about",
-    "into", "onto", "over", "under", "again", "next", "last", "first", "second", "third",
-    "today", "tomorrow", "yesterday", "monday", "tuesday", "wednesday", "thursday",
-    "friday", "saturday", "sunday", "january", "february", "march", "april", "may",
-    "june", "july", "august", "september", "october", "november", "december",
-    "note", "notes", "task", "tasks", "idea", "ideas", "question", "questions", "summary",
-    "background", "context", "details", "plan", "plans", "reference", "draft", "open",
-    "todo", "to", "do", "of", "in", "on", "at", "by", "as", "is", "are", "was", "were",
-    "have", "has", "had", "will", "would", "could", "should", "can", "may", "might",
-    "need", "needs", "want", "wants", "think", "thinking", "thought", "thoughts",
-}
-# Spelled-out numbers, so "three weeks" in a dump covers "3 weeks" in a draft.
-NUMBER_WORDS = {
-    "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
-    "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10", "eleven": "11",
-    "twelve": "12", "thirteen": "13", "fourteen": "14", "fifteen": "15",
-    "sixteen": "16", "seventeen": "17", "eighteen": "18", "nineteen": "19",
-    "twenty": "20", "thirty": "30", "forty": "40", "fifty": "50", "sixty": "60",
-    "seventy": "70", "eighty": "80", "ninety": "90", "hundred": "100",
-    "thousand": "1000", "million": "1000000",
-}
-
 
 # --------------------------------------------------------------------------- #
 # Output plumbing
@@ -505,6 +472,31 @@ def exemplar_excerpt(text, limit=EXEMPLAR_CHARS):
     return text[: cut if cut > limit // 2 else limit].strip()
 
 
+PROVENANCE_BLOCK_RE = re.compile(r"^>\s*\[!provenance\]", re.IGNORECASE | re.MULTILINE)
+
+
+def machine_authored(values, body):
+    """Whether a note was written by a pipeline rather than by the vault's owner.
+
+    Frontmatter alone does not answer this. `capture_type` records the *channel* a
+    note arrived by, and `vault-transcripts` correctly writes `voice` on a note it
+    generated, so the property is true and useless here. `processed_by` was the
+    other half of the test and is not an approved property in every vault -- where
+    it is not, `serialize_frontmatter` drops it, and every transcript-derived note
+    in that vault reads as owner-authored. That is the state this vault is in, so
+    the guard against a model learning its own habits has been open for as long as
+    transcripts have been processed.
+
+    The `> [!provenance]-` block is the reliable marker: `0.04 Note Format.md`
+    says it must be accurate about what made a note, and that a note written by
+    hand does not get one. It survives filing, which rewrites frontmatter
+    wholesale, and it cannot be dropped by a schema that never approved it.
+    """
+    if values.get("capture_type") == "generated" or values.get("processed_by"):
+        return True
+    return bool(PROVENANCE_BLOCK_RE.search(str(body)))
+
+
 def collect_exemplars(vault, query, wanted=EXEMPLAR_COUNT, note_type=None):
     """Notes by this person that read the way a new note should.
 
@@ -528,7 +520,7 @@ def collect_exemplars(vault, query, wanted=EXEMPLAR_COUNT, note_type=None):
         except (OSError, UnicodeDecodeError):
             continue
         values = {} if split["malformed"] else parse_frontmatter(split["frontmatter_text"])
-        if values.get("capture_type") == "generated" or values.get("processed_by"):
+        if machine_authored(values, split["body"]):
             continue
         excerpt = exemplar_excerpt(split["body"])
         if len(excerpt) < EXEMPLAR_MIN_CHARS:
@@ -767,37 +759,6 @@ def draft_items(args, service, system, planned, run_dir):
 # --------------------------------------------------------------------------- #
 
 
-def content_words(text):
-    return WORD_RE.findall(str(text).casefold().replace("'", "").replace("’", ""))
-
-
-def normalized_source(text):
-    """The source as one comparable blob, with spelled-out numbers as digits."""
-    lowered = str(text).casefold().replace("'", "").replace("’", "")
-    for word, digits in NUMBER_WORDS.items():
-        lowered = lowered.replace(word, f"{word} {digits}")
-    return lowered
-
-
-def capitalized_tokens(text):
-    """Capitalized tokens, split by how much their position proves.
-
-    Mid-sentence capitalization is nearly always a name. At the start of a
-    sentence it is ambiguous — an ordinary word gets a capital there too — so
-    the two are kept apart rather than pretending one rule fits both.
-    """
-    confident = []
-    ambiguous = []
-    for match in PROPER_NOUN_RE.finditer(str(text)):
-        token = match.group(1)
-        if token.casefold() in COMMON_CAPITALS or len(token) < 3:
-            continue
-        preceding = str(text)[max(0, match.start() - 24):match.start()]
-        opener = bool(SENTENCE_START_RE.search(preceding)) and not token.isupper()
-        (ambiguous if opener else confident).append(token)
-    return confident, ambiguous
-
-
 def invented_specifics(source, body, allowed_urls=()):
     """Specifics in the draft with no root in the braindump.
 
@@ -811,67 +772,25 @@ def invented_specifics(source, body, allowed_urls=()):
     the reflection sections ask for would be held as an invented link. Only that
     set widens the check; a URL from anywhere else is still invention.
 
+    The check itself now lives in `vault_compose.ungrounded_specifics`, which
+    takes a set of sources rather than one. This skill has exactly one -- the
+    braindump -- so it wraps that with a single-unit set and keeps its own name,
+    because "invented" is the right word when there is a single source and the
+    draft is supposed to be a rewording of it.
+
     Returns ``{"names", "uncertain_names", "links", "numbers"}``. Only ``names``
     and ``links`` are strong enough to hold a note back; the rest are handed to
     the reviewer, which reads the braindump anyway.
     """
-    permitted = {str(url).rstrip(".,;:)").casefold() for url in allowed_urls or ()}
-    source_lower = normalized_source(source)
-    source_words = set(content_words(source))
-    prose = strip_structure(body)
-
-    def rooted(token):
-        folded = token.casefold().replace("'", "").replace("’", "")
-        if folded in source_lower or folded in source_words:
-            return True
-        # A word the draft derived from one that was spoken ("order" ->
-        # "ordering") shares a stem; a fabricated name shares nothing.
-        return len(folded) >= 4 and any(folded[:length] in source_words for length in range(4, len(folded) + 1))
-
-    confident, ambiguous = capitalized_tokens(prose)
-    names, uncertain = [], []
-    for token, bucket in [(token, names) for token in confident] + [(token, uncertain) for token in ambiguous]:
-        if not rooted(token) and token not in bucket:
-            bucket.append(token)
-    return {
-        "names": names,
-        "uncertain_names": [token for token in uncertain if token not in names],
-        "links": [
-            url
-            for url in URL_RE.findall(body)
-            if url.rstrip(".,;:)").casefold() not in permitted and url.rstrip(".,;:").casefold() not in source_lower
-        ],
-        "numbers": [number for number in NUMBER_RE.findall(prose) if number not in source_lower],
-    }
-
-
-def strip_structure(markdown):
-    """Prose only. Headings and list markers are structure the writer authors."""
-    lines = []
-    for line in str(markdown).splitlines():
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            continue
-        stripped = re.sub(r"^[-*+]\s+", "", stripped)
-        stripped = re.sub(r"^\d+[.)]\s+", "", stripped)
-        stripped = re.sub(r"^>\s*", "", stripped)
-        lines.append(stripped)
-    return "\n".join(lines)
-
-
-def coverage_ratio(source, bodies):
-    """How much of the braindump's distinctive vocabulary survived into notes."""
-    source_words = [word for word in content_words(source) if len(word) >= 5]
-    if not source_words:
-        return 1.0
-    kept = set()
-    written = set()
-    for body in bodies:
-        written.update(content_words(body))
-    for word in source_words:
-        if word in written or any(word[:length] in written for length in range(4, len(word))):
-            kept.add(word)
-    return len(kept) / len(set(source_words))
+    sources = vault_compose.source_set(
+        [vault_compose.source_unit(vault_compose.KIND_BRAINDUMP, "the braindump", source)]
+    )
+    found = vault_compose.ungrounded_specifics(sources, body, extra_urls=allowed_urls or ())
+    # Wikilinks are checked against `connection_candidates` by `check_reflection`,
+    # which knows which notes actually exist; the source-set answer would be "none
+    # of them", since a braindump names no vault notes.
+    found.pop("wikilinks", None)
+    return found
 
 
 def body_blocks(body):
@@ -1145,7 +1064,9 @@ def assemble_one(args, schema, item, entries, taken, date, warnings, prior=None)
         entry["notices"] = notices
     primary = primary_of(entries)
     if primary is not None and item["words"] >= COVERAGE_MIN_SOURCE_WORDS:
-        ratio = coverage_ratio(item["text"], [entry["body"] for entry in entries if not entry.get("held")])
+        ratio = vault_compose.coverage_ratio(
+            item["text"], [entry["body"] for entry in entries if not entry.get("held")]
+        )
         if ratio < COVERAGE_WARN_RATIO:
             message = f"{item['label']}: notes kept {ratio:.0%} of the braindump's distinctive words"
             warnings.append(message)

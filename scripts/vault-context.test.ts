@@ -71,7 +71,14 @@ const REGISTER_WITH_OWNER = `# Personal Context
 `;
 
 function makeVault(
-	options: { schema?: string; schemaAt?: string; notes?: string[]; indexed?: number; register?: string } = {},
+	options: {
+		schema?: string;
+		schemaAt?: string;
+		notes?: string[];
+		indexed?: number;
+		register?: string;
+		format?: string;
+	} = {},
 ) {
 	const root = mkdtempSync(join(tmpdir(), "vault-context-"));
 	mkdirSync(join(root, ".obsidian"), { recursive: true });
@@ -85,6 +92,11 @@ function makeVault(
 		const full = join(root, "99 Meta", "99.02 Schemas", "0.03 Personal Context.md");
 		mkdirSync(join(full, ".."), { recursive: true });
 		writeFileSync(full, options.register);
+	}
+	if (options.format !== undefined) {
+		const full = join(root, "99 Meta", "99.02 Schemas", "0.04 Note Format.md");
+		mkdirSync(join(full, ".."), { recursive: true });
+		writeFileSync(full, options.format);
 	}
 	for (const note of options.notes ?? []) {
 		const full = join(root, note);
@@ -233,6 +245,28 @@ test("the injected message flags a missing schema, a missing index, and a missin
 		assert.match(withoutSchema, /Schema note: NOT FOUND/);
 	} finally {
 		rmSync(bare, { recursive: true, force: true });
+	}
+});
+
+test("the note-format note is named when the vault has one, and costs no line when it does not", () => {
+	const withFormat = makeVault({ schema: SCHEMA_WITH_WIKI, format: "# Note Format\n", notes: ["A.md"] });
+	try {
+		const info = inspectVault(withFormat) as NonNullable<ReturnType<typeof inspectVault>>;
+		assert.equal(info.formatNote, join("99 Meta", "99.02 Schemas", "0.04 Note Format.md"));
+		assert.match(vaultContextMessage(info), /Note format \(block order and the callout registry/);
+	} finally {
+		rmSync(withFormat, { recursive: true, force: true });
+	}
+
+	// A vault that has not adopted the registry is not a broken vault, and an
+	// absent policy note does not earn a line explaining that it is absent.
+	const without = makeVault({ schema: SCHEMA_WITH_WIKI, notes: ["A.md"] });
+	try {
+		const info = inspectVault(without) as NonNullable<ReturnType<typeof inspectVault>>;
+		assert.equal(info.formatNote, undefined);
+		assert.doesNotMatch(vaultContextMessage(info), /Note format/);
+	} finally {
+		rmSync(without, { recursive: true, force: true });
 	}
 });
 
