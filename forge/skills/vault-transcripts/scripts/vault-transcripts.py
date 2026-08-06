@@ -3205,6 +3205,199 @@ def build_daily_note(fmt, schema, group, composition, sources, raw_names, run_di
     return vault_compose.render_note(fmt, schema, daily_metadata(schema, group["date"]), blocks)
 
 
+COMPOSE_DAILY_SYSTEM = """You organize one day of a person's voice memos into the sections of a single note.
+
+The transcript you get is that person's whole day, several recordings merged into
+one and already cleaned. Dividers reading `--- recording s-0001 ---` mark where
+each recording begins. Your job is only to decide the shape: what the day should
+be called, one paragraph saying what it covered, and which topics it breaks into.
+
+Rules:
+- Group by topic, not by recording. One topic that spans three recordings is one
+  section; one recording holding three topics becomes three sections.
+- A section's `sourceIds` are every recording that contributed to it, in order.
+- Do not invent a topic the day did not contain, and do not drop one it did.
+- Write nothing for the sections themselves except the text belonging to them.
+  Keep the speaker's own words and their own register; condense by dropping
+  words, never by replacing one with a word you prefer.
+- Headings are sentence case, name what is under them, and carry no timestamp:
+  times are added afterwards from the recording files.
+- The summary is one paragraph naming what the day covered. No preamble.
+
+Return JSON only:
+{"title": "...", "summary": "...", "sections": [{"heading": "...", "sourceIds": ["s-0001"], "lines": ["..."]}]}"""
+
+
+def compose_daily(args, vault, group, cleaned, sources):
+    """One chat call deciding a day's shape. Everything exact is written in code.
+
+    The model gets the cleaned day and returns a title, a summary, and topical
+    sections with the recordings each rests on. It is never asked for a time, a
+    filename, or a link: those are facts about files, and asking invites an
+    invented one.
+    """
+    payload = {
+        "date": group["date"],
+        "recordingCount": len(group["members"]),
+        "recordingIds": [unit["id"] for unit in sources["units"]],
+        "day": cleaned,
+    }
+    compiled = vault_voice.compile_voice(
+        getattr(args, "compiled_voice", None),
+        vault_voice.CONTEXT_OWNER,
+        note_type="journal",
+        material=cleaned,
+    )
+    if compiled["per_type_rule"]:
+        payload["styleForThisKind"] = compiled["per_type_rule"]
+    if compiled["vocabulary"]:
+        payload["relevantVocabulary"] = compiled["vocabulary"]
+    value, _call = forge_llm.call_json_with_retry(
+        chat_service(args),
+        [
+            {"role": "system", "content": COMPOSE_DAILY_SYSTEM},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ],
+        cache_prompt=args.cache_prompt,
+        response_format={"type": "json_object"},
+        timeout=args.request_timeout,
+        api_key=args.api_key,
+        task="compose-daily-log",
+    )
+    return validate_daily_composition(value, sources)
+
+
+def validate_daily_composition(value, sources):
+    """The composing response, or a UserError naming what was wrong with it."""
+    if not isinstance(value, dict):
+        raise UserError("composing response was not an object")
+    title = validate_title(value.get("title"))
+    summary = value.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        raise UserError("composing response has no summary")
+    raw_sections = value.get("sections")
+    if not isinstance(raw_sections, list) or not raw_sections:
+        raise UserError("composing response has no sections")
+    known = {unit["id"] for unit in sources["units"]}
+    sections = []
+    seen = set()
+    dropped = []
+    for entry in raw_sections:
+        if not isinstance(entry, dict):
+            raise UserError("a section is not an object")
+        heading = str(entry.get("heading") or "").strip()
+        if not heading:
+            raise UserError("a section has no heading")
+        if heading.casefold() in seen:
+            raise UserError(f"two sections are both called {heading!r}")
+        seen.add(heading.casefold())
+        if heading.casefold() == SOURCE_RECORDINGS_HEADING.casefold():
+            raise UserError(f"'{SOURCE_RECORDINGS_HEADING}' is written in code, not by the model")
+        lines = entry.get("lines")
+        if isinstance(lines, str):
+            lines = lines.splitlines()
+        if not isinstance(lines, list) or not any(str(line).strip() for line in lines):
+            raise UserError(f"section {heading!r} has no text")
+        # An id the day does not have is dropped rather than refused. A six
+        # recording day drew `s-0007` through `s-0011` on a real run -- the model
+        # counting sections rather than reading the dividers. The ids feed the
+        # `(~HH:MM)` markers and nothing else, so an invented one contributes
+        # nothing and costs nothing to discard; a section left citing *no* real
+        # recording is the substantive failure, and `check_daily_note` holds the
+        # day for it. Absorbing the noise here keeps that signal readable.
+        source_ids = []
+        for unit_id in entry.get("sourceIds") or []:
+            unit_id = str(unit_id)
+            if unit_id in known and unit_id not in source_ids:
+                source_ids.append(unit_id)
+            elif unit_id not in known:
+                dropped.append(f"{heading}: {unit_id}")
+        sections.append({"heading": heading, "sourceIds": source_ids, "lines": [str(line) for line in lines]})
+    return {
+        "title": title,
+        "summary": summary.strip(),
+        "sections": sections,
+        "dropped_source_ids": dropped,
+    }
+
+
+def clean_daily_group(args, group, merged, run_dir, journal_key):
+    """Clean a day's merged transcript as one document, one chunk per chat call.
+
+    Mirrors `clean_items`, but over blocks that belong to no single file. The
+    tiny threshold is measured on the merged day rather than per recording, which
+    is the whole point of merging first: a 61-word fragment gets no summary and
+    the lightest possible touch on its own, and a real edit as part of a day.
+    """
+    journal_path = run_dir / "cleaned.jsonl"
+    prior, _ = run_state.read_jsonl_recover_tail(journal_path, repair=True)
+    journal = {
+        (row["path"], row["chunk"]): row
+        for row in prior
+        if row.get("path") == journal_key and row.get("chunk") is not None and row.get("status") == "ok"
+    }
+    artifacts = run_dir / "cleaned"
+    artifacts.mkdir(exist_ok=True)
+    blocks = [{"speaker": None, "seconds": entry["seconds"], "text": entry["text"]} for entry in merged]
+    words = sum(len(entry["text"].split()) for entry in merged)
+    tiny = words < args.tiny_words
+    record = {"recording_type": group["recording_type"], "material_role": DAILY_ROLE}
+    chunks = chunk_blocks(blocks)
+    service = chat_service(args)
+    cleaned_chunks = []
+    headings = []
+    previous_tail = ""
+    warnings = []
+    for index, chunk in enumerate(chunks, start=1):
+        row = journal.get((journal_key, index))
+        if row is not None:
+            cleaned = (artifacts / row["artifact"]).read_text(encoding="utf-8")
+            cleaned_chunks.append(cleaned)
+            headings.extend(heading_lines(cleaned))
+            previous_tail = cleaned[-300:]
+            continue
+        started = time.time()
+        payload, source = cleanup_payload(
+            record, chunk, index, len(chunks), headings, previous_tail, {}, False, tiny,
+            getattr(args, "compiled_voice", None), getattr(args, "compiled_lexicon", None),
+        )
+        cleaned, _summary = clean_one_chunk(
+            args, service, payload, source, {}, False, tiny,
+            system=cleanup_system(getattr(args, "compiled_voice", None), vault_voice.CONTEXT_OWNER),
+        )
+        name = f"{sha256_text(journal_key)[:12]}-{index:04d}.md"
+        (artifacts / name).write_text(cleaned, encoding="utf-8")
+        run_state.append_jsonl_fsync(
+            journal_path,
+            {
+                "path": journal_key, "chunk": index, "chunks": len(chunks), "status": "ok",
+                "artifact": name, "cleaned_sha256": sha256_text(cleaned),
+                "seconds": round(time.time() - started, 3),
+            },
+        )
+        cleaned_chunks.append(cleaned)
+        headings.extend(heading_lines(cleaned))
+        previous_tail = cleaned[-300:]
+        progress(f"[daily {group['date']}] chunk {index}/{len(chunks)}")
+    return "\n\n".join(part.strip() for part in cleaned_chunks).strip(), tiny, warnings
+
+
+def composed_prose(composition):
+    """Only the text the model actually wrote, per section, with its citations.
+
+    The grounding check must read this rather than the rendered note. A rendered
+    note also contains a title the model chose, `## Source Recordings` links built
+    from filenames code generated, and a provenance block code wrote -- and
+    checking those means checking the pipeline's own output against the sources,
+    which reports the note's title as an invented name every time it is not a
+    phrase somebody said out loud. Naming a thing is exactly the part of writing
+    that does not quote.
+    """
+    written = [(None, composition["summary"])] if composition.get("summary") else []
+    written.extend((section.get("sourceIds") or None, "\n".join(section["lines"])) for section in composition["sections"])
+    return written
+
+
 def check_daily_note(fmt, sources, text, composition, members):
     """Deterministic findings against a composed day's log."""
     review = []
@@ -3215,21 +3408,181 @@ def check_daily_note(fmt, sources, text, composition, members):
             review.append(f"section {section['heading']!r} cites unknown recordings: {', '.join(unknown)}")
         if not section.get("sourceIds"):
             review.append(f"section {section['heading']!r} cites no recording")
-    # A day's log built from five of six recordings is worse than no log, because
-    # nothing about it looks wrong.
-    for dropped in vault_compose.dropped_units(sources, text):
-        review.append(f"recording {dropped['id']} ({dropped['label']}) did not reach the note")
-    found = vault_compose.ungrounded_specifics(sources, text)
+    # Grounded against the whole day, not per section. `cited_ids` is the right
+    # gate where each source is fetched and quoted separately, but a day is merged
+    # and cleaned as one document *before* the model sees any section boundary, so
+    # its `sourceIds` attribute an already-unified text rather than claiming where
+    # each sentence came from. Narrowing by them reports the day's own vocabulary
+    # as invented -- a real run flagged Herder, Mochi, Claude, ITO, Mac Whisper and
+    # Linux, every one of them spoken that morning, in a different recording than
+    # the section that carried them. The citations earn their keep on the
+    # `(~HH:MM)` markers instead, and are checked above for existing at all.
+    written = "\n\n".join(prose for _ids, prose in composed_prose(composition))
+    found = vault_compose.ungrounded_specifics(sources, written)
     for name in found["names"]:
         review.append(f"name not in any recording: {name}")
     for link in found["links"]:
         review.append(f"link not in any recording: {link}")
+    for dropped in vault_compose.dropped_units(sources, written):
+        review.append(f"recording {dropped['id']} ({dropped['label']}) did not reach the note")
     for severity, message in vault_compose.check_grammar(fmt, text):
         if severity == "error":
             review.append(f"note format: {message}")
     if len(composition["sections"]) > len(members) * 3:
         review.append("more sections than the day plausibly held; the log is fragmenting")
     return review
+
+
+def daily_raw_destination(group, item, title, taken):
+    """Where one recording's own note goes: the inbox, beside the log.
+
+    Deliberately not routed into the sources tree. Doing that means choosing a
+    domain, and the only way to choose one here is to hardcode it -- an earlier
+    version said `personal`, which is wrong for a workday of memos about a
+    dissertation. `vault-organizer` owns filing and reads each note to decide, so
+    both the log and its recordings leave here unfiled, exactly as the
+    per-recording path already leaves its raw twins.
+    """
+    stem = safe_title(
+        format_filename("date-time-topic", group["date"], item["time_hhmm"], group["recording_type"], title)[:-3]
+        + RAW_NOTE_SUFFIX
+    )
+    return assign_raw_name_in(INBOX_DIR, stem, taken)
+
+
+def assign_raw_name_in(folder, stem, taken):
+    suffix = 1
+    while True:
+        candidate = stem if suffix == 1 else f"{stem} ({suffix})"
+        rel = (Path(folder) / f"{candidate}.md").as_posix()
+        if rel.casefold() not in taken:
+            taken.add(rel.casefold())
+            return rel
+        suffix += 1
+
+
+def assemble_daily(args, vault, schema, fmt, group, parsed_by_path, class_records, composition, sources, merged, run_dir):
+    """A day's log plus one source note per recording, ready to write.
+
+    The recordings keep their own notes -- the log says what the day was about,
+    and what was actually said stays available underneath it. Merging happens in
+    memory and never on disk, which is what satisfies both halves of the request:
+    cleanup reads one transcript, and the vault keeps six.
+    """
+    artifacts = run_dir / "assembled"
+    artifacts.mkdir(exist_ok=True)
+    taken = set()
+    raw_names = {}
+    raw_records = []
+    for position, item in enumerate(group["members"], start=1):
+        unit_id = "s-%04d" % position
+        # Each recording keeps a name describing *itself*, from the per-recording
+        # classification. Naming them after the day's log gives six files called
+        # the same thing, which is exactly the state merging was meant to end.
+        record = class_records.get(item["path"]) or {}
+        title = record.get("title") or item.get("filename_hint") or composition["title"]
+        destination = daily_raw_destination(group, item, title, taken)
+        raw_names[item["path"]] = destination
+        metadata = raw_metadata(schema, group["recording_type"], "", date=group["date"])
+        metadata.pop("parent", None)
+        body = (vault / item["path"]).read_bytes()
+        text = build_raw_note(schema, metadata, transcript_source(split_frontmatter(body)["body"], vault))
+        name = f"raw-{sha256_text(item['path'])[:12]}.md"
+        (artifacts / name).write_text(text, encoding="utf-8")
+        raw_records.append(
+            {
+                "unit_id": unit_id,
+                "source": item["path"],
+                "source_hash": sha256_bytes(body),
+                "artifact": name,
+                "final_hash": sha256_text(text),
+                "destination": destination,
+            }
+        )
+    # The log's `parent` cannot be filled until the log has a name, and the raw
+    # notes carry it, so it is stamped after the log is named rather than in
+    # `raw_metadata` the way the per-recording path does it.
+    note_text = build_daily_note(fmt, schema, group, composition, sources, raw_names, run_dir)
+    review = check_daily_note(fmt, sources, note_text, composition, group["members"])
+    log_name = format_filename(
+        args.filename_pattern, group["date"], None, group["recording_type"], composition["title"]
+    )
+    log_destination = (Path(INBOX_DIR) / log_name).as_posix()
+    if (vault / log_destination).exists():
+        review.append(f"a note already exists at {log_destination}")
+    artifact = f"log-{sha256_text(group['date'])[:12]}.md"
+    (artifacts / artifact).write_text(note_text, encoding="utf-8")
+    return {
+        "date": group["date"],
+        "recording_type": group["recording_type"],
+        "members": len(group["members"]),
+        "raw": raw_records,
+        "log": {
+            "artifact": artifact,
+            "final_hash": sha256_text(note_text),
+            "destination": log_destination,
+            "title": composition["title"],
+        },
+        "source_fingerprint": sources["fingerprint"],
+        "merged_words": sum(len(entry["text"].split()) for entry in merged),
+        "sections": len(composition["sections"]),
+        "review": review,
+        "needs_review": bool(review),
+    }
+
+
+def apply_daily(vault, run_dir, plan):
+    """Write a day's source notes and then its log.
+
+    The recordings are written first, for the same reason the per-recording path
+    writes the raw note before the processed one: an interruption between the two
+    leaves the recordings safe on disk and the log missing, which resuming can
+    finish. The other order loses recordings to a log that claims to link them.
+    """
+    log_path = run_dir / "apply-log.jsonl"
+    prior, _ = run_state.read_jsonl_recover_tail(log_path, repair=True)
+    done = {(entry.get("op"), entry.get("source")) for entry in prior if entry.get("status") == "ok"}
+    written = 0
+    for record in plan["raw"]:
+        if ("daily-raw", record["source"]) in done:
+            continue
+        source = vault / record["source"]
+        data = source.read_bytes()
+        if sha256_bytes(data) != record["source_hash"]:
+            raise UserError(f"{record['source']} changed since planning")
+        text = (run_dir / "assembled" / record["artifact"]).read_text(encoding="utf-8")
+        if sha256_text(text) != record["final_hash"]:
+            raise UserError(f"{record['source']}: assembled note changed since planning")
+        destination = vault / record["destination"]
+        if destination.exists() and sha256_text(destination.read_text(encoding="utf-8")) != record["final_hash"]:
+            raise UserError(f"destination collision: {record['destination']}")
+        backup = run_dir / "backup" / record["source"]
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        if not backup.exists():
+            shutil.copy2(source, backup)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        write_atomic(destination, text)
+        source.unlink()
+        run_state.append_jsonl_fsync(
+            log_path,
+            {"op": "daily-raw", "status": "ok", "source": record["source"], "destination": record["destination"]},
+        )
+        written += 1
+    entry = plan["log"]
+    if ("daily-log", entry["destination"]) not in done:
+        text = (run_dir / "assembled" / entry["artifact"]).read_text(encoding="utf-8")
+        destination = vault / entry["destination"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        # Exclusive create: a log is only ever new, so a name that is taken is a
+        # collision to report rather than a file to overwrite.
+        with open(destination, "xb") as handle:
+            handle.write(text.encode("utf-8"))
+        run_state.append_jsonl_fsync(
+            log_path,
+            {"op": "daily-log", "status": "ok", "source": entry["destination"], "destination": entry["destination"]},
+        )
+        written += 1
+    return written
 
 
 # --------------------------------------------------------------------------
@@ -4199,6 +4552,260 @@ def run_configuration(args, vault, schema_hash, voice_path, voice_hash, lexicon_
 
 def phase(run_dir, name, event=None):
     run_state.update_run_state(run_dir, lambda draft: draft.update({"phase": name}) or draft, event=event)
+
+
+def scan_filed_exports(vault, schema, limit=None):
+    """Frontmatter-less exports already sitting in the sources tree.
+
+    Opt-in, and never the default. `scan_inbox` walks `00 Inbox`, which is where
+    a recording is supposed to arrive -- but a person who filed a day's memos by
+    hand before this mode existed has them under the sources tree with no
+    frontmatter, invisible to every pass. This finds those and nothing else: a
+    note with frontmatter has been processed and is not an export.
+    """
+    folder = compile_destination(schema, {"type": "source", "domain": "personal", "source_kind": RAW_SOURCE_KIND})
+    root = vault / folder
+    if not root.is_dir():
+        raise UserError(f"sources folder does not exist: {root}")
+    items = []
+    for path in sorted(root.rglob("*.md")):
+        if path.is_symlink() or is_workspace_dir(path.parent):
+            continue
+        rel = relative_path(vault, path)
+        try:
+            data = path.read_bytes()
+            split = split_frontmatter(data)
+            parsed = parse_transcript(transcript_source(split["body"], vault))
+        except (OSError, UnicodeDecodeError):
+            continue
+        ok, reason = is_transcript(split, parsed)
+        if not ok:
+            continue
+        stat = path.stat()
+        items.append(
+            {
+                "path": rel,
+                "sha256": sha256_bytes(data),
+                "size": stat.st_size,
+                "mtime": int(stat.st_mtime),
+                "is_transcript": True,
+                "skip_reason": reason,
+                "error": None,
+                **parse_filename(path.name),
+                "filename_hint": filename_title_hint(path.name),
+                "stats": transcript_stats(parsed),
+            }
+        )
+    items.sort(key=lambda item: item["path"])
+    return items[:limit] if limit is not None else items
+
+
+def daily(args):
+    """Merge a day's short voice memos into one log, keeping each recording.
+
+    A memo recorded on the way out the door is a fragment: one real recording is
+    61 words and ends "I don't remember what it is". The pipeline could only ever
+    make one note per file, so a day of thinking became a dozen notes that mean
+    nothing apart. This groups a day, merges it onto one clock, cleans it as a
+    whole, and writes one note plus the recordings it was made from.
+    """
+    vault = Path(args.vault).expanduser().resolve()
+    if not vault.is_dir():
+        raise UserError(f"vault root does not exist: {vault}")
+    resuming = bool(args.run)
+    state = None
+    if resuming:
+        run_dir = Path(args.run).expanduser().resolve()
+        state = run_state.load_run_state(run_dir, workflow=WORKFLOW)
+        adopt_stored_options(args, state)
+    schema_path = resolve_schema_path(vault, args.schema)
+    schema, schema_hash = compiled_schema_for(vault, schema_path, cache_dir=vault / STATE_DIR / "cache")
+    format_path = vault_format.resolve_format_path(vault, args.format, disabled=args.no_format)
+    fmt, format_hash = vault_format.compiled_format_for(vault, format_path, cache_dir=vault / STATE_DIR / "cache")
+    if not fmt or not fmt.get("blocks"):
+        raise UserError(
+            "a day's log is assembled from the vault's declared block order, and this vault declares none; "
+            f"add a '### {vault_format.GRAMMAR_SUBSECTION}' table to {vault_format.DEFAULT_FORMAT}"
+        )
+    voice_path = vault_voice.resolve_voice_path(vault, args.voice, disabled=args.no_voice)
+    voice, voice_hash = vault_voice.compiled_voice_for(vault, voice_path, cache_dir=vault / STATE_DIR / "cache")
+    args.compiled_voice = voice
+    lexicon_path = vault_lexicon.resolve_lexicon_path(vault, args.lexicon, disabled=args.no_lexicon)
+    lexicon, lexicon_hash = vault_lexicon.load_lexicon(
+        vault, lexicon_path, schema=schema, cache_dir=vault / STATE_DIR / "cache",
+        dictionary_path=dictionary_path(args),
+    )
+    args.compiled_lexicon = lexicon
+    profile_path, resolve_warnings = vault_profile.resolve_profile_or_warn(vault, args.profile, disabled=args.no_profile)
+    profile, profile_hash, compile_warnings = vault_profile.compiled_profile_for(
+        vault, profile_path, cache_dir=vault / STATE_DIR / "cache"
+    )
+    args.compiled_profile = profile
+    configuration = run_configuration(
+        args, vault, schema_hash, voice_path, voice_hash, lexicon_path, lexicon_hash,
+        profile_path, profile_hash, command="daily",
+    )
+    configuration["input"].update(vault_format.format_state(format_path, format_hash))
+    if resuming:
+        try:
+            run_state.assert_compatible_run(state, configuration)
+        except ValueError as error:
+            raise UserError(str(error)) from error
+    warnings = list(resolve_warnings + compile_warnings)
+    plans = []
+    with run_state.run_lock(vault / STATE_DIR):
+        if not resuming:
+            run_dir = unique_run_directory(vault)
+            run_state.initialize_run_state(
+                run_dir,
+                run_state.create_run_state(
+                    WORKFLOW, "daily", configuration["input"], configuration["options"], phase="scan"
+                ),
+            )
+        scan_path = run_dir / "scan.json"
+        if scan_path.is_file():
+            items = json.loads(scan_path.read_text(encoding="utf-8"))["items"]
+        else:
+            items = scan_filed_exports(vault, schema, args.limit) if args.scan == "filed" else scan_inbox(vault, args.limit)
+            run_state.atomic_write_json(scan_path, {"items": items})
+            phase(run_dir, "dedupe", event={"type": "phase", "phase": "scan", "selected": len(items)})
+        log(args, f"scanned {len(items)} notes, {sum(1 for item in items if item['is_transcript'])} transcripts")
+
+        dedupe_path = run_dir / "dedupe.json"
+        if dedupe_path.is_file():
+            dedupe = json.loads(dedupe_path.read_text(encoding="utf-8"))
+        else:
+            dedupe, _losers, _held = plan_dedupe(vault, items)
+            run_state.atomic_write_json(dedupe_path, dedupe)
+            phase(run_dir, "classify", event={"type": "phase", "phase": "dedupe", "groups": len(dedupe["groups"])})
+        losers = {loser["path"] for group in dedupe.get("groups", []) for loser in group["losers"]}
+        held = {member["path"] for pair in dedupe.get("review_pairs", []) for member in pair["members"]}
+
+        class_records, stage_warnings = classify_items(args, vault, items, run_dir, losers | held)
+        warnings.extend(stage_warnings)
+        phase(run_dir, "group", event={"type": "phase", "phase": "classify", "records": len(class_records)})
+
+        groups = group_daily(items, class_records, args.daily_min_recordings)
+        for group in groups:
+            # A day's log silently built from five of six recordings is worse than
+            # no log, because nothing about it looks wrong. A held member holds
+            # the day, and those recordings fall through to ordinary processing.
+            blocked = [item["path"] for item in group["members"] if item["path"] in held or item["path"] in losers]
+            if blocked:
+                warnings.append(
+                    f"{group['date']}: not merged; {len(blocked)} of {len(group['members'])} recordings are held "
+                    f"for review ({', '.join(blocked)}). Run `process` for that day instead."
+                )
+                continue
+            parsed_by_path = {}
+            for item in group["members"]:
+                split = split_frontmatter((vault / item["path"]).read_bytes())
+                parsed_by_path[item["path"]] = parse_transcript(transcript_source(split["body"], vault))
+            merged = merge_transcripts(group["members"], parsed_by_path)
+            sources = vault_compose.source_set(
+                [
+                    vault_compose.source_unit(
+                        vault_compose.KIND_TRANSCRIPT,
+                        Path(item["path"]).stem,
+                        "\n".join(block["text"] for block in parsed_by_path[item["path"]]["blocks"]),
+                        occurred_at=item.get("time_hhmmss"),
+                        origin={"path": item["path"], "sha256": item["sha256"]},
+                    )
+                    for item in group["members"]
+                ]
+            )
+            try:
+                cleaned, tiny, stage_warnings = clean_daily_group(args, group, merged, run_dir, group["date"])
+                warnings.extend(stage_warnings)
+                composition = compose_daily(args, vault, group, cleaned, sources)
+            except (forge_llm.ChatError, UserError, ValueError) as error:
+                warnings.append(f"{group['date']}: could not be composed ({type(error).__name__}: {error})")
+                continue
+            if tiny:
+                warnings.append(f"{group['date']}: the merged day is still under --tiny-words; the log will be brief")
+            for dropped in composition.get("dropped_source_ids") or []:
+                warnings.append(f"{group['date']}: dropped a recording id the day does not have ({dropped})")
+            plans.append(
+                assemble_daily(
+                    args, vault, schema, fmt, group, parsed_by_path, class_records, composition, sources, merged, run_dir
+                )
+            )
+        phase(run_dir, "plan", event={"type": "phase", "phase": "assemble", "days": len(plans)})
+
+        applied = 0
+        if args.apply:
+            for plan in plans:
+                if plan["needs_review"]:
+                    warnings.append(f"{plan['date']}: held for review, not written")
+                    continue
+                applied += apply_daily(vault, run_dir, plan)
+        run_state.atomic_write_json(run_dir / "daily.json", {"days": plans})
+        report_path = write_daily_report(run_dir, plans, warnings, not args.apply)
+        final_phase = "complete" if args.apply else "planned"
+        run_state.update_run_state(
+            run_dir,
+            lambda draft: draft.update(
+                {
+                    "phase": final_phase,
+                    "status": "complete" if args.apply else "running",
+                    "nextAction": None if args.apply else f"review {report_path.name}, then rerun with --apply --run {run_dir}",
+                }
+            )
+            or draft,
+            event={"type": "phase", "phase": final_phase, "days": len(plans), "written": applied},
+        )
+    return structured(
+        "ok",
+        artifacts=[str(report_path)],
+        warnings=warnings,
+        data={
+            "dry_run": not args.apply,
+            "vault": str(vault),
+            "run_directory": str(run_dir),
+            "counts": {
+                "days": len(plans),
+                "recordings": sum(plan["members"] for plan in plans),
+                "held": sum(1 for plan in plans if plan["needs_review"]),
+                "written": applied,
+            },
+            "days": [
+                {
+                    "date": plan["date"],
+                    "title": plan["log"]["title"],
+                    "destination": plan["log"]["destination"],
+                    "recordings": plan["members"],
+                    "sections": plan["sections"],
+                    "needs_review": plan["needs_review"],
+                    "review": plan["review"],
+                }
+                for plan in plans
+            ],
+        },
+    )
+
+
+def write_daily_report(run_dir, plans, warnings, dry_run):
+    lines = ["# Daily log run", "", f"Mode: {'dry run' if dry_run else 'applied'}", f"Days: {len(plans)}", ""]
+    for plan in plans:
+        lines.append(f"## {plan['date']} — {plan['log']['title']}")
+        lines.append("")
+        lines.append(f"- {plan['members']} recordings, {plan['sections']} sections, {plan['merged_words']} words merged")
+        lines.append(f"- Log: `{plan['log']['destination']}`")
+        for record in plan["raw"]:
+            lines.append(f"- Recording {record['unit_id']}: `{record['source']}` -> `{record['destination']}`")
+        if plan["review"]:
+            lines.append("")
+            lines.append("Held for review:")
+            lines.extend(f"- {line}" for line in plan["review"])
+        lines.append("")
+    if warnings:
+        lines.append("## Warnings")
+        lines.append("")
+        lines.extend(f"- {line}" for line in warnings)
+        lines.append("")
+    path = run_dir / "report.md"
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
 
 
 def process(args):
@@ -5377,7 +5984,7 @@ class TrackingAction(argparse.Action):
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(description="Rename, clean, and summarize voice-note transcripts in an Obsidian inbox.")
-    parser.add_argument("mode", choices=["process", "reprocess", "split", "reconcile", "status", "doctor"])
+    parser.add_argument("mode", choices=["process", "daily", "reprocess", "split", "reconcile", "status", "doctor"])
     parser.add_argument("--vault")
     parser.add_argument("--schema", action=TrackingAction)
     parser.add_argument("--voice", action=TrackingAction, help="voice-and-style note (default: the vault's, when present)")
@@ -5397,6 +6004,20 @@ def parse_args(argv):
         ),
     )
     parser.add_argument("--run", help="existing run directory to resume")
+    parser.add_argument(
+        "--daily-min-recordings",
+        type=int,
+        action=TrackingAction,
+        help="daily: how many same-day recordings make a log (default 2)",
+    )
+    parser.add_argument(
+        "--scan",
+        choices=["inbox", "filed"],
+        action=TrackingAction,
+        help="daily: where to look for exports; filed finds ones already moved into the sources tree",
+    )
+    parser.add_argument("--format", action=TrackingAction, help="note-format note (default: the vault's, when present)")
+    parser.add_argument("--no-format", action="store_true", help="disable the vault note-format policy")
     parser.add_argument("--limit", type=int, action=TrackingAction)
     parser.add_argument("--filename-pattern", choices=FILENAME_PATTERNS, action=TrackingAction)
     parser.add_argument("--summary-style", choices=SUMMARY_STYLES, action=TrackingAction)
@@ -5427,6 +6048,11 @@ def parse_args(argv):
     args.tiny_summary = args.tiny_summary or TINY_SUMMARY_CHOICES[0]
     if args.tiny_words is None:
         args.tiny_words = 120
+    args.scan = args.scan or "inbox"
+    if args.daily_min_recordings is None:
+        args.daily_min_recordings = DEFAULT_DAILY_MIN_RECORDINGS
+    if args.daily_min_recordings < 2:
+        raise UserError("--daily-min-recordings must be at least 2; one recording is not a day")
     if args.mode == "status":
         if not args.run:
             raise UserError("status requires --run <run-directory>")
@@ -5434,6 +6060,9 @@ def parse_args(argv):
     if not args.vault:
         raise UserError(f"{args.mode} requires --vault")
     args.schema = args.schema or os.environ.get("VAULT_TRANSCRIPTS_SCHEMA") or None
+    args.format = args.format or os.environ.get("VAULT_TRANSCRIPTS_FORMAT") or None
+    if args.no_format and args.format and args.format_provided:
+        raise UserError("--format and --no-format cannot be used together")
     if args.mode in {"split", "reconcile"}:
         # Deterministic text work: no model reads a note in either mode, so both
         # run with every endpoint down.
@@ -5466,6 +6095,8 @@ def run(argv):
         return reconcile_notes(args)
     if args.mode == "reprocess":
         return reprocess_notes(args)
+    if args.mode == "daily":
+        return daily(args)
     return process(args)
 
 

@@ -71,6 +71,50 @@ conversations.
 6. Offer to run `vault-organizer inbox` next, which files the cleaned notes —
    both halves of each pair, the note and its recording.
 
+## A day of short memos as one log
+
+Memos recorded through a day are fragments alone — one real recording is 61 words
+and ends "I don't remember what it is" — and `process` makes one note per file, so
+a day of thinking becomes a dozen notes that mean nothing apart. `daily` merges a
+day and writes one note plus the recordings it was made from.
+
+```bash
+python3 <skill-directory>/scripts/vault-transcripts.py daily --vault <vault>
+```
+
+Grouping is deterministic and needs no model: same day, same recording type,
+owner-authored, two or more. It is deliberately **not** content similarity — a
+day of memos spans whatever the day held, and a similarity threshold splits
+exactly the group a person would have made on purpose. `conversation`, `meeting`,
+`therapy`, and `lecture` never group; each is a document in its own right.
+
+The day's recordings are merged **in memory only**, each one's `*MM:SS*` offsets
+rebased onto its filename's start stamp so the day reads on one clock. Cleanup
+then reads the whole day as a single document, which is what makes `--tiny-words`
+meaningful: a 61-word fragment gets no summary alone and a real edit as part of a
+1,400-word day. A `--- recording s-0001 ---` divider marks each recording, and the
+model returns a title, one summary paragraph, and topical sections with the
+recordings each drew on. Everything that has to be exact is written in code: the
+`(~09:36)` markers come from the filename stamps, the `## Source Recordings` list
+from the group, and the `> [!provenance]-` block from the run.
+
+Output is one journal note plus one source note per recording — seven files for
+six recordings, not twelve — all left in `00 Inbox` for `vault-organizer` to file.
+Dry-run by default; **get approval before `--apply`**.
+
+A day where dedupe held any recording for review is not merged at all: a log
+silently built from five of six is worse than no log, because nothing about it
+looks wrong. Those days are reported and fall through to `process`.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--daily-min-recordings` | `2` | How many same-day recordings make a log. |
+| `--scan` | `inbox` | `filed` also finds frontmatter-less exports already moved into the sources tree. |
+
+This mode needs the vault's `0.04 Note Format.md` to declare a `### Block order`
+table: the log is assembled in the order that note declares, and a vault that
+declares none is told so rather than guessed at.
+
 ## Re-exports of recordings the vault already has
 
 A transcription app re-exports: the same recording arrives in the inbox again,

@@ -2742,8 +2742,8 @@ class DailyNoteBuildingTests(unittest.TestCase):
             "date": "2026-08-03",
             "recording_type": "memo",
             "members": [
-                {"path": "a.md", "time_hhmmss": "09:36:50"},
-                {"path": "b.md", "time_hhmmss": "10:38:10"},
+                {"path": "a.md", "time_hhmm": "0936", "time_hhmmss": "09:36:50"},
+                {"path": "b.md", "time_hhmm": "1038", "time_hhmmss": "10:38:10"},
             ],
         }
         self.sources = self.vc.source_set(
@@ -2838,6 +2838,62 @@ class DailyNoteBuildingTests(unittest.TestCase):
         composition["sections"][0]["lines"] = ["A coding tool that Priya suggested for interviews."]
         review = vt.check_daily_note(self.fmt, self.sources, self.build(composition), composition, self.group["members"])
         self.assertTrue(any("name not in any recording: Priya" in line for line in review))
+
+    def test_a_recording_id_the_day_does_not_have_is_dropped_not_refused(self):
+        """A six-recording day drew `s-0007` through `s-0011` on a real run -- the
+        model counting sections rather than reading the dividers. The ids feed the
+        time markers and nothing else, so an invented one costs nothing to
+        discard, and refusing the whole day for it loses six real recordings."""
+        response = {
+            "title": "Thoughts",
+            "summary": "A day.",
+            "sections": [{"heading": "Coding tool", "sourceIds": ["s-0001", "s-0007"], "lines": ["A tool."]}],
+        }
+        composition = vt.validate_daily_composition(response, self.sources)
+        self.assertEqual(composition["sections"][0]["sourceIds"], ["s-0001"])
+        self.assertEqual(composition["dropped_source_ids"], ["Coding tool: s-0007"])
+
+    def test_a_section_left_citing_nothing_real_is_still_held(self):
+        """Dropping the noise must not swallow the signal."""
+        response = {
+            "title": "Thoughts",
+            "summary": "A day.",
+            "sections": [{"heading": "Coding tool", "sourceIds": ["s-0099"], "lines": ["A tool."]}],
+        }
+        composition = vt.validate_daily_composition(response, self.sources)
+        self.assertEqual(composition["sections"][0]["sourceIds"], [])
+        review = vt.check_daily_note(
+            self.fmt, self.sources, self.build(composition), composition, self.group["members"]
+        )
+        self.assertTrue(any("cites no recording" in line for line in review))
+
+    def test_the_model_may_not_write_the_source_recordings_section(self):
+        response = {
+            "title": "Thoughts",
+            "summary": "A day.",
+            "sections": [{"heading": "Source Recordings", "sourceIds": ["s-0001"], "lines": ["- [[a]]"]}],
+        }
+        with self.assertRaises(vt.UserError):
+            vt.validate_daily_composition(response, self.sources)
+
+    def test_grounding_reads_the_whole_day_not_one_section(self):
+        """A day is merged and cleaned as one document before the model sees any
+        section boundary, so its citations attribute an already-unified text.
+        Narrowing by them reported the day's own vocabulary as invented."""
+        composition = self.composition()
+        composition["sections"][0]["lines"] = ["Ordering yogurt came up while thinking about the coding tool."]
+        review = vt.check_daily_note(
+            self.fmt, self.sources, self.build(composition), composition, self.group["members"]
+        )
+        self.assertFalse(any("not in any recording" in line for line in review))
+
+    def test_recordings_stay_unfiled_for_the_organizer(self):
+        """Routing them means choosing a domain, and the only way to choose one
+        here is to hardcode it."""
+        taken = set()
+        destination = vt.daily_raw_destination(self.group, self.group["members"][0], "A Memo", taken)
+        self.assertTrue(destination.startswith("00 Inbox/"))
+        self.assertTrue(destination.endswith(" - Transcript.md"))
 
     def test_a_faithful_log_passes_every_gate(self):
         composition = self.composition()
