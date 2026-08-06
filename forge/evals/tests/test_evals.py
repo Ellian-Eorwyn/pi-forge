@@ -40,7 +40,7 @@ class ConfigurationTests(unittest.TestCase):
         # reads the user's settings.json.
         service = harness.resolve_model("task-9b")
         self.assertEqual(service["url"], "http://llms:8007/v1/chat/completions")
-        self.assertEqual(service["contextTokens"], 65538)
+        self.assertEqual(service["contextTokens"], 65792)
         self.assertEqual(service["chatTemplateKwargs"], {"enable_thinking": False})
         # Background scheduling would let an interactive turn preempt a call and
         # land it in the results as a model failure.
