@@ -532,6 +532,109 @@ def check_grammar(fmt, text):
     return findings
 
 
+#: Blocks a drafter never writes, so a grounding pass has nothing to say about
+#: them. `provenance` is assembled in code from the run's own record and cites
+#: source *labels* rather than source text, which a check reading it as prose
+#: would report as invention.
+UNCHECKED_BLOCKS = frozenset({"frontmatter", "title", "provenance"})
+
+
+def _block_extent(name, entry, registry, lines, start, later_starts):
+    """The last line (exclusive) belonging to a block that starts at ``start``."""
+    if name == "title":
+        return start + 1
+    if name in registry:
+        # A callout owns its own contiguous `>` run and nothing after it, which
+        # is what keeps a lead summary from swallowing the body beneath it.
+        end = start + 1
+        while end < len(lines) and lines[end].lstrip().startswith(">"):
+            end += 1
+        return end
+    following = [value for value in later_starts if value > start]
+    return min(following) if following else len(lines)
+
+
+def split_rendered_blocks(fmt, text):
+    """A rendered note back into ``{block: lines}``, as the checks read it.
+
+    The half of `render_note` a check needs to undo: which lines belong to which
+    declared block. `apply` needs it because the note it is about to write is a
+    file on disk rather than the mapping the drafter returned, and a check that
+    reads a note as one lump cannot tell a name borrowed from a source the block
+    it sits in never cited.
+
+    Frontmatter is dropped: it is the vault's metadata, not the note's content.
+    ``body`` is whatever no marked block claims, which is exactly how it is
+    emitted -- alone among the blocks, it carries no syntax of its own.
+    """
+    stripped = re.sub(r"\A---\n.*?\n---\n", "", str(text), count=1, flags=re.DOTALL)
+    lines = stripped.splitlines()
+    # Line-aligned: `without_code` emits one line per line, so a position found
+    # in the blanked copy indexes the real one. Blanking first is what stops a
+    # `## Sources` inside a fenced example from being read as the block.
+    blanked_text = without_code(stripped)
+    blanked = blanked_text.splitlines()
+    registry = fmt.get("callouts", {})
+
+    starts = {}
+    for entry in fmt.get("blocks", []):
+        name = entry["block"]
+        if name in ("frontmatter", "body"):
+            continue
+        offset = _block_position(blanked_text, name, entry, registry)
+        if offset is not None:
+            starts[name] = blanked_text.count("\n", 0, offset)
+
+    declared = {entry["block"]: entry for entry in fmt.get("blocks", [])}
+    claimed = set()
+    blocks = {}
+    for name, start in sorted(starts.items(), key=lambda item: item[1]):
+        end = _block_extent(name, declared[name], registry, blanked, start, starts.values())
+        blocks[name] = lines[start:end]
+        claimed.update(range(start, end))
+
+    body = [line for index, line in enumerate(lines) if index not in claimed]
+    while body and not body[0].strip():
+        body.pop(0)
+    while body and not body[-1].strip():
+        body.pop()
+    if body:
+        blocks["body"] = body
+    return blocks
+
+
+def check_rendered(fmt, sources, cited, text):
+    """Every deterministic finding against a note as it stands on disk.
+
+    The same tests `vault-compose.check_note` runs over the blocks a drafter
+    returned, run instead over a rendered file. That is what lets `apply` check
+    the bytes it is about to write rather than trusting a verdict recorded about
+    earlier ones.
+
+    ``cited`` maps a block to the source ids it claimed; a block missing from it
+    is checked against the whole set, so a block added after the fact is checked
+    rather than waved through.
+    """
+    review = []
+    for name, lines in split_rendered_blocks(fmt, text).items():
+        if name in UNCHECKED_BLOCKS:
+            continue
+        prose = "\n".join(lines)
+        if not prose.strip():
+            continue
+        found = ungrounded_specifics(sources, prose, cited_ids=(cited or {}).get(name) or None)
+        for value in found["names"]:
+            review.append(f"{name}: name not in the sources it cites: {value}")
+        for value in found["links"]:
+            review.append(f"{name}: link not in the sources it cites: {value}")
+        for value in found["wikilinks"]:
+            review.append(f"{name}: link to a note no source names: [[{value}]]")
+    for severity, message in check_grammar(fmt, text):
+        if severity == "error":
+            review.append(f"note format: {message}")
+    return review
+
+
 def _block_position(body, name, entry, registry):
     """Where a block starts in a rendered note, or ``None`` when it is absent."""
     if name in registry:
@@ -560,8 +663,10 @@ __all__ = [
     "NUMBER_WORDS",
     "SOURCE_KINDS",
     "SOURCE_SET_VERSION",
+    "UNCHECKED_BLOCKS",
     "capitalized_tokens",
     "check_grammar",
+    "check_rendered",
     "content_words",
     "coverage_ratio",
     "dropped_units",
@@ -575,6 +680,7 @@ __all__ = [
     "set_text",
     "source_set",
     "source_unit",
+    "split_rendered_blocks",
     "strip_structure",
     "ungrounded_specifics",
     "units_by_id",

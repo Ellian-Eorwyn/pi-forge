@@ -58,6 +58,11 @@ interface CaptureSourceParams {
 	why?: string;
 }
 
+interface ApplyParams {
+	runDirectory: string;
+	accept: string[];
+}
+
 interface ComposeParams {
 	intent: "synthesis" | "conversation" | "research";
 	request: string;
@@ -78,16 +83,35 @@ function extractText(content: unknown): string {
 		.join("\n");
 }
 
-function runPython(args: string[], signal?: AbortSignal): Promise<{ stdout: string; stderr: string; code: number }> {
+/**
+ * The CLI, with its progress reaching the caller while it still means something.
+ *
+ * The skill already writes a line per note to stderr. Buffering that to the end
+ * turns a run that is working into a run that looks hung, which is how a
+ * multi-minute call comes to be interrupted or retried.
+ */
+function runPython(
+	args: string[],
+	signal?: AbortSignal,
+	onProgress?: (line: string) => void,
+): Promise<{ stdout: string; stderr: string; code: number }> {
 	return new Promise((resolvePromise, reject) => {
 		const child = spawn("python3", [SKILL_SCRIPT, ...args], { signal });
 		let stdout = "";
 		let stderr = "";
+		let partial = "";
 		child.stdout.on("data", (chunk) => {
 			stdout += String(chunk);
 		});
 		child.stderr.on("data", (chunk) => {
-			stderr += String(chunk);
+			const text = String(chunk);
+			stderr += text;
+			if (!onProgress) return;
+			// Held back to whole lines: half a progress line is noise, not news.
+			partial += text;
+			const lines = partial.split("\n");
+			partial = lines.pop() ?? "";
+			for (const line of lines) if (line.trim()) onProgress(line.trim());
 		});
 		child.on("error", reject);
 		child.on("close", (code) => resolvePromise({ stdout, stderr, code: code ?? 0 }));
@@ -105,6 +129,34 @@ function insideWorkspace(vaultRoot: string, target: string): boolean {
 		current = parent;
 	}
 	return false;
+}
+
+/**
+ * What to do with the proposals a compose run just made.
+ *
+ * The skill computes this and files it in `run_state.json`, which nothing reads.
+ * Saying it in the result is the difference between a session that names ids to
+ * the user and one that starts inventing `forge compose accept`.
+ */
+function nextStep(parsed: unknown): string {
+	const data = (parsed as { data?: { run_directory?: unknown; proposals?: unknown[] } } | undefined)?.data;
+	const proposals = Array.isArray(data?.proposals) ? (data.proposals as { id?: unknown; needs_review?: unknown }[]) : [];
+	if (proposals.length === 0) return "Nothing was proposed. Relay the warnings; do not retry with different options.";
+	const held = proposals.filter((entry) => entry.needs_review).map((entry) => String(entry.id));
+	const ready = proposals.filter((entry) => !entry.needs_review).map((entry) => String(entry.id));
+	const lines = [
+		"Nothing is in the vault yet. Show the user each proposal and let them name the ids they want.",
+		`Then call forge_vault_compose_apply with runDirectory ${String(data?.run_directory ?? "")} and those ids.`,
+	];
+	if (ready.length > 0) lines.push(`Ready to write: ${ready.join(", ")}.`);
+	if (held.length > 0) {
+		lines.push(
+			`Held for review: ${held.join(", ")}. Relay the reasons. A hold can be fixed by editing the note in ` +
+				"the run's `proposed/` directory -- the checks run again over the file as it then stands -- but a " +
+				"reviewer's objection needs a fresh compose, not an edit.",
+		);
+	}
+	return lines.join(" ");
 }
 
 function isInside(root: string, target: string): boolean {
@@ -149,7 +201,7 @@ export default function vaultComposeExtension(pi: ExtensionAPI) {
 			"note or file give the path and the harness reads it. Call once per source, then forge_vault_compose.",
 		promptSnippet: "Collect sources for a vault note",
 		promptGuidelines: [
-			"To turn a conversation, some notes, or a research run into a vault note, collect its sources with forge_vault_capture_source and then call forge_vault_compose. Never write a note into the vault with the write tool.",
+			"To turn a conversation, some notes, or a research run into a vault note: collect its sources with forge_vault_capture_source, call forge_vault_compose, show the user what it proposed, then call forge_vault_compose_apply with the ids they name. Never write a note into the vault with the write tool.",
 		],
 		parameters: Type.Object({
 			kind: Type.Union([Type.Literal("chat"), Type.Literal("vault-note"), Type.Literal("file")], {
@@ -249,7 +301,7 @@ export default function vaultComposeExtension(pi: ExtensionAPI) {
 			),
 		}),
 		executionMode: "sequential",
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const input = params as ComposeParams;
 			const vault = inspectVault(ctx.cwd);
 			if (!vault) throw new Error("the working directory is not inside an Obsidian vault.");
@@ -290,7 +342,55 @@ export default function vaultComposeExtension(pi: ExtensionAPI) {
 				"utf8",
 			);
 
-			const result = await runPython(["compose", "--vault", vault.root, "--spec", specPath], signal);
+			const result = await runPython(["compose", "--vault", vault.root, "--spec", specPath], signal, (line) =>
+				onUpdate?.({ content: [{ type: "text", text: line }], details: {} }),
+			);
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(result.stdout);
+			} catch {
+				throw new Error(`vault-compose did not return JSON (exit ${result.code}): ${result.stderr.slice(-800)}`);
+			}
+			// Without this a session that has just been handed proposal ids has
+			// nowhere to go, and starts guessing at CLIs that do not exist.
+			const payload = { ...(parsed as Record<string, unknown>), nextStep: nextStep(parsed) };
+			return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }], details: payload };
+		},
+	});
+
+	pi.registerTool({
+		name: "forge_vault_compose_apply",
+		label: "Write an accepted composed note",
+		description:
+			"Write proposals from a forge_vault_compose run into the vault, by id. Only ids the user named: " +
+			"this is the step that puts a note in the vault. Every accepted note is checked against its sources " +
+			"again here, over the file as it currently stands, so a note held for review stays held until the " +
+			"reason is actually fixed.",
+		promptSnippet: "Write an accepted composed note into the vault",
+		parameters: Type.Object({
+			runDirectory: Type.String({ description: "The run directory forge_vault_compose reported." }),
+			accept: Type.Array(Type.String(), {
+				description: "Proposal ids the user named, such as n-001. Nothing else is written.",
+			}),
+		}),
+		executionMode: "sequential",
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			const input = params as ApplyParams;
+			const vault = inspectVault(ctx.cwd);
+			if (!vault) throw new Error("the working directory is not inside an Obsidian vault.");
+			if (input.accept.length === 0) throw new Error("accept is empty; nothing is written without a proposal id.");
+			// A run directory is somewhere this extension put one. Anywhere else is
+			// either a mistake or a way to point apply at a hand-built manifest.
+			const runDirectory = resolve(ctx.cwd, input.runDirectory);
+			const runRoot = resolveWorkflowRoot(ctx.cwd, "vault-compose");
+			if (!isInside(runRoot, runDirectory)) {
+				throw new Error(`${input.runDirectory} is not a vault-compose run directory under ${runRoot}.`);
+			}
+			const result = await runPython(
+				["apply", "--vault", vault.root, "--run", runDirectory, "--accept", input.accept.join(",")],
+				signal,
+				(line) => onUpdate?.({ content: [{ type: "text", text: line }], details: {} }),
+			);
 			let parsed: unknown;
 			try {
 				parsed = JSON.parse(result.stdout);

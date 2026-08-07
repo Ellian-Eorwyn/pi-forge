@@ -25,6 +25,7 @@ costs nothing.
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import sys
@@ -547,10 +548,25 @@ def assemble(args, vault, schema, fmt, spec, note, drafted, run_dir, taken):
         "text": text,
         "words": len(text.split()),
         "blocks": [block["block"] for block in note["blocks"]],
+        # What `apply` needs to run the same checks over the file on disk: which
+        # sources each block claimed, and what the bytes were when the reviewer
+        # last saw them.
+        "cited": {block["block"]: block["sourceIds"] for block in note["blocks"]},
+        "text_sha256": text_digest(text),
         "unfiled_properties": unfiled,
         "review": review,
+        "reviewer_review": [],
         "needs_review": bool(review),
     }
+
+
+def text_digest(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def all_review(record):
+    """Every reason a note is held, deterministic and reviewer alike."""
+    return list(record.get("review") or []) + list(record.get("reviewer_review") or [])
 
 
 def assign_filename(vault, title, taken):
@@ -695,7 +711,7 @@ def compose(args):
                     "words": record["words"],
                     "blocks": record["blocks"],
                     "needs_review": record["needs_review"],
-                    "review": record["review"],
+                    "review": all_review(record),
                 }
                 for record in proposals
             ],
@@ -742,7 +758,10 @@ def verify_proposals(args, spec, proposals, run_dir):
         if record is None or verdict.get("verdict") != forge_verify.VERDICT_FLAG:
             continue
         flagged += 1
-        record["review"].append(f"reviewer: {verdict.get('reason') or 'flagged without a reason'}")
+        # Kept apart from the deterministic findings because `apply` recomputes
+        # those from the file and cannot recompute this one: re-reviewing needs
+        # the think service, which an apply must never depend on.
+        record["reviewer_review"].append(f"reviewer: {verdict.get('reason') or 'flagged without a reason'}")
         record["needs_review"] = True
     return {"reviewed": len(items), "flagged": flagged}, []
 
@@ -778,9 +797,13 @@ def write_report(run_dir, spec, proposals, warnings, verification):
         lines.append("")
         lines.append(f"- Destination: `{record['destination']}`")
         lines.append(f"- Blocks: {', '.join(record['blocks'])} ({record['words']} words)")
-        if record["review"]:
+        if all_review(record):
             lines.append("- **Held for review:**")
-            lines.extend(f"  - {line}" for line in record["review"])
+            lines.extend(f"  - {line}" for line in all_review(record))
+            lines.append(
+                "  - Fix the note in `proposed/` and apply again: the deterministic checks "
+                "run over the file as it then stands."
+            )
         lines.extend(["", "---", "", record["text"], "", "---", ""])
     if verification:
         lines.extend(["## Verification", "", json.dumps(verification), ""])
@@ -791,11 +814,60 @@ def write_report(run_dir, spec, proposals, warnings, verification):
     return path
 
 
+def format_for_run(vault, state, args):
+    """The block grammar this run composed against, so apply checks the same one."""
+    recorded = (state.get("input") or {}).get("format_path")
+    format_path = (
+        Path(recorded)
+        if recorded
+        else vault_format.resolve_format_path(vault, args.format, disabled=args.no_format)
+    )
+    fmt, _ = vault_format.compiled_format_for(vault, format_path, cache_dir=vault / STATE_DIR / "cache")
+    if not fmt or not fmt.get("blocks"):
+        raise UserError(
+            f"the note format this run composed against declares no block order ({format_path}); "
+            "a note that cannot be parsed cannot be checked, so nothing is written"
+        )
+    return fmt
+
+
+def sticky_reviewer_review(record):
+    """Reviewer verdicts, which an edit does not clear.
+
+    Held apart from the deterministic findings because they cannot be recomputed
+    here: re-reviewing needs the think service, and an apply that reached for a
+    model would fail whenever the model was down. Runs composed before the split
+    kept both in one list, distinguishable by the prefix the reviewer writes.
+    """
+    if "reviewer_review" in record:
+        return list(record["reviewer_review"] or [])
+    return [line for line in (record.get("review") or []) if str(line).startswith("reviewer: ")]
+
+
+def resolve_destination(vault, relative):
+    """The absolute path a proposal names, refused if it leaves the inbox."""
+    destination = (vault / relative).resolve()
+    if destination.parent != (vault / INBOX_DIR).resolve():
+        raise UserError(f"proposal destination is outside {INBOX_DIR} and was not written: {relative}")
+    return destination
+
+
 def apply_notes(args):
-    """Write the accepted notes, and nothing else."""
+    """Write the accepted notes, and nothing else.
+
+    The gate here is recomputed, never read. `proposals.json` records what the
+    compose run found, but the bytes reaching the vault are whatever sits in
+    `proposed/` at this moment -- so trusting the stored verdict would check one
+    note and write another. An edit to a proposal, or to the verdict in the
+    manifest, would walk straight past a check that only read what compose left
+    behind. So the deterministic checks run again, over the file as it stands.
+
+    That also makes fixing a held note a supported move rather than a dead end:
+    correct what was flagged, apply again, and the same checks decide.
+    """
     vault = Path(args.vault).expanduser().resolve()
     run_dir = Path(args.run).expanduser().resolve()
-    run_state.load_run_state(run_dir, workflow=WORKFLOW)
+    state = run_state.load_run_state(run_dir, workflow=WORKFLOW)
     stored = json.loads((run_dir / "proposals.json").read_text(encoding="utf-8"))["proposals"]
     by_id = {record["id"]: record for record in stored}
     accepted = [value for entry in (args.accept or []) for value in str(entry).split(",") if value.strip()]
@@ -804,20 +876,33 @@ def apply_notes(args):
         raise UserError(f"unknown proposal ids: {', '.join(unknown)}")
     if not accepted:
         raise UserError("apply needs --accept <id>; nothing is written without one")
+    fmt = format_for_run(vault, state, args)
+    sources = vault_compose.load_source_set(run_dir / "sources.json")
     log_path = run_dir / "apply-log.jsonl"
     prior, _ = run_state.read_jsonl_recover_tail(log_path, repair=True)
     done = {entry.get("id") for entry in prior if entry.get("status") == "ok"}
     written = []
     warnings = []
+    rechecked = []
     for note_id in accepted:
         record = by_id[note_id]
         if note_id in done:
             continue
-        if record["needs_review"]:
-            warnings.append(f"{note_id} was held for review and is not written: {'; '.join(record['review'])}")
+        proposed = run_dir / "proposed" / f"{note_id}.md"
+        if not proposed.is_file():
+            warnings.append(f"{note_id}: {proposed.name} is not in the run and was not written")
             continue
-        text = (run_dir / "proposed" / f"{note_id}.md").read_text(encoding="utf-8")
-        destination = vault / record["destination"]
+        text = proposed.read_text(encoding="utf-8")
+        review = vault_compose.check_rendered(fmt, sources, record.get("cited"), text)
+        reviewer = sticky_reviewer_review(record)
+        if reviewer and text_digest(text) != record.get("text_sha256"):
+            reviewer = [f"{line} (the reviewer has not seen this edit; recompose to have it reviewed)" for line in reviewer]
+        review.extend(reviewer)
+        rechecked.append(note_id)
+        if review:
+            warnings.append(f"{note_id} was held for review and is not written: {'; '.join(review)}")
+            continue
+        destination = resolve_destination(vault, record["destination"])
         destination.parent.mkdir(parents=True, exist_ok=True)
         try:
             # Exclusive create: a composed note is always new, so a taken name is
@@ -834,7 +919,13 @@ def apply_notes(args):
     return structured(
         "ok",
         warnings=warnings,
-        data={"vault": str(vault), "run_directory": str(run_dir), "written": written},
+        data={
+            "vault": str(vault),
+            "run_directory": str(run_dir),
+            "written": written,
+            # Named so a caller can tell "this passed" from "this was never looked at".
+            "rechecked": rechecked,
+        },
     )
 
 
@@ -939,6 +1030,13 @@ def parse_args(argv):
     if args.no_voice and getattr(args, "voice_provided", False):
         raise UserError("--voice and --no-voice cannot be used together")
     if args.mode == "apply":
+        # Accepted and silently ignored until now, which read as "the check was
+        # skipped and held it anyway" to anyone who tried it.
+        if args.no_verify:
+            raise UserError(
+                "--no-verify turns off the reviewer during compose; the checks apply runs are "
+                "deterministic and are not optional. Fix what was flagged and apply again."
+            )
         return args
     resolved = forge_llm.resolve_service("chat", base_url=args.base_url, model=args.model)
     args.base_url = resolved["url"]

@@ -361,6 +361,105 @@ class ComposeTests(unittest.TestCase):
         self.assertTrue(record["needs_review"])
         self.assertTrue(any("invented a claim" in line for line in record["review"]))
 
+    # ----------------------------------------------------------------------- #
+    # The apply gate reads the file, not the verdict recorded about it
+    # ----------------------------------------------------------------------- #
+
+    def proposed_note(self, result, note_id="n-001"):
+        return Path(self.run_dir_of(result)) / "proposed" / f"{note_id}.md"
+
+    def apply(self, result, *extra):
+        return vcs.run(
+            ["apply", "--vault", str(self.vault), "--run", self.run_dir_of(result), "--accept", "n-001", *extra]
+        )
+
+    def held_run(self, server):
+        """A run whose only hold is a name the sources do not carry."""
+        server.script("draft", {"blocks": {"body": GOOD_BODY + ["The supplier list was short, and Priya found a cheaper one."]}})
+        return self.compose(server)
+
+    def test_fixing_a_held_note_lets_it_apply(self):
+        """The dead end this gate used to be: the file changed and the verdict did not."""
+        with StubServer() as server:
+            result = self.held_run(server)
+        note = self.proposed_note(result)
+        note.write_text(
+            note.read_text(encoding="utf-8").replace(
+                "The supplier list was short, and Priya found a cheaper one.", ""
+            ),
+            encoding="utf-8",
+        )
+        applied = self.apply(result)
+        self.assertEqual(applied["data"]["written"], ["00 Inbox/Espresso And Shelving.md"])
+        self.assertEqual(applied["data"]["rechecked"], ["n-001"])
+
+    def test_a_name_edited_into_a_clean_note_is_caught(self):
+        """The hole: apply wrote the file on disk while checking a verdict about
+        earlier bytes, so anything edited in afterwards went unchecked."""
+        with StubServer() as server:
+            result = self.compose(server)
+        self.assertEqual(result["data"]["counts"]["held"], 0)
+        note = self.proposed_note(result)
+        # A surname pinned onto a name the sources carry bare: the shape of the
+        # fabrication that started all this, where the sources said "Waismann"
+        # and the draft said "Friedrich Waismann".
+        note.write_text(
+            note.read_text(encoding="utf-8").replace("and Marcus recommended", "and Marcus Whitfield recommended"),
+            encoding="utf-8",
+        )
+        applied = self.apply(result)
+        self.assertEqual(applied["data"]["written"], [])
+        self.assertTrue(any("Whitfield" in line for line in applied["warnings"]))
+        self.assertEqual(list((self.vault / "00 Inbox").iterdir()), [])
+
+    def test_clearing_the_verdict_in_the_manifest_does_not_write_the_note(self):
+        """`proposals.json` is a manifest, not the gate. The session that
+        prompted this cleared the flags by hand and the note went in."""
+        with StubServer() as server:
+            result = self.held_run(server)
+        manifest = Path(self.run_dir_of(result)) / "proposals.json"
+        stored = json.loads(manifest.read_text(encoding="utf-8"))
+        for record in stored["proposals"]:
+            record["review"] = []
+            record["reviewer_review"] = []
+            record["needs_review"] = False
+        manifest.write_text(json.dumps(stored), encoding="utf-8")
+        applied = self.apply(result)
+        self.assertEqual(applied["data"]["written"], [])
+        self.assertTrue(any("Priya" in line for line in applied["warnings"]))
+
+    def test_a_reviewer_hold_survives_an_edit(self):
+        """A reviewer verdict cannot be recomputed here, so editing the prose it
+        objected to must not clear it."""
+        with StubServer() as server:
+            server.script("verify", {"verdicts": [{"id": "n-001", "verdict": "flag", "reason": "invented a claim"}]})
+            result = self.compose(server)
+        note = self.proposed_note(result)
+        note.write_text(note.read_text(encoding="utf-8") + "\nGillian thinks the kettle is fine.\n", encoding="utf-8")
+        applied = self.apply(result)
+        self.assertEqual(applied["data"]["written"], [])
+        held = " ".join(applied["warnings"])
+        self.assertIn("invented a claim", held)
+        self.assertIn("has not seen this edit", held)
+
+    def test_a_destination_outside_the_inbox_is_refused(self):
+        with StubServer() as server:
+            result = self.compose(server)
+        manifest = Path(self.run_dir_of(result)) / "proposals.json"
+        stored = json.loads(manifest.read_text(encoding="utf-8"))
+        stored["proposals"][0]["destination"] = "99 Meta/99.02 Schemas/0.00 Vault Schema.md"
+        manifest.write_text(json.dumps(stored), encoding="utf-8")
+        with self.assertRaises(vcs.UserError):
+            self.apply(result)
+
+    def test_apply_refuses_no_verify(self):
+        """Accepted and silently ignored until now, which read as a check that
+        ran and held the note anyway."""
+        with StubServer() as server:
+            result = self.held_run(server)
+        with self.assertRaises(vcs.UserError):
+            self.apply(result, "--no-verify")
+
     def test_an_unreachable_reviewer_is_not_approval(self):
         with StubServer() as server:
             result = self.compose(server, None, "--think-url", "http://127.0.0.1:9/v1/chat/completions")

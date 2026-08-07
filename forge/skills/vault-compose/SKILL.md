@@ -57,6 +57,10 @@ Everything runs on the local LAN endpoints. Nothing is sent anywhere.
    python3 <skill-directory>/scripts/vault-compose.py apply --vault <vault> --run <run-directory> --accept n-001
    ```
 
+   Every accepted note is checked again here, against the file as it stands.
+   From a session holding the tools rather than the CLI, this step is
+   `forge_vault_compose_apply`.
+
 7. Offer `vault-organizer inbox` next, which files what this wrote.
 
 ## The run spec
@@ -130,6 +134,15 @@ Everything below is deterministic and runs before the reviewer:
 
 A held note is reported, never written. Relay the reasons; do not rerun with
 different options to make them go away.
+
+There is one legitimate way past a hold, and it is to fix what was flagged.
+`apply` runs the deterministic checks again, over the file in `proposed/` as it
+then stands — so correcting the note and applying again is a supported move, and
+the same checks decide. What it is not is a way around them: the checks read the
+bytes about to be written, so a specific edited *in* holds the note just as one
+composed in would, and editing `proposals.json` changes nothing. A reviewer's
+objection is the exception — it cannot be recomputed without the reviewer, so it
+survives an edit and needs a fresh compose.
 
 ## Rules
 

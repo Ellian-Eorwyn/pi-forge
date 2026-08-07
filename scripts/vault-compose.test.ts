@@ -102,6 +102,16 @@ function harness(cwd: string, entries: unknown[] = []) {
 		async composeCommand() {
 			await commands.get("compose")?.("" as never, ctx as never);
 		},
+		async apply(params: unknown) {
+			const tool = tools.get("forge_vault_compose_apply");
+			assert.ok(tool, "forge_vault_compose_apply is registered");
+			return (await tool.execute("call-3", params, undefined, undefined, ctx)).details;
+		},
+		parametersOf(name: string) {
+			const tool = tools.get(name);
+			assert.ok(tool, `${name} is registered`);
+			return (tool.parameters as { properties?: Record<string, unknown> }).properties ?? {};
+		},
 		toolNames: () => [...tools.keys()],
 	};
 }
@@ -110,16 +120,22 @@ function messageEntry(id: string, role: string, text: string) {
 	return { id, type: "message", message: { role, content: [{ type: "text", text }] } };
 }
 
-test("neither tool has a parameter that can carry note prose", () => {
+test("no tool has a parameter that can carry note prose", () => {
 	const root = makeVault();
 	try {
 		const app = harness(root);
-		assert.deepEqual(app.toolNames(), ["forge_vault_capture_source", "forge_vault_compose"]);
+		assert.deepEqual(app.toolNames(), [
+			"forge_vault_capture_source",
+			"forge_vault_compose",
+			"forge_vault_compose_apply",
+		]);
 		const serialized = JSON.stringify(app);
 		// The capture tool's shape is asserted by the entry-id test below; this
-		// guards the tool list itself, since a third tool taking text would
-		// reopen the hole the other two exist to close.
+		// guards the tool list itself, since a tool taking text would reopen the
+		// hole the others exist to close. Apply is the one that writes, so it is
+		// held to naming a run and some ids and nothing else.
 		assert.ok(!serialized.includes("sourceText"));
+		assert.deepEqual(Object.keys(app.parametersOf("forge_vault_compose_apply")), ["runDirectory", "accept"]);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -189,6 +205,31 @@ test("composing with nothing collected says so", async () => {
 			() => app.compose({ intent: "conversation", request: "make a note" }),
 			/no sources collected/,
 		);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("apply refuses a run directory this extension did not make", async () => {
+	const root = makeVault();
+	try {
+		const app = harness(root);
+		// The run directory decides which manifest apply trusts, so pointing it
+		// at a hand-built one somewhere else is the way around every check.
+		await assert.rejects(
+			() => app.apply({ runDirectory: join(root, "00 Inbox"), accept: ["n-001"] }),
+			/not a vault-compose run directory/,
+		);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("apply with no ids writes nothing", async () => {
+	const root = makeVault();
+	try {
+		const app = harness(root);
+		await assert.rejects(() => app.apply({ runDirectory: root, accept: [] }), /nothing is written/);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
