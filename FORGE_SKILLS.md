@@ -6,18 +6,18 @@
 
 - Available skills: 28
 - Model-visible skills at launch: 28
-- Tools offered at launch: 15
+- Tools offered at launch: 16
 
 | Launch context block | Tokens |
 |---|---:|
-| Base system prompt (intro, tools list, guidelines, connected services) | 459 |
-| Tool JSON schemas (15 tools) | 3525 |
-| Managed instructions (`AGENTS.md` with its `<project_context>` wrapper) | 2193 |
+| Base system prompt (intro, tools list, guidelines, connected services) | 457 |
+| Tool JSON schemas (16 tools) | 3697 |
+| Managed instructions (`AGENTS.md` with its `<project_context>` wrapper) | 2232 |
 | Skills menu (metadata for all model-visible skills) | 4070 |
-| **Total launch context (always processed)** | **10246** |
-| Maximum if every `SKILL.md` body is also loaded at once | 78180 |
+| **Total launch context (always processed)** | **10455** |
+| Maximum if every `SKILL.md` body is also loaded at once | 78997 |
 
-Of that total, the forge profile itself owns 6262 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
+Of that total, the forge profile itself owns 6301 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
 
 Of the skills menu above, the shared wrapper (instructions and XML envelope, independent of skill count) is ~92 tokens; the rest scales with the number of skills.
 
@@ -38,11 +38,12 @@ Sorted by launch cost. `Prompt lines` counts a tool's `promptSnippet` and `promp
 | `forge_vault_compose` | forge extension | 7 | 308 | 17 |
 | `edit` | built-in | 2 | 302 | 153 |
 | `forge_web_read` | forge extension | 6 | 281 | 12 |
-| `forge_vault_capture_source` | forge extension | 5 | 270 | 70 |
+| `forge_vault_capture_source` | forge extension | 5 | 270 | 91 |
 | `forge_web_discover` | forge extension | 5 | 254 | 18 |
 | `forge_academic_web_research` | forge extension | 6 | 253 | 19 |
 | `grep` | built-in | 7 | 253 | 16 |
 | `forge_reference_lookup` | forge extension | 3 | 183 | 17 |
+| `forge_vault_compose_apply` | forge extension | 2 | 172 | 19 |
 | `read` | built-in | 3 | 163 | 20 |
 | `find` | built-in | 3 | 147 | 15 |
 | `bash` | built-in | 2 | 129 | 14 |
@@ -70,12 +71,12 @@ Sorted by launch cost. `Prompt lines` counts a tool's `promptSnippet` and `promp
 | [`transcript-cleanup`](forge/skills/transcript-cleanup/SKILL.md) | Clean and structure raw transcripts | 144 | 1263 | 1380 | Model-visible |
 | [`transcription`](forge/skills/transcription/SKILL.md) | Transcribe audio or video, then correct and clean it | 141 | 1639 | 1754 | Model-visible |
 | [`vault-capture`](forge/skills/vault-capture/SKILL.md) | Turn a braindump into schema-valid notes in an Obsidian vault inbox - split unedited thinking... | 138 | 2534 | 2645 | Model-visible |
-| [`vault-compose`](forge/skills/vault-compose/SKILL.md) | Compose a vault note from material already in hand - a web-research run, existing notes, or t... | 144 | 1632 | 1742 | Model-visible |
+| [`vault-compose`](forge/skills/vault-compose/SKILL.md) | Compose a vault note from material already in hand - a web-research run, existing notes, or t... | 144 | 1827 | 1938 | Model-visible |
 | [`vault-connections`](forge/skills/vault-connections/SKILL.md) | Search an Obsidian vault by meaning, propose links for per-id review, publish completed liter... | 151 | 2682 | 2807 | Model-visible |
 | [`vault-curator`](forge/skills/vault-curator/SKILL.md) | Research how a field catalogues its records and propose what that means for an Obsidian vault... | 151 | 2403 | 2526 | Model-visible |
 | [`vault-media`](forge/skills/vault-media/SKILL.md) | Catalog books, films, television, music, and games in an Obsidian vault as `work` notes under... | 149 | 2129 | 2251 | Model-visible |
 | [`vault-naturalist`](forge/skills/vault-naturalist/SKILL.md) | Compile the seasonal Phenology tables on animal, plant, and fungus wiki cards into a queryabl... | 142 | 1570 | 1684 | Model-visible |
-| [`vault-organizer`](forge/skills/vault-organizer/SKILL.md) | Organize an Obsidian vault or its inbox from a human-maintained schema note - classify notes,... | 150 | 5797 | 5921 | Model-visible |
+| [`vault-organizer`](forge/skills/vault-organizer/SKILL.md) | Organize an Obsidian vault or its inbox from a human-maintained schema note - classify notes,... | 150 | 6209 | 6333 | Model-visible |
 | [`vault-projects`](forge/skills/vault-projects/SKILL.md) | Resolve a vault project into the closed set of files an agent may work from, and freeze it as... | 148 | 2369 | 2490 | Model-visible |
 | [`vault-transcripts`](forge/skills/vault-transcripts/SKILL.md) | Process raw voice-note and meeting transcripts in an Obsidian vault inbox - give each recordi... | 151 | 4574 | 4697 | Model-visible |
 | [`vault-wiki`](forge/skills/vault-wiki/SKILL.md) | Install the seven wiki entry templates and expand wiki entity notes into complete, cited refe... | 143 | 2300 | 2418 | Model-visible |
