@@ -13,6 +13,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import forge_embeddings
 import forge_llm
@@ -120,6 +121,7 @@ from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
     yaml_quote,
     yaml_scalar,
 )
+import vault_guide
 
 
 WORKFLOW = "vault-organizer"
@@ -3199,6 +3201,61 @@ def drift(args):
     )
 
 
+def guide(args):
+    """Compile the vault's own orientation skill from its schema and its folders.
+
+    The output is a skill the agent discovers on its own, so this mode is the one
+    place in the tool that writes outside the vault's notes and outside its own
+    state directory. It stays a dry run by default for the same reason every
+    other mode does: the file it replaces may have been read by a session five
+    minutes ago, and a diff is cheap to look at.
+    """
+    vault = Path(args.vault).expanduser().resolve()
+    if not vault.is_dir():
+        raise UserError(f"vault root does not exist: {vault}")
+    schema_path = resolve_schema_path(vault, args.schema)
+    schema, schema_hash = compiled_schema_for(vault, schema_path)
+    rendered = vault_guide.build(vault, schema, schema_path, schema_hash)
+    triggers = vault_guide.render_triggers(vault.name, schema)
+    target = vault_guide.guide_path(vault)
+
+    data = {
+        "vault": str(vault),
+        "schema": str(schema_path),
+        "guide": str(target),
+        "skill": vault_guide.SKILL_NAME,
+        "sections": vault_guide.section_summary(rendered),
+    }
+    if args.print_guide:
+        data["body"] = rendered
+
+    if args.check:
+        current, stale = vault_guide.check(vault, rendered)
+        data["dryRun"] = True
+        data["current"] = current
+        return structured(
+            "ok" if current else "error",
+            warnings=stale,
+            errors=[] if current else [error_entry("stale_guide", "; ".join(stale))],
+            data=data,
+        )
+
+    installed = vault_guide.read_text(target)
+    changes = vault_guide.describe_changes(rendered, installed)
+    data["changes"] = changes
+    data["changed"] = bool(changes)
+    data["dryRun"] = not args.apply
+
+    if args.apply:
+        vault_guide.write_guide(vault, rendered, triggers)
+        return structured("ok", artifacts=[str(target)], data=data)
+
+    candidate = vault_guide.write_candidate(vault, rendered, triggers)
+    data["candidate"] = str(candidate)
+    warnings = [] if not changes else ["guide is out of date; rerun with --apply to install it"]
+    return structured("ok", artifacts=[str(candidate)], warnings=warnings, data=data)
+
+
 def parse_renumber_moves(raw):
     """``craft=4,writing=5`` -> ``{"craft": 4, "writing": 5}``."""
     moves = {}
@@ -3649,7 +3706,7 @@ def parse_args(argv):
     parser = argparse.ArgumentParser(description="Classify, dedupe, and organize Obsidian vault notes.")
     parser.add_argument(
         "mode",
-        choices=["inbox", "vault", "attachments", "dates", "drift", "renumber", "status", "doctor"],
+        choices=["inbox", "vault", "attachments", "dates", "drift", "renumber", "status", "doctor", "guide"],
     )
     parser.add_argument("--vault")
     parser.add_argument("--schema", action=TrackingAction)
@@ -3720,6 +3777,17 @@ def parse_args(argv):
             "as YYYY-01-01; the day is a placeholder, so read the report first"
         ),
     )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="guide mode: report whether the installed guide still matches the vault, and write nothing",
+    )
+    parser.add_argument(
+        "--print",
+        dest="print_guide",
+        action="store_true",
+        help="guide mode: include the compiled guide in the JSON, instead of only its shape",
+    )
     parser.add_argument("--run", help="existing run directory to resume")
     parser.add_argument("--limit", type=int, action=TrackingAction)
     parser.add_argument("--base-url", action=TrackingAction)
@@ -3786,7 +3854,11 @@ def parse_args(argv):
             "--archive, --self-only, --include-file-times, --trust-birthtime, --near-match, --ids, "
             "and --year-only belong to dates mode"
         )
-    if args.mode in {"attachments", "drift", "renumber"}:
+    if (args.check or args.print_guide) and args.mode != "guide":
+        raise UserError("--check and --print belong to guide mode")
+    if args.check and args.apply:
+        raise UserError("--check reports whether the guide is current; it never writes, so --apply is meaningless with it")
+    if args.mode in {"attachments", "drift", "renumber", "guide"}:
         # Deterministic filesystem work: no classification, so no model or
         # embeddings service is resolved and these run with every endpoint down.
         return args
@@ -3837,6 +3909,8 @@ def run(argv):
         result = dates(args)
     elif args.mode == "drift":
         result = drift(args)
+    elif args.mode == "guide":
+        result = guide(args)
     elif args.mode == "renumber":
         result = renumber(args)
     else:

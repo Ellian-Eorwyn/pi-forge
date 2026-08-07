@@ -300,6 +300,37 @@ new registrations are reported for the user to make. The note is backed up, and
 an edit that fails to re-parse or introduces new high-severity drift is rolled
 back.
 
+## The vault guide
+
+`guide` compiles a skill that describes this vault, and writes it into the vault
+at `.agents/skills/vault-guide/SKILL.md` — where the agent discovers it on its
+own, from the vault root and every folder beneath it. The session already learns
+*that* it is in a vault; the guide is what tells it which domains exist, what
+each property may hold, which folders are machine output, and which notes carry
+the vault's own rules. Without it a session re-derives that with `ls` and `grep`,
+or guesses.
+
+```bash
+python3 <skill-directory>/scripts/vault-organizer.py guide --vault <vault>
+```
+
+Dry-runs like every other mode: the compiled file is staged under
+`.vault-organizer/cache/guide/` and the payload names which sections changed.
+`--apply` installs it, `--print` puts the body in the payload, and `--check`
+writes nothing and exits non-zero when the guide no longer matches the vault.
+
+Everything in it is compiled from the schema note and the folders on disk, so it
+carries no judgment of its own — the vault's convention notes are indexed by
+path and trigger, never paraphrased, and stay the authority. There is no
+timestamp, so regeneration over an unchanged vault is byte-identical and a diff
+means something. Anything written *after* the generated end marker is preserved.
+
+**Never hand-edit the generated block; regenerate instead.** The fingerprints in
+its footer are what `--check` compares, and an edited guide is one nobody can
+tell is stale. After any schema edit, renumber, or new subdomain folder, run
+`--check` — and relay its findings rather than applying silently, since the file
+is versioned in the user's vault.
+
 ## Renumbering
 
 Making room for a new domain in the middle of a Johnny Decimal scheme is a chain
