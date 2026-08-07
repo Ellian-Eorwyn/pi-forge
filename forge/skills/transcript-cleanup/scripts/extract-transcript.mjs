@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { ensureWorkspaceMarker } from "../../../lib/vault-workspace.mjs";
 
 function fail(message) {
 	process.stderr.write(`Error: ${message}\n`);
@@ -44,7 +45,13 @@ if (![".txt", ".md", ".docx"].includes(extension)) {
 const source = readFileSync(inputPath);
 const checksum = createHash("sha256").update(source).digest("hex");
 const outputDirectory = dirname(outputPath);
-mkdirSync(outputDirectory, { recursive: true });
+// Mark a directory this run created, never one it found. Inside a vault the
+// created directory is the run directory named in SKILL.md, and leaving it
+// unmarked makes the cleaned transcript a note: classified, filed away from the
+// report beside it, and embedded. Outside one the output path is wherever the
+// caller pointed, so a pre-existing directory -- a home folder, a Desktop --
+// keeps whatever it already is.
+if (mkdirSync(outputDirectory, { recursive: true })) ensureWorkspaceMarker(outputDirectory);
 accessSync(outputDirectory, constants.W_OK);
 
 const temporaryPath = join(outputDirectory, `.${basename(outputPath)}.${process.pid}.tmp`);

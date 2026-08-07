@@ -29,10 +29,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import vault_corpus
 from vault_schema import (
-    WORKSPACE_MARKER,
     UserError,
     compile_destination,
     compiled_schema_for,
+    ensure_workspace_marker,
     note_title,
     relative_path,
     resolve_schema_path,
@@ -110,13 +110,7 @@ def run_directory(vault, schema, name):
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     directory = base / name / stamp
     directory.mkdir(parents=True, exist_ok=True)
-    marker = base / WORKSPACE_MARKER
-    if not marker.exists():
-        marker.write_text(
-            "This folder holds generated pi-forge run artifacts, not vault notes.\n"
-            "Its whole tree is skipped by classification, filing, and corpus resolution.\n",
-            encoding="utf-8",
-        )
+    ensure_workspace_marker(base)
     return directory
 
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { test } from "node:test";
 import vaultContextExtension, {
 	inspectVault,
@@ -385,6 +385,40 @@ test("the workflow root carries a marker that keeps the organizer and the index 
 		writeFileSync(marker, `${contents}edited\n`);
 		assert.equal(resolveWorkflowRoot(root, "web-research"), resolved);
 		assert.match(readFileSync(marker, "utf8"), /edited/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("the injected context names the category folders that are still unmarked", () => {
+	const root = makeVault({ schema: schemaWithMeta(), notes: ["A.md"] });
+	try {
+		const marked = resolveWorkflowRoot(root, "web-research");
+		const workflowRoot = join(root, "99 Meta", "99.06 Workflows");
+		// What a bare mkdir leaves behind: artifacts that discovery reads as notes.
+		mkdirSync(join(workflowRoot, "Project Extractions", "Waste-Heat"), { recursive: true });
+		writeFileSync(join(workflowRoot, "Project Extractions", "Waste-Heat", "pkt-01.md"), "# Packet\n");
+		writeFileSync(join(workflowRoot, "How I Process The Inbox.md"), "# Note\n");
+		const message = vaultContextMessage(inspectVault(root) as NonNullable<ReturnType<typeof inspectVault>>);
+		assert.match(message, /Unmarked, so currently counted as notes: `Project Extractions\/`/);
+		// A folder that already carries a marker is not nagged about, and a note
+		// sitting directly in the workflow root is not a folder at all.
+		assert.doesNotMatch(message, new RegExp(`\`${basename(marked)}/\``));
+		assert.doesNotMatch(message, /How I Process The Inbox/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a vault with every category folder marked gets no repair line", () => {
+	const root = makeVault({ schema: schemaWithMeta(), notes: ["A.md"] });
+	try {
+		resolveWorkflowRoot(root, "web-research");
+		const message = vaultContextMessage(inspectVault(root) as NonNullable<ReturnType<typeof inspectVault>>);
+		assert.doesNotMatch(message, /Unmarked, so currently counted as notes/);
+		// The rule itself is always stated, with the text to write.
+		assert.match(message, /write it yourself as the directory's first file/);
+		assert.match(message, /pi-forge workspace\. Generated run directories live here\./);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

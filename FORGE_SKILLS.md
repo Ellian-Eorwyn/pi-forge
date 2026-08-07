@@ -10,12 +10,12 @@
 
 | Launch context block | Tokens |
 |---|---:|
-| Base system prompt (intro, tools list, guidelines, connected services) | 438 |
+| Base system prompt (intro, tools list, guidelines, connected services) | 459 |
 | Tool JSON schemas (15 tools) | 3525 |
 | Managed instructions (`AGENTS.md` with its `<project_context>` wrapper) | 2193 |
 | Skills menu (metadata for all model-visible skills) | 4070 |
-| **Total launch context (always processed)** | **10225** |
-| Maximum if every `SKILL.md` body is also loaded at once | 78070 |
+| **Total launch context (always processed)** | **10246** |
+| Maximum if every `SKILL.md` body is also loaded at once | 78180 |
 
 Of that total, the forge profile itself owns 6262 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
 
@@ -67,7 +67,7 @@ Sorted by launch cost. `Prompt lines` counts a tool's `promptSnippet` and `promp
 | [`skill-builder`](forge/skills/skill-builder/SKILL.md) | Create and validate portable Agent Skills | 141 | 1010 | 1126 | Model-visible |
 | [`skill-tuner`](forge/skills/skill-tuner/SKILL.md) | Mine session logs for pain points that improve skills | 143 | 1879 | 1997 | Model-visible |
 | [`spreadsheet-analysis`](forge/skills/spreadsheet-analysis/SKILL.md) | Analyze and enrich tabular datasets | 129 | 2233 | 2334 | Model-visible |
-| [`transcript-cleanup`](forge/skills/transcript-cleanup/SKILL.md) | Clean and structure raw transcripts | 144 | 1174 | 1291 | Model-visible |
+| [`transcript-cleanup`](forge/skills/transcript-cleanup/SKILL.md) | Clean and structure raw transcripts | 144 | 1263 | 1380 | Model-visible |
 | [`transcription`](forge/skills/transcription/SKILL.md) | Transcribe audio or video, then correct and clean it | 141 | 1639 | 1754 | Model-visible |
 | [`vault-capture`](forge/skills/vault-capture/SKILL.md) | Turn a braindump into schema-valid notes in an Obsidian vault inbox - split unedited thinking... | 138 | 2534 | 2645 | Model-visible |
 | [`vault-compose`](forge/skills/vault-compose/SKILL.md) | Compose a vault note from material already in hand - a web-research run, existing notes, or t... | 144 | 1632 | 1742 | Model-visible |

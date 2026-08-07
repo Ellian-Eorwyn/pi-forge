@@ -19,9 +19,10 @@
  * few known paths. Outside a vault this extension does nothing at all.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, delimiter, dirname, join, relative, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { WORKSPACE_MARKER, WORKSPACE_MARKER_CONTENT, ensureWorkspaceMarker } from "../lib/vault-workspace.mjs";
 
 const CONTEXT_CUSTOM_TYPE = "vault-context";
 const DEFAULT_SCHEMA_RELATIVE = join("99 Meta", "99.02 Schemas", "0.00 Vault Schema.md");
@@ -42,14 +43,6 @@ const META_DOMAIN_VALUE = "meta";
 const WORKFLOWS_SUBDOMAIN_VALUE = "workflows";
 const WORKFLOWS_FOLDER_PATTERN = /^\d{1,2}\.\d{2} Workflows$/;
 const CATEGORY_MAP_URL = new URL("../lib/workflow-categories.json", import.meta.url);
-/** Marks a directory whose contents are machine artifacts, not vault notes. */
-const WORKSPACE_MARKER = ".forge-workspace";
-const WORKSPACE_MARKER_CONTENT = [
-	"pi-forge workspace. Generated run directories live here.",
-	"vault-organizer and vault-connections skip any directory containing this file.",
-	"",
-].join("\n");
-
 interface VaultOwner {
 	name: string;
 	pronouns?: string;
@@ -402,6 +395,30 @@ function findWorkflowsFolder(root: string, schemaNote: string | undefined): stri
 }
 
 /**
+ * Names of the directories directly under the workflow root with no marker.
+ *
+ * One level deep and no recursion: the workflow root's children are the category
+ * folders, and a marker on a category covers everything beneath it. A folder
+ * here that predates the scripts writing the marker is not distinguishable from
+ * a folder the owner made on purpose, so this reports rather than repairs.
+ */
+function unmarkedWorkflowFolders(workflowRoot: string): string[] {
+	let entries: ReturnType<typeof readdirSync>;
+	try {
+		entries = readdirSync(workflowRoot, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+	const unmarked: string[] = [];
+	for (const entry of entries) {
+		if (!entry.isDirectory() || entry.isSymbolicLink() || entry.name.startsWith(".")) continue;
+		if (existsSync(join(workflowRoot, entry.name, WORKSPACE_MARKER))) continue;
+		unmarked.push(entry.name);
+	}
+	return unmarked.sort();
+}
+
+/**
  * Where `skill` should write its generated run directories.
  *
  * Inside a vault whose workflows folder resolves, that is a per-skill category
@@ -418,9 +435,7 @@ export function resolveWorkflowRoot(cwd: string, skill: string): string {
 		return fallback;
 	}
 	const directory = join(vaultRoot, workflowsFolder, category);
-	mkdirSync(directory, { recursive: true });
-	const marker = join(directory, WORKSPACE_MARKER);
-	if (!existsSync(marker)) writeFileSync(marker, WORKSPACE_MARKER_CONTENT);
+	ensureWorkspaceMarker(directory);
 	return directory;
 }
 
@@ -526,11 +541,21 @@ export function vaultContextMessage(vault: VaultInfo): string {
 			"",
 			"Where generated output goes:",
 			`- Workflow root: ${join(vault.root, vault.workflowsFolder)}`,
-			"- Every skill that would otherwise write to `forge-output/<skill>/` writes to `<workflow root>/<Category>/<stem>/` instead. Each SKILL.md names its own category; do not invent one.",
+			"- Every skill that would otherwise write to `forge-output/<skill>/` writes to `<workflow root>/<Category>/<stem>/` instead. Each SKILL.md names its own category; do not invent one. A skill whose SKILL.md names no category has none, and its output stays in `forge-output/<skill>/` — do not put it in the workflow root under a made-up folder.",
 			"- This wins over a skill's `<source-folder>/Generated/…` convention inside the vault, so no run directory lands in a domain folder.",
-			"- Those category folders carry a `.forge-workspace` marker and are skipped by vault-organizer and vault-connections. Run artifacts are not notes.",
+			`- A run directory is only invisible to vault-organizer and vault-connections while it holds a \`${WORKSPACE_MARKER}\` file. The skill scripts write one, but if you create a directory for generated output yourself, write it yourself as the directory's first file, before anything else goes in. An unmarked run is counted, classified, filed, and embedded as notes.`,
+			`- Marker contents, verbatim:\n\n${WORKSPACE_MARKER_CONTENT}`,
 			"- To make a finished report an actual note, use vault-connections `import-run`. Never hand-copy a run artifact into a domain folder.",
 		);
+		// Naming what is already broken beats repeating the rule: these were made
+		// before any script wrote the marker, and each one is a tree the organizer
+		// and the index are still treating as notes.
+		const unmarked = unmarkedWorkflowFolders(join(vault.root, vault.workflowsFolder));
+		if (unmarked.length > 0) {
+			lines.push(
+				`- Unmarked, so currently counted as notes: ${unmarked.map((name) => `\`${name}/\``).join(", ")}. If these hold run artifacts, add the marker to each. Do not delete them.`,
+			);
+		}
 	} else {
 		lines.push(
 			"",

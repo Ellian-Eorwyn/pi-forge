@@ -85,5 +85,49 @@ class WorkspaceExclusionTests(unittest.TestCase):
         self.assertFalse(vs.is_inside_workspace(self.vault, self.vault / "01 Personal" / "Journal.md"))
 
 
+class WorkspaceMarkerWritingTests(unittest.TestCase):
+    """``ensure_workspace_marker`` is what makes the exclusion above reachable.
+
+    Every one of these directories used to be created by a bare mkdir, so the
+    exclusion tested above was a promise the injected vault context made and only
+    two skills kept.
+    """
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name).resolve()
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_a_marked_directory_becomes_invisible_to_discovery(self):
+        directory = self.root / "Project Extractions" / "Waste-Heat"
+        write(directory / "packets" / "pkt-01.md")
+        self.assertFalse(vs.is_workspace_dir(directory))
+        vs.ensure_workspace_marker(directory)
+        self.assertTrue(vs.is_workspace_dir(directory))
+        self.assertEqual(vs.count_notes(self.root), 0)
+
+    def test_it_creates_a_directory_that_does_not_exist_yet(self):
+        marker = vs.ensure_workspace_marker(self.root / "fresh")
+        self.assertTrue(marker.is_file())
+        self.assertEqual(marker.read_text(encoding="utf-8"), vs.WORKSPACE_MARKER_CONTENT)
+
+    def test_it_leaves_a_hand_written_marker_alone(self):
+        # The markers already in the owner's vault carry their own wording.
+        directory = self.root / "Literature Extractions"
+        existing = write(directory / vs.WORKSPACE_MARKER, "Written by hand.\n")
+        vs.ensure_workspace_marker(directory)
+        self.assertEqual(existing.read_text(encoding="utf-8"), "Written by hand.\n")
+
+    def test_the_marker_text_matches_the_javascript_definition(self):
+        # A vault holds markers written by both languages. `vault-workspace.mjs`
+        # is the JavaScript and TypeScript copy; a reader comparing two markers
+        # should not have to wonder whether a difference means anything.
+        source = (Path(__file__).resolve().parents[1] / "vault-workspace.mjs").read_text(encoding="utf-8")
+        for line in vs.WORKSPACE_MARKER_CONTENT.splitlines():
+            self.assertIn(f'"{line}",', source)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

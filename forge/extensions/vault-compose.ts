@@ -32,11 +32,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { WORKSPACE_MARKER } from "../lib/vault-workspace.mjs";
 import { inspectVault, resolveWorkflowRoot } from "./vault-context.ts";
 
 const SKILL_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "skills", "vault-compose", "scripts", "vault-compose.py");
-/** Marks a directory whose contents are machine artifacts, not vault notes. */
-const WORKSPACE_MARKER = ".forge-workspace";
 /** Bound on one excerpt, so a pasted book cannot become a "source". */
 const MAX_UNIT_CHARS = 60000;
 

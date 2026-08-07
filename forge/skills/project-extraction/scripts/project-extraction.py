@@ -26,6 +26,7 @@ import run_state
 import forge_embeddings
 import forge_llm
 import forge_verify
+from vault_schema import ensure_workspace_marker
 
 
 RUN_SCHEMA_VERSION = 2
@@ -1299,6 +1300,11 @@ def command_init(args):
         print(json.dumps({"runDirectory": str(run_directory), "resumed": True, "status": state["status"], "phase": state["phase"], "nextAction": state.get("nextAction"), "foregroundAvailable": chat["enabled"], "nextCommand": f"project-extraction.py process {run_directory}" if chat["enabled"] else "Configure connectedServices.chat, then rerun process."}, indent=2))
         return
     run_directory.mkdir(parents=True)
+    # Inside a vault this lands in the workflow root, whose category folder is
+    # created here by the mkdir above rather than by `resolveWorkflowRoot`. An
+    # unmarked run is counted as notes, classified, filed, and embedded -- and a
+    # run of this skill is hundreds of packets, so it swamps everything else.
+    ensure_workspace_marker(run_directory)
     (run_directory / "working").mkdir()
     sources = discover_sources(args.inputs)
     manifest = initialize_manifest(run_directory, sources, args.packet_chars)
@@ -3776,6 +3782,7 @@ def command_focus(args):
     if output.exists():
         fail(f"focus output already exists: {output}")
     output.mkdir(parents=True)
+    ensure_workspace_marker(output)
     scope = scope_options(args)
     controls = read_jsonl(parent / "controls.jsonl")
     selected_ids = {row["control_id"] for row in controls if control_matches_scope(row, scope)}

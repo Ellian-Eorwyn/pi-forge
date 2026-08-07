@@ -32,7 +32,11 @@ interpretation, and uncertainty visible.
    numbered suffix. Inside an Obsidian vault use the vault workflow root
    instead — `99 Meta/99.06 Workflows/Transcript Cleanups/<source-stem>/`, at the
    absolute path the injected vault context names. Do not overwrite existing
-   output.
+   output. Inside a vault, the directory's first file is a `.forge-workspace`
+   marker with the contents the vault context quotes — the extraction helper
+   writes one when it creates the directory, but a directory you made yourself
+   has none, and a cleaned transcript in an unmarked directory is filed away from
+   the report beside it as though it were a note.
 5. Follow the selected output track below. Create separate artifacts only when
    requested.
 6. Review the result against the source before finishing. Report omissions,

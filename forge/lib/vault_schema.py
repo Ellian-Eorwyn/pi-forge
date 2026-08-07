@@ -40,6 +40,14 @@ PROTECTED_DIRS = {".obsidian", ".git", ".vault-organizer", ".vault-connections",
 # refiling a run's Markdown would break the run's own path references. Drop the
 # file into any other folder to exclude it the same way.
 WORKSPACE_MARKER = ".forge-workspace"
+# Byte-identical to WORKSPACE_MARKER_CONTENT in forge/lib/vault-workspace.mjs,
+# which is where the JavaScript and TypeScript callers get it. A vault ends up
+# with markers written by both languages, and a reader comparing two of them
+# should not have to wonder whether the difference means anything.
+WORKSPACE_MARKER_CONTENT = (
+    "pi-forge workspace. Generated run directories live here.\n"
+    "vault-organizer and vault-connections skip any directory containing this file.\n"
+)
 RESERVED_WINDOWS_NAMES = {
     "con", "prn", "aux", "nul",
     "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
@@ -1924,6 +1932,28 @@ def is_workspace_dir(path):
         return (path / WORKSPACE_MARKER).is_file()
     except OSError:
         return False
+
+
+def ensure_workspace_marker(directory):
+    """Mark ``directory`` as holding run artifacts, creating it if it is missing.
+
+    The counterpart to ``is_workspace_dir``: whatever creates a directory for
+    generated output calls this, so that an artifact tree is invisible to
+    classification, filing, counting, and embedding from the moment it exists
+    rather than from whenever somebody notices. Only ``resolveWorkflowRoot``
+    used to write the marker, and only two skills go through it, so every other
+    skill's category folder came out unmarked and its runs were counted as notes.
+
+    Idempotent, and never rewrites a marker that is already there: markers
+    written by hand carry their own wording, and normalizing one would be a
+    vault edit nobody asked for. Returns the marker path.
+    """
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    marker = directory / WORKSPACE_MARKER
+    if not marker.exists():
+        marker.write_text(WORKSPACE_MARKER_CONTENT, encoding="utf-8")
+    return marker
 
 
 def is_inside_workspace(vault, path):
