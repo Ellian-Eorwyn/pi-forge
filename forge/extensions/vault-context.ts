@@ -28,6 +28,8 @@ const CONTEXT_CUSTOM_TYPE = "vault-context";
 const DEFAULT_SCHEMA_RELATIVE = join("99 Meta", "99.02 Schemas", "0.00 Vault Schema.md");
 const DEFAULT_PROFILE_RELATIVE = join("99 Meta", "99.02 Schemas", "0.03 Personal Context.md");
 const DEFAULT_FORMAT_RELATIVE = join("99 Meta", "99.02 Schemas", "0.04 Note Format.md");
+/** The vault's own generated orientation skill, written by `vault-organizer guide`. */
+const GUIDE_RELATIVE = join(".agents", "skills", "vault-guide", "SKILL.md");
 /** Matches `MAX_OWNER_FIELD_CHARS` in `forge/lib/vault_profile.py`: a name, not a biography. */
 const MAX_OWNER_FIELD_CHARS = 40;
 const SKIPPED_DIRECTORIES = new Set([".obsidian", ".git", ".vault-organizer", ".vault-connections", "node_modules"]);
@@ -71,6 +73,8 @@ interface VaultInfo {
 	owner?: VaultOwner;
 	wikiDomain: boolean;
 	organizerState: boolean;
+	/** Whether the vault carries a generated skill describing its own shape. */
+	guide: boolean;
 	indexedNotes?: number;
 	/** Vault-relative folder holding generated run directories, when resolvable. */
 	workflowsFolder?: string;
@@ -454,6 +458,7 @@ export function inspectVault(cwd: string): VaultInfo | undefined {
 		owner: readOwner(root),
 		wikiDomain: hasWikiDomain(root, schemaNote),
 		organizerState: existsSync(join(root, ".vault-organizer")),
+		guide: existsSync(join(root, GUIDE_RELATIVE)),
 		indexedNotes: readIndexedNoteCount(root),
 		workflowsFolder: findWorkflowsFolder(root, schemaNote),
 		obsidianCli: inspectObsidianCli(root),
@@ -546,7 +551,7 @@ export function vaultContextMessage(vault: VaultInfo): string {
 			"- This wins over a skill's `<source-folder>/Generated/…` convention inside the vault, so no run directory lands in a domain folder.",
 			`- A run directory is only invisible to vault-organizer and vault-connections while it holds a \`${WORKSPACE_MARKER}\` file. The skill scripts write one, but if you create a directory for generated output yourself, write it yourself as the directory's first file, before anything else goes in. An unmarked run is counted, classified, filed, and embedded as notes.`,
 			`- Marker contents, verbatim:\n\n${WORKSPACE_MARKER_CONTENT}`,
-			"- To make a finished report an actual note, use vault-connections `import-run`. Never hand-copy a run artifact into a domain folder.",
+			"- To file a finished run artifact as a note more or less as it stands, use vault-connections `import-run`. To write a *new* note grounded in that run, use the compose tools below. Either way, never hand-copy a run artifact into a domain folder.",
 		);
 		// Naming what is already broken beats repeating the rule: these were made
 		// before any script wrote the marker, and each one is a tree the organizer
@@ -564,15 +569,22 @@ export function vaultContextMessage(vault: VaultInfo): string {
 		);
 	}
 
+	lines.push("", "Which skill to load:");
+	// Named first because it is the cheapest thing to read and it answers the
+	// questions the rest of this message deliberately leaves out: what the
+	// domains are, what a property may contain, which note holds which rule.
+	if (vault.guide) {
+		lines.push(
+			`- Anything needing this vault's own layout, property vocabulary, or conventions -> ${GUIDE_RELATIVE}. It is generated from the schema, so read it instead of deriving the folder tree by hand.`,
+		);
+	}
 	lines.push(
-		"",
-		"Which skill to load:",
 		"- Finding notes, or answering a question about what is in the vault -> skills/vault-connections/SKILL.md, `search`. Use it before grep; it ranks by meaning, and grep misses notes that never use the query's words.",
 		"- Proposing links between notes, filling `related`, or maintaining the wiki layer -> skills/vault-connections/SKILL.md.",
 		"- Classifying, filing, de-duplicating, or processing the inbox -> skills/vault-organizer/SKILL.md.",
 		"- Raw voice-note or meeting transcripts in the inbox -> skills/vault-transcripts/SKILL.md **before** vault-organizer processes them: it names, cleans, and summarizes each recording and writes advisory frontmatter, and the organizer then classifies and files the result.",
 		"- Several short voice memos from the same day -> skills/vault-transcripts/SKILL.md, `daily`. It merges the day onto one clock and writes one log plus the recordings, instead of a note per fragment.",
-		"- Making a note out of research, out of existing notes, or out of this conversation -> the `forge_vault_capture_source` and `forge_vault_compose` tools, or skills/vault-compose/SKILL.md for the CLI. Collect the sources, then compose; it proposes and writes nothing until you accept an id.",
+		"- Making a *new* note out of research, out of existing notes, or out of this conversation -> the `forge_vault_capture_source`, `forge_vault_compose` and `forge_vault_compose_apply` tools, or skills/vault-compose/SKILL.md for the CLI. Collect the sources, compose, show the user the proposals, then apply the ids they name. Nothing is written until then. This is the route when the note is written from the material; `import-run` above is the route when the artifact already is the note.",
 		"",
 		"Never write a note into the vault with the write tool: it is blocked, because nothing would check that note against anything. Run artifacts under a `.forge-workspace` directory are exempt.",
 		"Both skills dry-run by default and need explicit approval before `--apply`. Never hand-edit the schema note or note frontmatter; let the skills write them.",

@@ -78,6 +78,7 @@ function makeVault(
 		indexed?: number;
 		register?: string;
 		format?: string;
+		guide?: boolean;
 	} = {},
 ) {
 	const root = mkdtempSync(join(tmpdir(), "vault-context-"));
@@ -97,6 +98,11 @@ function makeVault(
 		const full = join(root, "99 Meta", "99.02 Schemas", "0.04 Note Format.md");
 		mkdirSync(join(full, ".."), { recursive: true });
 		writeFileSync(full, options.format);
+	}
+	if (options.guide) {
+		const full = join(root, ".agents", "skills", "vault-guide", "SKILL.md");
+		mkdirSync(join(full, ".."), { recursive: true });
+		writeFileSync(full, "---\nname: vault-guide\ndescription: Generated.\n---\n");
 	}
 	for (const note of options.notes ?? []) {
 		const full = join(root, note);
@@ -245,6 +251,32 @@ test("the injected message flags a missing schema, a missing index, and a missin
 		assert.match(withoutSchema, /Schema note: NOT FOUND/);
 	} finally {
 		rmSync(bare, { recursive: true, force: true });
+	}
+});
+
+test("a vault carrying a generated guide is routed to it, and one without it pays no line", () => {
+	const withGuide = makeVault({ schema: SCHEMA_WITH_WIKI, guide: true, notes: ["A.md"] });
+	try {
+		const info = inspectVault(withGuide);
+		assert.ok(info);
+		assert.equal(info.guide, true);
+		const message = vaultContextMessage(info);
+		assert.match(message, /\.agents\/skills\/vault-guide\/SKILL\.md/);
+		// It has to be the first route offered: it is the cheapest read, and the
+		// point of it is to be consulted before the vault is explored by hand.
+		assert.ok(message.indexOf("vault-guide/SKILL.md") < message.indexOf("vault-connections/SKILL.md"));
+	} finally {
+		rmSync(withGuide, { recursive: true, force: true });
+	}
+
+	const without = makeVault({ schema: SCHEMA_WITH_WIKI, notes: ["A.md"] });
+	try {
+		const info = inspectVault(without);
+		assert.ok(info);
+		assert.equal(info.guide, false);
+		assert.doesNotMatch(vaultContextMessage(info), /vault-guide/);
+	} finally {
+		rmSync(without, { recursive: true, force: true });
 	}
 });
 
