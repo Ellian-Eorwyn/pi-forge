@@ -7,6 +7,7 @@ import {
 	mkdtempSync,
 	mkdirSync,
 	readFileSync,
+	readdirSync,
 	readlinkSync,
 	realpathSync,
 	rmSync,
@@ -303,6 +304,22 @@ test("worker cancellation terminates the child process", async () => {
 	assert.equal(result.signal, "SIGTERM");
 });
 
+// Both fixtures below install the real `configure-pi-forge.mjs` rather than a
+// stub, so every module it imports has to be present or the install fails to
+// load. Each used to name those modules individually, and both lists went stale
+// the moment configure-pi-forge picked up `stack-state.mjs`: ten tests here
+// failed on a missing module rather than on anything they were written to
+// check. `forge/package.json` ships `lib/` whole, so the fixtures do the same
+// and the import closure stops being something to maintain by hand.
+function copyRuntimeLibrary(packageRoot) {
+	const library = join(repositoryRoot, "forge", "lib");
+	for (const entry of readdirSync(library, { withFileTypes: true })) {
+		if (entry.isFile() && entry.name.endsWith(".mjs")) {
+			writeFileSync(join(packageRoot, "lib", entry.name), readFileSync(join(library, entry.name), "utf8"));
+		}
+	}
+}
+
 function makeFakeInstallSource(source, version = "0.0.0-test") {
 	mkdirSync(join(source, "scripts"), { recursive: true });
 	mkdirSync(join(source, "forge", "bin"), { recursive: true });
@@ -331,16 +348,7 @@ function makeFakeInstallSource(source, version = "0.0.0-test") {
 			files: ["AGENTS.md", "bin", "lib", "scripts", "skills"],
 		})}\n`,
 	);
-	writeFileSync(
-		join(source, "forge", "lib", "connected-services.mjs"),
-		readFileSync(join(repositoryRoot, "forge", "lib", "connected-services.mjs"), "utf8"),
-	);
-	// The real `configure-pi-forge.mjs` is copied below rather than stubbed, so
-	// every module it imports has to be here too or the install fails to load.
-	writeFileSync(
-		join(source, "forge", "lib", "moshi-hook.mjs"),
-		readFileSync(join(repositoryRoot, "forge", "lib", "moshi-hook.mjs"), "utf8"),
-	);
+	copyRuntimeLibrary(join(source, "forge"));
 	writeFileSync(
 		join(source, "forge", "scripts", "configure-pi-forge.mjs"),
 		readFileSync(join(repositoryRoot, "forge", "scripts", "configure-pi-forge.mjs"), "utf8"),
@@ -544,16 +552,7 @@ function makeFakePackageTarball(root) {
 		})}\n`,
 	);
 	writeFileSync(join(packageRoot, "AGENTS.md"), "# Fake Package Agent\n");
-	writeFileSync(
-		join(packageRoot, "lib", "connected-services.mjs"),
-		readFileSync(join(repositoryRoot, "forge", "lib", "connected-services.mjs"), "utf8"),
-	);
-	// The real `configure-pi-forge.mjs` is copied below rather than stubbed, so
-	// every module it imports has to be here too or the install fails to load.
-	writeFileSync(
-		join(packageRoot, "lib", "moshi-hook.mjs"),
-		readFileSync(join(repositoryRoot, "forge", "lib", "moshi-hook.mjs"), "utf8"),
-	);
+	copyRuntimeLibrary(packageRoot);
 	writeFileSync(
 		join(packageRoot, "scripts", "configure-pi-forge.mjs"),
 		readFileSync(join(repositoryRoot, "forge", "scripts", "configure-pi-forge.mjs"), "utf8"),
