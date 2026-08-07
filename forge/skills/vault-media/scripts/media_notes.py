@@ -39,12 +39,15 @@ MEDIUM_HUB = {
     "show": "00 Shows",
 }
 
+# Named by medium rather than by verb, because Obsidian resolves a wikilink by
+# basename and two notes called "00 To Watch" — one for films, one for shows —
+# would be ambiguous from anywhere else in the vault.
 MEDIUM_BACKLOG = {
-    "book": "00 To Read",
-    "music": "00 To Listen",
-    "game": "00 To Play",
-    "movie": "00 To Watch",
-    "show": "00 To Watch",
+    "book": "00 Books to Read",
+    "music": "00 Music to Hear",
+    "game": "00 Games to Play",
+    "movie": "00 Films to Watch",
+    "show": "00 Shows to Watch",
 }
 
 # Which provider fields become Details rows, in order, per medium. A field the

@@ -315,3 +315,10 @@ def test_a_hand_written_backlog_row_survives_parsing():
     table += "\n| Stalker | 1979 | someone said so | |"
     parsed = media_notes.parse_backlog_table(table)
     assert [p["cells"][0] for p in parsed] == ["Dune", "Stalker"]
+
+
+def test_hub_and_backlog_names_are_unique_across_media():
+    """Obsidian resolves a wikilink by basename, so two "00 To Watch" notes in
+    different folders would be ambiguous from everywhere else in the vault."""
+    names = list(media_notes.MEDIUM_HUB.values()) + list(media_notes.MEDIUM_BACKLOG.values())
+    assert len(names) == len(set(names))
