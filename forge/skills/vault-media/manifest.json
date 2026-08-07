@@ -1,0 +1,34 @@
+{
+  "name": "vault-media",
+  "type": "pi-forge-skill",
+  "version": "0.1.0",
+  "description": "Catalog books, films, television, music, and games in an Obsidian vault as `type: work` notes under an `entertainment` domain, with metadata fetched from Open Library, MusicBrainz, TVmaze, Steam, TMDB, or IGDB and the owner's own rating and thoughts recorded verbatim beside it.",
+  "skill_file": "SKILL.md",
+  "scripts_dir": "scripts",
+  "references_dir": "references",
+  "restart_safe": true,
+  "tools": [
+    {
+      "name": "vault_media",
+      "description": "Search media providers for a title and write a schema-valid `type: work` note under the vault's `entertainment` domain. Fetched metadata renders as a `## Details` body table; the owner's rating and thoughts are copied verbatim and are never inferred, composed, or supplied from a provider's score. Also maintains To Read / To Watch backlog list notes and promotes a row into a full note. Dry run is the default.",
+      "command": "python3 scripts/vault-media.py",
+      "destructive": false
+    }
+  ],
+  "safety": {
+    "destructive_by_default": false,
+    "requires_review_for_filesystem_changes": true,
+    "preserve_provenance_when_applicable": true,
+    "never_deletes_notes": true,
+    "never_writes_the_schema_note": true,
+    "never_overwrites_without_an_explicit_flag": true,
+    "never_writes_outside_the_entertainment_folders": true,
+    "never_infers_a_rating": true,
+    "never_paraphrases_the_owners_thoughts": true,
+    "never_promotes_a_provider_score_into_the_rating_property": true,
+    "drops_an_ungrounded_drafted_lead_rather_than_repairing_it": true,
+    "reports_a_missing_provider_key_by_name": true,
+    "never_prints_a_configured_api_key": true,
+    "never_disables_tls_verification": true
+  }
+}
