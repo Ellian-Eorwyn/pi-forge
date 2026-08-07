@@ -4317,6 +4317,12 @@ async function commandDeep(positionals, flags) {
 	const validation = validateDeepRun(runDirectory, { emit: false });
 	const completion = {
 				runDirectory,
+				// Named because a caller cannot guess them, and guessing wrong
+				// costs a failed read and a directory listing to recover from.
+				files: {
+					report: join(runDirectory, "deep_research_report.md"),
+					sources: join(runDirectory, "sources.md"),
+				},
 				question,
 				queries: state.queryLog.length,
 				sources: state.sources.length,

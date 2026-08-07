@@ -220,10 +220,12 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 			advanced: Type.Optional(Type.Object({}, { additionalProperties: true, description: ADVANCED_DESCRIPTION })),
 		}),
 		executionMode: "sequential",
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const input = params as WebReadParams;
 			const output = input.output ?? defaultOutputDirectory(ctx.cwd, "read", input.urls.join(" "));
-			const result = await runNode(buildWebReadArgs({ ...input, output }), signal);
+			const result = await runNode(buildWebReadArgs({ ...input, output }), signal, (line) =>
+				onUpdate?.({ content: [{ type: "text", text: line }], details: {} }),
+			);
 			const data = readResearchReport(output);
 			const details = {
 				runDirectory: output,
@@ -256,10 +258,12 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 			advanced: Type.Optional(Type.Object({}, { additionalProperties: true, description: ADVANCED_DESCRIPTION })),
 		}),
 		executionMode: "sequential",
-		async execute(_toolCallId, params, signal) {
+		async execute(_toolCallId, params, signal, onUpdate) {
 			const input = params as DeepWebResearchParams;
 			const args = buildDeepResearchArgs(input);
-			const result = await runNode(args, signal);
+			const result = await runNode(args, signal, (line) =>
+				onUpdate?.({ content: [{ type: "text", text: line }], details: {} }),
+			);
 			const summary = JSON.parse(result.stdout);
 			return {
 				content: [{ type: "text", text: JSON.stringify(summary, null, 2) }],
@@ -332,10 +336,12 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 			timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Provider request timeout in milliseconds." })),
 		}),
 		executionMode: "sequential",
-		async execute(_toolCallId, params, signal) {
+		async execute(_toolCallId, params, signal, onUpdate) {
 			const input = params as AcademicWebResearchParams;
 			const args = buildAcademicResearchArgs(input);
-			const result = await runNode(args, signal);
+			const result = await runNode(args, signal, (line) =>
+				onUpdate?.({ content: [{ type: "text", text: line }], details: {} }),
+			);
 			const summary = JSON.parse(result.stdout);
 			return {
 				content: [{ type: "text", text: JSON.stringify(summary, null, 2) }],
@@ -441,11 +447,23 @@ function safeStem(value: string): string {
 		.replace(/^-+|-+$/g, "");
 }
 
-function runNode(args: string[], signal: AbortSignal): Promise<{ stdout: string; stderr: string }> {
+/**
+ * The CLI, with its progress reaching the caller while it still means something.
+ *
+ * A deep run is minutes of reading sources, and it says so on stderr as it goes.
+ * Holding that until the process exits is what makes eleven working minutes
+ * indistinguishable from a hang.
+ */
+function runNode(
+	args: string[],
+	signal: AbortSignal,
+	onProgress?: (line: string) => void,
+): Promise<{ stdout: string; stderr: string }> {
 	return new Promise((resolveRun, rejectRun) => {
 		const child = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "pipe"] });
 		let stdout = "";
 		let stderr = "";
+		let partial = "";
 		child.stdout.setEncoding("utf8");
 		child.stderr.setEncoding("utf8");
 		child.stdout.on("data", (chunk: string) => {
@@ -453,6 +471,12 @@ function runNode(args: string[], signal: AbortSignal): Promise<{ stdout: string;
 		});
 		child.stderr.on("data", (chunk: string) => {
 			stderr += chunk;
+			if (!onProgress) return;
+			// Held back to whole lines: half a progress line is noise, not news.
+			partial += chunk;
+			const lines = partial.split("\n");
+			partial = lines.pop() ?? "";
+			for (const line of lines) if (line.trim()) onProgress(line.trim());
 		});
 		const abort = () => child.kill();
 		signal.addEventListener("abort", abort, { once: true });
