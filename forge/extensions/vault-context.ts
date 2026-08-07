@@ -488,6 +488,7 @@ function obsidianCliLines(cli: ObsidianCli | undefined): string[] {
 	return [
 		`- Obsidian CLI: available (vault name \`${cli.vaultName}\`). The vault skills use it as an optional verifier and for link-safe moves. It is never required; every skill works without it.`,
 		"- Do not run mutating `obsidian` subcommands yourself — rename, move, delete, property:set, create, append, eval. It exits 0 whether it succeeded or failed, has no dry run, and rewrites links across the whole vault. The skills own those calls: they back up every affected note, verify hashes, and journal what they did.",
+		"- This restrains you, not them. Running vault-organizer, vault-connections, or any other vault skill is always allowed, including when it moves or rewrites notes — that is the approved way to do it, and needs no reasoning about the rule above.",
 	];
 }
 

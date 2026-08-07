@@ -37,6 +37,8 @@ owner". Given no name, use none rather than guess; given no pronouns, they/them.
   the whole vault. The vault skills own those calls: they back up every affected
   note, verify hashes, journal what they did, and restore from backup when the
   app touches anything but a link. Read-only `obsidian` queries are fine.
+- That restrains you, not the skills. Running a vault skill is always allowed,
+  including when it moves or rewrites notes; it is the approved way to do it.
 
 ## Provenance and Interpretation
 
