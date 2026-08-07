@@ -32,6 +32,7 @@ import {
 	readJsonlRecoverTail,
 	updateRunState,
 } from "../forge/lib/run-state.mjs";
+import { DEFAULT_CONNECTED_SERVICES } from "../forge/lib/connected-services.mjs";
 
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const skillsRoot = join(repositoryRoot, "forge", "skills");
@@ -3751,35 +3752,24 @@ test("extracted organize-folder and spreadsheet tools expose structured executio
 	});
 });
 
-test("shared library Python tests pass", () => {
-	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_eml_parser.py")]);
-	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_forge_llm.py")]);
-	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_forge_verify.py")]);
-	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_vault_schema.py")]);
-	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_schema_drift.py")]);
-	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_vault_sources.py")]);
-	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_vault_lexicon.py")]);
-	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_vault_voice.py")]);
-	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_vault_profile.py")]);
-	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_vault_reflection.py")]);
-	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_vault_wiki.py")]);
-});
-
-// The per-skill suites are discovered rather than listed. A hand-maintained list
-// drifts silently in the one direction that matters: a skill lands with tests,
-// nobody adds the registration, and the suite reads as passing because it never
-// runs at all. Discovery makes writing the file the whole of wiring it up.
-function pythonSuites(skill, directory) {
-	const path = join(skillsRoot, skill, directory);
-	if (!existsSync(path) || !statSync(path).isDirectory()) {
+// The Python suites are discovered rather than listed. A hand-maintained list
+// drifts silently in the one direction that matters: a suite lands, nobody adds
+// the registration, and it reads as passing because it never runs at all. That
+// had happened sixteen times — seven skills and nine shared-library suites,
+// 276 library tests among them — before anyone looked. Discovery makes writing
+// the file the whole of wiring it up.
+function pythonSuites(directory) {
+	if (!existsSync(directory) || !statSync(directory).isDirectory()) {
 		return [];
 	}
-	return readdirSync(path, { withFileTypes: true })
+	return readdirSync(directory, { withFileTypes: true })
 		.filter((entry) => entry.isFile() && entry.name.startsWith("test_") && entry.name.endsWith(".py"))
 		.map((entry) => entry.name)
 		.sort((left, right) => left.localeCompare(right))
-		.map((name) => join(path, name));
+		.map((name) => join(directory, name));
 }
+
+const librarySuites = pythonSuites(join(repositoryRoot, "forge", "lib", "tests"));
 
 const skillPythonSuites = readdirSync(skillsRoot, { withFileTypes: true })
 	.filter((entry) => entry.isDirectory() && !entry.name.startsWith(".") && entry.name !== "node_modules")
@@ -3787,7 +3777,10 @@ const skillPythonSuites = readdirSync(skillsRoot, { withFileTypes: true })
 	.sort((left, right) => left.localeCompare(right))
 	// organize-folder keeps its suite beside the script it exercises; every other
 	// skill uses tests/. Both spellings count.
-	.map((name) => ({ name, suites: [...pythonSuites(name, "tests"), ...pythonSuites(name, "scripts")] }))
+	.map((name) => ({
+		name,
+		suites: [...pythonSuites(join(skillsRoot, name, "tests")), ...pythonSuites(join(skillsRoot, name, "scripts"))],
+	}))
 	.filter((skill) => skill.suites.length > 0);
 
 // Nearly every suite is unittest with a __main__ block and runs as a plain
@@ -3801,6 +3794,12 @@ function pythonArguments(suite) {
 	}
 	return ["-m", "pytest", suite, "-q"];
 }
+
+test("shared library Python tests pass", () => {
+	for (const suite of librarySuites) {
+		run(python, pythonArguments(suite));
+	}
+});
 
 for (const skill of skillPythonSuites) {
 	test(`${skill.name} Python tests pass`, () => {
@@ -6185,50 +6184,17 @@ test("profile configuration installs local service defaults without dropping use
 			softRatio: 0.75,
 			useTaskModel: false,
 		});
-		assert.deepEqual(settings.connectedServices, {
-			searxng: {
-				enabled: true,
-				baseUrl: "http://llms/searxng",
-			},
-			playwright: {
-				enabled: true,
-				wsEndpoint: "ws://llms/playwright",
-			},
-			chat: {
-				enabled: true,
-				baseUrl: "http://llms:8004/v1/chat/completions",
-				model: "chat",
-				scheduling: {
-					enabled: true,
-					interactiveSlot: 0,
-					backgroundSlot: 1,
-					idleGraceMs: 2000,
-					yieldMs: 1000,
-					backgroundOutputTokens: 4096,
-				},
-			},
-			think: {
-				enabled: true,
-				baseUrl: "http://llms:8008/v1/chat/completions",
-				model: "code",
-				scheduling: {
-					enabled: true,
-					interactiveSlot: 0,
-					backgroundSlot: 1,
-					idleGraceMs: 2000,
-					yieldMs: 1000,
-					backgroundOutputTokens: 4096,
-				},
-			},
-			embeddings: {
-				enabled: true,
-				url: "http://llms:8005/v1/embeddings",
-				model: "embed",
-			},
-			// Seeded empty. Every no-key provider works without it, so an install
-			// nobody has configured still searches.
-			apiKeys: {},
-		});
+		// A fresh install gets the defaults verbatim. Compared against the exported
+		// constant rather than a copy of it: this was a hand-written snapshot, and
+		// it had silently drifted past stackState, task, routing, contextTokens and
+		// chatTemplateKwargs -- five additions, one red test nobody was reading.
+		// The default *values* are covered by configure-pi-forge.test.mjs; what is
+		// under test here is that installing them discards none of the user's own
+		// settings, which the assertions above and below check.
+		//
+		// `routing` is seeded by the routing layer rather than this constant, so it
+		// is the one key that has to be named.
+		assert.deepEqual(settings.connectedServices, { ...DEFAULT_CONNECTED_SERVICES, routing: {} });
 		assert.deepEqual(settings.packages, [join(repositoryRoot, "forge"), "/user/package"]);
 
 		const models = JSON.parse(readFileSync(join(agentDirectory, "models.json"), "utf8"));
@@ -6259,7 +6225,13 @@ test("profile configuration preserves connected service overrides", () => {
 		run("node", [join(repositoryRoot, "scripts", "configure-pi-forge.mjs"), agentDirectory, join(repositoryRoot, "forge")]);
 
 		const settings = JSON.parse(readFileSync(join(agentDirectory, "settings.json"), "utf8"));
+		// Everything default except the two the user set, which keep their values
+		// and lose only their trailing slash. Spelling the expectation as
+		// defaults-plus-overrides is the claim the test name makes; a full literal
+		// buries it in fifty lines that go stale on the next service added.
 		assert.deepEqual(settings.connectedServices, {
+			...DEFAULT_CONNECTED_SERVICES,
+			routing: {},
 			searxng: {
 				enabled: true,
 				baseUrl: "http://search.local/custom",
@@ -6268,40 +6240,6 @@ test("profile configuration preserves connected service overrides", () => {
 				enabled: false,
 				wsEndpoint: "ws://browser.local/custom",
 			},
-			chat: {
-				enabled: true,
-				baseUrl: "http://llms:8004/v1/chat/completions",
-				model: "chat",
-				scheduling: {
-					enabled: true,
-					interactiveSlot: 0,
-					backgroundSlot: 1,
-					idleGraceMs: 2000,
-					yieldMs: 1000,
-					backgroundOutputTokens: 4096,
-				},
-			},
-			think: {
-				enabled: true,
-				baseUrl: "http://llms:8008/v1/chat/completions",
-				model: "code",
-				scheduling: {
-					enabled: true,
-					interactiveSlot: 0,
-					backgroundSlot: 1,
-					idleGraceMs: 2000,
-					yieldMs: 1000,
-					backgroundOutputTokens: 4096,
-				},
-			},
-			embeddings: {
-				enabled: true,
-				url: "http://llms:8005/v1/embeddings",
-				model: "embed",
-			},
-			// Seeded empty. Every no-key provider works without it, so an install
-			// nobody has configured still searches.
-			apiKeys: {},
 		});
 	});
 });
