@@ -10,6 +10,7 @@ import {
 	readdirSync,
 	realpathSync,
 	rmSync,
+	statSync,
 	symlinkSync,
 	utimesSync,
 	writeFileSync,
@@ -3764,39 +3765,50 @@ test("shared library Python tests pass", () => {
 	run(python, [join(repositoryRoot, "forge", "lib", "tests", "test_vault_wiki.py")]);
 });
 
-test("vault-organizer Python tests pass", () => {
-	run(python, [join(skillsRoot, "vault-organizer", "tests", "test_vault_organizer.py")]);
-	run(python, [join(skillsRoot, "vault-organizer", "tests", "test_attachments.py")]);
-	run(python, [join(skillsRoot, "vault-organizer", "tests", "test_drift.py")]);
-});
+// The per-skill suites are discovered rather than listed. A hand-maintained list
+// drifts silently in the one direction that matters: a skill lands with tests,
+// nobody adds the registration, and the suite reads as passing because it never
+// runs at all. Discovery makes writing the file the whole of wiring it up.
+function pythonSuites(skill, directory) {
+	const path = join(skillsRoot, skill, directory);
+	if (!existsSync(path) || !statSync(path).isDirectory()) {
+		return [];
+	}
+	return readdirSync(path, { withFileTypes: true })
+		.filter((entry) => entry.isFile() && entry.name.startsWith("test_") && entry.name.endsWith(".py"))
+		.map((entry) => entry.name)
+		.sort((left, right) => left.localeCompare(right))
+		.map((name) => join(path, name));
+}
 
-test("vault-connections Python tests pass", () => {
-	run(python, [join(skillsRoot, "vault-connections", "tests", "test_vault_connections.py")]);
-});
+const skillPythonSuites = readdirSync(skillsRoot, { withFileTypes: true })
+	.filter((entry) => entry.isDirectory() && !entry.name.startsWith(".") && entry.name !== "node_modules")
+	.map((entry) => entry.name)
+	.sort((left, right) => left.localeCompare(right))
+	// organize-folder keeps its suite beside the script it exercises; every other
+	// skill uses tests/. Both spellings count.
+	.map((name) => ({ name, suites: [...pythonSuites(name, "tests"), ...pythonSuites(name, "scripts")] }))
+	.filter((skill) => skill.suites.length > 0);
 
-test("vault-transcripts Python tests pass", () => {
-	run(python, [join(skillsRoot, "vault-transcripts", "tests", "test_vault_transcripts.py")]);
-});
+// Nearly every suite is unittest with a __main__ block and runs as a plain
+// script. vault-media's is pytest-style — bare test functions — and running that
+// as a script exits 0 having collected nothing, which is the failure mode this
+// whole block exists to prevent: a registration that only looks green. Take the
+// runner from the file rather than assuming.
+function pythonArguments(suite) {
+	if (/^if __name__ == ["']__main__["']:/m.test(readFileSync(suite, "utf8"))) {
+		return [suite];
+	}
+	return ["-m", "pytest", suite, "-q"];
+}
 
-test("vault-capture Python tests pass", () => {
-	run(python, [join(skillsRoot, "vault-capture", "tests", "test_vault_capture.py")]);
-});
-
-test("vault-wiki Python tests pass", () => {
-	run(python, [join(skillsRoot, "vault-wiki", "tests", "test_vault_wiki.py")]);
-});
-
-test("literature-library Python tests pass", () => {
-	run(python, [join(skillsRoot, "literature-library", "tests", "test_literature_library.py")]);
-});
-
-test("reviewer-2 Python tests pass", () => {
-	run(python, [join(skillsRoot, "reviewer-2", "tests", "test_reviewer_2.py")]);
-});
-
-test("organize-folder Python tests pass", () => {
-	run(python, [join(skillsRoot, "organize-folder", "scripts", "test_organize_folder.py")]);
-});
+for (const skill of skillPythonSuites) {
+	test(`${skill.name} Python tests pass`, () => {
+		for (const suite of skill.suites) {
+			run(python, pythonArguments(suite));
+		}
+	});
+}
 
 function startChunkWorkerFixture(workspace, options = {}) {
 	const serverPath = join(workspace, "chunk-worker-server.mjs");
