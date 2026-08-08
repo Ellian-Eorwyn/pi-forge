@@ -8,10 +8,7 @@ credits a near-miss nor so strict it punishes a rephrasing.
 """
 
 import collections
-import json
 import re
-import sys
-from pathlib import Path
 
 import _common
 

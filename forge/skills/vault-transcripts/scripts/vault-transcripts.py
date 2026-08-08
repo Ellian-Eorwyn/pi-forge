@@ -38,7 +38,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 import forge_llm
 import forge_routing
 import forge_verify
-import obsidian_cli
 import run_state
 import vault_compose
 import vault_format
@@ -67,7 +66,6 @@ from vault_schema import (
     sha256_bytes,
     sha256_text,
     split_frontmatter,
-    valid_wikilink,
     wikilink_target,
 )
 

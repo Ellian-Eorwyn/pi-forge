@@ -1819,6 +1819,8 @@ def resolved_options(args):
         "schema": args.schema,
         "voice": args.voice,
         "no_voice": args.no_voice,
+        "lexicon": args.lexicon,
+        "no_lexicon": args.no_lexicon,
         "exemplars": args.exemplars,
     }
 
@@ -1831,6 +1833,8 @@ RESUMABLE_OPTION_FLAGS = {
     "schema": "--schema",
     "voice": "--voice",
     "no_voice": "--no-voice",
+    "lexicon": "--lexicon",
+    "no_lexicon": "--no-lexicon",
     "profile": "--profile",
     "no_profile": "--no-profile",
 }
@@ -1872,7 +1876,7 @@ def capture(args):
     voice, voice_hash = vault_voice.compiled_voice_for(vault, voice_path, cache_dir=vault / STATE_DIR / "cache")
     lexicon, _lexicon_hash = vault_lexicon.load_lexicon(
         vault,
-        vault_lexicon.resolve_lexicon_path(vault),
+        vault_lexicon.resolve_lexicon_path(vault, args.lexicon, disabled=args.no_lexicon),
         schema=schema,
         cache_dir=vault / STATE_DIR / "cache",
         dictionary_path=vault_lexicon.default_dictionary_path(),
@@ -2254,6 +2258,8 @@ def parse_args(argv):
     parser.add_argument("--schema", action=TrackingAction)
     parser.add_argument("--voice", action=TrackingAction, help="voice-and-style note (default: the vault's, when it has one)")
     parser.add_argument("--no-voice", action="store_true", help="disable the vault voice policy for this run")
+    parser.add_argument("--lexicon", action=TrackingAction, help="speakers-and-terms note (default: the vault's, when it has one)")
+    parser.add_argument("--no-lexicon", action="store_true", help="disable the term glossary and speaker roster for this run")
     parser.add_argument("--profile", action=TrackingAction, help="personal-context register note (default: the vault's, when it has one)")
     parser.add_argument("--no-profile", action="store_true", help="disable personal context for this run")
     parser.add_argument(

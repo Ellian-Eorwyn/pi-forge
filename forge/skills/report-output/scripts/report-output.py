@@ -9,7 +9,6 @@ import re
 import shutil
 import subprocess
 import sys
-from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))

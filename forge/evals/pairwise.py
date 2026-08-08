@@ -15,9 +15,7 @@ in absolute terms as well as a ratio, because a ratio on a small base is how a
 cheap upgrade comes to look expensive.
 """
 
-import json
 import sys
-from pathlib import Path
 
 sys.path.insert(0, "forge/evals")
 import harness  # noqa: E402

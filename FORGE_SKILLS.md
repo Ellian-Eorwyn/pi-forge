@@ -15,7 +15,7 @@
 | Managed instructions (`AGENTS.md` with its `<project_context>` wrapper) | 2232 |
 | Skills menu (metadata for all model-visible skills) | 4070 |
 | **Total launch context (always processed)** | **10712** |
-| Maximum if every `SKILL.md` body is also loaded at once | 79263 |
+| Maximum if every `SKILL.md` body is also loaded at once | 79312 |
 
 Of that total, the forge profile itself owns 6301 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
 
@@ -70,7 +70,7 @@ Sorted by launch cost. `Prompt lines` counts a tool's `promptSnippet` and `promp
 | [`spreadsheet-analysis`](forge/skills/spreadsheet-analysis/SKILL.md) | Analyze and enrich tabular datasets | 129 | 2233 | 2334 | Model-visible |
 | [`transcript-cleanup`](forge/skills/transcript-cleanup/SKILL.md) | Clean and structure raw transcripts | 144 | 1263 | 1380 | Model-visible |
 | [`transcription`](forge/skills/transcription/SKILL.md) | Transcribe audio or video, then correct and clean it | 141 | 1639 | 1754 | Model-visible |
-| [`vault-capture`](forge/skills/vault-capture/SKILL.md) | Turn a braindump into schema-valid notes in an Obsidian vault inbox - split unedited thinking... | 138 | 2534 | 2645 | Model-visible |
+| [`vault-capture`](forge/skills/vault-capture/SKILL.md) | Turn a braindump into schema-valid notes in an Obsidian vault inbox - split unedited thinking... | 138 | 2583 | 2694 | Model-visible |
 | [`vault-compose`](forge/skills/vault-compose/SKILL.md) | Compose a vault note from material already in hand - a web-research run, existing notes, or t... | 144 | 1827 | 1938 | Model-visible |
 | [`vault-connections`](forge/skills/vault-connections/SKILL.md) | Search an Obsidian vault by meaning, propose links for per-id review, publish completed liter... | 151 | 2682 | 2807 | Model-visible |
 | [`vault-curator`](forge/skills/vault-curator/SKILL.md) | Research how a field catalogues its records and propose what that means for an Obsidian vault... | 151 | 2403 | 2526 | Model-visible |

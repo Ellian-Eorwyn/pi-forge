@@ -80,6 +80,12 @@ const forbiddenPatterns = [
 	/(^|\/)node_modules\//,
 	/(^|\/)__pycache__\//,
 	/\.pyc$/,
+	// Suites are run from the repository, never from the installed package, and
+	// they were 21% of the tarball -- 1.16 MB across 48 files. organize-folder
+	// keeps its suite beside the script it exercises rather than in `tests/`, so
+	// both spellings are excluded.
+	/(^|\/)tests\//,
+	/(^|\/)test_[^/]*\.py$/,
 	/^scripts\/pi-forge-install\.(sh|ps1)$/,
 	/^scripts\/pi-forge-uninstall\.(sh|ps1)$/,
 ];

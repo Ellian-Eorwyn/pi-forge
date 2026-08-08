@@ -49,7 +49,6 @@ from vault_schema import (
     relative_path,
     resolve_schema_path,
     selected_notes,
-    serialize_frontmatter,
     sha256_bytes,
     sha256_text,
     split_frontmatter,

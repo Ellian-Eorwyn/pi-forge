@@ -29,7 +29,6 @@ import hashlib
 import json
 import os
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
@@ -38,8 +37,6 @@ import forge_verify
 import run_state
 import vault_compose
 import vault_format
-import vault_lexicon
-import vault_profile
 import vault_research
 import vault_voice
 from vault_schema import (
@@ -47,10 +44,8 @@ from vault_schema import (
     UserError,
     compiled_schema_for,
     missing_required_properties,
-    parse_frontmatter,
     resolve_schema_path,
     safe_title,
-    split_frontmatter,
     validate_filename_title,
 )
 

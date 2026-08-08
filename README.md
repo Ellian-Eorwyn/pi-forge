@@ -28,6 +28,7 @@ The `@ellian-eorwyn/pi-forge` package ships Agent Skills under `forge/skills/<na
 pi-forge uses `forge/CAPABILITIES.md` as a compact startup capability index. Full workflows stay in `forge/skills/<name>/SKILL.md` and are loaded on demand. Each skill has a `manifest.json` describing its package boundary and available real scripts/tools; repeatable mechanical operations should live under the skill directory as scripts/tools, while skills keep workflow judgment, review standards, provenance expectations, and output shape. This is a distribution/profile boundary, not a full extension rewrite.
 
 The `forge` profile provides agents with the following built-in skills:
+<!-- forge:readme-skills start -->
 - **`coding`**: Inspect repos and ship small reviewable changes
 - **`document-ingest`**: Normalize documents with provenance
 - **`file-conversion`**: Convert files, including Markdown and EPUB
@@ -40,21 +41,31 @@ The `forge` profile provides agents with the following built-in skills:
 - **`reviewer-2`**: Peer-review a draft article without modifying it
 - **`site-builder`**: Build a static website from a content folder
 - **`skill-builder`**: Create, revise, audit, and package skills
+- **`skill-tuner`**: Mine a session log for skill improvements, with cited evidence
 - **`spreadsheet-analysis`**: Analyze and enrich tabular datasets
 - **`transcript-cleanup`**: Clean and structure raw transcripts
 - **`transcription`**: Transcribe audio or video, then correct and clean it
 - **`vault-capture`**: Turn a braindump into schema-valid vault notes
+- **`vault-compose`**: Compose a vault note from a typed set of held sources
 - **`vault-connections`**: Search and connect vault notes, then publish validated research runs through reviewed inbox/wiki proposals
+- **`vault-curator`**: Research how a field catalogues its records, then propose schema rows
+- **`vault-media`**: Catalog books, films, television, music, and games
+- **`vault-naturalist`**: Index phenology from species cards and record field observations
 - **`vault-organizer`**: Classify and organize Obsidian notes from a schema note
+- **`vault-projects`**: Resolve a project into its corpus and freeze it for handoff
 - **`vault-transcripts`**: Classify, clean, and summarize raw transcripts into vault notes
 - **`vault-wiki`**: Expand thin wiki entity notes into cited reference cards
 - **`web-collection`**: Archive and organize web sources
 - **`web-research`**: Quick or deep web research with provenance and validation
+<!-- forge:readme-skills end -->
 
 The vault skills share three optional vault-owned layers, each a note the vault
 itself holds and each disableable per run: a **voice policy** (`--voice`), a
 **lexicon** of terms and speakers (`--lexicon`), and a **personal context**
-register of cards (`--profile`). The personal-context layer informs how notes are
+register of cards (`--profile`). Not every skill takes every layer — a layer
+reaches a skill only where it has something to do there, so the lexicon is a
+`vault-transcripts` and `vault-capture` flag while voice and personal context
+are wider. The personal-context layer informs how notes are
 filed, drafted, and searched — never what they say. Its cards are structurally
 barred from becoming note content, cards gated to a route are refused wherever
 the destination is still undecided, and a missing or ambiguous register costs the

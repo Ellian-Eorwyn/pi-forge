@@ -12,7 +12,6 @@ someone is halfway through grading.
 """
 
 import json
-from pathlib import Path
 
 import harness
 

@@ -15,7 +15,7 @@ A case module exposes two functions and three constants:
 it must be the finished artifact rather than the raw reply.
 """
 
-import json
+import json  # noqa: F401  (the case modules reach it as `_common.json`)
 import sys
 from pathlib import Path
 

@@ -110,6 +110,14 @@ function validateSkillManifest(skillName, skillDirectory) {
 	requireStringField(manifest, "type", "pi-forge-skill", manifestPath);
 	requireStringField(manifest, "skill_file", "SKILL.md", manifestPath);
 
+	// The architecture checklist says a manifest declares only directories that
+	// exist, and nothing enforced it: vault-naturalist declared a `references/`
+	// it does not have. `validateOptionalPath` was already here, used for tool
+	// commands and schemas only.
+	for (const field of ["scripts_dir", "references_dir", "assets_dir"]) {
+		validateOptionalPath(manifest[field], field, skillDirectory, manifestPath);
+	}
+
 	if ("mechanical_operations" in manifest) {
 		errors.push(`${repositoryPath(manifestPath)}: mechanical_operations is obsolete; use tools`);
 	}

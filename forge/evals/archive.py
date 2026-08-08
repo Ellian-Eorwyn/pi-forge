@@ -24,7 +24,6 @@ Three properties, each of which the code checks rather than assumes:
 
 import json
 import os
-import shutil
 import sys
 from pathlib import Path
 

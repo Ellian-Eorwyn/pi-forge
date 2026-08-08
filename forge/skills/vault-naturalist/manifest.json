@@ -5,7 +5,6 @@
 	"description": "Field observations and region-scoped phenology for a vault's natural-history wiki: compile every species card's seasonal windows into a queryable index, report what is expected here this month, and record what was actually seen.",
 	"skill_file": "SKILL.md",
 	"scripts_dir": "scripts",
-	"references_dir": "references",
 	"restart_safe": true,
 	"tools": [
 		{

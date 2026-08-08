@@ -20,6 +20,13 @@ const referencePath = join(repositoryRoot, "PI_FORGE_SKILLS_REFERENCE.md");
 const startMarker = "<!-- forge:skills-list start -->";
 const endMarker = "<!-- forge:skills-list end -->";
 const capabilitiesHeading = "## Built-in capabilities";
+// README.md keeps its own one-line descriptions, deliberately shorter than the
+// CAPABILITIES.md entries, which run to a paragraph for the newer skills. So the
+// block is not generated -- only the *set of names* is checked, which is the
+// drift that actually happened: six skills shipped and none of them was listed.
+const readmePath = join(repositoryRoot, "README.md");
+const readmeStartMarker = "<!-- forge:readme-skills start -->";
+const readmeEndMarker = "<!-- forge:readme-skills end -->";
 
 const checkOnly = process.argv.slice(2).includes("--check");
 const unknownOptions = process.argv.slice(2).filter((argument) => argument !== "--check");
@@ -104,6 +111,35 @@ if (missing.length > 0 || extra.length > 0) {
 		console.error(`${repositoryPath(capabilitiesPath)}: lists \`${name}\`, but forge/skills/${name}/ does not exist`);
 	}
 	fail(`Add or remove the entries above in ${repositoryPath(capabilitiesPath)}, then re-run.`);
+}
+
+checkReadmeSkillList(skillNames);
+
+function checkReadmeSkillList(names) {
+	if (!existsSync(readmePath)) {
+		fail(`${repositoryPath(readmePath)} does not exist`);
+	}
+	const readme = readFileSync(readmePath, "utf8");
+	const start = readme.indexOf(readmeStartMarker);
+	const end = readme.indexOf(readmeEndMarker);
+	if (start === -1 || end === -1 || end < start) {
+		fail(`${repositoryPath(readmePath)}: missing the ${readmeStartMarker} / ${readmeEndMarker} markers`);
+	}
+	const block = readme.slice(start + readmeStartMarker.length, end);
+	const listed = [...block.matchAll(/^- \*\*`([a-z0-9-]+)`\*\*:/gm)].map((match) => match[1]);
+	const absent = names.filter((name) => !listed.includes(name));
+	const unknown = listed.filter((name) => !names.includes(name));
+	if (absent.length === 0 && unknown.length === 0) return;
+	for (const name of absent) {
+		console.error(`${repositoryPath(readmePath)}: missing an entry for \`${name}\` (forge/skills/${name}/ exists)`);
+	}
+	for (const name of unknown) {
+		console.error(`${repositoryPath(readmePath)}: lists \`${name}\`, but forge/skills/${name}/ does not exist`);
+	}
+	fail(
+		`Add or remove the entries above in ${repositoryPath(readmePath)}, keeping them alphabetical. The descriptions ` +
+			"there are hand-written and shorter than CAPABILITIES.md's, so they are not generated.",
+	);
 }
 
 const workflowCount = skillNames.length;

@@ -7573,7 +7573,19 @@ function referenceFixture(workspace, { skills, capabilities }) {
 		join(workspace, "PI_FORGE_SKILLS_REFERENCE.md"),
 		"# Pi-Forge Skills Reference\n\nHand-written preamble.\n\n## Built-in skills\n\n<!-- forge:skills-list start -->\n\nstale contents\n\n<!-- forge:skills-list end -->\n\nHand-written trailer.\n",
 	);
+	// The README list is checked rather than generated -- its descriptions are
+	// hand-written and shorter than CAPABILITIES.md's -- so the fixture carries a
+	// correct one by default and the drift tests below break it deliberately.
+	writeReadme(workspace, skills);
 	return join(workspace, "PI_FORGE_SKILLS_REFERENCE.md");
+}
+
+function writeReadme(workspace, skills) {
+	const entries = skills.map((skill) => `- **\`${skill}\`**: Short hand-written description`).join("\n");
+	writeFileSync(
+		join(workspace, "README.md"),
+		`# Readme\n\nProse.\n\n<!-- forge:readme-skills start -->\n${entries}\n<!-- forge:readme-skills end -->\n\nMore prose.\n`,
+	);
 }
 
 function runSync(workspace, extraArgs = [], expectedStatus = 0) {
@@ -7728,5 +7740,38 @@ test("a real run directory carries the marker, so the organizer skips its tree",
 		// Byte-identical to the Python and JavaScript constants, because a vault
 		// ends up holding markers written by both.
 		assert.match(readFileSync(marker, "utf8"), /^pi-forge workspace\./);
+	});
+});
+
+test("reference sync reports a skill the README does not list", () => {
+	withWorkspace((workspace) => {
+		referenceFixture(workspace, {
+			skills: ["alpha", "beta"],
+			capabilities: ["- `alpha`: Real.", "- `beta`: Also real."],
+		});
+		// The drift that actually happened: six skills shipped and the README
+		// listed none of them, because nothing compared the two.
+		writeReadme(workspace, ["alpha"]);
+		const drift = runSync(workspace, ["--check"], 1);
+		assert.match(drift.stderr, /README\.md: missing an entry for `beta`/);
+		assert.match(drift.stderr, /keeping them alphabetical/);
+	});
+});
+
+test("reference sync reports a README entry with no skill directory", () => {
+	withWorkspace((workspace) => {
+		referenceFixture(workspace, { skills: ["alpha"], capabilities: ["- `alpha`: Real."] });
+		writeReadme(workspace, ["alpha", "ghost"]);
+		const orphan = runSync(workspace, ["--check"], 1);
+		assert.match(orphan.stderr, /README\.md: lists `ghost`, but forge\/skills\/ghost\/ does not exist/);
+	});
+});
+
+test("reference sync fails loudly when the README markers are missing", () => {
+	withWorkspace((workspace) => {
+		referenceFixture(workspace, { skills: ["alpha"], capabilities: ["- `alpha`: Real."] });
+		writeFileSync(join(workspace, "README.md"), "# Readme\n\nNo markers here.\n");
+		const failure = runSync(workspace, [], 1);
+		assert.match(failure.stderr, /missing the <!-- forge:readme-skills start -->/);
 	});
 });

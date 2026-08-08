@@ -39,7 +39,6 @@ from vault_research import claim_detail, deep_run_claims, deep_run_sources, flag
 import vault_voice
 import vault_wiki
 from vault_classification import (
-    DEFAULT_BASE_URL,
     build_messages as classification_messages,
     chat_service,
     request_json_with_retry as classification_request,
@@ -67,9 +66,7 @@ from vault_schema import (
     sha256_bytes,
     sha256_file,
     sha256_text,
-    split_flow_items,
     split_frontmatter,
-    strip_yaml_scalar,
     valid_wikilink,
     validate_filename_title,
     wikilink_target,

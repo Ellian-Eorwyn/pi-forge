@@ -5,7 +5,6 @@ import contextlib
 import csv
 import hashlib
 import html
-import http.client
 import io
 import json
 import math
@@ -13,9 +12,7 @@ import os
 import re
 import subprocess
 import sys
-import threading
 import time
-import urllib.parse
 import unicodedata
 from collections import Counter
 from datetime import date, datetime, timezone

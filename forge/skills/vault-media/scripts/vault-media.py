@@ -58,7 +58,6 @@ except ImportError:  # pragma: no cover - only when run outside the forge tree
 
 from vault_schema import (  # noqa: E402
     UserError,
-    parse_frontmatter,
     resolve_schema_path,
 )
 import vault_schema  # noqa: E402
