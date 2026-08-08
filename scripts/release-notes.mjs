@@ -227,7 +227,7 @@ function normalizeLinkTarget(target, options) {
 
 function normalizeReleaseNoteLinks(markdown, options) {
 	const changes = [];
-	const normalized = markdown.replace(INLINE_MARKDOWN_LINK_RE, (match, prefix, target, suffix) => {
+	const normalized = markdown.replace(INLINE_MARKDOWN_LINK_RE, (_match, prefix, target, suffix) => {
 		const normalizedTarget = normalizeLinkTarget(target, options);
 		if (normalizedTarget !== target) {
 			changes.push({ from: target, to: normalizedTarget });

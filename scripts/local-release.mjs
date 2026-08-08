@@ -170,7 +170,6 @@ function createPiShim(installDirectory) {
 }
 
 function createForgeShims(installDirectory) {
-	const binDirectory = join(installDirectory, "node_modules", ".bin");
 	for (const command of ["pi-forge", "pi-forge-mcp", "pi-forge-update"]) {
 		if (process.platform === "win32") {
 			writeFileSync(join(installDirectory, `${command}.cmd`), `@ECHO off\r\n"%~dp0node_modules\\.bin\\${command}.cmd" %*\r\n`);

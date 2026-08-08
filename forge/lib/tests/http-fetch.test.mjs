@@ -106,7 +106,7 @@ test("parseRetryAfterMs accepts seconds and HTTP-dates, and caps the wait", () =
 });
 
 test("retries a 503 and returns the eventual success", async () => {
-	const server = await startServer((request, response, count) => {
+	const server = await startServer((_request, response, count) => {
 		if (count < 3) return json(response, 503, { error: "busy" });
 		json(response, 200, { ok: true });
 	});

@@ -20,13 +20,13 @@ export async function htmlToCleanMarkdown(buffer, url) {
 		const doc = new JSDOM(htmlString, { url }).window.document;
 		const reader = new Readability(doc);
 		const article = reader.parse();
-		if (article && article.content) {
+		if (article?.content) {
 			const result = spawnSync("pandoc", ["--from=html", "--to=gfm", "--wrap=none"], { input: article.content, encoding: "utf8" });
 			if (result.status === 0 && result.stdout) {
 				rawMarkdown = result.stdout;
 			}
 		}
-	} catch (e) {
+	} catch (_e) {
 		// Ignore JSDOM/Readability errors and fall through to failure
 	}
 	
@@ -60,7 +60,7 @@ export async function htmlToCleanMarkdown(buffer, url) {
 	
 	let cleanMarkdown = "";
 	try {
-		let response = await fetch(baseChatUrl, {
+		const response = await fetch(baseChatUrl, {
 			method: "POST",
 			headers: { "Content-Type": "application/json", "Authorization": "Bearer local" },
 			body: JSON.stringify({
@@ -74,9 +74,9 @@ export async function htmlToCleanMarkdown(buffer, url) {
 			})
 		});
 		if (!response.ok) throw new Error(`LLM returned HTTP ${response.status}`);
-		let data = await response.json();
+		const data = await response.json();
 		cleanMarkdown = data.choices[0]?.message?.content?.trim() || "";
-	} catch (e) {
+	} catch (_e) {
 		// If the LLM is completely unreachable (e.g. tests or network issues), just return the raw markdown
 		return rawMarkdown;
 	}

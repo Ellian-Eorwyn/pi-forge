@@ -71,7 +71,7 @@ test("shared run state is atomic, compatible, and recovers a malformed journal t
 			draft.items[0].status = "success";
 		});
 		assert.equal(loadRunState(workspace).items[0].status, "success");
-		writeFileSync(join(workspace, "run_events.jsonl"), `${readFileSync(join(workspace, "run_events.jsonl"), "utf8")}{\"broken\":`);
+		writeFileSync(join(workspace, "run_events.jsonl"), `${readFileSync(join(workspace, "run_events.jsonl"), "utf8")}{"broken":`);
 		appendRunEvent(workspace, { type: "recovered" });
 		const journal = readJsonlRecoverTail(join(workspace, "run_events.jsonl"));
 		assert.equal(journal.rows.at(-1).type, "recovered");
@@ -272,7 +272,7 @@ function csvEscape(value) {
 }
 
 function writeCsvRows(path, rows) {
-	writeFileSync(path, rows.map((row) => row.map(csvEscape).join(",")).join("\n") + "\n");
+	writeFileSync(path, `${rows.map((row) => row.map(csvEscape).join(",")).join("\n")}\n`);
 }
 
 function readManifestRows(runDirectory) {
@@ -433,7 +433,7 @@ function startDeepResearchFixture({ flagVerdicts = new Map() } = {}) {
 						],
 					});
 				} else if (prompt.includes("Build a source-backed claim register")) {
-					const matches = [...prompt.matchAll(/evidence_id: (ev-\d+)\n  source_id: (src-[a-f0-9]+)/g)];
+					const matches = [...prompt.matchAll(/evidence_id: (ev-\d+)\n {2}source_id: (src-[a-f0-9]+)/g)];
 					const evidenceIds = matches.slice(0, 2).map((match) => match[1]);
 					const sourceIds = [...new Set(matches.slice(0, 2).map((match) => match[2]))];
 					content = JSON.stringify({
@@ -1074,7 +1074,9 @@ server.listen(0, "127.0.0.1", () => process.stdout.write(String(server.address()
 		let stderr = "";
 		child.stdout.setEncoding("utf8");
 		child.stderr.setEncoding("utf8");
-		child.stderr.on("data", (chunk) => (stderr += chunk));
+		child.stderr.on("data", (chunk) => {
+			stderr += chunk;
+		});
 		child.stdout.on("data", (chunk) => {
 			stdout += chunk;
 			const port = stdout.split(/\r?\n/).find((value) => value.trim());
@@ -1188,7 +1190,9 @@ server.listen(0, "127.0.0.1", () => process.stdout.write(String(server.address()
 		let stderr = "";
 		child.stdout.setEncoding("utf8");
 		child.stderr.setEncoding("utf8");
-		child.stderr.on("data", (chunk) => (stderr += chunk));
+		child.stderr.on("data", (chunk) => {
+			stderr += chunk;
+		});
 		child.stdout.on("data", (chunk) => {
 			stdout += chunk;
 			const port = stdout.split(/\r?\n/).find((value) => value.trim());
@@ -1986,7 +1990,9 @@ server.listen(0, "127.0.0.1", () => process.stdout.write(String(server.address()
 		let stderr = "";
 		child.stdout.setEncoding("utf8");
 		child.stderr.setEncoding("utf8");
-		child.stderr.on("data", (chunk) => (stderr += chunk));
+		child.stderr.on("data", (chunk) => {
+			stderr += chunk;
+		});
 		child.stdout.on("data", (chunk) => {
 			stdout += chunk;
 			const port = stdout.split(/\r?\n/).find((value) => value.trim());
@@ -3174,7 +3180,9 @@ server.listen(0, "127.0.0.1", () => process.stdout.write(String(server.address()
 		let stderr = "";
 		child.stdout.setEncoding("utf8");
 		child.stderr.setEncoding("utf8");
-		child.stderr.on("data", (chunk) => (stderr += chunk));
+		child.stderr.on("data", (chunk) => {
+			stderr += chunk;
+		});
 		child.stdout.on("data", (chunk) => {
 			stdout += chunk;
 			const port = stdout.split(/\r?\n/).find((value) => value.trim());
@@ -3384,7 +3392,9 @@ server.listen(0, "127.0.0.1", () => process.stdout.write(String(server.address()
 		let stderr = "";
 		child.stdout.setEncoding("utf8");
 		child.stderr.setEncoding("utf8");
-		child.stderr.on("data", (chunk) => (stderr += chunk));
+		child.stderr.on("data", (chunk) => {
+			stderr += chunk;
+		});
 		child.stdout.on("data", (chunk) => {
 			stdout += chunk;
 			const port = stdout.split(/\r?\n/).find((value) => value.trim());
@@ -3858,7 +3868,9 @@ server.listen(0, "127.0.0.1", () => process.stdout.write(String(server.address()
 		let stderr = "";
 		child.stdout.setEncoding("utf8");
 		child.stderr.setEncoding("utf8");
-		child.stderr.on("data", (chunk) => (stderr += chunk));
+		child.stderr.on("data", (chunk) => {
+			stderr += chunk;
+		});
 		child.stdout.on("data", (chunk) => {
 			stdout += chunk;
 			const port = stdout.split(/\r?\n/).find((value) => value.trim());
@@ -4157,13 +4169,13 @@ test("skill builder scaffolds, validates, and checks trigger overlap", () => {
 		);
 		runFailure("node", [builder, "validate", broken], /referenced file does not exist/);
 
-		const escape = join(workspace, "escape-reference");
-		mkdirSync(escape);
+		const escapeSkill = join(workspace, "escape-reference");
+		mkdirSync(escapeSkill);
 		writeFileSync(
-			join(escape, "SKILL.md"),
+			join(escapeSkill, "SKILL.md"),
 			"---\nname: escape-reference\ndescription: Escape Reference workflow. Use when validating unsafe local references. Do not use elsewhere.\n---\n\n# Escape\n\nSee [outside](../outside.md).\n",
 		);
-		runFailure("node", [builder, "validate", escape], /escapes skill directory/);
+		runFailure("node", [builder, "validate", escapeSkill], /escapes skill directory/);
 
 		const overlapRoot = join(workspace, "overlap-skills");
 		const broad = join(overlapRoot, "broad-research");
@@ -4255,7 +4267,7 @@ test("web-research deep creates validated provenance-backed artifacts", async ()
 				.split(/\r?\n/)
 				.map((line) => JSON.parse(line));
 			evidenceRows[0].directQuote = "This quote is not in the archived source text.";
-			writeFileSync(evidencePath, evidenceRows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+			writeFileSync(evidencePath, `${evidenceRows.map((row) => JSON.stringify(row)).join("\n")}\n`);
 			runFailure("node", [script("web-research", "web-research.mjs"), "validate", deepRun], /direct quote was not found/);
 
 			writeFileSync(evidencePath, originalEvidence);
@@ -4266,7 +4278,7 @@ test("web-research deep creates validated provenance-backed artifacts", async ()
 				.split(/\r?\n/)
 				.map((line) => JSON.parse(line));
 			claimRows[0].sourceIds = [];
-			writeFileSync(claimsPath, claimRows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+			writeFileSync(claimsPath, `${claimRows.map((row) => JSON.stringify(row)).join("\n")}\n`);
 			runFailure("node", [script("web-research", "web-research.mjs"), "validate", deepRun], /has no sourceIds/);
 		} finally {
 			await fixture.close();
@@ -4397,7 +4409,7 @@ test("web-research deep applies whole-run budgets and records budget gaps", asyn
 			const queries = join(workspace, "many-queries.txt");
 			writeFileSync(
 				queries,
-				Array.from({ length: 10 }, (_, index) => `many budget query ${index + 1}`).join("\n") + "\n",
+				`${Array.from({ length: 10 }, (_, index) => `many budget query ${index + 1}`).join("\n")}\n`,
 			);
 			const deepRun = join(workspace, "deep-budgeted");
 			const result = jsonOutput(
@@ -4917,7 +4929,7 @@ test("web-research deep records unsafe result URLs as failed sources", async () 
 test("web-research reference-resolve answers on stdout and caches the index it read", async () => {
 	await withAsyncWorkspace(async (workspace) => {
 		let served = 0;
-		const server = createServer((request, response) => {
+		const server = createServer((_request, response) => {
 			served += 1;
 			response.writeHead(200, { "Content-Type": "text/html" });
 			response.end('<html><body><a href="entries/madhyamaka/">Madhyamaka</a><a href="entries/truth/">Truth</a></body></html>');
@@ -5039,10 +5051,10 @@ test("web-research academic dedupes works and exports RIS artifacts", async () =
 			assert.equal(arxiv.type, "preprint");
 			assert.equal(arxiv.related_works.some((relation) => relation.relation === "preprint_published_version"), true);
 			const aggregateRis = readFileSync(join(academicRun, "works.ris"), "utf8");
-			assert.equal((aggregateRis.match(/^TY  - /gm) ?? []).length, 3);
-			assert.equal((aggregateRis.match(/^ER  -$/gm) ?? []).length, 3);
-			assert.match(aggregateRis, /^DO  - 10\.1234\/alpha$/m);
-			assert.match(aggregateRis, /^AU  - Lovelace, Ada$/m);
+			assert.equal((aggregateRis.match(/^TY {2}- /gm) ?? []).length, 3);
+			assert.equal((aggregateRis.match(/^ER {2}-$/gm) ?? []).length, 3);
+			assert.match(aggregateRis, /^DO {2}- 10\.1234\/alpha$/m);
+			assert.match(aggregateRis, /^AU {2}- Lovelace, Ada$/m);
 			const risManifest = JSON.parse(readFileSync(join(academicRun, "ris_manifest.json"), "utf8"));
 			assert.equal(risManifest.records.length, 3);
 			for (const record of risManifest.records) assert.equal(existsSync(join(academicRun, record.risPath)), true);
@@ -5168,7 +5180,7 @@ test("web-research academic records provider failures without blocking RIS expor
 			assert.equal(result.valid, true);
 			assert.equal(result.works, 2);
 			assert.equal(result.providerErrors, 1);
-			assert.equal((readFileSync(join(academicRun, "works.ris"), "utf8").match(/^TY  - /gm) ?? []).length, 2);
+			assert.equal((readFileSync(join(academicRun, "works.ris"), "utf8").match(/^TY {2}- /gm) ?? []).length, 2);
 			const errors = readFileSync(join(academicRun, "provider_errors.jsonl"), "utf8")
 				.trim()
 				.split(/\r?\n/)

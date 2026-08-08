@@ -120,13 +120,11 @@ async function loadContextWindows() {
 		// Optional in non-repo usage.
 	}
 	const providerRegex = /\n\t"([^"]+)": \{([\s\S]*?\n\t)\},/g;
-	let providerMatch;
-	while ((providerMatch = providerRegex.exec(text)) !== null) {
+	for (const providerMatch of text.matchAll(providerRegex)) {
 		const provider = providerMatch[1];
 		const body = providerMatch[2];
 		const modelRegex = /\n\t\t"([^"]+)": \{[\s\S]*?contextWindow: (\d+),/g;
-		let modelMatch;
-		while ((modelMatch = modelRegex.exec(body)) !== null) {
+		for (const modelMatch of body.matchAll(modelRegex)) {
 			windows.set(`${provider}/${modelMatch[1]}`, Number(modelMatch[2]));
 		}
 	}

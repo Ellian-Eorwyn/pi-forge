@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 process.env.PI_FORGE_SKIP_STACK_DISCOVERY = "1";
 
 const libraryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const { call, callJsonWithRetry, ChatError, ContextBudgetError, doctorWarnings, estimatePromptTokens, extractJsonContent, hiddenTokenCount, parseJsonContent, PreemptedError, resetStackConditions, resolveService, resolveTaskService, resolveThinkService, serviceDoctor, activeInteractiveLeases, LEASE_STALE_MS } = await import(join(libraryRoot, "forge-llm.mjs"));
+const { call, callJsonWithRetry, ChatError, ContextBudgetError, doctorWarnings, estimatePromptTokens, extractJsonContent, hiddenTokenCount, parseJsonContent, resetStackConditions, resolveService, resolveTaskService, resolveThinkService, serviceDoctor, activeInteractiveLeases, LEASE_STALE_MS } = await import(join(libraryRoot, "forge-llm.mjs"));
 const { clearStackStateCache } = await import(join(libraryRoot, "stack-state.mjs"));
 const { SLOT_CONTEXT_TOKENS } = await import(join(libraryRoot, "connected-services.mjs"));
 const { buildPackets, escalate, summarize, verifyPackets, VerificationError, VERDICT_FLAG } = await import(join(libraryRoot, "forge-verify.mjs"));
@@ -36,7 +36,9 @@ function startStub(reply) {
 	const server = createServer((request, response) => {
 		let body = "";
 		request.setEncoding("utf8");
-		request.on("data", (chunk) => (body += chunk));
+		request.on("data", (chunk) => {
+			body += chunk;
+		});
 		request.on("end", () => {
 			if (request.url.endsWith("/models")) {
 				response.writeHead(200, { "Content-Type": "application/json" });

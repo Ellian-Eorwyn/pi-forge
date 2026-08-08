@@ -195,7 +195,7 @@ const html = `<!doctype html>
 	<script>
 		const data=${JSON.stringify(data)};
 		function fmt(n){return Math.round(n).toLocaleString()}
-		function esc(s){return String(s).replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+		function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 		function table(rows,el){
 			document.getElementById(el).innerHTML='<table class="w-full text-sm"><thead class="text-zinc-400"><tr><th class="text-left p-2">Name</th><th class="text-right p-2">Calls</th><th class="text-right p-2">Results</th><th class="text-right p-2">Est. tokens</th><th class="text-right p-2">Avg/result</th><th class="text-left p-2 w-64">Histogram</th></tr></thead><tbody>'+rows.map((r,i)=>'<tr class="border-t border-zinc-800 hover:bg-zinc-800/50 cursor-pointer" data-row="'+i+'"><td class="p-2 font-mono">'+esc(r.name)+'</td><td class="p-2 text-right">'+fmt(r.calls)+'</td><td class="p-2 text-right">'+fmt(r.results??r.samples.length)+'</td><td class="p-2 text-right">'+fmt(r.estimatedTokens)+'</td><td class="p-2 text-right">'+fmt(r.avg)+'</td><td class="p-2"><canvas id="'+el+'Hist'+i+'" height="34"></canvas></td></tr>').join('')+'</tbody></table>';
 			rows.forEach((r,i)=>new Chart(document.getElementById(el+'Hist'+i),{type:'bar',data:{labels:data.bucketLabels,datasets:[{data:r.histogram,label:r.name,backgroundColor:'#60a5fa'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{title:(items)=>data.bucketLabels[items[0].dataIndex]+' tokens'}}},scales:{x:{display:false},y:{display:false}}}}));

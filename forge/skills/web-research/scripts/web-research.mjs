@@ -167,6 +167,7 @@ function sleep(milliseconds) {
 	return new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
 }
 
+// biome-ignore lint/correctness/noUnusedVariables: dead since the acquisition split; pending a decision to remove
 function run(command, args = ["--version"]) {
 	const result = spawnSync(command, args, { encoding: "utf8" });
 	if (result.error?.code === "ENOENT" || result.error || result.status !== 0) return { available: false, version: null };
@@ -2102,8 +2103,8 @@ function validateAcademicRun(runDirectory, options = {}) {
 		if (keys.has(key)) errors.push(`duplicate RIS key after dedupe: ${key}`);
 		keys.add(key);
 	}
-	const recordCount = (worksRis.match(/^TY  - /gm) ?? []).length;
-	const endCount = (worksRis.match(/^ER  -$/gm) ?? []).length;
+	const recordCount = (worksRis.match(/^TY {2}- /gm) ?? []).length;
+	const endCount = (worksRis.match(/^ER {2}-$/gm) ?? []).length;
 	if (recordCount !== works.length) errors.push(`works.ris contains ${recordCount} records for ${works.length} works`);
 	if (endCount !== recordCount) errors.push("works.ris has records without ER terminators");
 	const result = { valid: errors.length === 0, errors, warnings };
@@ -2224,12 +2225,13 @@ function readabilityMetadata(html, url) {
 	}
 }
 
+// biome-ignore lint/correctness/noUnusedVariables: superseded by acquisition.mjs `extractWithPlaywright`; pending a decision to remove
 async function extractWithPlaywright(playwright, url, timeoutMs, userAgent, playwrightWsEndpointOverride) {
 	const browser = await connectPlaywrightBrowser(playwright, timeoutMs, playwrightWsEndpointOverride);
 	let text = "";
 	let title = null;
 	let finalUrl = url;
-	let warnings = [];
+	const warnings = [];
 	let metadata = {};
 	try {
 		const context = await browser.newContext({ userAgent });
@@ -2280,6 +2282,7 @@ async function extractWithPlaywright(playwright, url, timeoutMs, userAgent, play
 
 // --- HTTP extraction -------------------------------------------------------
 
+// biome-ignore lint/correctness/noUnusedVariables: dead since the acquisition split; pending a decision to remove
 async function extractWithHttp(url, timeoutMs, userAgent) {
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -2560,7 +2563,7 @@ const CLAIM_SYSTEM = `${RESEARCH_SYSTEM}
 
 Disagreement between sources, thin support, and counter-evidence are findings, not noise. Record them as claims with their limits stated, or as gaps. A register that lists only what the sources agree on has lost the part a reader most needs.`;
 
-async function callLocalJsonModel(runDirectory, task, prompt, fallback, runtime = null, systemPrompt = RESEARCH_SYSTEM) {
+async function callLocalJsonModel(_runDirectory, task, prompt, fallback, runtime = null, systemPrompt = RESEARCH_SYSTEM) {
 	const startedAt = nowIso();
 	const callId = `${task}-${sha256(`${startedAt}\n${prompt}`).slice(0, 12)}`;
 	const chat = runtime?.chat ?? chatService();
@@ -2613,6 +2616,7 @@ async function callLocalJsonModel(runDirectory, task, prompt, fallback, runtime 
 	}
 }
 
+// biome-ignore lint/correctness/noUnusedVariables: dead since the acquisition split; pending a decision to remove
 function evidencePrompt(source, question, maxEvidenceChars) {
 	const text = selectRelevantText(source.text, question, maxEvidenceChars);
 	return `Extract source-backed evidence for this research question.
@@ -4115,7 +4119,7 @@ async function commandDeep(positionals, flags) {
 		return;
 	}
 	const checkpoint = loadDeepCheckpoint(runDirectory);
-	let state = checkpoint?.state ?? {
+	const state = checkpoint?.state ?? {
 		question,
 		startedAt: runState.createdAt,
 		startedAtMs: Date.now(),

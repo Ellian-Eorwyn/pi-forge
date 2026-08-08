@@ -170,6 +170,7 @@ function bar(part, total) {
 	return `${"█".repeat(filled)}${"░".repeat(CHART_WIDTH - filled)}`;
 }
 
+// biome-ignore lint/correctness/noUnusedVariables: unused copy of the helper edit-tool-stats.mjs uses; pending a decision to remove
 function extractTextContent(content) {
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
@@ -322,7 +323,7 @@ function buildHumanReport(summary) {
 	} finally {
 		console.log = originalLog;
 	}
-	return lines.join("\n") + "\n";
+	return `${lines.join("\n")}\n`;
 }
 
 function escapeHtml(text) {

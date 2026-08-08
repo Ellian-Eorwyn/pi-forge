@@ -937,7 +937,7 @@ function extractMedia(filePath, documentDirectory, tools) {
 	const audioPath = join(derivedDirectory, "audio.mp3");
 	const result = run("ffmpeg", ["-i", filePath, "-vn", "-ar", "44100", "-ac", "2", "-b:a", "160k", audioPath]);
 	if (result.error || result.status !== 0 || !existsSync(audioPath)) {
-		throw new Error(`FFmpeg extraction failed: ${result.stderr?.trim() || result.error?.message || "exit status " + result.status}`);
+		throw new Error(`FFmpeg extraction failed: ${result.stderr?.trim() || result.error?.message || `exit status ${result.status}`}`);
 	}
 	const markdown = `Media file extracted to derived/audio.mp3. Waiting for transcription.\\n`;
 	return {
@@ -1855,7 +1855,7 @@ function emailSegments(markdown, maximumCharacters = 60_000) {
 	return segments;
 }
 
-function normalizeEvidenceItems(value, document, segment, row) {
+function normalizeEvidenceItems(value, _document, segment, row) {
 	if (!value || typeof value !== "object" || !Array.isArray(value.items)) throw new Error('response must contain an "items" array');
 	const records = [];
 	for (const item of value.items) {

@@ -832,7 +832,7 @@ async function extractWithPlaywrightUnqueued(url, context, domainRule) {
 		const selectors = domainRule?.main_selectors ?? ["article", "main", "[role='main']", ".content", ".post", ".entry", "#content", "#main"];
 		const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: context.timeoutMs });
 		const selector = await waitForContentSelector(page, selectors, 8_000);
-		let html = await page.content();
+		const html = await page.content();
 		let text = "";
 		if (selector) text = normalizeWhitespace(await page.locator(selector).first().textContent());
 		if (text.length < 120) text = htmlToReadableText(html);

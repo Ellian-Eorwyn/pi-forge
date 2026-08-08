@@ -60,7 +60,7 @@ const MAX_DISPLAY_WIDTH = 100;
 function truncateLine(text: string, maxWidth: number): string {
 	const singleLine = text.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
 	if (singleLine.length <= maxWidth) return singleLine;
-	return singleLine.slice(0, maxWidth - 3) + "...";
+	return `${singleLine.slice(0, maxWidth - 3)}...`;
 }
 
 interface JsonEvent {
@@ -98,7 +98,7 @@ function runSubagent(prompt: string, cwd: string): Promise<{ success: boolean }>
 				} else if (event.type === "tool_execution_start" && event.toolName) {
 					// Print accumulated text before tool starts
 					if (textBuffer.trim()) {
-						console.log(chalk.dim("  " + truncateLine(textBuffer, MAX_DISPLAY_WIDTH)));
+						console.log(chalk.dim(`  ${truncateLine(textBuffer, MAX_DISPLAY_WIDTH)}`));
 						textBuffer = "";
 					}
 					// Format tool call with args
@@ -116,7 +116,7 @@ function runSubagent(prompt: string, cwd: string): Promise<{ success: boolean }>
 				} else if (event.type === "turn_end") {
 					// Print any remaining text at turn end
 					if (textBuffer.trim()) {
-						console.log(chalk.dim("  " + truncateLine(textBuffer, MAX_DISPLAY_WIDTH)));
+						console.log(chalk.dim(`  ${truncateLine(textBuffer, MAX_DISPLAY_WIDTH)}`));
 					}
 					textBuffer = "";
 				}

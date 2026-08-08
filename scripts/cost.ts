@@ -32,7 +32,7 @@ if (!directory || !days) {
 function encodeSessionDir(dir: string): string {
 	// Remove leading slash, replace remaining slashes with dashes
 	const normalized = dir.startsWith("/") ? dir.slice(1) : dir;
-	return "--" + normalized.replace(/\//g, "-") + "--";
+	return `--${normalized.replace(/\//g, "-")}--`;
 }
 
 const sessionsBase = path.join(process.env.HOME!, ".pi/agent/sessions");
@@ -167,7 +167,7 @@ for (const day of sortedDays) {
 	grandTotal += dayTotal;
 }
 
-console.log("\n" + "=".repeat(80));
+console.log(`\n${"=".repeat(80)}`);
 console.log("TOTALS BY PROVIDER");
 console.log("-".repeat(40));
 

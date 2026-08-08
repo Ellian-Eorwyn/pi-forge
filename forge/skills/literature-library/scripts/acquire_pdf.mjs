@@ -187,7 +187,7 @@ function discoverPdfLinks(html, baseUrl) {
 // like a browser is fine, but evading detection is what gets an institution's
 // whole address range blocked, and it would also make this tool a liability to
 // run. If a publisher still refuses, the record goes to the manual queue.
-async function acquireViaBrowser(record, candidates, options, attempts) {
+async function acquireViaBrowser(_record, candidates, options, attempts) {
 	let playwright;
 	try {
 		playwright = await import("playwright");

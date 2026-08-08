@@ -11,7 +11,7 @@ import {
 	rmSync,
 	writeFileSync,
 } from "node:fs";
-import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SKILL_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -126,7 +126,7 @@ function renderInline(text) {
 		return `<img src="${escapeAttribute(url)}" alt="${escapeAttribute(alt)}" loading="lazy">`;
 	});
 
-	working = working.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+[^)]*)?\)/g, (match, label, target) => {
+	working = working.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+[^)]*)?\)/g, (_match, label, target) => {
 		const url = sanitizeUrl(target);
 		if (!url) return escapeHtml(label);
 		const rel = isExternal(url) ? ' rel="noopener noreferrer"' : "";
@@ -685,7 +685,7 @@ function buildHero(site) {
 	const title = escapeHtml(site.title || "Site");
 	const tagline = escapeHtml(site.description || "");
 	const cta =
-		hero.cta && hero.cta.label && hero.cta.href
+		hero.cta?.label && hero.cta.href
 			? `<a class="hero-cta" href="${escapeAttribute(hero.cta.href)}">${escapeHtml(hero.cta.label)}</a>`
 			: "";
 	const copy = `<h1 class="hero-title">${title}</h1>\n<p class="hero-tagline">${tagline}</p>${cta ? `\n${cta}` : ""}`;

@@ -2,7 +2,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, extname, join, resolve, sep } from "node:path";
 import * as readline from "node:readline/promises";
 import { resolveConnectedServices } from "../../../lib/connected-services.mjs";
@@ -863,7 +863,7 @@ async function commandHarvest(positionals, flags) {
 	const { response, finalUrl } = await fetchWithRedirects(pageUrl, options);
 	if (!response.ok) fail(`could not fetch page (HTTP ${response.status}): ${pageUrl}`);
 	const html = (await readCappedBody(response, options.maxBytes)).buffer.toString("utf8");
-	let links = extractLinks(html, finalUrl);
+	const links = extractLinks(html, finalUrl);
 	const disallows = flags.ignoreRobots ? [] : await fetchRobots(parsedPage.origin, options.userAgent, options.timeoutMs);
 	const selected = [];
 	for (const link of links) {
@@ -935,7 +935,7 @@ async function commandSpider(positionals, flags) {
 	const { response, finalUrl } = await fetchWithRedirects(pageUrl, options);
 	if (!response.ok) fail(`could not fetch page (HTTP ${response.status}): ${pageUrl}`);
 	const html = (await readCappedBody(response, options.maxBytes)).buffer.toString("utf8");
-	let links = extractLinks(html, finalUrl);
+	const links = extractLinks(html, finalUrl);
 	const disallows = flags.ignoreRobots ? [] : await fetchRobots(parsedPage.origin, options.userAgent, options.timeoutMs);
 	
 	const validLinks = [];
