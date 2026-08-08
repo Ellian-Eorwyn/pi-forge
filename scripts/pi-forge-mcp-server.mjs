@@ -3,8 +3,8 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
-	DEFAULT_SKILLS_ROOT,
 	createBridgeServer,
+	DEFAULT_SKILLS_ROOT,
 	parseArguments,
 	runChildProcess,
 	runMcpServerMain,

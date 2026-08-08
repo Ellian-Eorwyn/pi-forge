@@ -6,7 +6,8 @@ import { artifactsForDocuments, metadataForDocument, prepareSingleFile } from ".
 
 await runTool(async (input) => {
 	const source = resolve(requiredString(input, "input"));
-	if (extname(source).toLowerCase() !== ".pptx") throw new ToolInputError("unsupported_input_format", "pptx_to_markdown requires a .pptx input");
+	if (extname(source).toLowerCase() !== ".pptx")
+		throw new ToolInputError("unsupported_input_format", "pptx_to_markdown requires a .pptx input");
 	const prepared = prepareSingleFile(source, requiredString(input, "output"), {
 		chunkCharacters: optionalInteger(input, "chunkCharacters", undefined),
 	});

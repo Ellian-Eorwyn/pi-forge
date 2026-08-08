@@ -16,7 +16,9 @@ await runTool(async (input) => {
 			chunkCharacters: optionalInteger(input, "chunkCharacters", undefined),
 		});
 		return okResult({
-			warnings: prepared.documents.flatMap((document) => preparedMetadata(document.directory)[0].metadata.extraction?.warnings ?? []),
+			warnings: prepared.documents.flatMap(
+				(document) => preparedMetadata(document.directory)[0].metadata.extraction?.warnings ?? [],
+			),
 			data: { summary: prepared.summary, documents: preparedMetadata(prepared.runDirectory) },
 		});
 	}

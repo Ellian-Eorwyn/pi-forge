@@ -198,7 +198,9 @@ test("inspectVault returns undefined outside a vault", () => {
 });
 
 test("inspectVault ignores skill state directories when counting notes", () => {
-	const root = makeVault({ notes: ["A.md", ".vault-connections/runs/x/report.md", ".vault-organizer/runs/y/report.md"] });
+	const root = makeVault({
+		notes: ["A.md", ".vault-connections/runs/x/report.md", ".vault-organizer/runs/y/report.md"],
+	});
 	try {
 		const info = inspectVault(root);
 		assert.ok(info);
@@ -460,10 +462,7 @@ test("a vault whose schema declares no workflows subdomain falls back to an exis
 	const root = makeVault({ schema: SCHEMA_WITH_WIKI, notes: ["A.md"] });
 	try {
 		mkdirSync(join(root, "99 Meta", "99.06 Workflows"), { recursive: true });
-		assert.equal(
-			resolveWorkflowRoot(root, "web-research"),
-			join(root, "99 Meta", "99.06 Workflows", "Web Research"),
-		);
+		assert.equal(resolveWorkflowRoot(root, "web-research"), join(root, "99 Meta", "99.06 Workflows", "Web Research"));
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

@@ -6,7 +6,8 @@ import { artifactsForDocuments, metadataForDocument, prepareSingleFile } from ".
 
 await runTool(async (input) => {
 	const source = resolve(requiredString(input, "input"));
-	if (extname(source).toLowerCase() !== ".docx") throw new ToolInputError("unsupported_input_format", "docx_to_markdown requires a .docx input");
+	if (extname(source).toLowerCase() !== ".docx")
+		throw new ToolInputError("unsupported_input_format", "docx_to_markdown requires a .docx input");
 	const prepared = prepareSingleFile(source, requiredString(input, "output"), {
 		chunkCharacters: optionalInteger(input, "chunkCharacters", undefined),
 	});

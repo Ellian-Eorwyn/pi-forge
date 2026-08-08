@@ -19,7 +19,11 @@ export const DEFAULT_MAX_ATTEMPTS = 3;
 function canonicalValue(value) {
 	if (Array.isArray(value)) return value.map(canonicalValue);
 	if (value && typeof value === "object") {
-		return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, item]) => [key, canonicalValue(item)]));
+		return Object.fromEntries(
+			Object.entries(value)
+				.sort(([left], [right]) => left.localeCompare(right))
+				.map(([key, item]) => [key, canonicalValue(item)]),
+		);
 	}
 	return value;
 }
@@ -88,7 +92,10 @@ export function readJsonlRecoverTail(filePath, { repair = false } = {}) {
 			validLines.push(line);
 		} catch (error) {
 			const isTail = index === lines.length - 1 && !text.endsWith("\n");
-			if (!isTail) throw new Error(`invalid JSONL at ${filePath}:${index + 1}: ${error instanceof Error ? error.message : String(error)}`);
+			if (!isTail)
+				throw new Error(
+					`invalid JSONL at ${filePath}:${index + 1}: ${error instanceof Error ? error.message : String(error)}`,
+				);
 			warnings.push(`Ignored an incomplete final JSONL record at ${filePath}:${index + 1}.`);
 			if (repair) atomicWriteFile(filePath, validLines.length > 0 ? `${validLines.join("\n")}\n` : "");
 		}
@@ -100,7 +107,16 @@ function now() {
 	return new Date().toISOString();
 }
 
-export function createRunState({ workflow, command, input, options, items = [], phase = "initialized", nextAction = null, children = {} }) {
+export function createRunState({
+	workflow,
+	command,
+	input,
+	options,
+	items = [],
+	phase = "initialized",
+	nextAction = null,
+	children = {},
+}) {
 	const createdAt = now();
 	return {
 		schemaVersion: RUN_STATE_SCHEMA_VERSION,
@@ -129,16 +145,21 @@ export function initializeRunState(runDirectory, state) {
 
 export function loadRunState(runDirectory, workflow = null) {
 	const statePath = join(runDirectory, "run_state.json");
-	if (!existsSync(statePath)) throw new Error(`legacy or unrelated output directory has no run_state.json: ${runDirectory}`);
+	if (!existsSync(statePath))
+		throw new Error(`legacy or unrelated output directory has no run_state.json: ${runDirectory}`);
 	const state = JSON.parse(readFileSync(statePath, "utf8"));
-	if (state.schemaVersion !== RUN_STATE_SCHEMA_VERSION) throw new Error(`unsupported run state schema version: ${state.schemaVersion}`);
+	if (state.schemaVersion !== RUN_STATE_SCHEMA_VERSION)
+		throw new Error(`unsupported run state schema version: ${state.schemaVersion}`);
 	if (workflow && state.workflow !== workflow) throw new Error(`run belongs to ${state.workflow}, not ${workflow}`);
 	return state;
 }
 
 export function assertCompatibleRun(state, configuration) {
 	const actual = configurationFingerprint(configuration);
-	if (actual !== state.optionsFingerprint) throw new Error("existing run options or input do not match this invocation; use status/refresh or choose a new output directory");
+	if (actual !== state.optionsFingerprint)
+		throw new Error(
+			"existing run options or input do not match this invocation; use status/refresh or choose a new output directory",
+		);
 }
 
 export function updateRunState(runDirectory, mutate, event = null) {
@@ -175,11 +196,19 @@ export function isTransientFailure(error) {
 	if (error?.transient === true) return true;
 	const code = String(error?.code ?? "").toLowerCase();
 	const message = String(error instanceof Error ? error.message : error).toLowerCase();
-	return ["econnreset", "econnrefused", "etimedout", "timeout", "interrupted", "aborted"].some((value) => code.includes(value) || message.includes(value)) || /http\s+5\d\d/.test(message);
+	return (
+		["econnreset", "econnrefused", "etimedout", "timeout", "interrupted", "aborted"].some(
+			(value) => code.includes(value) || message.includes(value),
+		) || /http\s+5\d\d/.test(message)
+	);
 }
 
 export function retryableItem(item, maximumAttempts = DEFAULT_MAX_ATTEMPTS) {
-	return item.status === "pending" || item.status === "in_progress" || (item.status === "failed" && item.transient === true && (item.attempts ?? 0) < maximumAttempts);
+	return (
+		item.status === "pending" ||
+		item.status === "in_progress" ||
+		(item.status === "failed" && item.transient === true && (item.attempts ?? 0) < maximumAttempts)
+	);
 }
 
 function processIsAlive(pid) {
@@ -196,7 +225,9 @@ export async function withRunLock(runDirectory, callback) {
 	const lockPath = join(runDirectory, ".run.lock");
 	const acquire = () => {
 		try {
-			writeFileSync(lockPath, `${JSON.stringify({ pid: process.pid, host: hostname(), createdAt: now() })}\n`, { flag: "wx" });
+			writeFileSync(lockPath, `${JSON.stringify({ pid: process.pid, host: hostname(), createdAt: now() })}\n`, {
+				flag: "wx",
+			});
 			return;
 		} catch (error) {
 			if (error?.code !== "EEXIST") throw error;
@@ -207,10 +238,13 @@ export async function withRunLock(runDirectory, callback) {
 		} catch {
 			// A malformed lock is stale.
 		}
-		if (lock?.host && lock.host !== hostname()) throw new Error(`run is locked by PID ${lock.pid ?? "unknown"} on ${lock.host}`);
+		if (lock?.host && lock.host !== hostname())
+			throw new Error(`run is locked by PID ${lock.pid ?? "unknown"} on ${lock.host}`);
 		if (processIsAlive(lock?.pid)) throw new Error(`run is locked by active PID ${lock.pid}`);
 		rmSync(lockPath, { force: true });
-		writeFileSync(lockPath, `${JSON.stringify({ pid: process.pid, host: hostname(), createdAt: now() })}\n`, { flag: "wx" });
+		writeFileSync(lockPath, `${JSON.stringify({ pid: process.pid, host: hostname(), createdAt: now() })}\n`, {
+			flag: "wx",
+		});
 	};
 	mkdirSync(runDirectory, { recursive: true });
 	acquire();

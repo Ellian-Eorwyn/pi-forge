@@ -3,10 +3,10 @@ import { spawnSync } from "node:child_process";
 import {
 	chmodSync,
 	existsSync,
-	mkdtempSync,
 	mkdirSync,
-	readFileSync,
+	mkdtempSync,
 	readdirSync,
+	readFileSync,
 	readlinkSync,
 	realpathSync,
 	rmSync,
@@ -113,10 +113,7 @@ test("MCP bridge discovers tools and returns transcription artifacts", async () 
 	const { client, server } = await connectedBridge(readRoot, writeRoot, fakeSkills(join(root, "skills")));
 	try {
 		const tools = await client.listTools();
-		assert.deepEqual(
-			tools.tools.map((tool) => tool.name).sort(),
-			["forge_convert_files", "forge_transcribe"],
-		);
+		assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), ["forge_convert_files", "forge_transcribe"]);
 		const response = await client.callTool({
 			name: "forge_transcribe",
 			arguments: { inputPath: media, outputRoot: writeRoot, recordingType: "lecture" },
@@ -496,7 +493,8 @@ function makeFakeInstallSource(source, version = "0.0.0-test") {
 			},
 			files: {
 				"dist/index.js": "export const version = '0.0.0-source-runtime';\n",
-				"dist/cli.js": "#!/usr/bin/env node\nif (process.argv.includes('--version')) console.log('0.0.0-source-runtime');\nif (process.argv.includes('--print-agent-dir')) console.log(process.env.PI_CODING_AGENT_DIR);\n",
+				"dist/cli.js":
+					"#!/usr/bin/env node\nif (process.argv.includes('--version')) console.log('0.0.0-source-runtime');\nif (process.argv.includes('--print-agent-dir')) console.log(process.env.PI_CODING_AGENT_DIR);\n",
 				"dist/source-runtime-marker.js": "export const packedFromSource = true;\n",
 				"npm-shrinkwrap.json": `${JSON.stringify({
 					name: "@earendil-works/pi-coding-agent",
@@ -687,39 +685,42 @@ test("installer exposes a usable MCP launcher from the npm package install", () 
 	const bin = join(piForgeHome, "bin");
 	const agent = join(piForgeHome, "agent");
 	const environment = cleanPiForgeEnvironment();
-	const install = spawnSync(
-		"bash",
-		[
-			join(repositoryRoot, "scripts", "pi-forge-install.sh"),
-		],
-		{
-			encoding: "utf8",
-			env: {
-				...environment,
-				HOME: root,
-				SHELL: "/bin/zsh",
-				PI_FORGE_PACKAGE_SPEC: `file:${tarball}`,
-				PI_FORGE_PI_PACKAGE_SPEC: `file:${piTarball}`,
-			},
+	const install = spawnSync("bash", [join(repositoryRoot, "scripts", "pi-forge-install.sh")], {
+		encoding: "utf8",
+		env: {
+			...environment,
+			HOME: root,
+			SHELL: "/bin/zsh",
+			PI_FORGE_PACKAGE_SPEC: `file:${tarball}`,
+			PI_FORGE_PI_PACKAGE_SPEC: `file:${piTarball}`,
 		},
-	);
+	});
 	assert.equal(install.status, 0, install.stderr);
 	const launcher = join(bin, "pi-forge-mcp");
 	const packageRoot = join(piForgeHome, "app", "node_modules", "@ellian-eorwyn", "pi-forge");
 	assert.equal(existsSync(join(bin, "pi-forge")), true);
 	assert.equal(existsSync(launcher), true);
-	assert.equal(existsSync(join(piForgeHome, "app", "node_modules", "@earendil-works", "pi-coding-agent", "package.json")), true);
+	assert.equal(
+		existsSync(join(piForgeHome, "app", "node_modules", "@earendil-works", "pi-coding-agent", "package.json")),
+		true,
+	);
 	assert.equal(existsSync(join(agent, "AGENTS.md")), true);
 	assert.equal(existsSync(join(agent, "sessions")), true);
 	assert.equal(existsSync(join(packageRoot, "skills", "document-ingest", "SKILL.md")), true);
 	assert.doesNotMatch(readlinkSync(launcher), /repository/);
-	assert.match(readFileSync(join(root, ".zprofile"), "utf8"), new RegExp(piForgeHome.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+	assert.match(
+		readFileSync(join(root, ".zprofile"), "utf8"),
+		new RegExp(piForgeHome.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+	);
 	assert.match(install.stdout, new RegExp(`State: ${agent.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
 	const settings = JSON.parse(readFileSync(join(agent, "settings.json"), "utf8"));
 	assert.equal(settings.packages[0], realpathSync(packageRoot));
 	const appPackage = JSON.parse(readFileSync(join(piForgeHome, "app", "package.json"), "utf8"));
 	assert.match(appPackage.dependencies["@earendil-works/pi-coding-agent"], /earendil-works-pi-coding-agent/);
-	const result = spawnSync(launcher, ["--help"], { encoding: "utf8", env: { ...environment, HOME: root, SHELL: "/bin/zsh" } });
+	const result = spawnSync(launcher, ["--help"], {
+		encoding: "utf8",
+		env: { ...environment, HOME: root, SHELL: "/bin/zsh" },
+	});
 	assert.equal(result.status, 0, result.stderr);
 	assert.match(result.stdout, /Usage: pi-forge-mcp/);
 	const nestedPiRoot = join(packageRoot, "node_modules", "@earendil-works", "pi-coding-agent");
@@ -828,10 +829,15 @@ test("installer packs Pi runtime packages from the upstream source archive by de
 	);
 	assert.equal(installedPiPackage.version, "0.0.1-upstream");
 	assert.equal(
-		existsSync(join(appRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "source-runtime-marker.js")),
+		existsSync(
+			join(appRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "source-runtime-marker.js"),
+		),
 		true,
 	);
-	assert.equal(existsSync(join(appRoot, "node_modules", "@earendil-works", "pi-coding-agent", "npm-shrinkwrap.json")), false);
+	assert.equal(
+		existsSync(join(appRoot, "node_modules", "@earendil-works", "pi-coding-agent", "npm-shrinkwrap.json")),
+		false,
+	);
 	const npmCalls = readFileSync(npmLog, "utf8");
 	assert.match(npmCalls, /ci --ignore-scripts/);
 	assert.match(npmCalls, /run build:install/);
@@ -884,13 +890,18 @@ test("packaged updater refreshes pi-forge from the GitHub source archive by defa
 	assert.match(update.stderr, /pi-forge-update: installing pi-forge from file:/);
 	assert.match(
 		update.stderr,
-		new RegExp(`pi-forge-update: installing Pi runtime from file://${upstreamSourceArchive.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
+		new RegExp(
+			`pi-forge-update: installing Pi runtime from file://${upstreamSourceArchive.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`,
+		),
 	);
 	// The updater hands off to the copy of itself it just installed, exactly once.
 	assert.equal(update.stderr.match(/pi-forge-update: installing Pi runtime from/g)?.length, 1);
 	assert.match(update.stdout, /Pi package: runtime packages from file:/);
 	const packageJson = JSON.parse(
-		readFileSync(join(root, ".pi-forge", "app", "node_modules", "@ellian-eorwyn", "pi-forge", "package.json"), "utf8"),
+		readFileSync(
+			join(root, ".pi-forge", "app", "node_modules", "@ellian-eorwyn", "pi-forge", "package.json"),
+			"utf8",
+		),
 	);
 	assert.equal(packageJson.version, "0.0.1-source");
 	const appRoot = join(root, ".pi-forge", "app");
@@ -903,7 +914,9 @@ test("packaged updater refreshes pi-forge from the GitHub source archive by defa
 	);
 	assert.equal(installedPiPackage.version, "0.0.2-upstream");
 	assert.equal(
-		existsSync(join(appRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "source-runtime-marker.js")),
+		existsSync(
+			join(appRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "source-runtime-marker.js"),
+		),
 		true,
 	);
 	const npmCalls = readFileSync(npmLog, "utf8");
@@ -923,11 +936,7 @@ test("installer uses package install unless dev-link is explicit", () => {
 	const environment = cleanPiForgeEnvironment();
 	const packageInstall = spawnSync(
 		"bash",
-		[
-			join(repositoryRoot, "scripts", "pi-forge-install.sh"),
-			"--source-dir",
-			source,
-		],
+		[join(repositoryRoot, "scripts", "pi-forge-install.sh"), "--source-dir", source],
 		{
 			encoding: "utf8",
 			env: {
@@ -979,12 +988,7 @@ test("installer moves legacy local-share state during default home install", () 
 
 	const install = spawnSync(
 		"bash",
-		[
-			join(repositoryRoot, "scripts", "pi-forge-install.sh"),
-			"--source-dir",
-			source,
-			"--resources-only",
-		],
+		[join(repositoryRoot, "scripts", "pi-forge-install.sh"), "--source-dir", source, "--resources-only"],
 		{
 			encoding: "utf8",
 			env: {
@@ -1029,12 +1033,7 @@ test("installer migrates mistaken pi-vault install into pi-forge home", () => {
 
 	const install = spawnSync(
 		"bash",
-		[
-			join(repositoryRoot, "scripts", "pi-forge-install.sh"),
-			"--source-dir",
-			source,
-			"--resources-only",
-		],
+		[join(repositoryRoot, "scripts", "pi-forge-install.sh"), "--source-dir", source, "--resources-only"],
 		{
 			encoding: "utf8",
 			env: {
@@ -1057,7 +1056,10 @@ test("installer migrates mistaken pi-vault install into pi-forge home", () => {
 	assert.equal(existsSync(join(newHome, "bin", "pi-forge")), true);
 	assert.equal(existsSync(join(newHome, "bin", "pi-forge-mcp")), true);
 	assert.equal(existsSync(join(newHome, "bin", "pi-forge-update")), true);
-	assert.match(readFileSync(join(root, ".zprofile"), "utf8"), new RegExp(newHome.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+	assert.match(
+		readFileSync(join(root, ".zprofile"), "utf8"),
+		new RegExp(newHome.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+	);
 	assert.equal(existsSync(join(legacyBin, "pi-forge")), false);
 	assert.equal(existsSync(join(legacyBin, "pi-forge-mcp")), false);
 	assert.equal(existsSync(join(legacyBin, "pi-forge-update")), false);
@@ -1078,12 +1080,7 @@ test("installer does not merge unrelated pi-vault state over an existing pi-forg
 
 	const install = spawnSync(
 		"bash",
-		[
-			join(repositoryRoot, "scripts", "pi-forge-install.sh"),
-			"--source-dir",
-			source,
-			"--resources-only",
-		],
+		[join(repositoryRoot, "scripts", "pi-forge-install.sh"), "--source-dir", source, "--resources-only"],
 		{
 			encoding: "utf8",
 			env: {
@@ -1116,12 +1113,7 @@ test("installer migrates local-share pi-forge install into home pi-forge", () =>
 
 	const install = spawnSync(
 		"bash",
-		[
-			join(repositoryRoot, "scripts", "pi-forge-install.sh"),
-			"--source-dir",
-			source,
-			"--resources-only",
-		],
+		[join(repositoryRoot, "scripts", "pi-forge-install.sh"), "--source-dir", source, "--resources-only"],
 		{
 			encoding: "utf8",
 			env: {
@@ -1140,7 +1132,10 @@ test("installer migrates local-share pi-forge install into home pi-forge", () =>
 	assert.equal(existsSync(oldHome), false);
 	assert.equal(existsSync(join(newHome, "agent", "auth.json")), true);
 	assert.equal(existsSync(join(newHome, "bin", "pi-forge")), true);
-	assert.match(readFileSync(join(root, ".zprofile"), "utf8"), new RegExp(newHome.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+	assert.match(
+		readFileSync(join(root, ".zprofile"), "utf8"),
+		new RegExp(newHome.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+	);
 });
 
 test("legacy pi-forge-update migrates managed repository to package app", () => {
@@ -1186,7 +1181,10 @@ esac
 	assert.equal(readFileSync(gitLog, "utf8"), "pull\n");
 	assert.equal(existsSync(source), false);
 	assert.equal(existsSync(join(piForgeHome, "app", "package-cache")), true);
-	assert.equal(existsSync(join(piForgeHome, "app", "node_modules", "@ellian-eorwyn", "pi-forge", "package.json")), true);
+	assert.equal(
+		existsSync(join(piForgeHome, "app", "node_modules", "@ellian-eorwyn", "pi-forge", "package.json")),
+		true,
+	);
 	assert.doesNotMatch(readlinkSync(join(piForgeHome, "bin", "pi-forge")), /repository/);
 });
 
@@ -1212,14 +1210,10 @@ test("uninstaller removes managed app while preserving agent state", () => {
 	symlinkSync(join(npmBin, "pi-forge-mcp"), join(bin, "pi-forge-mcp"));
 	symlinkSync(join(npmBin, "pi-forge-update"), join(bin, "pi-forge-update"));
 
-	const uninstall = spawnSync(
-		"bash",
-		[
-			join(repositoryRoot, "scripts", "pi-forge-uninstall.sh"),
-			"--yes",
-		],
-		{ encoding: "utf8", env: { ...cleanPiForgeEnvironment(), HOME: root, SHELL: "/bin/zsh" } },
-	);
+	const uninstall = spawnSync("bash", [join(repositoryRoot, "scripts", "pi-forge-uninstall.sh"), "--yes"], {
+		encoding: "utf8",
+		env: { ...cleanPiForgeEnvironment(), HOME: root, SHELL: "/bin/zsh" },
+	});
 	assert.equal(uninstall.status, 0, uninstall.stderr);
 	assert.equal(existsSync(app), false);
 	assert.equal(existsSync(join(bin, "pi-forge")), false);

@@ -6,8 +6,16 @@ import { fileURLToPath } from "node:url";
 
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const scriptsDirectory = join(repositoryRoot, "forge", "skills", "web-research", "scripts");
-const { SEARCH_PROVIDERS, __setSepIndexForTesting, bookIdentifier, findSuttaReference, searchProviderAvailability, searchProviderBase, searchProviderCapabilities, suttaUid } =
-	await import(join(scriptsDirectory, "search-providers.mjs"));
+const {
+	SEARCH_PROVIDERS,
+	__setSepIndexForTesting,
+	bookIdentifier,
+	findSuttaReference,
+	searchProviderAvailability,
+	searchProviderBase,
+	searchProviderCapabilities,
+	suttaUid,
+} = await import(join(scriptsDirectory, "search-providers.mjs"));
 const { classifySearchQuery, routeQuery, runRoutedSearch } = await import(join(scriptsDirectory, "search-router.mjs"));
 
 /**
@@ -21,7 +29,14 @@ const ROUTES = {
 	"/w/api.php": (url) => {
 		if (url.searchParams.get("action") === "wbsearchentities") {
 			return {
-				search: [{ id: "Q2123673", label: "Anapanasati", description: "Buddhist meditation practice", concepturi: "http://www.wikidata.org/entity/Q2123673" }],
+				search: [
+					{
+						id: "Q2123673",
+						label: "Anapanasati",
+						description: "Buddhist meditation practice",
+						concepturi: "http://www.wikidata.org/entity/Q2123673",
+					},
+				],
 			};
 		}
 		if (url.searchParams.get("action") === "opensearch") {
@@ -37,8 +52,24 @@ const ROUTES = {
 			query: {
 				searchinfo: { totalhits: 2115 },
 				search: [
-					{ ns: 0, title: "Anapanasati", pageid: 443371, size: 37817, wordcount: 4510, snippet: '<span class="searchmatch">Ānāpānasati</span> means mindfulness of breathing', timestamp: "2026-01-04T10:00:00Z" },
-					{ ns: 0, title: "Anapanasati Sutta", pageid: 443372, size: 12000, wordcount: 1500, snippet: "The discourse on <b>mindfulness</b> of breathing", timestamp: "2026-02-01T10:00:00Z" },
+					{
+						ns: 0,
+						title: "Anapanasati",
+						pageid: 443371,
+						size: 37817,
+						wordcount: 4510,
+						snippet: '<span class="searchmatch">Ānāpānasati</span> means mindfulness of breathing',
+						timestamp: "2026-01-04T10:00:00Z",
+					},
+					{
+						ns: 0,
+						title: "Anapanasati Sutta",
+						pageid: 443372,
+						size: 12000,
+						wordcount: 1500,
+						snippet: "The discourse on <b>mindfulness</b> of breathing",
+						timestamp: "2026-02-01T10:00:00Z",
+					},
 				],
 			},
 		};
@@ -50,56 +81,145 @@ const ROUTES = {
 		wikibase_item: "Q2123673",
 		extract: "Anapanasati is mindfulness of breathing, a form of Buddhist meditation.",
 	}),
-	"/api/rest_v1/page/summary/Ambiguous": () => ({ type: "disambiguation", title: "Ambiguous", extract: "May refer to:" }),
+	"/api/rest_v1/page/summary/Ambiguous": () => ({
+		type: "disambiguation",
+		title: "Ambiguous",
+		extract: "May refer to:",
+	}),
 	// SuttaCentral
 	"/api/search/instant": () => ({
 		total: 2,
 		hits: [
-			{ uid: "mn118", acronym: "MN 118", name: "Mindfulness of Breathing", url: "/mn118/en/sujato", lang: "en", highlight: { content: ['<strong class="highlight">Ānāpānasati</strong> is of great fruit'] } },
-			{ uid: "thag10.3", acronym: "Thag 10.3", name: "Mahākappina", url: "/thag10.3/pli/ms", lang: "pli", highlight: { content: ["<strong>Ānāpānasatī</strong> yassa"] } },
+			{
+				uid: "mn118",
+				acronym: "MN 118",
+				name: "Mindfulness of Breathing",
+				url: "/mn118/en/sujato",
+				lang: "en",
+				highlight: { content: ['<strong class="highlight">Ānāpānasati</strong> is of great fruit'] },
+			},
+			{
+				uid: "thag10.3",
+				acronym: "Thag 10.3",
+				name: "Mahākappina",
+				url: "/thag10.3/pli/ms",
+				lang: "pli",
+				highlight: { content: ["<strong>Ānāpānasatī</strong> yassa"] },
+			},
 		],
 	}),
 	"/api/suttaplex/mn118": () => [
-		{ uid: "mn118", acronym: "MN 118", original_title: "Ānāpānassatisutta", translated_title: "Mindfulness of Breathing", blurb: "The Buddha teaches mindfulness of breathing in detail." },
+		{
+			uid: "mn118",
+			acronym: "MN 118",
+			original_title: "Ānāpānassatisutta",
+			translated_title: "Mindfulness of Breathing",
+			blurb: "The Buddha teaches mindfulness of breathing in detail.",
+		},
 	],
 	// Open Library
 	"/search.json": () => ({
 		numFound: 676,
 		docs: [
-			{ key: "/works/OL18935815W", title: "The Dhammapada", author_name: ["Rose Kramer"], first_publish_year: 1995, edition_count: 2, isbn: ["0938077872"] },
+			{
+				key: "/works/OL18935815W",
+				title: "The Dhammapada",
+				author_name: ["Rose Kramer"],
+				first_publish_year: 1995,
+				edition_count: 2,
+				isbn: ["0938077872"],
+			},
 		],
 	}),
 	// Gutendex
 	"/books": () => ({
 		count: 2,
 		results: [
-			{ id: 2017, title: "Dhammapada, a Collection of Verses", authors: [{ name: "Max Müller" }], formats: { "text/html": "https://www.gutenberg.org/ebooks/2017.html" } },
+			{
+				id: 2017,
+				title: "Dhammapada, a Collection of Verses",
+				authors: [{ name: "Max Müller" }],
+				formats: { "text/html": "https://www.gutenberg.org/ebooks/2017.html" },
+			},
 			{ id: 2018, title: "Untitled", authors: [], formats: {} },
 		],
 	}),
 	// Internet Archive
-	"/advancedsearch.php": () => ({ response: { numFound: 845, docs: [{ identifier: "bdrc-W1KG13992", title: "Dhammapada", year: 2012, creator: ["Unknown"] }] } }),
+	"/advancedsearch.php": () => ({
+		response: {
+			numFound: 845,
+			docs: [{ identifier: "bdrc-W1KG13992", title: "Dhammapada", year: 2012, creator: ["Unknown"] }],
+		},
+	}),
 	// Library of Congress
-	"/search/": () => ({ results: [{ id: "https://www.loc.gov/item/unk81062171/", title: "Dhammapada or path of virtue", description: ["A translation"], date: "1901" }] }),
+	"/search/": () => ({
+		results: [
+			{
+				id: "https://www.loc.gov/item/unk81062171/",
+				title: "Dhammapada or path of virtue",
+				description: ["A translation"],
+				date: "1901",
+			},
+		],
+	}),
 	// HathiTrust
 	"/api/volumes/brief/json/isbn:9780861713219": () => ({
-		"isbn:9780861713219": { records: { "000123456": { titles: ["The Long Discourses"], recordURL: "https://catalog.hathitrust.org/Record/000123456", publishDates: ["1995"] } }, items: [{ htid: "mdp.111" }] },
+		"isbn:9780861713219": {
+			records: {
+				"000123456": {
+					titles: ["The Long Discourses"],
+					recordURL: "https://catalog.hathitrust.org/Record/000123456",
+					publishDates: ["1995"],
+				},
+			},
+			items: [{ htid: "mdp.111" }],
+		},
 	}),
 	"/api/volumes/brief/json/isbn:0000000000": () => ({ "isbn:0000000000": { records: {}, items: [] } }),
 	// GDELT
 	"/doc/doc": () => ({
-		articles: [{ url: "https://example.org/a", title: "Tibet news", seendate: "20260726T200000Z", domain: "example.org", language: "English", sourcecountry: "United States" }],
+		articles: [
+			{
+				url: "https://example.org/a",
+				title: "Tibet news",
+				seendate: "20260726T200000Z",
+				domain: "example.org",
+				language: "English",
+				sourcecountry: "United States",
+			},
+		],
 	}),
 	// Stack Exchange
 	"/search/advanced": () => ({
-		items: [{ title: "How do I handle errors in async Rust&#39;s tokio?", link: "https://stackoverflow.com/q/1", score: 42, tags: ["rust"], is_answered: true, creation_date: 1700000000 }],
+		items: [
+			{
+				title: "How do I handle errors in async Rust&#39;s tokio?",
+				link: "https://stackoverflow.com/q/1",
+				score: 42,
+				tags: ["rust"],
+				is_answered: true,
+				creation_date: 1700000000,
+			},
+		],
 	}),
 	// InPhO
-	"/thinker.json": () => ({ responseData: { total: 1, results: [{ wiki: "Plato", url: "/thinker/3724", sep_dir: "plato", label: "Plato", type: "thinker", ID: 3724 }] } }),
+	"/thinker.json": () => ({
+		responseData: {
+			total: 1,
+			results: [
+				{ wiki: "Plato", url: "/thinker/3724", sep_dir: "plato", label: "Plato", type: "thinker", ID: 3724 },
+			],
+		},
+	}),
 	"/idea.json": () => ({ responseData: { total: 0, results: [] } }),
 	// IEP
 	"/wp-json/wp/v2/search": () => [
-		{ id: 25926, title: "Cognitive Phenomenology", url: "https://iep.utm.edu/cognitive-phenomenology/", type: "post" },
+		{
+			id: 25926,
+			title: "Cognitive Phenomenology",
+			url: "https://iep.utm.edu/cognitive-phenomenology/",
+			type: "post",
+		},
 		{ id: 25927, title: "Phenomenology", url: "https://iep.utm.edu/phenomenology/", type: "post" },
 	],
 	// The New York Times
@@ -129,7 +249,15 @@ const ROUTES = {
 		},
 	}),
 	// BDRC
-	"/resource/P1614.jsonld": () => ({ "@graph": [{ "@id": "bdr:NM1246", "rdfs:label": { "@language": "bo-x-ewts", "@value": "mi la ras pa" }, "@type": "PersonPersonalName" }] }),
+	"/resource/P1614.jsonld": () => ({
+		"@graph": [
+			{
+				"@id": "bdr:NM1246",
+				"rdfs:label": { "@language": "bo-x-ewts", "@value": "mi la ras pa" },
+				"@type": "PersonPersonalName",
+			},
+		],
+	}),
 	// SEP contents index
 	// The contents page cross-files an entry alphabetically, so one slug can be
 	// listed under more than one title -- `japanese-zen` appears twice below, as
@@ -149,11 +277,31 @@ const ROUTES = {
 // differ in real life.
 const cbetaSearch = (url) => ({
 	num_found: 126,
-	results: [{ id: 8392, term_hits: 16, canon: "T", work: "T0602", juan: 1, title: "佛說大安般守意經", byline: "後漢 安世高譯", time_dynasty: "東漢" }],
+	results: [
+		{
+			id: 8392,
+			term_hits: 16,
+			canon: "T",
+			work: "T0602",
+			juan: 1,
+			title: "佛說大安般守意經",
+			byline: "後漢 安世高譯",
+			time_dynasty: "東漢",
+		},
+	],
 	query_string: url.searchParams.get("q"),
 });
 const hackerNewsSearch = () => ({
-	hits: [{ objectID: "1", title: "Why async Rust is hard", url: "https://ex.org/p", points: 300, num_comments: 120, created_at: "2026-03-01T00:00:00Z" }],
+	hits: [
+		{
+			objectID: "1",
+			title: "Why async Rust is hard",
+			url: "https://ex.org/p",
+			points: 300,
+			num_comments: 120,
+			created_at: "2026-03-01T00:00:00Z",
+		},
+	],
 });
 const guardianSearch = () => ({
 	response: {
@@ -173,13 +321,36 @@ const guardianSearch = () => ({
 });
 const marginaliaSearch = () => ({
 	license: "CC-BY-NC-SA 4.0",
-	results: [{ url: "https://small.example/page", title: "A Small Site", description: "Something no aggregator surfaced.", quality: 3.5 }],
+	results: [
+		{
+			url: "https://small.example/page",
+			title: "A Small Site",
+			description: "Something no aggregator surfaced.",
+			quality: 3.5,
+		},
+	],
 });
 const exaSearch = () => ({
-	results: [{ title: "An Exa Hit", url: "https://exa.example/a", text: "Extracted page text.", score: 0.42, publishedDate: "2026-06-01T00:00:00Z" }],
+	results: [
+		{
+			title: "An Exa Hit",
+			url: "https://exa.example/a",
+			text: "Extracted page text.",
+			score: 0.42,
+			publishedDate: "2026-06-01T00:00:00Z",
+		},
+	],
 });
 const tavilySearch = () => ({
-	results: [{ title: "A Tavily Hit", url: "https://tavily.example/a", content: "Extracted page text.", score: 0.91, published_date: "2026-06-02" }],
+	results: [
+		{
+			title: "A Tavily Hit",
+			url: "https://tavily.example/a",
+			content: "Extracted page text.",
+			score: 0.91,
+			published_date: "2026-06-02",
+		},
+	],
 });
 
 function startFixture() {
@@ -190,7 +361,12 @@ function startFixture() {
 		request.on("data", (chunk) => chunks.push(chunk));
 		request.on("end", () => {
 			const rawBody = Buffer.concat(chunks).toString("utf8");
-			requests.push({ path: url.pathname + url.search, method: request.method, headers: request.headers, body: rawBody });
+			requests.push({
+				path: url.pathname + url.search,
+				method: request.method,
+				headers: request.headers,
+				body: rawBody,
+			});
 			let handler = ROUTES[url.pathname];
 			if (url.pathname === "/search") {
 				if (request.method === "POST") {
@@ -225,7 +401,14 @@ function startFixture() {
 }
 
 function contextFor(fixture, overrides = {}) {
-	return { base: fixture.origin, userAgent: "pi-forge-test/1", timeoutMs: 5000, limit: 10, retrievedAt: "2026-07-31T00:00:00Z", ...overrides };
+	return {
+		base: fixture.origin,
+		userAgent: "pi-forge-test/1",
+		timeoutMs: 5000,
+		limit: 10,
+		retrievedAt: "2026-07-31T00:00:00Z",
+		...overrides,
+	};
 }
 
 async function withFixture(body) {
@@ -323,7 +506,10 @@ test("every provider declares capabilities and a base or an explicit null", () =
 		const capabilities = searchProviderCapabilities(id);
 		assert.ok(capabilities, `${id} has no capabilities`);
 		assert.equal(typeof capabilities.authRequired, "boolean", id);
-		assert.ok(Array.isArray(capabilities.strengths) && capabilities.strengths.length > 0, `${id} declares no strengths`);
+		assert.ok(
+			Array.isArray(capabilities.strengths) && capabilities.strengths.length > 0,
+			`${id} declares no strengths`,
+		);
 		assert.ok(Array.isArray(capabilities.limits) && capabilities.limits.length > 0, `${id} declares no limits`);
 		assert.ok("base" in SEARCH_PROVIDERS[id], `${id} has no base`);
 	}
@@ -331,8 +517,18 @@ test("every provider declares capabilities and a base or an explicit null", () =
 
 test("a provider base follows flag, then environment, then default", () => {
 	assert.equal(searchProviderBase("wikipedia", {}, {}), "https://en.wikipedia.org");
-	assert.equal(searchProviderBase("wikipedia", {}, { FORGE_SEARCH_WIKIPEDIA_URL: "http://fixture/" }), "http://fixture");
-	assert.equal(searchProviderBase("wikipedia", { wikipediaBase: "http://flag" }, { FORGE_SEARCH_WIKIPEDIA_URL: "http://fixture" }), "http://flag");
+	assert.equal(
+		searchProviderBase("wikipedia", {}, { FORGE_SEARCH_WIKIPEDIA_URL: "http://fixture/" }),
+		"http://fixture",
+	);
+	assert.equal(
+		searchProviderBase(
+			"wikipedia",
+			{ wikipediaBase: "http://flag" },
+			{ FORGE_SEARCH_WIKIPEDIA_URL: "http://fixture" },
+		),
+		"http://flag",
+	);
 	// SearXNG keeps its long-standing variable name rather than the generated one.
 	assert.equal(searchProviderBase("searxng", {}, { FORGE_SEARXNG_URL: "http://llms/searxng" }), "http://llms/searxng");
 });
@@ -554,10 +750,7 @@ test("a keyed provider is skipped without a key and asked with one", async () =>
 	assert.equal(withoutKey.providers.includes("guardian"), false);
 	assert.equal(withoutKey.providers.includes("nyt"), false);
 	assert.ok(withoutKey.providers.includes("gdelt"), "the no-key news provider still runs");
-	assert.match(
-		withoutKey.decisions.find((entry) => entry.provider === "guardian").reason,
-		/no API key configured/,
-	);
+	assert.match(withoutKey.decisions.find((entry) => entry.provider === "guardian").reason, /no API key configured/);
 
 	const withKey = routeQuery("latest news about Tibet", { apiKeys: { guardian: "k", nyt: "k" } });
 	assert.ok(withKey.providers.includes("guardian"));
@@ -569,7 +762,7 @@ test("guardian, nyt, marginalia and wolfram normalize their own shapes", async (
 		const guardian = await SEARCH_PROVIDERS.guardian.search("tibet", contextFor(fixture, { apiKey: "gk" }));
 		assert.equal(guardian[0].title, "A Guardian Headline");
 		// The standfirst arrives as HTML and a snippet field holds plain text.
-		assert.equal(guardian[0].content, 'The standfirst, with markup.');
+		assert.equal(guardian[0].content, "The standfirst, with markup.");
 		assert.equal(guardian[0].publishedAt, "2026-07-01T08:00:00Z");
 
 		const nyt = await SEARCH_PROVIDERS.nyt.search("tibet", contextFor(fixture, { apiKey: "nk" }));
@@ -585,7 +778,10 @@ test("guardian, nyt, marginalia and wolfram normalize their own shapes", async (
 
 		const wolfram = await SEARCH_PROVIDERS.wolfram.search("2+2", contextFor(fixture, { apiKey: "wk" }));
 		// Pods with no plaintext are plots, not answers.
-		assert.deepEqual(wolfram.map((row) => row.title), ["Input", "Result"]);
+		assert.deepEqual(
+			wolfram.map((row) => row.title),
+			["Input", "Result"],
+		);
 		assert.equal(wolfram[1].content, "4");
 		// There is no page to cite, so every pod carries the query's permalink.
 		assert.ok(wolfram[0].url.startsWith("https://www.wolframalpha.com/input?i="));

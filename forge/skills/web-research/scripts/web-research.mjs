@@ -4,18 +4,25 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
-import { JSDOM, VirtualConsole } from "jsdom";
 import { Readability } from "@mozilla/readability";
+import { JSDOM, VirtualConsole } from "jsdom";
 import { resolveConnectedServices } from "../../../lib/connected-services.mjs";
 import { callTextWithRetry, resolveService, resolveThinkService, serviceDoctor } from "../../../lib/forge-llm.mjs";
 import { verifyPackets } from "../../../lib/forge-verify.mjs";
 import {
-	DEFAULT_MAX_ATTEMPTS,
+	HostLimiter,
+	hostForUrl,
+	httpRequest,
+	redactSecrets,
+	WEB_RESEARCH_HOST_RULES,
+} from "../../../lib/http-fetch.mjs";
+import {
 	assertCompatibleRun,
 	atomicWriteFile,
 	atomicWriteJson,
 	configurationFingerprint,
 	createRunState,
+	DEFAULT_MAX_ATTEMPTS,
 	initializeRunState,
 	isTransientFailure,
 	loadRunState,
@@ -27,16 +34,15 @@ import {
 	DEFAULT_TIMEOUT_MS as ACQUISITION_DEFAULT_TIMEOUT_MS,
 	DEFAULT_USER_AGENT as ACQUISITION_DEFAULT_USER_AGENT,
 	acquireUrl,
+	sourceIdForUrl as acquisitionSourceIdForUrl,
 	assertFetchableUrl,
 	closeAcquisitionContext,
 	createAcquisitionContext,
 	discoverUrl,
 	modeDefaults,
 	normalizeUrl as normalizeAcquisitionUrl,
-	sourceIdForUrl as acquisitionSourceIdForUrl,
 	writeAcquisitionArtifacts,
 } from "./acquisition.mjs";
-import { HostLimiter, WEB_RESEARCH_HOST_RULES, hostForUrl, httpRequest, redactSecrets } from "../../../lib/http-fetch.mjs";
 import { providerBudgetState, recordProviderSpend, reportedRateLimit } from "./provider-budget.mjs";
 import {
 	pingSearxng,
@@ -170,7 +176,8 @@ function sleep(milliseconds) {
 // biome-ignore lint/correctness/noUnusedVariables: dead since the acquisition split; pending a decision to remove
 function run(command, args = ["--version"]) {
 	const result = spawnSync(command, args, { encoding: "utf8" });
-	if (result.error?.code === "ENOENT" || result.error || result.status !== 0) return { available: false, version: null };
+	if (result.error?.code === "ENOENT" || result.error || result.status !== 0)
+		return { available: false, version: null };
 	return { available: true, version: result.stdout.trim().split(/\r?\n/, 1)[0] || "available" };
 }
 
@@ -210,7 +217,15 @@ function openResearchRun(runDirectory, command, input, options, items = [], phas
 	mkdirSync(runDirectory, { recursive: true });
 	return initializeRunState(
 		runDirectory,
-		createRunState({ workflow: "web-research", command, input, options, items, phase, nextAction: items[0]?.id ?? command }),
+		createRunState({
+			workflow: "web-research",
+			command,
+			input,
+			options,
+			items,
+			phase,
+			nextAction: items[0]?.id ?? command,
+		}),
 	);
 }
 
@@ -274,7 +289,9 @@ async function processUrlQueue(runDirectory, options, acquisitionContext) {
 	mkdirSync(resultDirectory, { recursive: true });
 	await withRunLock(runDirectory, async () => {
 		let state = loadRunState(runDirectory, "web-research");
-		for (const snapshot of state.items.filter((item) => item.kind === "url" && !item.retired && retryableItem(item))) {
+		for (const snapshot of state.items.filter(
+			(item) => item.kind === "url" && !item.retired && retryableItem(item),
+		)) {
 			let item = snapshot;
 			while (retryableItem(item)) {
 				state = updateRunState(runDirectory, (draft) => startResearchItem(draft, item.id), {
@@ -298,16 +315,28 @@ async function processUrlQueue(runDirectory, options, acquisitionContext) {
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					const transient = isTransientFailure(error);
-					const failedReading = { url: item.url, title: null, text: "", charCount: 0, extractionMethod: "failed", warnings: [message], extractedAt: nowIso() };
+					const failedReading = {
+						url: item.url,
+						title: null,
+						text: "",
+						charCount: 0,
+						extractionMethod: "failed",
+						warnings: [message],
+						extractedAt: nowIso(),
+					};
 					writeJson(resultPath, failedReading);
 					writeAcquisitionArtifacts(acquisitionContext);
-					state = updateRunState(runDirectory, (draft) => failResearchItem(draft, item.id, message, transient, resultPath), {
-						type: "item_failed",
-						itemId: item.id,
-						attempt: item.attempts,
-						transient,
-						error: message,
-					});
+					state = updateRunState(
+						runDirectory,
+						(draft) => failResearchItem(draft, item.id, message, transient, resultPath),
+						{
+							type: "item_failed",
+							itemId: item.id,
+							attempt: item.attempts,
+							transient,
+							error: message,
+						},
+					);
 					item = state.items.find((candidate) => candidate.id === item.id);
 					if (!retryableItem(item)) break;
 				}
@@ -363,7 +392,10 @@ async function routedSearch(query, base, searchParams, limit, flags) {
 		results: outcome.results,
 		routing: {
 			classification: routed.classification,
-			decisions: [...routed.decisions, ...skipped.map((id) => ({ provider: id, selected: false, reason: "no base URL configured" }))],
+			decisions: [
+				...routed.decisions,
+				...skipped.map((id) => ({ provider: id, selected: false, reason: "no base URL configured" })),
+			],
 			perProvider: outcome.perProvider,
 			errors: outcome.errors,
 		},
@@ -375,15 +407,26 @@ async function processSearchItem(runDirectory, base, query, searchParams, limit,
 	return withRunLock(runDirectory, async () => {
 		let state = loadRunState(runDirectory, "web-research");
 		let item = state.items.find((candidate) => candidate.kind === "search");
-		if (item?.status === "completed" && existsSync(item.resultPath)) return JSON.parse(readFileSync(item.resultPath, "utf8"));
+		if (item?.status === "completed" && existsSync(item.resultPath))
+			return JSON.parse(readFileSync(item.resultPath, "utf8"));
 		while (item && retryableItem(item)) {
-			state = updateRunState(runDirectory, (draft) => startResearchItem(draft, item.id), { type: "item_started", itemId: item.id, attempt: item.attempts + 1 });
+			state = updateRunState(runDirectory, (draft) => startResearchItem(draft, item.id), {
+				type: "item_started",
+				itemId: item.id,
+				attempt: item.attempts + 1,
+			});
 			item = state.items.find((candidate) => candidate.id === item.id);
 			try {
 				const { retrievedAt, results, routing } = await routedSearch(query, base, searchParams, limit, flags);
 				// Every provider failing is a failed search, not an empty one.
-				if (results.length === 0 && routing.errors.length > 0 && routing.errors.length >= routing.perProvider.length) {
-					const error = new Error(`every provider failed: ${routing.errors.map((entry) => `${entry.provider}: ${entry.error}`).join("; ")}`);
+				if (
+					results.length === 0 &&
+					routing.errors.length > 0 &&
+					routing.errors.length >= routing.perProvider.length
+				) {
+					const error = new Error(
+						`every provider failed: ${routing.errors.map((entry) => `${entry.provider}: ${entry.error}`).join("; ")}`,
+					);
 					error.transient = routing.errors.some((entry) => entry.transient);
 					throw error;
 				}
@@ -392,7 +435,10 @@ async function processSearchItem(runDirectory, base, query, searchParams, limit,
 					runDirectory,
 					(draft) => {
 						finishResearchItem(draft, item.id, resultPath);
-						for (const [index, result] of results.slice(0, readCount).filter((entry) => entry.url).entries()) {
+						for (const [index, result] of results
+							.slice(0, readCount)
+							.filter((entry) => entry.url)
+							.entries()) {
 							const candidate = workItem("url", `${index}:${result.url}`, { url: result.url, index });
 							if (!draft.items.some((existing) => existing.id === candidate.id)) draft.items.push(candidate);
 						}
@@ -541,7 +587,9 @@ function nextId(prefix, index) {
 }
 
 function normalizeWhitespace(value) {
-	return String(value ?? "").replace(/\s+/g, " ").trim();
+	return String(value ?? "")
+		.replace(/\s+/g, " ")
+		.trim();
 }
 
 function includesQuote(text, quote) {
@@ -667,7 +715,8 @@ function stripTags(value) {
 }
 
 function firstText(value) {
-	if (Array.isArray(value)) return normalizeWhitespace(value.find((item) => typeof item === "string" && item.trim()) ?? "");
+	if (Array.isArray(value))
+		return normalizeWhitespace(value.find((item) => typeof item === "string" && item.trim()) ?? "");
 	return normalizeWhitespace(value ?? "");
 }
 
@@ -748,7 +797,9 @@ function academicProviderBase(provider, flags = {}) {
 	const envName = ACADEMIC_PROVIDER_ENV[provider];
 	const explicit = flags[`${provider}Base`];
 	const base = explicit || (envName ? process.env[envName] : null) || ACADEMIC_PROVIDER_BASES[provider];
-	return String(base ?? "").trim().replace(/\/+$/, "");
+	return String(base ?? "")
+		.trim()
+		.replace(/\/+$/, "");
 }
 
 function academicProviderList(flags, classification) {
@@ -765,15 +816,21 @@ function academicProviderList(flags, classification) {
 	// credential, so it is appended unconditionally and simply does nothing when
 	// nothing upstream found a DOI; Unpaywall needs a contact email.
 	if (!requested) unique.push("opencitations");
-	if (flags.contactEmail || process.env.FORGE_ACADEMIC_CONTACT_EMAIL || process.env.UNPAYWALL_EMAIL) unique.push("unpaywall");
+	if (flags.contactEmail || process.env.FORGE_ACADEMIC_CONTACT_EMAIL || process.env.UNPAYWALL_EMAIL)
+		unique.push("unpaywall");
 	return unique.filter((provider) => {
 		if (!ACADEMIC_PROVIDER_BASES[provider]) return false;
 		// arXiv and DBLP are both discipline-bound: a biomedical query has no
 		// business in a preprint server or a computer-science bibliography.
-		if ((provider === "arxiv" || provider === "dblp") && classification.domain !== "technical-preprint" && classification.domain !== "general") {
+		if (
+			(provider === "arxiv" || provider === "dblp") &&
+			classification.domain !== "technical-preprint" &&
+			classification.domain !== "general"
+		) {
 			return flags.providers?.includes(provider);
 		}
-		if (provider === "pubmed" && classification.domain !== "biomedical" && !flags.providers?.includes(provider)) return true;
+		if (provider === "pubmed" && classification.domain !== "biomedical" && !flags.providers?.includes(provider))
+			return true;
 		return true;
 	});
 }
@@ -787,9 +844,15 @@ function classifyAcademicQuery(query) {
 		arxivId: lower.match(/\barxiv[:\s]*(\d{4}\.\d{4,5}(v\d+)?|[a-z-]+\/\d{7}(v\d+)?)\b/i)?.[1] ?? null,
 	};
 	let domain = "general";
-	if (/\b(clinical|biomedical|pubmed|pmid|pmc|disease|drug|therapy|genetic|neuroscience|epidemiology|public health)\b/.test(lower)) {
+	if (
+		/\b(clinical|biomedical|pubmed|pmid|pmc|disease|drug|therapy|genetic|neuroscience|epidemiology|public health)\b/.test(
+			lower,
+		)
+	) {
 		domain = "biomedical";
-	} else if (/\b(arxiv|preprint|machine learning|computer science|physics|mathematics|statistics|algorithm)\b/.test(lower)) {
+	} else if (
+		/\b(arxiv|preprint|machine learning|computer science|physics|mathematics|statistics|algorithm)\b/.test(lower)
+	) {
 		domain = "technical-preprint";
 	} else if (/\b(dataset|software|repository|zenodo|figshare|data citation)\b/.test(lower)) {
 		domain = "data-software";
@@ -851,21 +914,23 @@ function fieldValueMap(record) {
  * by the repository rather than the publisher.
  */
 function providerPriority(provider) {
-	return {
-		pubmed: 1,
-		europepmc: 2,
-		crossref: 3,
-		openalex: 4,
-		arxiv: 5,
-		"semantic-scholar": 6,
-		core: 7,
-		datacite: 8,
-		openaire: 9,
-		doaj: 10,
-		dblp: 11,
-		opencitations: 12,
-		unpaywall: 13,
-	}[provider] ?? 14;
+	return (
+		{
+			pubmed: 1,
+			europepmc: 2,
+			crossref: 3,
+			openalex: 4,
+			arxiv: 5,
+			"semantic-scholar": 6,
+			core: 7,
+			datacite: 8,
+			openaire: 9,
+			doaj: 10,
+			dblp: 11,
+			opencitations: 12,
+			unpaywall: 13,
+		}[provider] ?? 14
+	);
 }
 
 function preferValue(field, current, incoming, currentProvider, incomingProvider) {
@@ -893,7 +958,8 @@ function mergeIdentifiers(current = {}, incoming = {}) {
 	const merged = { ...current };
 	for (const [key, value] of Object.entries(incoming)) {
 		if (value === undefined || value === null || value === "") continue;
-		if (Array.isArray(value)) merged[key] = mergeArrayUnique(asArray(merged[key]), value, (entry) => String(entry).toLowerCase());
+		if (Array.isArray(value))
+			merged[key] = mergeArrayUnique(asArray(merged[key]), value, (entry) => String(entry).toLowerCase());
 		else if (!merged[key]) merged[key] = value;
 	}
 	return compactObject(merged);
@@ -908,7 +974,9 @@ function createCanonicalWork(normalized, sourceRecord) {
 		normalized_title: normalizeTitleKey(normalized.canonical_title),
 		abstract_best: normalized.abstract_best ?? null,
 		abstract_best_source: normalized.abstract_best ? sourceRecord.source_record_id : null,
-		abstract_alternates: normalized.abstract_best ? [{ value: normalized.abstract_best, sourceRecordId: sourceRecord.source_record_id }] : [],
+		abstract_alternates: normalized.abstract_best
+			? [{ value: normalized.abstract_best, sourceRecordId: sourceRecord.source_record_id }]
+			: [],
 		authors: normalized.authors ?? [],
 		publication_year: normalized.publication_year ?? null,
 		publication_date: normalized.publication_date ?? null,
@@ -937,7 +1005,9 @@ function createCanonicalWork(normalized, sourceRecord) {
 		dedupe_cluster_id: `cluster-${sha256(key).slice(0, 12)}`,
 		created_at: nowIso(),
 		updated_at: nowIso(),
-		_fieldSources: Object.fromEntries(Object.keys(fieldValueMap(normalized)).map((field) => [field, sourceRecord.provider])),
+		_fieldSources: Object.fromEntries(
+			Object.keys(fieldValueMap(normalized)).map((field) => [field, sourceRecord.provider]),
+		),
 	};
 }
 
@@ -965,14 +1035,32 @@ function addFieldProvenance(rows, work, sourceRecord, normalized, conflictStatus
 function mergeCanonicalWork(work, normalized, sourceRecord, provenanceRows) {
 	work.source_records = mergeArrayUnique(work.source_records, [sourceRecord.source_record_id], String);
 	work.identifiers = mergeIdentifiers(work.identifiers, normalized.identifiers);
-	work.authors = mergeArrayUnique(work.authors, normalized.authors ?? [], (author) => authorDisplayName(author).toLowerCase());
+	work.authors = mergeArrayUnique(work.authors, normalized.authors ?? [], (author) =>
+		authorDisplayName(author).toLowerCase(),
+	);
 	work.urls = mergeArrayUnique(work.urls ?? [], normalized.urls ?? [], (url) => String(url).toLowerCase());
-	work.subjects = mergeArrayUnique(work.subjects, normalized.subjects ?? [], (subject) => String(subject).toLowerCase());
-	work.fields_of_study = mergeArrayUnique(work.fields_of_study, normalized.fields_of_study ?? [], (field) => String(field).toLowerCase());
-	work.funders = mergeArrayUnique(work.funders, normalized.funders ?? [], (funder) => JSON.stringify(funder).toLowerCase());
-	work.licenses = mergeArrayUnique(work.licenses, normalized.licenses ?? [], (license) => JSON.stringify(license).toLowerCase());
-	work.oa_locations = mergeArrayUnique(work.oa_locations, normalized.oa_locations ?? [], (location) => location.url ?? JSON.stringify(location));
-	work.full_text_candidates = mergeArrayUnique(work.full_text_candidates, normalized.full_text_candidates ?? [], (location) => location.url ?? String(location));
+	work.subjects = mergeArrayUnique(work.subjects, normalized.subjects ?? [], (subject) =>
+		String(subject).toLowerCase(),
+	);
+	work.fields_of_study = mergeArrayUnique(work.fields_of_study, normalized.fields_of_study ?? [], (field) =>
+		String(field).toLowerCase(),
+	);
+	work.funders = mergeArrayUnique(work.funders, normalized.funders ?? [], (funder) =>
+		JSON.stringify(funder).toLowerCase(),
+	);
+	work.licenses = mergeArrayUnique(work.licenses, normalized.licenses ?? [], (license) =>
+		JSON.stringify(license).toLowerCase(),
+	);
+	work.oa_locations = mergeArrayUnique(
+		work.oa_locations,
+		normalized.oa_locations ?? [],
+		(location) => location.url ?? JSON.stringify(location),
+	);
+	work.full_text_candidates = mergeArrayUnique(
+		work.full_text_candidates,
+		normalized.full_text_candidates ?? [],
+		(location) => location.url ?? String(location),
+	);
 	if (normalized.abstract_best) {
 		work.abstract_alternates = mergeArrayUnique(
 			work.abstract_alternates,
@@ -980,13 +1068,30 @@ function mergeCanonicalWork(work, normalized, sourceRecord, provenanceRows) {
 			(item) => normalizeWhitespace(item.value).toLowerCase(),
 		);
 	}
-	for (const field of ["canonical_title", "publication_year", "publication_date", "venue_name", "venue_type", "publisher", "type", "oa_status"]) {
+	for (const field of [
+		"canonical_title",
+		"publication_year",
+		"publication_date",
+		"venue_name",
+		"venue_type",
+		"publisher",
+		"type",
+		"oa_status",
+	]) {
 		if (preferValue(field, work[field], normalized[field], work._fieldSources?.[field], sourceRecord.provider)) {
 			work[field] = normalized[field];
 			work._fieldSources[field] = sourceRecord.provider;
 		}
 	}
-	if (preferValue("abstract_best", work.abstract_best, normalized.abstract_best, work._fieldSources?.abstract_best, sourceRecord.provider)) {
+	if (
+		preferValue(
+			"abstract_best",
+			work.abstract_best,
+			normalized.abstract_best,
+			work._fieldSources?.abstract_best,
+			sourceRecord.provider,
+		)
+	) {
 		work.abstract_best = normalized.abstract_best;
 		work.abstract_best_source = sourceRecord.source_record_id;
 		work._fieldSources.abstract_best = sourceRecord.provider;
@@ -1067,7 +1172,12 @@ function dedupeAcademicRecords(sourceRecords, normalizedRecords) {
 // --- Academic providers ----------------------------------------------------
 
 function providerCapabilities(provider) {
-	const common = { authRequired: false, optionalAuth: false, rateLimit: "conservative", searchSyntaxNotes: "provider native query syntax" };
+	const common = {
+		authRequired: false,
+		optionalAuth: false,
+		rateLimit: "conservative",
+		searchSyntaxNotes: "provider native query syntax",
+	};
 	return {
 		crossref: {
 			...common,
@@ -1093,7 +1203,16 @@ function providerCapabilities(provider) {
 		"semantic-scholar": {
 			...common,
 			optionalAuth: true,
-			fields: ["paperId", "externalIds", "title", "authors", "abstract", "citations", "fieldsOfStudy", "openAccessPdf"],
+			fields: [
+				"paperId",
+				"externalIds",
+				"title",
+				"authors",
+				"abstract",
+				"citations",
+				"fieldsOfStudy",
+				"openAccessPdf",
+			],
 			strengths: ["broad paper discovery", "abstracts", "citation graph signals"],
 			limits: ["public quota can throttle", "aggregated metadata is not canonical"],
 		},
@@ -1125,7 +1244,10 @@ function providerCapabilities(provider) {
 			rateLimit: "10 requests per window without a key; free key raises it",
 			fields: ["id", "doi", "title", "abstract", "authors", "yearPublished", "downloadUrl", "sourceFulltextUrls"],
 			strengths: ["open-access full text across institutional repositories", "direct PDF URLs"],
-			limits: ["repository deposits, so metadata quality varies by source", "duplicate deposits of one work are common"],
+			limits: [
+				"repository deposits, so metadata quality varies by source",
+				"duplicate deposits of one work are common",
+			],
 		},
 		dblp: {
 			...common,
@@ -1300,7 +1422,11 @@ function normalizeCrossrefType(type) {
 }
 
 function normalizeCrossrefItem(item) {
-	const published = parseDateParts(item["published-print"]?.["date-parts"] ?? item["published-online"]?.["date-parts"] ?? item.created?.["date-parts"]);
+	const published = parseDateParts(
+		item["published-print"]?.["date-parts"] ??
+			item["published-online"]?.["date-parts"] ??
+			item.created?.["date-parts"],
+	);
 	const authors = asArray(item.author).map((author) =>
 		compactObject({
 			given: author.given ?? null,
@@ -1326,14 +1452,21 @@ function normalizeCrossrefItem(item) {
 		}),
 		urls: asArray(item.URL),
 		subjects: asArray(item.subject),
-		licenses: asArray(item.license).map((license) => compactObject({ url: license.URL, start: license.start?.["date-time"] })),
-		funders: asArray(item.funder).map((funder) => compactObject({ name: funder.name, doi: normalizeDoi(funder.DOI), awards: asArray(funder.award) })),
+		licenses: asArray(item.license).map((license) =>
+			compactObject({ url: license.URL, start: license.start?.["date-time"] }),
+		),
+		funders: asArray(item.funder).map((funder) =>
+			compactObject({ name: funder.name, doi: normalizeDoi(funder.DOI), awards: asArray(funder.award) }),
+		),
 		field_paths: {
 			canonical_title: "message.items[].title",
 			abstract_best: "message.items[].abstract",
 			identifiers: "message.items[].DOI",
 		},
-		transformations: { abstract_best: item.abstract ? "stripped XML/HTML tags and normalized whitespace" : null, identifiers: "normalized DOI" },
+		transformations: {
+			abstract_best: item.abstract ? "stripped XML/HTML tags and normalized whitespace" : null,
+			identifiers: "normalized DOI",
+		},
 	};
 }
 
@@ -1408,10 +1541,15 @@ function normalizeCoreItem(item) {
 	return {
 		canonical_title: normalizeWhitespace(item.title),
 		abstract_best: normalizeWhitespace(item.abstract),
-		authors: asArray(item.authors).map((author) => compactObject({ name: normalizeWhitespace(author?.name ?? author) })),
+		authors: asArray(item.authors).map((author) =>
+			compactObject({ name: normalizeWhitespace(author?.name ?? author) }),
+		),
 		publication_year: Number.isInteger(item.yearPublished) ? item.yearPublished : yearFromDate(item.publishedDate),
 		publication_date: item.publishedDate || null,
-		venue_name: asArray(item.journals).map((journal) => journal?.title).find(Boolean) ?? null,
+		venue_name:
+			asArray(item.journals)
+				.map((journal) => journal?.title)
+				.find(Boolean) ?? null,
 		venue_type: asArray(item.journals).some((journal) => journal?.title) ? "journal" : null,
 		publisher: item.publisher || null,
 		type: /thesis/i.test(item.documentType ?? "") ? "thesis" : "article",
@@ -1423,7 +1561,11 @@ function normalizeCoreItem(item) {
 		// Every CORE hit is an open-access deposit; that is what the index is.
 		oa_status: fullText.length > 0 ? "green" : null,
 		full_text_candidates: fullText.map((url) => ({ url, source: "CORE" })),
-		field_paths: { canonical_title: "results[].title", abstract_best: "results[].abstract", identifiers: "results[].identifiers" },
+		field_paths: {
+			canonical_title: "results[].title",
+			abstract_best: "results[].abstract",
+			identifiers: "results[].identifiers",
+		},
 		transformations: { identifiers: "normalized DOI" },
 	};
 }
@@ -1465,7 +1607,7 @@ function normalizeOpenCitationsItem(item) {
 		venue_name: openCitationsLabel(item.venue),
 		venue_type: /journal/i.test(item.type ?? "") ? "journal" : null,
 		publisher: openCitationsLabel(item.publisher),
-		type: /journal article/i.test(item.type ?? "") ? "article" : (item.type || "unknown"),
+		type: /journal article/i.test(item.type ?? "") ? "article" : item.type || "unknown",
 		identifiers: compactObject({
 			doi: normalizeDoi(ids.doi),
 			pmid: normalizeIdentifier(ids.pmid),
@@ -1475,7 +1617,10 @@ function normalizeOpenCitationsItem(item) {
 		}),
 		urls: ids.doi ? [`https://doi.org/${ids.doi}`] : [],
 		field_paths: { canonical_title: "[].title", identifiers: "[].id", venue_name: "[].venue" },
-		transformations: { identifiers: "split the space-separated identifier string", venue_name: "stripped the bracketed identifiers" },
+		transformations: {
+			identifiers: "split the space-separated identifier string",
+			venue_name: "stripped the bracketed identifiers",
+		},
 	};
 }
 
@@ -1486,7 +1631,10 @@ function normalizeDblpItem(hit) {
 	const authors = asArray(info.authors?.author).map((author) =>
 		// "Fei-Yue Wang 0001" -- the trailing number disambiguates people who
 		// share a name and is not part of it.
-		compactObject({ name: normalizeWhitespace(String(author?.text ?? author).replace(/\s+\d{4}$/, "")), dblp_pid: author?.["@pid"] ?? null }),
+		compactObject({
+			name: normalizeWhitespace(String(author?.text ?? author).replace(/\s+\d{4}$/, "")),
+			dblp_pid: author?.["@pid"] ?? null,
+		}),
 	);
 	return {
 		canonical_title: normalizeWhitespace(info.title).replace(/\.$/, ""),
@@ -1495,9 +1643,17 @@ function normalizeDblpItem(hit) {
 		publication_year: Number.parseInt(info.year, 10) || null,
 		publication_date: info.year ? String(info.year) : null,
 		venue_name: firstText(info.venue),
-		venue_type: /journal/i.test(info.type ?? "") ? "journal" : /conference|proceedings/i.test(info.type ?? "") ? "proceedings" : null,
+		venue_type: /journal/i.test(info.type ?? "")
+			? "journal"
+			: /conference|proceedings/i.test(info.type ?? "")
+				? "proceedings"
+				: null,
 		publisher: info.publisher ?? null,
-		type: /journal/i.test(info.type ?? "") ? "article" : /informal|preprint/i.test(info.type ?? "") ? "preprint" : "proceedings",
+		type: /journal/i.test(info.type ?? "")
+			? "article"
+			: /informal|preprint/i.test(info.type ?? "")
+				? "preprint"
+				: "proceedings",
 		identifiers: compactObject({ doi: normalizeDoi(info.doi), dblp_key: normalizeIdentifier(info.key) }),
 		urls: [info.ee, info.url].filter(Boolean),
 		field_paths: { canonical_title: "result.hits.hit[].info.title", identifiers: "result.hits.hit[].info.doi" },
@@ -1510,7 +1666,9 @@ function normalizeSemanticScholarItem(item) {
 	return {
 		canonical_title: normalizeWhitespace(item.title),
 		abstract_best: normalizeWhitespace(item.abstract),
-		authors: asArray(item.authors).map((author) => compactObject({ name: author.name, semanticScholarAuthorId: author.authorId })),
+		authors: asArray(item.authors).map((author) =>
+			compactObject({ name: author.name, semanticScholarAuthorId: author.authorId }),
+		),
 		publication_year: Number.isInteger(item.year) ? item.year : null,
 		publication_date: item.publicationDate ?? null,
 		venue_name: item.venue || item.journal?.name || null,
@@ -1526,11 +1684,23 @@ function normalizeSemanticScholarItem(item) {
 		}),
 		urls: [item.url, item.openAccessPdf?.url].filter(Boolean),
 		fields_of_study: asArray(item.fieldsOfStudy),
-		full_text_candidates: item.openAccessPdf?.url ? [{ url: item.openAccessPdf.url, source: "Semantic Scholar openAccessPdf" }] : [],
-		citations_count_by_provider: Number.isInteger(item.citationCount)
-			? [{ provider: "semantic-scholar", citationCount: item.citationCount, influentialCitationCount: item.influentialCitationCount ?? null }]
+		full_text_candidates: item.openAccessPdf?.url
+			? [{ url: item.openAccessPdf.url, source: "Semantic Scholar openAccessPdf" }]
 			: [],
-		field_paths: { canonical_title: "data[].title", abstract_best: "data[].abstract", identifiers: "data[].externalIds" },
+		citations_count_by_provider: Number.isInteger(item.citationCount)
+			? [
+					{
+						provider: "semantic-scholar",
+						citationCount: item.citationCount,
+						influentialCitationCount: item.influentialCitationCount ?? null,
+					},
+				]
+			: [],
+		field_paths: {
+			canonical_title: "data[].title",
+			abstract_best: "data[].abstract",
+			identifiers: "data[].externalIds",
+		},
 		transformations: { identifiers: "normalized external IDs" },
 	};
 }
@@ -1540,7 +1710,9 @@ function normalizeEuropePmcItem(item) {
 	return {
 		canonical_title: stripTags(item.title),
 		abstract_best: stripTags(item.abstractText),
-		authors: asArray(item.authorList?.author).map((author) => compactObject({ name: author.fullName, given: author.firstName, family: author.lastName })),
+		authors: asArray(item.authorList?.author).map((author) =>
+			compactObject({ name: author.fullName, given: author.firstName, family: author.lastName }),
+		),
 		publication_year: Number.parseInt(item.pubYear, 10) || yearFromDate(date),
 		publication_date: date,
 		venue_name: item.journalInfo?.journal?.title || item.journalTitle || null,
@@ -1554,10 +1726,21 @@ function normalizeEuropePmcItem(item) {
 			issn: item.journalInfo?.journal?.issn ? [item.journalInfo.journal.issn] : [],
 		}),
 		urls: [item.fullTextUrlList?.fullTextUrl?.[0]?.url, item.authorString ? null : item.source].filter(Boolean),
-		full_text_candidates: asArray(item.fullTextUrlList?.fullTextUrl).map((entry) => compactObject({ url: entry.url, availability: entry.availability, documentStyle: entry.documentStyle })),
-		subjects: asArray(item.meshHeadingList?.meshHeading).map((heading) => heading.descriptorName).filter(Boolean),
-		field_paths: { canonical_title: "resultList.result[].title", abstract_best: "resultList.result[].abstractText", identifiers: "resultList.result[]" },
-		transformations: { abstract_best: item.abstractText ? "stripped XML/HTML tags and normalized whitespace" : null, identifiers: "normalized DOI/PMID/PMCID" },
+		full_text_candidates: asArray(item.fullTextUrlList?.fullTextUrl).map((entry) =>
+			compactObject({ url: entry.url, availability: entry.availability, documentStyle: entry.documentStyle }),
+		),
+		subjects: asArray(item.meshHeadingList?.meshHeading)
+			.map((heading) => heading.descriptorName)
+			.filter(Boolean),
+		field_paths: {
+			canonical_title: "resultList.result[].title",
+			abstract_best: "resultList.result[].abstractText",
+			identifiers: "resultList.result[]",
+		},
+		transformations: {
+			abstract_best: item.abstractText ? "stripped XML/HTML tags and normalized whitespace" : null,
+			identifiers: "normalized DOI/PMID/PMCID",
+		},
 	};
 }
 
@@ -1573,7 +1756,10 @@ function normalizePubmedSummary(uid, item) {
 		venue_type: "journal",
 		publisher: null,
 		type: "article",
-		identifiers: compactObject({ pmid: uid, doi: normalizeDoi(asArray(item.articleids).find((id) => id.idtype === "doi")?.value) }),
+		identifiers: compactObject({
+			pmid: uid,
+			doi: normalizeDoi(asArray(item.articleids).find((id) => id.idtype === "doi")?.value),
+		}),
 		urls: [`https://pubmed.ncbi.nlm.nih.gov/${uid}/`],
 		subjects: asArray(item.pubtype),
 		field_paths: { canonical_title: "result.<pmid>.title", identifiers: "result.<pmid>.articleids" },
@@ -1587,8 +1773,12 @@ function parseArxivFeed(text) {
 		return [...dom.window.document.querySelectorAll("entry")].map((entry) => {
 			const textOf = (selector) => entry.querySelector(selector)?.textContent?.trim() ?? null;
 			const id = textOf("id");
-			const authors = [...entry.querySelectorAll("author")].map((author) => compactObject({ name: normalizeWhitespace(author.querySelector("name")?.textContent) }));
-			const categories = [...entry.querySelectorAll("category")].map((category) => category.getAttribute("term")).filter(Boolean);
+			const authors = [...entry.querySelectorAll("author")].map((author) =>
+				compactObject({ name: normalizeWhitespace(author.querySelector("name")?.textContent) }),
+			);
+			const categories = [...entry.querySelectorAll("category")]
+				.map((category) => category.getAttribute("term"))
+				.filter(Boolean);
 			const links = [...entry.querySelectorAll("link")].map((link) => link.getAttribute("href")).filter(Boolean);
 			return {
 				canonical_title: normalizeWhitespace(textOf("title")),
@@ -1606,7 +1796,11 @@ function parseArxivFeed(text) {
 				}),
 				urls: links.length > 0 ? links : [id].filter(Boolean),
 				subjects: categories,
-				field_paths: { canonical_title: "feed.entry.title", abstract_best: "feed.entry.summary", identifiers: "feed.entry.id" },
+				field_paths: {
+					canonical_title: "feed.entry.title",
+					abstract_best: "feed.entry.summary",
+					identifiers: "feed.entry.id",
+				},
 				transformations: { identifiers: "normalized arXiv ID and DOI" },
 			};
 		});
@@ -1617,8 +1811,12 @@ function parseArxivFeed(text) {
 
 function normalizeDataCiteItem(item) {
 	const attributes = item.attributes ?? {};
-	const creators = asArray(attributes.creators).map((creator) => compactObject({ name: creator.name, given: creator.givenName, family: creator.familyName }));
-	const abstract = asArray(attributes.descriptions).find((description) => /abstract/i.test(description.descriptionType ?? ""))?.description;
+	const creators = asArray(attributes.creators).map((creator) =>
+		compactObject({ name: creator.name, given: creator.givenName, family: creator.familyName }),
+	);
+	const abstract = asArray(attributes.descriptions).find((description) =>
+		/abstract/i.test(description.descriptionType ?? ""),
+	)?.description;
 	const resourceType = attributes.types?.resourceTypeGeneral || attributes.types?.resourceType || null;
 	return {
 		canonical_title: firstText(asArray(attributes.titles).map((title) => title.title)),
@@ -1629,13 +1827,30 @@ function normalizeDataCiteItem(item) {
 		venue_name: attributes.container?.title ?? null,
 		venue_type: attributes.container?.type ?? null,
 		publisher: attributes.publisher ?? null,
-		type: /dataset/i.test(resourceType ?? "") ? "dataset" : /software/i.test(resourceType ?? "") ? "software" : /report/i.test(resourceType ?? "") ? "report" : "unknown",
+		type: /dataset/i.test(resourceType ?? "")
+			? "dataset"
+			: /software/i.test(resourceType ?? "")
+				? "software"
+				: /report/i.test(resourceType ?? "")
+					? "report"
+					: "unknown",
 		identifiers: compactObject({ doi: normalizeDoi(attributes.doi), datacite_id: item.id }),
 		urls: [attributes.url].filter(Boolean),
-		subjects: asArray(attributes.subjects).map((subject) => subject.subject).filter(Boolean),
-		licenses: asArray(attributes.rightsList).map((right) => compactObject({ rights: right.rights, url: right.rightsUri })),
-		field_paths: { canonical_title: "data[].attributes.titles", abstract_best: "data[].attributes.descriptions", identifiers: "data[].attributes.doi" },
-		transformations: { abstract_best: abstract ? "stripped XML/HTML tags and normalized whitespace" : null, identifiers: "normalized DOI" },
+		subjects: asArray(attributes.subjects)
+			.map((subject) => subject.subject)
+			.filter(Boolean),
+		licenses: asArray(attributes.rightsList).map((right) =>
+			compactObject({ rights: right.rights, url: right.rightsUri }),
+		),
+		field_paths: {
+			canonical_title: "data[].attributes.titles",
+			abstract_best: "data[].attributes.descriptions",
+			identifiers: "data[].attributes.doi",
+		},
+		transformations: {
+			abstract_best: abstract ? "stripped XML/HTML tags and normalized whitespace" : null,
+			identifiers: "normalized DOI",
+		},
 	};
 }
 
@@ -1653,9 +1868,17 @@ function normalizeOpenAireResult(item) {
 		venue_type: metadata.journal ? "journal" : null,
 		publisher: metadata.publisher ?? null,
 		type: "article",
-		identifiers: compactObject({ doi: normalizeDoi(metadata.pid?.content ?? metadata.doi), openaire_id: item.header?.dri?.objIdentifier ?? item.id }),
-		urls: asArray(metadata.children?.instance).map((instance) => instance.webresource?.url).filter(Boolean),
-		field_paths: { canonical_title: "response.results.result[].metadata", identifiers: "response.results.result[].metadata.pid" },
+		identifiers: compactObject({
+			doi: normalizeDoi(metadata.pid?.content ?? metadata.doi),
+			openaire_id: item.header?.dri?.objIdentifier ?? item.id,
+		}),
+		urls: asArray(metadata.children?.instance)
+			.map((instance) => instance.webresource?.url)
+			.filter(Boolean),
+		field_paths: {
+			canonical_title: "response.results.result[].metadata",
+			identifiers: "response.results.result[].metadata.pid",
+		},
 		transformations: { identifiers: "normalized DOI/OpenAIRE ID" },
 	};
 }
@@ -1666,7 +1889,9 @@ function normalizeDoajItem(item) {
 	return {
 		canonical_title: normalizeWhitespace(bibjson.title),
 		abstract_best: stripTags(bibjson.abstract),
-		authors: asArray(bibjson.author).map((author) => compactObject({ name: author.name, affiliation: author.affiliation })),
+		authors: asArray(bibjson.author).map((author) =>
+			compactObject({ name: author.name, affiliation: author.affiliation }),
+		),
 		publication_year: yearFromDate(bibjson.year ?? bibjson.month),
 		publication_date: bibjson.year ? String(bibjson.year) : null,
 		venue_name: bibjson.journal?.title ?? null,
@@ -1677,11 +1902,22 @@ function normalizeDoajItem(item) {
 			doi: normalizeDoi(identifiers.find((id) => id.type === "doi")?.id),
 			issn: identifiers.filter((id) => /issn/i.test(id.type ?? "")).map((id) => id.id),
 		}),
-		urls: asArray(bibjson.link).map((link) => link.url).filter(Boolean),
-		subjects: asArray(bibjson.subject).map((subject) => subject.term).filter(Boolean),
+		urls: asArray(bibjson.link)
+			.map((link) => link.url)
+			.filter(Boolean),
+		subjects: asArray(bibjson.subject)
+			.map((subject) => subject.term)
+			.filter(Boolean),
 		licenses: asArray(bibjson.license).map((license) => compactObject({ type: license.type, url: license.url })),
-		field_paths: { canonical_title: "results[].bibjson.title", abstract_best: "results[].bibjson.abstract", identifiers: "results[].bibjson.identifier" },
-		transformations: { abstract_best: bibjson.abstract ? "stripped XML/HTML tags and normalized whitespace" : null, identifiers: "normalized DOI/ISSN" },
+		field_paths: {
+			canonical_title: "results[].bibjson.title",
+			abstract_best: "results[].bibjson.abstract",
+			identifiers: "results[].bibjson.identifier",
+		},
+		transformations: {
+			abstract_best: bibjson.abstract ? "stripped XML/HTML tags and normalized whitespace" : null,
+			identifiers: "normalized DOI/ISSN",
+		},
 	};
 }
 
@@ -1709,7 +1945,9 @@ function normalizeUnpaywallItem(item) {
 		urls: locations.map((location) => location.url).filter(Boolean),
 		oa_status: item.oa_status ?? null,
 		oa_locations: locations,
-		full_text_candidates: locations.filter((location) => location.pdfUrl).map((location) => ({ url: location.pdfUrl, source: "Unpaywall" })),
+		full_text_candidates: locations
+			.filter((location) => location.pdfUrl)
+			.map((location) => ({ url: location.pdfUrl, source: "Unpaywall" })),
 		field_paths: { oa_status: "oa_status", oa_locations: "oa_locations", identifiers: "doi" },
 		transformations: { identifiers: "normalized DOI" },
 	};
@@ -1719,7 +1957,11 @@ const ACADEMIC_PROVIDERS = {
 	crossref: {
 		providerCapabilities: () => providerCapabilities("crossref"),
 		async search(context) {
-			const url = buildUrl(context.base, "/works", { query: context.query, rows: context.limit, mailto: context.contactEmail });
+			const url = buildUrl(context.base, "/works", {
+				query: context.query,
+				rows: context.limit,
+				mailto: context.contactEmail,
+			});
 			const response = await providerFetch(context.runDirectory, "crossref", url, context.options, context.state);
 			return asArray(response.json?.message?.items);
 		},
@@ -1734,7 +1976,13 @@ const ACADEMIC_PROVIDERS = {
 			// The key goes in a header rather than the `api_key` query parameter
 			// OpenAlex also accepts, so it never reaches the archived request URL
 			// in the first place -- redaction is the backstop, not the plan.
-			const response = await providerFetch(context.runDirectory, "openalex", url, withBearer(context, "openalex"), context.state);
+			const response = await providerFetch(
+				context.runDirectory,
+				"openalex",
+				url,
+				withBearer(context, "openalex"),
+				context.state,
+			);
 			return asArray(response.json?.results);
 		},
 		lookup: async () => [],
@@ -1744,8 +1992,13 @@ const ACADEMIC_PROVIDERS = {
 	"semantic-scholar": {
 		providerCapabilities: () => providerCapabilities("semantic-scholar"),
 		async search(context) {
-			const fields = "paperId,externalIds,title,authors,year,venue,abstract,citationCount,influentialCitationCount,publicationTypes,fieldsOfStudy,openAccessPdf,url,journal,publicationDate";
-			const url = buildUrl(context.base, "/graph/v1/paper/search", { query: context.query, limit: context.limit, fields });
+			const fields =
+				"paperId,externalIds,title,authors,year,venue,abstract,citationCount,influentialCitationCount,publicationTypes,fieldsOfStudy,openAccessPdf,url,journal,publicationDate";
+			const url = buildUrl(context.base, "/graph/v1/paper/search", {
+				query: context.query,
+				limit: context.limit,
+				fields,
+			});
 			// An introductory key grants 1 RPS, which is often *slower* than the
 			// shared anonymous pool. It is supported because the capability table
 			// has always claimed it was, not because it is an upgrade.
@@ -1763,7 +2016,13 @@ const ACADEMIC_PROVIDERS = {
 		async search(context) {
 			// The trailing slash is load-bearing: /v3/search/works?q= is a 301.
 			const url = buildUrl(context.base, "/search/works/", { q: context.query, limit: context.limit });
-			const response = await providerFetch(context.runDirectory, "core", url, withBearer(context, "core"), context.state);
+			const response = await providerFetch(
+				context.runDirectory,
+				"core",
+				url,
+				withBearer(context, "core"),
+				context.state,
+			);
 			return asArray(response.json?.results);
 		},
 		lookup: async () => [],
@@ -1792,7 +2051,13 @@ const ACADEMIC_PROVIDERS = {
 			const records = [];
 			for (const doi of [...new Set(context.knownDois)].filter(Boolean).slice(0, context.limit)) {
 				const url = `${context.base}/meta/v1/metadata/doi:${encodeURIComponent(doi)}`;
-				const response = await providerFetch(context.runDirectory, "opencitations", url, context.options, context.state);
+				const response = await providerFetch(
+					context.runDirectory,
+					"opencitations",
+					url,
+					context.options,
+					context.state,
+				);
 				for (const entry of asArray(response.json)) records.push(entry);
 			}
 			return records;
@@ -1804,7 +2069,12 @@ const ACADEMIC_PROVIDERS = {
 	europepmc: {
 		providerCapabilities: () => providerCapabilities("europepmc"),
 		async search(context) {
-			const url = buildUrl(context.base, "/search", { query: context.query, format: "json", pageSize: context.limit, resultType: "core" });
+			const url = buildUrl(context.base, "/search", {
+				query: context.query,
+				format: "json",
+				pageSize: context.limit,
+				resultType: "core",
+			});
 			const response = await providerFetch(context.runDirectory, "europepmc", url, context.options, context.state);
 			return asArray(response.json?.resultList?.result);
 		},
@@ -1828,7 +2098,13 @@ const ACADEMIC_PROVIDERS = {
 				email: context.contactEmail,
 				api_key: apiKey,
 			});
-			const searchResponse = await providerFetch(context.runDirectory, "pubmed", searchUrl, context.options, context.state);
+			const searchResponse = await providerFetch(
+				context.runDirectory,
+				"pubmed",
+				searchUrl,
+				context.options,
+				context.state,
+			);
 			const ids = asArray(searchResponse.json?.esearchresult?.idlist).slice(0, context.limit);
 			if (ids.length === 0) return [];
 			const summaryUrl = buildUrl(context.base, "/esummary.fcgi", {
@@ -1839,8 +2115,16 @@ const ACADEMIC_PROVIDERS = {
 				email: context.contactEmail,
 				api_key: apiKey,
 			});
-			const summaryResponse = await providerFetch(context.runDirectory, "pubmed", summaryUrl, context.options, context.state);
-			return ids.map((id) => ({ uid: id, summary: summaryResponse.json?.result?.[id] })).filter((item) => item.summary);
+			const summaryResponse = await providerFetch(
+				context.runDirectory,
+				"pubmed",
+				summaryUrl,
+				context.options,
+				context.state,
+			);
+			return ids
+				.map((id) => ({ uid: id, summary: summaryResponse.json?.result?.[id] }))
+				.filter((item) => item.summary);
 		},
 		lookup: async () => [],
 		hydrate: async (record) => record,
@@ -1849,8 +2133,18 @@ const ACADEMIC_PROVIDERS = {
 	arxiv: {
 		providerCapabilities: () => providerCapabilities("arxiv"),
 		async search(context) {
-			const url = buildUrl(context.base, "/query", { search_query: `all:${context.query}`, start: 0, max_results: context.limit });
-			const response = await providerFetch(context.runDirectory, "arxiv", url, { ...context.options, accept: "application/atom+xml, application/xml" }, context.state);
+			const url = buildUrl(context.base, "/query", {
+				search_query: `all:${context.query}`,
+				start: 0,
+				max_results: context.limit,
+			});
+			const response = await providerFetch(
+				context.runDirectory,
+				"arxiv",
+				url,
+				{ ...context.options, accept: "application/atom+xml, application/xml" },
+				context.state,
+			);
 			return response.text ? parseArxivFeed(response.text) : [];
 		},
 		lookup: async () => [],
@@ -1871,7 +2165,11 @@ const ACADEMIC_PROVIDERS = {
 	openaire: {
 		providerCapabilities: () => providerCapabilities("openaire"),
 		async search(context) {
-			const url = buildUrl(context.base, "/search/publications", { keywords: context.query, format: "json", size: context.limit });
+			const url = buildUrl(context.base, "/search/publications", {
+				keywords: context.query,
+				format: "json",
+				size: context.limit,
+			});
 			const response = await providerFetch(context.runDirectory, "openaire", url, context.options, context.state);
 			return asArray(response.json?.response?.results?.result);
 		},
@@ -1897,7 +2195,13 @@ const ACADEMIC_PROVIDERS = {
 			const records = [];
 			for (const doi of dois.slice(0, context.limit)) {
 				const url = buildUrl(context.base, `/${encodeURIComponent(doi)}`, { email: context.contactEmail });
-				const response = await providerFetch(context.runDirectory, "unpaywall", url, context.options, context.state);
+				const response = await providerFetch(
+					context.runDirectory,
+					"unpaywall",
+					url,
+					context.options,
+					context.state,
+				);
 				if (response.json) records.push(response.json);
 			}
 			return records;
@@ -1916,7 +2220,13 @@ async function runAcademicProvider(providerName, context, sourceRecords, normali
 	for (const record of records) {
 		const hydrated = await provider.hydrate(record, context);
 		const normalized = provider.normalize(hydrated, context);
-		if (!normalized?.canonical_title && !normalized?.identifiers?.doi && !normalized?.identifiers?.pmid && !normalized?.identifiers?.arxiv_id) continue;
+		if (
+			!normalized?.canonical_title &&
+			!normalized?.identifiers?.doi &&
+			!normalized?.identifiers?.pmid &&
+			!normalized?.identifiers?.arxiv_id
+		)
+			continue;
 		const providerRecordId =
 			normalized.identifiers?.doi ??
 			normalized.identifiers?.pmid ??
@@ -1929,11 +2239,16 @@ async function runAcademicProvider(providerName, context, sourceRecords, normali
 			provider: providerName,
 			provider_record_id: providerRecordId ?? null,
 			provider_url: normalized.urls?.[0] ?? null,
-			request_url: context.state.providerRequests.filter((request) => request.provider === providerName).at(-1)?.url ?? null,
+			request_url:
+				context.state.providerRequests.filter((request) => request.provider === providerName).at(-1)?.url ?? null,
 			request_params: { query: context.query, limit: context.limit },
 			retrieved_at: nowIso(),
-			raw_response_path: context.state.providerRequests.filter((request) => request.provider === providerName).at(-1)?.raw_response_path ?? null,
-			raw_hash: context.state.providerRequests.filter((request) => request.provider === providerName).at(-1)?.raw_hash ?? null,
+			raw_response_path:
+				context.state.providerRequests.filter((request) => request.provider === providerName).at(-1)
+					?.raw_response_path ?? null,
+			raw_hash:
+				context.state.providerRequests.filter((request) => request.provider === providerName).at(-1)?.raw_hash ??
+				null,
 			normalized_payload: normalized,
 			field_provenance: normalized.field_paths ?? {},
 			provider_confidence_notes: provider.providerCapabilities().strengths.join("; "),
@@ -1978,7 +2293,8 @@ function buildRisRecord(work, sourceRecords) {
 	lines.push(risLine("DO", work.identifiers?.doi));
 	const primaryUrl = work.urls?.[0] ?? work.oa_locations?.[0]?.url ?? work.full_text_candidates?.[0]?.url;
 	lines.push(risLine("UR", primaryUrl));
-	for (const subject of [...(work.subjects ?? []), ...(work.fields_of_study ?? [])].slice(0, 20)) lines.push(risLine("KW", subject));
+	for (const subject of [...(work.subjects ?? []), ...(work.fields_of_study ?? [])].slice(0, 20))
+		lines.push(risLine("KW", subject));
 	for (const issn of asArray(work.identifiers?.issn)) lines.push(risLine("SN", issn));
 	for (const isbn of asArray(work.identifiers?.isbn)) lines.push(risLine("SN", isbn));
 	const notes = [
@@ -2028,7 +2344,11 @@ function writeRisArtifacts(runDirectory, works, sourceRecords) {
 		});
 	}
 	atomicWriteFile(join(runDirectory, "works.ris"), records.length > 0 ? `${records.join("\n\n")}\n` : "");
-	writeJson(join(runDirectory, "ris_manifest.json"), { schemaVersion: ACADEMIC_SCHEMA_VERSION, generatedAt: nowIso(), records: manifest });
+	writeJson(join(runDirectory, "ris_manifest.json"), {
+		schemaVersion: ACADEMIC_SCHEMA_VERSION,
+		generatedAt: nowIso(),
+		records: manifest,
+	});
 	return manifest;
 }
 
@@ -2040,7 +2360,11 @@ function buildAcademicReport(state) {
 		const errors = state.providerErrors.filter((error) => error.provider === provider);
 		const skip = (state.providerSkips ?? []).find((entry) => entry.provider === provider);
 		const label = ACADEMIC_PROVIDER_LABELS[provider] ?? provider;
-		lines.push(skip ? `- ${label}: not asked — ${skip.reason}` : `- ${label}: ${requests.length} request(s), ${errors.length} error(s)`);
+		lines.push(
+			skip
+				? `- ${label}: not asked — ${skip.reason}`
+				: `- ${label}: ${requests.length} request(s), ${errors.length} error(s)`,
+		);
 	}
 	lines.push("");
 	lines.push("## Works", "");
@@ -2083,8 +2407,12 @@ function validateAcademicRun(runDirectory, options = {}) {
 	let worksRis = "";
 	try {
 		works = readJsonl(join(runDirectory, "works.jsonl"));
-		risManifest = existsSync(join(runDirectory, "ris_manifest.json")) ? JSON.parse(readFileSync(join(runDirectory, "ris_manifest.json"), "utf8")) : { records: [] };
-		worksRis = existsSync(join(runDirectory, "works.ris")) ? readFileSync(join(runDirectory, "works.ris"), "utf8") : "";
+		risManifest = existsSync(join(runDirectory, "ris_manifest.json"))
+			? JSON.parse(readFileSync(join(runDirectory, "ris_manifest.json"), "utf8"))
+			: { records: [] };
+		worksRis = existsSync(join(runDirectory, "works.ris"))
+			? readFileSync(join(runDirectory, "works.ris"), "utf8")
+			: "";
 	} catch (error) {
 		errors.push(`could not parse academic artifacts: ${error instanceof Error ? error.message : String(error)}`);
 	}
@@ -2097,7 +2425,8 @@ function validateAcademicRun(runDirectory, options = {}) {
 			continue;
 		}
 		const risPath = resolve(runDirectory, manifest.risPath);
-		if (!risPath.startsWith(`${resolve(runDirectory)}${sep}`)) errors.push(`${work.work_id} RIS path escapes run directory: ${manifest.risPath}`);
+		if (!risPath.startsWith(`${resolve(runDirectory)}${sep}`))
+			errors.push(`${work.work_id} RIS path escapes run directory: ${manifest.risPath}`);
 		else if (!existsSync(risPath)) errors.push(`${work.work_id} per-work RIS file is missing: ${manifest.risPath}`);
 		const key = manifest.risKey ?? risDuplicateKey(work);
 		if (keys.has(key)) errors.push(`duplicate RIS key after dedupe: ${key}`);
@@ -2143,9 +2472,13 @@ async function cachedSearchSearxng(base, query, options, context) {
 		return JSON.parse(readFileSync(cachePath, "utf8"));
 	}
 	context.searchCacheLog.push({ key, query, status: "miss", path: cachePath, recordedAt: nowIso() });
-	const payload = await context.searchQueue.run("searxng", () => searchSearxng(base, query, { ...options, limiter: searchLimiter }), {
-		query,
-	});
+	const payload = await context.searchQueue.run(
+		"searxng",
+		() => searchSearxng(base, query, { ...options, limiter: searchLimiter }),
+		{
+			query,
+		},
+	);
 	writeJson(cachePath, payload);
 	return payload;
 }
@@ -2187,7 +2520,10 @@ function chatService(flags = {}) {
 }
 
 function embeddingsService(flags = {}) {
-	const services = resolveConnectedServices({ embeddingsUrl: flags.embeddingUrl, embeddingsModel: flags.embeddingModel });
+	const services = resolveConnectedServices({
+		embeddingsUrl: flags.embeddingUrl,
+		embeddingsModel: flags.embeddingModel,
+	});
 	return services.embeddings;
 }
 
@@ -2273,7 +2609,10 @@ async function extractWithPlaywright(playwright, url, timeoutMs, userAgent, play
 			});
 		}
 
-		text = text.replace(/[ \t]{2,}/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+		text = text
+			.replace(/[ \t]{2,}/g, " ")
+			.replace(/\n{3,}/g, "\n\n")
+			.trim();
 	} finally {
 		await browser.close();
 	}
@@ -2303,7 +2642,10 @@ async function extractWithHttp(url, timeoutMs, userAgent) {
 	if (/application\/pdf/i.test(contentType) || /\.pdf($|[?#])/i.test(url)) {
 		throw new Error(`unsupported readable content type: ${contentType || "application/pdf"}`);
 	}
-	if (contentType && !/(text\/html|application\/xhtml\+xml|text\/plain|text\/xml|application\/xml)/i.test(contentType)) {
+	if (
+		contentType &&
+		!/(text\/html|application\/xhtml\+xml|text\/plain|text\/xml|application\/xml)/i.test(contentType)
+	) {
 		throw new Error(`unsupported readable content type: ${contentType}`);
 	}
 	const html = await response.text();
@@ -2325,7 +2667,13 @@ async function extractWithHttp(url, timeoutMs, userAgent) {
 
 async function readPage(url, options, acquisitionContext = null) {
 	assertFetchableUrl(url);
-	const context = acquisitionContext ?? createAcquisitionContext({ ...options, mode: options.mode ?? "standard", allowBrowser: options.render !== false });
+	const context =
+		acquisitionContext ??
+		createAcquisitionContext({
+			...options,
+			mode: options.mode ?? "standard",
+			allowBrowser: options.render !== false,
+		});
 	const acquisition = await acquireUrl(url, context);
 	if (!acquisitionContext) {
 		writeAcquisitionArtifacts(context);
@@ -2358,7 +2706,12 @@ function isLowValueReading(reading) {
 	const text = normalizeWhitespace(reading.text ?? "");
 	const lowerText = text.toLowerCase();
 	if (!text) return true;
-	if (text.length < 200 && /\b(vercel security checkpoint|security checkpoint|captcha|checking your browser|just a moment)\b/.test(`${title} ${lowerText}`)) {
+	if (
+		text.length < 200 &&
+		/\b(vercel security checkpoint|security checkpoint|captcha|checking your browser|just a moment)\b/.test(
+			`${title} ${lowerText}`,
+		)
+	) {
 		return true;
 	}
 	if (/\b(vercel security checkpoint|cloudflare|attention required)\b/.test(title) && text.length < 1_000) {
@@ -2563,7 +2916,14 @@ const CLAIM_SYSTEM = `${RESEARCH_SYSTEM}
 
 Disagreement between sources, thin support, and counter-evidence are findings, not noise. Record them as claims with their limits stated, or as gaps. A register that lists only what the sources agree on has lost the part a reader most needs.`;
 
-async function callLocalJsonModel(_runDirectory, task, prompt, fallback, runtime = null, systemPrompt = RESEARCH_SYSTEM) {
+async function callLocalJsonModel(
+	_runDirectory,
+	task,
+	prompt,
+	fallback,
+	runtime = null,
+	systemPrompt = RESEARCH_SYSTEM,
+) {
 	const startedAt = nowIso();
 	const callId = `${task}-${sha256(`${startedAt}\n${prompt}`).slice(0, 12)}`;
 	const chat = runtime?.chat ?? chatService();
@@ -2577,7 +2937,18 @@ async function callLocalJsonModel(_runDirectory, task, prompt, fallback, runtime
 		],
 		temperature: 0.1,
 	};
-	const record = { id: callId, task, startedAt, endedAt: null, endpoint: baseChatUrl, model, request, response: null, status: "failed", error: null };
+	const record = {
+		id: callId,
+		task,
+		startedAt,
+		endedAt: null,
+		endpoint: baseChatUrl,
+		model,
+		request,
+		response: null,
+		status: "failed",
+		error: null,
+	};
 	// contextTokens and chatTemplateKwargs have to survive the reshape from the
 	// connected-services shape into the client's. Dropped, `call` falls back to a
 	// 131,072-token ceiling and sends no template kwargs, so pointing this at a
@@ -2656,7 +3027,9 @@ function evidenceBatchPrompt(sources, question, maxChars) {
 	for (const source of sources) {
 		const remaining = Math.max(0, maxChars - used);
 		if (remaining <= 0) break;
-		const selected = source.selectedText ?? selectRelevantText(source.text, question, Math.min(remaining, source.maxEvidenceChars ?? remaining));
+		const selected =
+			source.selectedText ??
+			selectRelevantText(source.text, question, Math.min(remaining, source.maxEvidenceChars ?? remaining));
 		if (!selected.trim()) continue;
 		used += selected.length;
 		blocks.push(`Source:
@@ -2756,7 +3129,8 @@ function cosine(left, right) {
 }
 
 async function embedTexts(texts, runtime, options) {
-	if (options.noEmbeddings || !runtime.embeddings?.enabled || texts.length === 0) return { vectors: null, reason: "embeddings disabled" };
+	if (options.noEmbeddings || !runtime.embeddings?.enabled || texts.length === 0)
+		return { vectors: null, reason: "embeddings disabled" };
 	const request = {
 		model: runtime.embeddings.model,
 		input: texts,
@@ -2795,14 +3169,34 @@ async function embedChunks(chunks, runtime, options) {
 			if (!options.forceRefresh && existsSync(path)) {
 				const cached = JSON.parse(readFileSync(path, "utf8"));
 				chunk.embedding = normalizeVector(cached.embedding ?? []);
-				runtime.embeddingLog.push({ chunkId: chunk.chunkId, sourceId: chunk.sourceId, key, status: "hit", path, model, recordedAt: nowIso() });
+				runtime.embeddingLog.push({
+					chunkId: chunk.chunkId,
+					sourceId: chunk.sourceId,
+					key,
+					status: "hit",
+					path,
+					model,
+					recordedAt: nowIso(),
+				});
 			} else {
 				pending.push({ chunk, key, path });
-				runtime.embeddingLog.push({ chunkId: chunk.chunkId, sourceId: chunk.sourceId, key, status: "miss", path, model, recordedAt: nowIso() });
+				runtime.embeddingLog.push({
+					chunkId: chunk.chunkId,
+					sourceId: chunk.sourceId,
+					key,
+					status: "miss",
+					path,
+					model,
+					recordedAt: nowIso(),
+				});
 			}
 		}
 		if (pending.length === 0) continue;
-		const result = await embedTexts(pending.map((item) => item.chunk.text), runtime, options);
+		const result = await embedTexts(
+			pending.map((item) => item.chunk.text),
+			runtime,
+			options,
+		);
 		if (!result.vectors) {
 			for (const item of pending) {
 				runtime.embeddingLog.push({
@@ -2820,7 +3214,13 @@ async function embedChunks(chunks, runtime, options) {
 		for (const [index, item] of pending.entries()) {
 			const embedding = result.vectors[index];
 			item.chunk.embedding = embedding;
-			writeJson(item.path, { model, chunkId: item.chunk.chunkId, sourceId: item.chunk.sourceId, contentHash: item.chunk.hash, embedding });
+			writeJson(item.path, {
+				model,
+				chunkId: item.chunk.chunkId,
+				sourceId: item.chunk.sourceId,
+				contentHash: item.chunk.hash,
+				embedding,
+			});
 		}
 	}
 }
@@ -2841,14 +3241,16 @@ async function rankSourcesForQuestion(sources, question, runtime, options) {
 		chunk.score = Number(((chunk.embeddingScore ?? 0) * 0.75 + chunk.lexicalScore * 0.25).toFixed(4));
 	}
 	const bySource = new Map();
-	for (const source of sources) bySource.set(source.sourceId, { source, chunks: [], score: 0, lexicalScore: 0, embeddingScore: null });
+	for (const source of sources)
+		bySource.set(source.sourceId, { source, chunks: [], score: 0, lexicalScore: 0, embeddingScore: null });
 	for (const chunk of chunks.sort((a, b) => b.score - a.score || b.lexicalScore - a.lexicalScore)) {
 		const ranked = bySource.get(chunk.sourceId);
 		if (!ranked) continue;
 		ranked.chunks.push(chunk);
 		ranked.score = Math.max(ranked.score, chunk.score);
 		ranked.lexicalScore = Math.max(ranked.lexicalScore, chunk.lexicalScore);
-		if (chunk.embeddingScore !== null) ranked.embeddingScore = Math.max(ranked.embeddingScore ?? -1, chunk.embeddingScore);
+		if (chunk.embeddingScore !== null)
+			ranked.embeddingScore = Math.max(ranked.embeddingScore ?? -1, chunk.embeddingScore);
 	}
 	const rankings = [...bySource.values()]
 		.map((entry) => ({
@@ -2865,7 +3267,9 @@ async function rankSourcesForQuestion(sources, question, runtime, options) {
 	for (const ranking of rankings) {
 		const source = sources.find((candidate) => candidate.sourceId === ranking.sourceId);
 		const selectedChunks = chunks.filter((chunk) => ranking.selectedChunkIds.includes(chunk.chunkId));
-		source.selectedText = selectedChunks.map((chunk) => chunk.text).join("\n\n") || selectRelevantText(source.text, question, options.maxEvidenceChars);
+		source.selectedText =
+			selectedChunks.map((chunk) => chunk.text).join("\n\n") ||
+			selectRelevantText(source.text, question, options.maxEvidenceChars);
 		source.rankingScore = ranking.score;
 	}
 	return { chunks, rankings };
@@ -2970,7 +3374,11 @@ function verifiedDirectQuote(candidate, sourceText) {
 }
 
 function sanitizeEvidence(rawEvidence, source, startIndex) {
-	const rows = Array.isArray(rawEvidence?.evidence) ? rawEvidence.evidence : Array.isArray(rawEvidence) ? rawEvidence : [];
+	const rows = Array.isArray(rawEvidence?.evidence)
+		? rawEvidence.evidence
+		: Array.isArray(rawEvidence)
+			? rawEvidence
+			: [];
 	const items = [];
 	let index = startIndex;
 	for (const row of rows) {
@@ -2978,14 +3386,18 @@ function sanitizeEvidence(rawEvidence, source, startIndex) {
 		const text = typeof row.text === "string" ? row.text.trim() : "";
 		if (!text) continue;
 		const directQuote =
-			typeof row.direct_quote === "string" && row.direct_quote.trim() ? verifiedDirectQuote(row.direct_quote, source.text) : null;
+			typeof row.direct_quote === "string" && row.direct_quote.trim()
+				? verifiedDirectQuote(row.direct_quote, source.text)
+				: null;
 		items.push({
 			evidenceId: nextId("ev", index++),
 			sourceId: source.sourceId,
 			text,
 			directQuote,
 			locator: typeof row.locator === "string" && row.locator.trim() ? row.locator.trim() : null,
-			interpretation: ["explicit", "inferred", "unclear"].includes(row.interpretation) ? row.interpretation : "unclear",
+			interpretation: ["explicit", "inferred", "unclear"].includes(row.interpretation)
+				? row.interpretation
+				: "unclear",
 			confidence: ["high", "medium", "low"].includes(row.confidence) ? row.confidence : "low",
 			notes: typeof row.notes === "string" && row.notes.trim() ? row.notes.trim() : null,
 			extractedAt: nowIso(),
@@ -3012,7 +3424,11 @@ function sanitizeEvidence(rawEvidence, source, startIndex) {
 function sanitizeBatchedEvidence(rawEvidence, sources, startIndex) {
 	const sourceById = new Map(sources.map((source) => [source.sourceId, source]));
 	const fallbackSource = sources.length === 1 ? sources[0] : null;
-	const rows = Array.isArray(rawEvidence?.evidence) ? rawEvidence.evidence : Array.isArray(rawEvidence) ? rawEvidence : [];
+	const rows = Array.isArray(rawEvidence?.evidence)
+		? rawEvidence.evidence
+		: Array.isArray(rawEvidence)
+			? rawEvidence
+			: [];
 	const items = [];
 	let index = startIndex;
 	for (const row of rows) {
@@ -3022,14 +3438,18 @@ function sanitizeBatchedEvidence(rawEvidence, sources, startIndex) {
 		const text = typeof row.text === "string" ? row.text.trim() : "";
 		if (!text) continue;
 		const directQuote =
-			typeof row.direct_quote === "string" && row.direct_quote.trim() ? verifiedDirectQuote(row.direct_quote, source.text) : null;
+			typeof row.direct_quote === "string" && row.direct_quote.trim()
+				? verifiedDirectQuote(row.direct_quote, source.text)
+				: null;
 		items.push({
 			evidenceId: nextId("ev", index++),
 			sourceId: source.sourceId,
 			text,
 			directQuote,
 			locator: typeof row.locator === "string" && row.locator.trim() ? row.locator.trim() : null,
-			interpretation: ["explicit", "inferred", "unclear"].includes(row.interpretation) ? row.interpretation : "unclear",
+			interpretation: ["explicit", "inferred", "unclear"].includes(row.interpretation)
+				? row.interpretation
+				: "unclear",
 			confidence: ["high", "medium", "low"].includes(row.confidence) ? row.confidence : "low",
 			notes: typeof row.notes === "string" && row.notes.trim() ? row.notes.trim() : null,
 			extractedAt: nowIso(),
@@ -3107,7 +3527,8 @@ function writeDeepSource(runDirectory, source) {
 	const outputPath = sourceTextPath(runDirectory, source.sourceId);
 	const hash = sha256(source.text);
 	if (existsSync(outputPath)) {
-		if (sha256(readFileSync(outputPath)) !== hash) throw new Error(`archived source hash mismatch: ${source.sourceId}`);
+		if (sha256(readFileSync(outputPath)) !== hash)
+			throw new Error(`archived source hash mismatch: ${source.sourceId}`);
 	} else atomicWriteFile(outputPath, source.text);
 	return {
 		filename: basename(outputPath),
@@ -3177,7 +3598,10 @@ function writeDeepArtifacts(runDirectory, state) {
 	writeJsonl(join(runDirectory, "claim_register.jsonl"), state.claims);
 	writeJsonl(join(runDirectory, "gap_log.jsonl"), state.gaps);
 	writeJsonl(join(runDirectory, "model_calls.jsonl"), state.modelCalls);
-	writeJsonl(join(runDirectory, "chunks.jsonl"), state.chunks.map(({ text, embedding, ...chunk }) => chunk));
+	writeJsonl(
+		join(runDirectory, "chunks.jsonl"),
+		state.chunks.map(({ text, embedding, ...chunk }) => chunk),
+	);
 	writeJsonl(join(runDirectory, "embedding_log.jsonl"), state.embeddingLog);
 	writeJsonl(join(runDirectory, "source_rankings.jsonl"), state.sourceRankings);
 	writeJsonl(join(runDirectory, "search_cache_log.jsonl"), state.searchCacheLog);
@@ -3282,7 +3706,9 @@ function buildDeepReport(state) {
 			const evidence = evidenceById.get(evidenceId);
 			const source = evidence ? sourceById.get(evidence.sourceId) : null;
 			if (!evidence || !source) continue;
-			lines.push(`- ${evidenceId} from ${evidence.sourceId}: ${evidence.directQuote ? `"${evidence.directQuote}"` : evidence.text}`);
+			lines.push(
+				`- ${evidenceId} from ${evidence.sourceId}: ${evidence.directQuote ? `"${evidence.directQuote}"` : evidence.text}`,
+			);
 			lines.push(`  ${source.finalUrl || source.sourceUrl}`);
 		}
 		lines.push("");
@@ -3376,10 +3802,14 @@ function validateDeepRun(runDirectory, options = {}) {
 	let claims = [];
 	let report = "";
 	try {
-		if (existsSync(join(runDirectory, "source_index.json"))) sourceIndex = JSON.parse(readFileSync(join(runDirectory, "source_index.json"), "utf8"));
-		if (existsSync(join(runDirectory, "evidence_items.jsonl"))) evidenceItems = readJsonl(join(runDirectory, "evidence_items.jsonl"));
-		if (existsSync(join(runDirectory, "claim_register.jsonl"))) claims = readJsonl(join(runDirectory, "claim_register.jsonl"));
-		if (existsSync(join(runDirectory, "deep_research_report.md"))) report = readFileSync(join(runDirectory, "deep_research_report.md"), "utf8");
+		if (existsSync(join(runDirectory, "source_index.json")))
+			sourceIndex = JSON.parse(readFileSync(join(runDirectory, "source_index.json"), "utf8"));
+		if (existsSync(join(runDirectory, "evidence_items.jsonl")))
+			evidenceItems = readJsonl(join(runDirectory, "evidence_items.jsonl"));
+		if (existsSync(join(runDirectory, "claim_register.jsonl")))
+			claims = readJsonl(join(runDirectory, "claim_register.jsonl"));
+		if (existsSync(join(runDirectory, "deep_research_report.md")))
+			report = readFileSync(join(runDirectory, "deep_research_report.md"), "utf8");
 	} catch (error) {
 		errors.push(`could not parse deep research artifacts: ${error instanceof Error ? error.message : String(error)}`);
 	}
@@ -3406,14 +3836,17 @@ function validateDeepRun(runDirectory, options = {}) {
 		const text = readFileSync(outputPath, "utf8");
 		sourceTexts.set(source.sourceId, text);
 		const hash = sha256(text);
-		if (source.sha256 && source.sha256 !== hash) errors.push(`${source.sourceId} SHA-256 does not match archived text`);
-		if (source.resourceId && source.resourceId !== `sha256:${hash}`) errors.push(`${source.sourceId} resourceId does not match archived text`);
+		if (source.sha256 && source.sha256 !== hash)
+			errors.push(`${source.sourceId} SHA-256 does not match archived text`);
+		if (source.resourceId && source.resourceId !== `sha256:${hash}`)
+			errors.push(`${source.sourceId} resourceId does not match archived text`);
 	}
 	const evidenceById = new Map();
 	for (const item of evidenceItems) {
 		evidenceById.set(item.evidenceId, item);
 		if (!item.evidenceId) errors.push("evidence item is missing evidenceId");
-		if (!item.sourceId || !sourceById.has(item.sourceId)) errors.push(`${item.evidenceId ?? "unknown evidence"} references missing sourceId`);
+		if (!item.sourceId || !sourceById.has(item.sourceId))
+			errors.push(`${item.evidenceId ?? "unknown evidence"} references missing sourceId`);
 		if (!item.text) errors.push(`${item.evidenceId ?? "unknown evidence"} is missing text`);
 		if (item.directQuote && !includesQuote(sourceTexts.get(item.sourceId) ?? "", item.directQuote)) {
 			errors.push(`${item.evidenceId} direct quote was not found in archived source text`);
@@ -3422,11 +3855,14 @@ function validateDeepRun(runDirectory, options = {}) {
 	for (const claim of claims) {
 		if (!claim.claimId) errors.push("claim is missing claimId");
 		if (!claim.text) errors.push(`${claim.claimId ?? "unknown claim"} is missing text`);
-		if (!Array.isArray(claim.sourceIds) || claim.sourceIds.length === 0) errors.push(`${claim.claimId} has no sourceIds`);
-		if (!Array.isArray(claim.evidenceIds) || claim.evidenceIds.length === 0) errors.push(`${claim.claimId} has no evidenceIds`);
+		if (!Array.isArray(claim.sourceIds) || claim.sourceIds.length === 0)
+			errors.push(`${claim.claimId} has no sourceIds`);
+		if (!Array.isArray(claim.evidenceIds) || claim.evidenceIds.length === 0)
+			errors.push(`${claim.claimId} has no evidenceIds`);
 		for (const sourceId of claim.sourceIds ?? []) {
 			if (!sourceById.has(sourceId)) errors.push(`${claim.claimId} references missing source ${sourceId}`);
-			if (!report.includes(sourceId)) errors.push(`deep_research_report.md does not cite source ${sourceId} for ${claim.claimId}`);
+			if (!report.includes(sourceId))
+				errors.push(`deep_research_report.md does not cite source ${sourceId} for ${claim.claimId}`);
 		}
 		for (const evidenceId of claim.evidenceIds ?? []) {
 			const evidence = evidenceById.get(evidenceId);
@@ -3434,15 +3870,19 @@ function validateDeepRun(runDirectory, options = {}) {
 				errors.push(`${claim.claimId} references missing evidence ${evidenceId}`);
 				continue;
 			}
-			if (!claim.sourceIds?.includes(evidence.sourceId)) errors.push(`${claim.claimId} does not include source ${evidence.sourceId} for ${evidenceId}`);
-			if (!report.includes(evidenceId)) errors.push(`deep_research_report.md does not cite evidence ${evidenceId} for ${claim.claimId}`);
+			if (!claim.sourceIds?.includes(evidence.sourceId))
+				errors.push(`${claim.claimId} does not include source ${evidence.sourceId} for ${evidenceId}`);
+			if (!report.includes(evidenceId))
+				errors.push(`deep_research_report.md does not cite evidence ${evidenceId} for ${claim.claimId}`);
 		}
-		if (claim.claimId && !report.includes(claim.claimId)) errors.push(`deep_research_report.md does not cite claim ${claim.claimId}`);
+		if (claim.claimId && !report.includes(claim.claimId))
+			errors.push(`deep_research_report.md does not cite claim ${claim.claimId}`);
 	}
 	if (existsSync(join(runDirectory, "web_manifest.csv"))) {
 		const rows = parseCsv(readFileSync(join(runDirectory, "web_manifest.csv"), "utf8"));
 		const headers = rows.shift() ?? [];
-		if (headers.join(",") !== DEEP_MANIFEST_COLUMNS.join(",")) errors.push("web_manifest.csv columns do not match the required contract");
+		if (headers.join(",") !== DEEP_MANIFEST_COLUMNS.join(","))
+			errors.push("web_manifest.csv columns do not match the required contract");
 	}
 	validateDeepVerification(runDirectory, evidenceItems, claims, errors, warnings);
 	const result = { valid: errors.length === 0, errors, warnings };
@@ -3467,7 +3907,8 @@ function acquisitionOptions(flags, defaults = {}) {
 		allowBrowser: flags.noBrowser ? false : (defaults.allowBrowser ?? flags.render ?? modeConfig.allowBrowser),
 		playwrightWsEndpoint: flags.playwrightWs,
 		maxConcurrency: flags.maxConcurrency ?? defaults.maxConcurrency ?? modeConfig.maxConcurrency,
-		perDomainConcurrency: flags.perDomainConcurrency ?? defaults.perDomainConcurrency ?? modeConfig.perDomainConcurrency,
+		perDomainConcurrency:
+			flags.perDomainConcurrency ?? defaults.perDomainConcurrency ?? modeConfig.perDomainConcurrency,
 		playwrightConcurrency: flags.playwrightConcurrency ?? defaults.playwrightConcurrency ?? 1,
 	};
 }
@@ -3497,20 +3938,28 @@ async function commandDoctor(options) {
 	};
 	const remediation = [];
 	if (!searxng.configured) {
-		remediation.push("Set connectedServices.searxng.baseUrl, FORGE_SEARXNG_URL, or --searxng to enable open-ended web search; the direct providers work without it.");
-	}
-	else if (!searxng.reachable) remediation.push(`SearXNG unreachable: ${searxng.detail}`);
+		remediation.push(
+			"Set connectedServices.searxng.baseUrl, FORGE_SEARXNG_URL, or --searxng to enable open-ended web search; the direct providers work without it.",
+		);
+	} else if (!searxng.reachable) remediation.push(`SearXNG unreachable: ${searxng.detail}`);
 	if (!tools.playwright.available) remediation.push("Install Playwright for rendered page extraction.");
 	if (tools.playwright.available && !tools.playwrightEndpoint.available) {
-		remediation.push("Set connectedServices.playwright.wsEndpoint or FORGE_PLAYWRIGHT_WS_ENDPOINT for rendered browsing.");
+		remediation.push(
+			"Set connectedServices.playwright.wsEndpoint or FORGE_PLAYWRIGHT_WS_ENDPOINT for rendered browsing.",
+		);
 	}
-	if (!tools.chat.available) remediation.push("Set connectedServices.chat.baseUrl or FORGE_BASE_CHAT_URL for local model calls.");
-	if (!tools.embeddings.available) remediation.push("Set connectedServices.embeddings.url or FORGE_EMBEDDINGS_URL for source ranking.");
+	if (!tools.chat.available)
+		remediation.push("Set connectedServices.chat.baseUrl or FORGE_BASE_CHAT_URL for local model calls.");
+	if (!tools.embeddings.available)
+		remediation.push("Set connectedServices.embeddings.url or FORGE_EMBEDDINGS_URL for source ranking.");
 	// Whether the bulk endpoint is quietly reasoning cannot be read off a
 	// response body, and every model call in a deep run pays for it.
 	let chatProbe = null;
 	if (tools.chat.available && options.probe !== false) {
-		chatProbe = await serviceDoctor(resolveService("chat", { chatUrl: options.chatUrl, chatModel: options.chatModel }), { expectNonThinking: true, timeoutMs: 15_000 });
+		chatProbe = await serviceDoctor(
+			resolveService("chat", { chatUrl: options.chatUrl, chatModel: options.chatModel }),
+			{ expectNonThinking: true, timeoutMs: 15_000 },
+		);
 		if (chatProbe.warning) remediation.push(chatProbe.warning);
 	}
 	// Deep runs review their own evidence and claims on the thinking service.
@@ -3520,8 +3969,10 @@ async function commandDoctor(options) {
 	let thinkProbe = null;
 	if (think.enabled) {
 		thinkProbe = await serviceDoctor(think, { timeoutMs: 15_000 });
-		if (!thinkProbe.reachable) remediation.push("thinking service unreachable; deep runs would report that nothing was verified");
-		if (think.fallback) remediation.push("no thinking service is configured; deep verification would run on the bulk service");
+		if (!thinkProbe.reachable)
+			remediation.push("thinking service unreachable; deep runs would report that nothing was verified");
+		if (think.fallback)
+			remediation.push("no thinking service is configured; deep verification would run on the bulk service");
 	} else {
 		remediation.push("no thinking service is configured; deep runs would not be verified");
 	}
@@ -3543,13 +3994,28 @@ async function commandDoctor(options) {
 	});
 	const keyed = providers.filter((provider) => provider.authRequired && !provider.keyConfigured);
 	if (keyed.length > 0) {
-		remediation.push(`optional provider keys not set (${keyed.map((provider) => provider.id).join(", ")}); those providers are skipped`);
+		remediation.push(
+			`optional provider keys not set (${keyed.map((provider) => provider.id).join(", ")}); those providers are skipped`,
+		);
 	}
 	const spent = providers.filter((provider) => provider.budgetExhausted);
 	if (spent.length > 0) {
-		remediation.push(`daily budget spent for ${spent.map((provider) => provider.id).join(", ")}; those providers resume tomorrow`);
+		remediation.push(
+			`daily budget spent for ${spent.map((provider) => provider.id).join(", ")}; those providers resume tomorrow`,
+		);
 	}
-	const report = { tools, capabilities, searxng, providers, chat, chatProbe, think, thinkProbe, embeddings, remediation };
+	const report = {
+		tools,
+		capabilities,
+		searxng,
+		providers,
+		chat,
+		chatProbe,
+		think,
+		thinkProbe,
+		embeddings,
+		remediation,
+	};
 	if (options.json) {
 		process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 		return;
@@ -3596,7 +4062,14 @@ async function commandSearch(positionals, flags) {
 
 	const limit = flags.limit ?? DEFAULT_LIMIT;
 	const runDirectory = resolve(flags.output);
-	let runState = openResearchRun(runDirectory, "search", { query }, { base, searchParams, limit }, [workItem("search", query, { query })], "searching");
+	let runState = openResearchRun(
+		runDirectory,
+		"search",
+		{ query },
+		{ base, searchParams, limit },
+		[workItem("search", query, { query })],
+		"searching",
+	);
 	if (runState.status === "complete" && runState.completion) {
 		process.stdout.write(`${JSON.stringify(runState.completion, null, 2)}\n`);
 		return;
@@ -3608,7 +4081,11 @@ async function commandSearch(positionals, flags) {
 		fail(error instanceof Error ? error.message : String(error));
 	}
 	const { retrievedAt, results } = searchResult;
-	const acquisitionContext = createAcquisitionContext({ ...acquisitionOptions(flags), runDirectory, mode: flags.mode ?? "fast" });
+	const acquisitionContext = createAcquisitionContext({
+		...acquisitionOptions(flags),
+		runDirectory,
+		mode: flags.mode ?? "fast",
+	});
 	restoreAcquisitionLogs(acquisitionContext);
 	if (acquisitionContext.normalizedUrls.length === 0) recordSearchNormalizedUrls(acquisitionContext, results);
 	acquisitionContext.metrics.searchResultsDiscovered = results.length;
@@ -3628,7 +4105,10 @@ async function commandSearch(positionals, flags) {
 	atomicWriteFile(join(runDirectory, "research_report.md"), report);
 
 	const completion = { runDirectory, query, results: results.length, params: searchParams };
-	runState = updateRunState(runDirectory, (draft) => completeResearchRun(draft, completion), { type: "run_completed", items: 1 });
+	runState = updateRunState(runDirectory, (draft) => completeResearchRun(draft, completion), {
+		type: "run_completed",
+		items: 1,
+	});
 	process.stdout.write(`${JSON.stringify(runState.completion, null, 2)}\n`);
 }
 
@@ -3650,7 +4130,10 @@ async function commandReferenceResolve(positionals, flags) {
 	const subject = positionals.join(" ");
 	const providerId = String(flags.provider).trim();
 	const services = resolveConnectedServices({ searxngUrl: flags.searxng });
-	const availability = searchProviderAvailability(providerId, { apiKeys: services.apiKeys, budget: searchProviderBudgets() });
+	const availability = searchProviderAvailability(providerId, {
+		apiKeys: services.apiKeys,
+		budget: searchProviderBudgets(),
+	});
 	const base = providerId === "searxng" ? searxngBase(flags.searxng) : searchProviderBase(providerId, flags);
 	const report = { provider: providerId, subject, candidates: [], failures: [] };
 	if (!availability.available) {
@@ -3677,10 +4160,16 @@ async function commandReferenceResolve(positionals, flags) {
 			// travels with it, because a swallowed TLS error is indistinguishable
 			// from "this subject has no entry", which is the most misleading thing
 			// this pipeline could say.
-			report.failures.push({ host: hostForUrl(base) ?? providerId, error: error instanceof Error ? error.message : String(error) });
+			report.failures.push({
+				host: hostForUrl(base) ?? providerId,
+				error: error instanceof Error ? error.message : String(error),
+			});
 		}
 		for (const stale of staleIndexes) {
-			report.failures.push({ host: hostForUrl(stale.key) ?? providerId, error: `served a stale cached index: ${stale.error}` });
+			report.failures.push({
+				host: hostForUrl(stale.key) ?? providerId,
+				error: `served a stale cached index: ${stale.error}`,
+			});
 		}
 	}
 	process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
@@ -3710,7 +4199,13 @@ async function commandRead(positionals, flags) {
 	};
 
 	const runDirectory = resolve(flags.output);
-	const runOptions = { ...options, cacheDir: flags.cacheDir ?? null, forceRefresh: Boolean(flags.forceRefresh), forceStrategy: flags.forceStrategy ?? null, noBrowser: Boolean(flags.noBrowser) };
+	const runOptions = {
+		...options,
+		cacheDir: flags.cacheDir ?? null,
+		forceRefresh: Boolean(flags.forceRefresh),
+		forceStrategy: flags.forceStrategy ?? null,
+		noBrowser: Boolean(flags.noBrowser),
+	};
 	let runState = openResearchRun(
 		runDirectory,
 		"read",
@@ -3748,7 +4243,10 @@ async function commandRead(positionals, flags) {
 
 	const successCount = readings.filter((r) => r.extractionMethod !== "failed").length;
 	const completion = { runDirectory, urls: urls.length, success: successCount, readings: readings.length };
-	runState = updateRunState(runDirectory, (draft) => completeResearchRun(draft, completion), { type: "run_completed", items: readings.length });
+	runState = updateRunState(runDirectory, (draft) => completeResearchRun(draft, completion), {
+		type: "run_completed",
+		items: readings.length,
+	});
 	process.stdout.write(`${JSON.stringify(runState.completion, null, 2)}\n`);
 }
 
@@ -3757,7 +4255,10 @@ async function commandResearch(positionals, flags) {
 	if (!flags.output) fail("research requires --output <new-directory>");
 	const query = positionals.join(" ");
 	const base = searxngBase(flags.searxng);
-	if (!base) fail("research requires a SearXNG instance; set connectedServices.searxng.baseUrl, FORGE_SEARXNG_URL, or --searxng <url>");
+	if (!base)
+		fail(
+			"research requires a SearXNG instance; set connectedServices.searxng.baseUrl, FORGE_SEARXNG_URL, or --searxng <url>",
+		);
 
 	const autoParams = autoSelectParams(query);
 	const searchParams = {
@@ -3794,7 +4295,14 @@ async function commandResearch(positionals, flags) {
 		forceStrategy: flags.forceStrategy ?? null,
 		noBrowser: Boolean(flags.noBrowser),
 	};
-	let runState = openResearchRun(runDirectory, "research", { query }, runOptions, [workItem("search", query, { query })], "searching");
+	let runState = openResearchRun(
+		runDirectory,
+		"research",
+		{ query },
+		runOptions,
+		[workItem("search", query, { query })],
+		"searching",
+	);
 	if (runState.status === "complete" && runState.completion) {
 		process.stdout.write(`${JSON.stringify(runState.completion, null, 2)}\n`);
 		return;
@@ -3832,8 +4340,18 @@ async function commandResearch(positionals, flags) {
 	atomicWriteFile(join(runDirectory, "research_report.md"), report);
 
 	const successCount = readings.filter((r) => r.extractionMethod !== "failed").length;
-	const completion = { runDirectory, query, results: results.length, read: readings.length, success: successCount, params: searchParams };
-	runState = updateRunState(runDirectory, (draft) => completeResearchRun(draft, completion), { type: "run_completed", items: readings.length + 1 });
+	const completion = {
+		runDirectory,
+		query,
+		results: results.length,
+		read: readings.length,
+		success: successCount,
+		params: searchParams,
+	};
+	runState = updateRunState(runDirectory, (draft) => completeResearchRun(draft, completion), {
+		type: "run_completed",
+		items: readings.length + 1,
+	});
 	process.stdout.write(`${JSON.stringify(runState.completion, null, 2)}\n`);
 }
 
@@ -3890,7 +4408,9 @@ function applyDeepReadingToSource(runDirectory, source, result, reading) {
 	source.text = reading.text;
 	if (isLowValueReading(reading)) {
 		source.status = "needs_review";
-		source.warnings.push("skipped evidence extraction because the page looked like a security checkpoint or low-value response");
+		source.warnings.push(
+			"skipped evidence extraction because the page looked like a security checkpoint or low-value response",
+		);
 	}
 	const archived = writeDeepSource(runDirectory, source);
 	Object.assign(source, archived);
@@ -3899,20 +4419,20 @@ function applyDeepReadingToSource(runDirectory, source, result, reading) {
 async function acquireDeepSources(runDirectory, sources, options, acquisitionContext, state, checkpoint = null) {
 	const pending = sources.filter((source) => source.status === "failed" && source.strategy === "pending");
 	for (const [index, source] of pending.entries()) {
-			if (runtimeBudgetExceeded(state, options)) {
-				addBudgetEvent(state, "maxRuntimeMs", "Stopped before reading another source.");
-				break;
-			}
-			if (index > 0 && options.delayMs > 0) await sleep(Math.min(options.delayMs, 50));
-			try {
-				process.stderr.write(`Deep reading ${source.sourceUrl}...\n`);
-				const result = source.searchOrigins[0] ?? {};
-				const reading = await readPage(source.sourceUrl, options, acquisitionContext);
-				applyDeepReadingToSource(runDirectory, source, result, reading);
-			} catch (readError) {
-				source.warnings.push(readError instanceof Error ? readError.message : String(readError));
-			}
-			if (checkpoint) checkpoint(source);
+		if (runtimeBudgetExceeded(state, options)) {
+			addBudgetEvent(state, "maxRuntimeMs", "Stopped before reading another source.");
+			break;
+		}
+		if (index > 0 && options.delayMs > 0) await sleep(Math.min(options.delayMs, 50));
+		try {
+			process.stderr.write(`Deep reading ${source.sourceUrl}...\n`);
+			const result = source.searchOrigins[0] ?? {};
+			const reading = await readPage(source.sourceUrl, options, acquisitionContext);
+			applyDeepReadingToSource(runDirectory, source, result, reading);
+		} catch (readError) {
+			source.warnings.push(readError instanceof Error ? readError.message : String(readError));
+		}
+		if (checkpoint) checkpoint(source);
 	}
 }
 
@@ -3943,7 +4463,8 @@ function evidenceSourceBatches(sources, options) {
 async function extractEvidenceBatches(runDirectory, sources, state, options, runtime) {
 	for (const batch of evidenceSourceBatches(sources, options)) {
 		if (!canCallDeepModel(state, options, "extract-evidence")) {
-			for (const source of batch) source.warnings.push("skipped evidence extraction because the model-call budget was reached");
+			for (const source of batch)
+				source.warnings.push("skipped evidence extraction because the model-call budget was reached");
 			continue;
 		}
 		const { value, record } = await callLocalJsonModel(
@@ -4022,7 +4543,12 @@ function claimVerifyItems(state) {
 		citedEvidence: claim.evidenceIds
 			.map((evidenceId) => evidenceById.get(evidenceId))
 			.filter(Boolean)
-			.map((item) => ({ id: item.evidenceId, text: item.text, quote: item.directQuote, confidence: item.confidence })),
+			.map((item) => ({
+				id: item.evidenceId,
+				text: item.text,
+				quote: item.directQuote,
+				confidence: item.confidence,
+			})),
 	}));
 }
 
@@ -4086,7 +4612,9 @@ function summarizeVerdicts(verdicts) {
 async function commandDeep(positionals, flags) {
 	if (!flags.output) fail("deep requires --output <new-directory>");
 	const positionalQuestion = positionals.join(" ").trim();
-	const explicitQueries = asArray(flags.query).map((query) => String(query).trim()).filter(Boolean);
+	const explicitQueries = asArray(flags.query)
+		.map((query) => String(query).trim())
+		.filter(Boolean);
 	const fileQueries = flags.queryFile ? readQueryFile(flags.queryFile) : [];
 	const seedQueries = [...explicitQueries, ...fileQueries];
 	if (positionalQuestion) seedQueries.unshift(positionalQuestion);
@@ -4094,7 +4622,10 @@ async function commandDeep(positionals, flags) {
 	if (uniqueSeedQueries.length === 0) fail("deep requires a query, --query, or --query-file");
 	const question = flags.question || positionalQuestion || uniqueSeedQueries.join("; ");
 	const base = searxngBase(flags.searxng);
-	if (!base) fail("deep requires a SearXNG instance; set connectedServices.searxng.baseUrl, FORGE_SEARXNG_URL, or --searxng <url>");
+	if (!base)
+		fail(
+			"deep requires a SearXNG instance; set connectedServices.searxng.baseUrl, FORGE_SEARXNG_URL, or --searxng <url>",
+		);
 	const runDirectory = resolve(flags.output);
 	const options = deepDefaults(flags);
 	options.mode = flags.mode ?? "deep";
@@ -4111,7 +4642,9 @@ async function commandDeep(positionals, flags) {
 		"deep",
 		{ question, seedQueries: uniqueSeedQueries },
 		{ ...options, searxng: base },
-		Array.from({ length: options.maxIterations }, (_, index) => workItem("iteration", String(index + 1), { iteration: index + 1 })),
+		Array.from({ length: options.maxIterations }, (_, index) =>
+			workItem("iteration", String(index + 1), { iteration: index + 1 }),
+		),
 		"iterations",
 	);
 	if (runState.status === "complete" && runState.completion) {
@@ -4139,7 +4672,11 @@ async function commandDeep(positionals, flags) {
 		schedulerLog: [],
 	};
 	state.startedAtMs = Date.now();
-	const control = checkpoint?.control ?? { currentIteration: 1, queuedQueries: [...uniqueSeedQueries], seenQueries: [] };
+	const control = checkpoint?.control ?? {
+		currentIteration: 1,
+		queuedQueries: [...uniqueSeedQueries],
+		seenQueries: [],
+	};
 	const acquisitionContext = createAcquisitionContext({
 		...acquisitionOptions(flags, { ...options, allowBrowser: options.render && !options.noBrowser }),
 		runDirectory,
@@ -4165,9 +4702,15 @@ async function commandDeep(positionals, flags) {
 			addBudgetEvent(state, "maxRuntimeMs", "Stopped before starting another iteration.");
 			break;
 		}
-		const iterationItem = loadRunState(runDirectory, "web-research").items.find((item) => item.iteration === iteration);
+		const iterationItem = loadRunState(runDirectory, "web-research").items.find(
+			(item) => item.iteration === iteration,
+		);
 		if (iterationItem && iterationItem.status !== "completed") {
-			runState = updateRunState(runDirectory, (draft) => startResearchItem(draft, iterationItem.id), { type: "item_started", itemId: iterationItem.id, attempt: iterationItem.attempts + 1 });
+			runState = updateRunState(runDirectory, (draft) => startResearchItem(draft, iterationItem.id), {
+				type: "item_started",
+				itemId: iterationItem.id,
+				attempt: iterationItem.attempts + 1,
+			});
 		}
 		const iterationQueries = control.activeIteration === iteration ? [...(control.iterationQueries ?? [])] : [];
 		while (control.activeIteration !== iteration && queuedQueries.length > 0) {
@@ -4221,7 +4764,13 @@ async function commandDeep(positionals, flags) {
 				const normalized = normalizeUrl(result.url);
 				if (seenUrls.has(normalized)) {
 					const source = seenUrls.get(normalized);
-					source.searchOrigins.push({ iteration, query, rank: result.rank, engine: result.engine, score: result.score });
+					source.searchOrigins.push({
+						iteration,
+						query,
+						rank: result.rank,
+						engine: result.engine,
+						score: result.score,
+					});
 					continue;
 				}
 				if (state.sources.length >= options.maxSources) {
@@ -4237,20 +4786,27 @@ async function commandDeep(positionals, flags) {
 			writeDeepCheckpoint(runDirectory, state, control);
 		}
 
-		const iterationSources = state.sources.filter((source) => source.searchOrigins.some((origin) => origin.iteration === iteration));
-		await acquireDeepSources(runDirectory, iterationSources, options, acquisitionContext, state, () => writeDeepCheckpoint(runDirectory, state, control));
+		const iterationSources = state.sources.filter((source) =>
+			source.searchOrigins.some((origin) => origin.iteration === iteration),
+		);
+		await acquireDeepSources(runDirectory, iterationSources, options, acquisitionContext, state, () =>
+			writeDeepCheckpoint(runDirectory, state, control),
+		);
 		const successful = iterationSources.filter((source) => source.status === "success" && !source.evidenceExtracted);
 		if (successful.length > 0) {
 			const ranked = await rankSourcesForQuestion(successful, question, runtime, options);
 			state.chunks.push(...ranked.chunks);
-			state.sourceRankings.push(...ranked.rankings.map((ranking) => ({ ...ranking, iteration, recordedAt: nowIso() })));
+			state.sourceRankings.push(
+				...ranked.rankings.map((ranking) => ({ ...ranking, iteration, recordedAt: nowIso() })),
+			);
 			const hasPositiveScore = ranked.rankings.some((ranking) => ranking.score > 0 || ranking.lexicalScore > 0);
 			const orderedSources = ranked.rankings
 				.filter((ranking) => !hasPositiveScore || ranking.score > 0 || ranking.lexicalScore > 0)
 				.map((ranking) => successful.find((source) => source.sourceId === ranking.sourceId))
 				.filter(Boolean);
 			for (const source of successful) {
-				if (!orderedSources.includes(source)) source.warnings.push("skipped evidence extraction because source ranking was low");
+				if (!orderedSources.includes(source))
+					source.warnings.push("skipped evidence extraction because source ranking was low");
 			}
 			await extractEvidenceBatches(runDirectory, orderedSources, state, options, runtime);
 			writeDeepCheckpoint(runDirectory, state, control);
@@ -4283,9 +4839,15 @@ async function commandDeep(positionals, flags) {
 		control.queuedQueries = queuedQueries;
 		control.seenQueries = [...seenQueries];
 		writeDeepCheckpoint(runDirectory, state, control);
-		const currentIterationItem = loadRunState(runDirectory, "web-research").items.find((item) => item.iteration === iteration);
+		const currentIterationItem = loadRunState(runDirectory, "web-research").items.find(
+			(item) => item.iteration === iteration,
+		);
 		if (currentIterationItem) {
-			runState = updateRunState(runDirectory, (draft) => finishResearchItem(draft, currentIterationItem.id, "deep_checkpoint.json"), { type: "item_completed", itemId: currentIterationItem.id, attempt: currentIterationItem.attempts });
+			runState = updateRunState(
+				runDirectory,
+				(draft) => finishResearchItem(draft, currentIterationItem.id, "deep_checkpoint.json"),
+				{ type: "item_completed", itemId: currentIterationItem.id, attempt: currentIterationItem.attempts },
+			);
 		}
 	}
 
@@ -4310,35 +4872,45 @@ async function commandDeep(positionals, flags) {
 	state.verification = await verifyDeepRun(runDirectory, state, state.sources ?? [], options);
 	acquisitionContext.metrics.embeddingEvents = state.embeddingLog.length;
 	acquisitionContext.metrics.embeddingCacheHits = state.embeddingLog.filter((event) => event.status === "hit").length;
-	acquisitionContext.metrics.embeddingCacheMisses = state.embeddingLog.filter((event) => event.status === "miss").length;
-	acquisitionContext.metrics.selectedChunks = state.sourceRankings.reduce((sum, ranking) => sum + (ranking.selectedChunkIds?.length ?? 0), 0);
+	acquisitionContext.metrics.embeddingCacheMisses = state.embeddingLog.filter(
+		(event) => event.status === "miss",
+	).length;
+	acquisitionContext.metrics.selectedChunks = state.sourceRankings.reduce(
+		(sum, ranking) => sum + (ranking.selectedChunkIds?.length ?? 0),
+		0,
+	);
 	acquisitionContext.metrics.modelCalls = state.modelCalls.length;
 	acquisitionContext.metrics.searchCacheHits = state.searchCacheLog.filter((event) => event.status === "hit").length;
-	acquisitionContext.metrics.searchCacheMisses = state.searchCacheLog.filter((event) => event.status === "miss").length;
+	acquisitionContext.metrics.searchCacheMisses = state.searchCacheLog.filter(
+		(event) => event.status === "miss",
+	).length;
 	writeDeepArtifacts(runDirectory, state);
 	writeAcquisitionArtifacts(acquisitionContext);
 	await closeAcquisitionContext(acquisitionContext);
 	const validation = validateDeepRun(runDirectory, { emit: false });
 	const completion = {
-				runDirectory,
-				// Named because a caller cannot guess them, and guessing wrong
-				// costs a failed read and a directory listing to recover from.
-				files: {
-					report: join(runDirectory, "deep_research_report.md"),
-					sources: join(runDirectory, "sources.md"),
-				},
-				question,
-				queries: state.queryLog.length,
-				sources: state.sources.length,
-				evidence: state.evidenceItems.length,
-				claims: state.claims.length,
-				gaps: state.gaps.length,
-				modelCalls: state.modelCalls.length,
-				budgetEvents: state.budgetEvents.length,
-				valid: validation.valid,
-				validationErrors: validation.errors,
+		runDirectory,
+		// Named because a caller cannot guess them, and guessing wrong
+		// costs a failed read and a directory listing to recover from.
+		files: {
+			report: join(runDirectory, "deep_research_report.md"),
+			sources: join(runDirectory, "sources.md"),
+		},
+		question,
+		queries: state.queryLog.length,
+		sources: state.sources.length,
+		evidence: state.evidenceItems.length,
+		claims: state.claims.length,
+		gaps: state.gaps.length,
+		modelCalls: state.modelCalls.length,
+		budgetEvents: state.budgetEvents.length,
+		valid: validation.valid,
+		validationErrors: validation.errors,
 	};
-	runState = updateRunState(runDirectory, (draft) => completeResearchRun(draft, completion), { type: "run_completed", iterations: control.currentIteration - 1 });
+	runState = updateRunState(runDirectory, (draft) => completeResearchRun(draft, completion), {
+		type: "run_completed",
+		iterations: control.currentIteration - 1,
+	});
 	process.stdout.write(`${JSON.stringify(runState.completion, null, 2)}\n`);
 	if (!validation.valid) process.exit(1);
 }
@@ -4350,7 +4922,10 @@ async function commandDiscover(positionals, flags) {
 	if (existsSync(runDirectory)) fail(`output directory already exists: ${runDirectory}`);
 	mkdirSync(runDirectory, { recursive: true });
 	const context = createAcquisitionContext({
-		...acquisitionOptions(flags, { mode: flags.mode ?? "standard", allowBrowser: !flags.noBrowser && flags.render !== false }),
+		...acquisitionOptions(flags, {
+			mode: flags.mode ?? "standard",
+			allowBrowser: !flags.noBrowser && flags.render !== false,
+		}),
 		runDirectory,
 	});
 	try {
@@ -4381,7 +4956,8 @@ async function commandAcademic(positionals, flags) {
 	const runDirectory = resolve(flags.output);
 	const classification = classifyAcademicQuery(query);
 	const providers = academicProviderList(flags, classification);
-	const contactEmail = flags.contactEmail || process.env.FORGE_ACADEMIC_CONTACT_EMAIL || process.env.UNPAYWALL_EMAIL || null;
+	const contactEmail =
+		flags.contactEmail || process.env.FORGE_ACADEMIC_CONTACT_EMAIL || process.env.UNPAYWALL_EMAIL || null;
 	// Same ladder as every other service: explicit, then environment, then
 	// persisted. A provider whose key is absent runs on its anonymous tier rather
 	// than failing -- none of the academic providers requires one.
@@ -4391,7 +4967,9 @@ async function commandAcademic(positionals, flags) {
 		userAgent: flags.userAgent ?? DEFAULT_USER_AGENT,
 		timeoutMs: flags.timeoutMs ?? DEFAULT_TIMEOUT_MS,
 	};
-	const providerBases = Object.fromEntries(providers.map((provider) => [provider, academicProviderBase(provider, flags)]));
+	const providerBases = Object.fromEntries(
+		providers.map((provider) => [provider, academicProviderBase(provider, flags)]),
+	);
 	let runState = openResearchRun(
 		runDirectory,
 		"academic",
@@ -4438,7 +5016,11 @@ async function commandAcademic(positionals, flags) {
 			}
 			if (!retryableItem(item)) continue;
 			while (retryableItem(item)) {
-				runState = updateRunState(runDirectory, (draft) => startResearchItem(draft, item.id), { type: "item_started", itemId: item.id, attempt: item.attempts + 1 });
+				runState = updateRunState(runDirectory, (draft) => startResearchItem(draft, item.id), {
+					type: "item_started",
+					itemId: item.id,
+					attempt: item.attempts + 1,
+				});
 				item = runState.items.find((candidate) => candidate.id === item.id);
 				const providerState = { providerRequests: [], providerErrors: [] };
 				const providerSources = [];
@@ -4456,11 +5038,23 @@ async function commandAcademic(positionals, flags) {
 					// OpenAlex meters by daily spend rather than by rate. Once the
 					// allowance is gone, asking again buys three retries and a 429.
 					const budget = providerBudgetState(providerName);
-					if (budget.exhausted) state.providerSkips.push({ provider: providerName, reason: budget.reason, recorded_at: nowIso() });
+					if (budget.exhausted)
+						state.providerSkips.push({ provider: providerName, reason: budget.reason, recorded_at: nowIso() });
 					if (hasInput && hasCredential && !budget.exhausted) {
 						await runAcademicProvider(
 							providerName,
-							{ query, limit, base: providerBases[providerName], runDirectory, options, state: providerState, contactEmail, classification, knownDois, apiKeys },
+							{
+								query,
+								limit,
+								base: providerBases[providerName],
+								runDirectory,
+								options,
+								state: providerState,
+								contactEmail,
+								classification,
+								knownDois,
+								apiKeys,
+							},
 							providerSources,
 							providerNormalized,
 						);
@@ -4468,18 +5062,32 @@ async function commandAcademic(positionals, flags) {
 					if (providerSources.length === 0 && providerState.providerErrors.length > 0) {
 						throw new Error(providerState.providerErrors.map((entry) => entry.error).join("; "));
 					}
-					const result = { provider: providerName, sourceRecords: providerSources, normalizedRecords: providerNormalized, providerRequests: providerState.providerRequests, providerErrors: providerState.providerErrors };
+					const result = {
+						provider: providerName,
+						sourceRecords: providerSources,
+						normalizedRecords: providerNormalized,
+						providerRequests: providerState.providerRequests,
+						providerErrors: providerState.providerErrors,
+					};
 					writeJson(resultPath, result);
 					sourceRecords.push(...providerSources);
 					normalizedRecords.push(...providerNormalized);
 					state.providerRequests.push(...providerState.providerRequests);
 					state.providerErrors.push(...providerState.providerErrors);
-					runState = updateRunState(runDirectory, (draft) => finishResearchItem(draft, item.id, resultPath), { type: "item_completed", itemId: item.id, attempt: item.attempts });
+					runState = updateRunState(runDirectory, (draft) => finishResearchItem(draft, item.id, resultPath), {
+						type: "item_completed",
+						itemId: item.id,
+						attempt: item.attempts,
+					});
 					break;
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					const transient = isTransientFailure(error);
-					runState = updateRunState(runDirectory, (draft) => failResearchItem(draft, item.id, message, transient), { type: "item_failed", itemId: item.id, attempt: item.attempts, transient, error: message });
+					runState = updateRunState(
+						runDirectory,
+						(draft) => failResearchItem(draft, item.id, message, transient),
+						{ type: "item_failed", itemId: item.id, attempt: item.attempts, transient, error: message },
+					);
 					item = runState.items.find((candidate) => candidate.id === item.id);
 					if (!retryableItem(item)) {
 						writeJson(resultPath, {
@@ -4534,17 +5142,20 @@ async function commandAcademic(positionals, flags) {
 	atomicWriteFile(join(runDirectory, "academic_report.md"), buildAcademicReport(state));
 	const validation = validateAcademicRun(runDirectory, { emit: false });
 	const completion = {
-				runDirectory,
-				query,
-				providers,
-				works: works.length,
-				sourceRecords: sourceRecords.length,
-				providerErrors: state.providerErrors.length,
-				risRecords: risManifest.length,
-				valid: validation.valid,
-				validationErrors: validation.errors,
+		runDirectory,
+		query,
+		providers,
+		works: works.length,
+		sourceRecords: sourceRecords.length,
+		providerErrors: state.providerErrors.length,
+		risRecords: risManifest.length,
+		valid: validation.valid,
+		validationErrors: validation.errors,
 	};
-	runState = updateRunState(runDirectory, (draft) => completeResearchRun(draft, completion), { type: "run_completed", providers: providers.length });
+	runState = updateRunState(runDirectory, (draft) => completeResearchRun(draft, completion), {
+		type: "run_completed",
+		providers: providers.length,
+	});
 	process.stdout.write(`${JSON.stringify(runState.completion, null, 2)}\n`);
 	if (!validation.valid) process.exit(1);
 }
@@ -4553,24 +5164,42 @@ function commandStatus(positionals) {
 	if (positionals.length !== 1) fail("status requires exactly one run directory");
 	const runDirectory = resolve(positionals[0]);
 	const state = loadRunState(runDirectory, "web-research");
-	const counts = Object.fromEntries(["pending", "in_progress", "completed", "failed"].map((status) => [status, state.items.filter((item) => item.status === status).length]));
+	const counts = Object.fromEntries(
+		["pending", "in_progress", "completed", "failed"].map((status) => [
+			status,
+			state.items.filter((item) => item.status === status).length,
+		]),
+	);
 	let inputDrift = { added: [], removed: [], changed: [] };
 	if (state.command === "read" && state.input.inputFile) {
-		const listed = readFileSync(state.input.inputFile, "utf8").split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith("#"));
+		const listed = readFileSync(state.input.inputFile, "utf8")
+			.split(/\r?\n/)
+			.map((line) => line.trim())
+			.filter((line) => line && !line.startsWith("#"));
 		const currentUrls = [...state.input.staticUrls, ...listed];
 		const frozen = new Map(state.input.urls.map((url) => [normalizeUrl(url), url]));
 		const current = new Map(currentUrls.map((url) => [normalizeUrl(url), url]));
-		inputDrift = { added: [...current].filter(([key]) => !frozen.has(key)).map(([, url]) => ({ url })), removed: [...frozen].filter(([key]) => !current.has(key)).map(([, url]) => ({ url })), changed: [] };
+		inputDrift = {
+			added: [...current].filter(([key]) => !frozen.has(key)).map(([, url]) => ({ url })),
+			removed: [...frozen].filter(([key]) => !current.has(key)).map(([, url]) => ({ url })),
+			changed: [],
+		};
 	}
-	process.stdout.write(`${JSON.stringify({ runDirectory, command: state.command, status: state.status, phase: state.phase, nextAction: state.nextAction, items: counts, inputDrift, refreshRequired: inputDrift.added.length + inputDrift.removed.length > 0 }, null, 2)}\n`);
+	process.stdout.write(
+		`${JSON.stringify({ runDirectory, command: state.command, status: state.status, phase: state.phase, nextAction: state.nextAction, items: counts, inputDrift, refreshRequired: inputDrift.added.length + inputDrift.removed.length > 0 }, null, 2)}\n`,
+	);
 }
 
 function commandRefresh(positionals) {
 	if (positionals.length !== 1) fail("refresh requires exactly one run directory");
 	const runDirectory = resolve(positionals[0]);
 	const state = loadRunState(runDirectory, "web-research");
-	if (state.command !== "read" || !state.input.inputFile) fail("refresh is only applicable to read runs created with --input-file");
-	const listed = readFileSync(state.input.inputFile, "utf8").split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith("#"));
+	if (state.command !== "read" || !state.input.inputFile)
+		fail("refresh is only applicable to read runs created with --input-file");
+	const listed = readFileSync(state.input.inputFile, "utf8")
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter((line) => line && !line.startsWith("#"));
 	const currentUrls = [...state.input.staticUrls, ...listed];
 	const frozen = new Map(state.input.urls.map((url) => [normalizeUrl(url), url]));
 	const current = new Map(currentUrls.map((url) => [normalizeUrl(url), url]));
@@ -4583,24 +5212,41 @@ function commandRefresh(positionals) {
 	const updated = updateRunState(
 		runDirectory,
 		(draft) => {
-			for (const item of draft.items) if (item.kind === "url" && removed.has(normalizeUrl(item.url))) item.retired = true;
-			for (const [index, url] of added.entries()) draft.items.push(workItem("url", `${draft.items.length + index}:${url}`, { url, index: draft.items.length + index }));
+			for (const item of draft.items)
+				if (item.kind === "url" && removed.has(normalizeUrl(item.url))) item.retired = true;
+			for (const [index, url] of added.entries())
+				draft.items.push(
+					workItem("url", `${draft.items.length + index}:${url}`, { url, index: draft.items.length + index }),
+				);
 			draft.input.urls = currentUrls;
-			draft.optionsFingerprint = configurationFingerprint({ workflow: draft.workflow, command: draft.command, input: draft.input, options: draft.options });
-			Object.assign(draft, { status: "running", phase: "processing", nextAction: draft.items.find((item) => retryableItem(item))?.id ?? "finalize" });
+			draft.optionsFingerprint = configurationFingerprint({
+				workflow: draft.workflow,
+				command: draft.command,
+				input: draft.input,
+				options: draft.options,
+			});
+			Object.assign(draft, {
+				status: "running",
+				phase: "processing",
+				nextAction: draft.items.find((item) => retryableItem(item))?.id ?? "finalize",
+			});
 			delete draft.completion;
 			return draft;
 		},
 		{ type: "input_refreshed", added: added.length, removed: removed.size },
 	);
-	process.stdout.write(`${JSON.stringify({ runDirectory, refreshed: true, added: added.length, removed: removed.size, total: updated.items.filter((item) => item.kind === "url" && !item.retired).length })}\n`);
+	process.stdout.write(
+		`${JSON.stringify({ runDirectory, refreshed: true, added: added.length, removed: removed.size, total: updated.items.filter((item) => item.kind === "url" && !item.retired).length })}\n`,
+	);
 }
 
 function commandRetry(positionals, flags) {
 	if (positionals.length !== 1) fail("retry requires exactly one run directory");
 	const runDirectory = resolve(positionals[0]);
 	const state = loadRunState(runDirectory, "web-research");
-	const targets = flags.item ? new Set([flags.item]) : new Set(state.items.filter((item) => item.status === "failed" && !item.retired).map((item) => item.id));
+	const targets = flags.item
+		? new Set([flags.item])
+		: new Set(state.items.filter((item) => item.status === "failed" && !item.retired).map((item) => item.id));
 	if (targets.size === 0) fail("no failed items selected");
 	const known = new Set(state.items.map((item) => item.id));
 	const unknown = [...targets].filter((item) => !known.has(item));
@@ -4609,17 +5255,21 @@ function commandRetry(positionals, flags) {
 		runDirectory,
 		(draft) => {
 			for (const item of draft.items) {
-				if (targets.has(item.id)) Object.assign(item, { status: "pending", attempts: 0, transient: false, error: null });
+				if (targets.has(item.id))
+					Object.assign(item, { status: "pending", attempts: 0, transient: false, error: null });
 			}
 			draft.status = "running";
-			draft.phase = draft.command === "academic" ? "providers" : draft.command === "deep" ? "iterations" : "processing";
+			draft.phase =
+				draft.command === "academic" ? "providers" : draft.command === "deep" ? "iterations" : "processing";
 			draft.nextAction = [...targets][0];
 			delete draft.completion;
 			return draft;
 		},
 		{ type: "items_retried", itemIds: [...targets].sort() },
 	);
-	process.stdout.write(`${JSON.stringify({ runDirectory, retried: [...targets].sort(), nextAction: updated.nextAction }, null, 2)}\n`);
+	process.stdout.write(
+		`${JSON.stringify({ runDirectory, retried: [...targets].sort(), nextAction: updated.nextAction }, null, 2)}\n`,
+	);
 }
 
 // --- Argument parsing -------------------------------------------------------
@@ -4711,7 +5361,8 @@ function parseArguments(args) {
 	if (flags.noBrowser) flags.render = false;
 	if (flags.mode && !["fast", "standard", "deep"].includes(flags.mode)) fail("--mode must be fast, standard, or deep");
 	for (const key of ["embeddingBatchSize", "evidenceBatchSources", "evidenceBatchChars", "playwrightConcurrency"]) {
-		if (flags[key] !== undefined && flags[key] < 1) fail(`--${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)} requires a positive integer`);
+		if (flags[key] !== undefined && flags[key] < 1)
+			fail(`--${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)} requires a positive integer`);
 	}
 	return { positionals, flags };
 }
@@ -4770,17 +5421,16 @@ async function main() {
 	else if (command === "status") commandStatus(positionals);
 	else if (command === "refresh") commandRefresh(positionals);
 	else if (command === "retry") {
-		if (Boolean(flags.item) === Boolean(flags.allFailed)) fail("retry requires exactly one of --item or --all-failed");
+		if (Boolean(flags.item) === Boolean(flags.allFailed))
+			fail("retry requires exactly one of --item or --all-failed");
 		commandRetry(positionals, flags);
-	}
-	else if (command === "validate") {
+	} else if (command === "validate") {
 		if (positionals.length !== 1) fail("validate requires exactly one run directory");
 		const runDirectory = resolve(positionals[0]);
 		const validationOptions = { exitOnError: true, writeReport: !flags.readOnly };
 		if (existsSync(join(runDirectory, "academic_run.json"))) validateAcademicRun(runDirectory, validationOptions);
 		else validateDeepRun(runDirectory, validationOptions);
-	}
-	else fail(`unknown command: ${command}`, 2);
+	} else fail(`unknown command: ${command}`, 2);
 }
 
 main().catch((error) => fail(error instanceof Error ? error.stack || error.message : String(error)));

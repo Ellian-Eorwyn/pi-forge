@@ -13,8 +13,8 @@
  * needs when revisiting a routing decision.
  */
 
-import { resolveService, resolveTaskService, resolveThinkService } from "./forge-llm.mjs";
 import { resolveConnectedServices } from "./connected-services.mjs";
+import { resolveService, resolveTaskService, resolveThinkService } from "./forge-llm.mjs";
 
 /** Stage label -> service name. See `forge_routing.py` for why each is here. */
 export const STAGE_SERVICES = Object.freeze({
@@ -39,14 +39,16 @@ export const STAGES_HELD_ON_CHAT = Object.freeze({
 	"summarize-transcript": "thinking ties on gates (8/8) and carries 2 silent failures; the small model 3",
 	"draft-note": "measured as `grounding-draft`: every candidate either gate-blocked or unstable across repeats",
 	"clean-chunk": "measured as `doc-cleanup-ocr`: no candidate cleared; thinking flipped on 4 items between attempts",
-	verify: "measured as `verifier-seeded`: all three tie, so the case cannot tell them apart; stays on think until it is strengthened",
+	verify:
+		"measured as `verifier-seeded`: all three tie, so the case cannot tell them apart; stays on think until it is strengthened",
 	"verify-repair": "the corrective retry of `verify`, and it goes wherever `verify` goes",
 });
 
 /** Capabilities the suite measures that no production stage corresponds to. */
 export const CAPABILITIES_MEASURED = Object.freeze({
 	"summarize-report": "summarizing a report document: gates tie, silent failures do not",
-	"meeting-brief": "synthesis over a whole meeting: small model 2/8 with 0.11 fact recall; thinking carries a silent failure",
+	"meeting-brief":
+		"synthesis over a whole meeting: small model 2/8 with 0.11 fact recall; thinking carries a silent failure",
 	"enumerate-items": "breadth: small model 1/8 against 3/8, and slower per call on this prompt size",
 	"abstention-grounded": "answering from a source: thinking ties exactly (12/12); the tie rule takes 5.8s over 14.7s",
 });

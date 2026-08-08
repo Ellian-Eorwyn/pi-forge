@@ -45,7 +45,9 @@ try {
 	const bundledInputs = new Set(Object.keys(baseBuild.metafile.inputs));
 	const reachableProviderImplementations = providerImplementationInputs.filter((input) => bundledInputs.has(input));
 	if (reachableProviderImplementations.length > 0) {
-		throw new Error(`Base browser bundle reached provider implementations:\n${reachableProviderImplementations.join("\n")}`);
+		throw new Error(
+			`Base browser bundle reached provider implementations:\n${reachableProviderImplementations.join("\n")}`,
+		);
 	}
 	await build({
 		stdin: {

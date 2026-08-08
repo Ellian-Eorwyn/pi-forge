@@ -16,10 +16,29 @@ import { fileURLToPath } from "node:url";
 process.env.PI_FORGE_SKIP_STACK_DISCOVERY = "1";
 
 const libraryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const { call, callJsonWithRetry, ChatError, ContextBudgetError, doctorWarnings, estimatePromptTokens, extractJsonContent, hiddenTokenCount, parseJsonContent, resetStackConditions, resolveService, resolveTaskService, resolveThinkService, serviceDoctor, activeInteractiveLeases, LEASE_STALE_MS } = await import(join(libraryRoot, "forge-llm.mjs"));
+const {
+	call,
+	callJsonWithRetry,
+	ChatError,
+	ContextBudgetError,
+	doctorWarnings,
+	estimatePromptTokens,
+	extractJsonContent,
+	hiddenTokenCount,
+	parseJsonContent,
+	resetStackConditions,
+	resolveService,
+	resolveTaskService,
+	resolveThinkService,
+	serviceDoctor,
+	activeInteractiveLeases,
+	LEASE_STALE_MS,
+} = await import(join(libraryRoot, "forge-llm.mjs"));
 const { clearStackStateCache } = await import(join(libraryRoot, "stack-state.mjs"));
 const { SLOT_CONTEXT_TOKENS } = await import(join(libraryRoot, "connected-services.mjs"));
-const { buildPackets, escalate, summarize, verifyPackets, VerificationError, VERDICT_FLAG } = await import(join(libraryRoot, "forge-verify.mjs"));
+const { buildPackets, escalate, summarize, verifyPackets, VerificationError, VERDICT_FLAG } = await import(
+	join(libraryRoot, "forge-verify.mjs")
+);
 
 function withWorkspace(callback) {
 	const workspace = mkdtempSync(join(tmpdir(), "forge-llm-mjs-"));
@@ -74,7 +93,13 @@ function startStub(reply) {
 	});
 }
 
-const service = (url, name = "chat") => ({ name, enabled: true, url, model: "chat", scheduling: { enabled: false, interactiveSlot: 0, backgroundSlot: 1, idleGraceMs: 0 } });
+const service = (url, name = "chat") => ({
+	name,
+	enabled: true,
+	url,
+	model: "chat",
+	scheduling: { enabled: false, interactiveSlot: 0, backgroundSlot: 1, idleGraceMs: 0 },
+});
 
 test("a stray think block and code fence are stripped before parsing", () => {
 	assert.equal(extractJsonContent('<think>weighing it up</think>\n```json\n{"a":1}\n```'), '{"a":1}');
@@ -133,7 +158,9 @@ test("a service can carry a smaller ceiling than the default slot", async () => 
 test("chat template kwargs are forwarded verbatim, and omitted when unset", async () => {
 	const stub = await startStub(() => ({ content: "{}" }));
 	try {
-		await call({ ...service(stub.url), chatTemplateKwargs: { enable_thinking: false } }, [{ role: "user", content: "hi" }]);
+		await call({ ...service(stub.url), chatTemplateKwargs: { enable_thinking: false } }, [
+			{ role: "user", content: "hi" },
+		]);
 		assert.deepEqual(stub.requests[0].chat_template_kwargs, { enable_thinking: false });
 		// A backend that does not understand the field must not be sent it.
 		await call(service(stub.url), [{ role: "user", content: "hi" }]);
@@ -164,7 +191,10 @@ test("output tokens count against the slot alongside the prompt", async () => {
 	try {
 		// Comfortably under the ceiling on its own, over it once max_tokens is reserved.
 		const content = "x".repeat(Math.trunc(SLOT_CONTEXT_TOKENS * 3.42) - 1000);
-		await assert.rejects(() => call(service(stub.url), [{ role: "user", content }], { maxTokens: 4096 }), ContextBudgetError);
+		await assert.rejects(
+			() => call(service(stub.url), [{ role: "user", content }], { maxTokens: 4096 }),
+			ContextBudgetError,
+		);
 		assert.equal(stub.requests.length, 0);
 		// The same prompt goes through when nothing is reserved for output.
 		const result = await call(service(stub.url), [{ role: "user", content }]);
@@ -204,7 +234,10 @@ print(json.dumps({
 test("background bulk work pins the slot it was assigned", async () => {
 	const stub = await startStub(() => ({ content: "{}" }));
 	try {
-		const scheduled = { ...service(stub.url), scheduling: { enabled: true, interactiveSlot: 0, backgroundSlot: 1, idleGraceMs: 0 } };
+		const scheduled = {
+			...service(stub.url),
+			scheduling: { enabled: true, interactiveSlot: 0, backgroundSlot: 1, idleGraceMs: 0 },
+		};
 		await call(scheduled, [{ role: "user", content: "hi" }], { background: true });
 		assert.equal(stub.requests[0].id_slot, 1);
 	} finally {
@@ -341,19 +374,31 @@ test("leases written by the Python client are honored by this one, and the rever
 			mkdirSync(leases, { recursive: true });
 
 			// Written the way forge_llm.py writes an interactive lease.
-			writeFileSync(join(leases, "interactive-1.json"), `${JSON.stringify({ pid: 1, kind: "interactive", slot: 0, updatedAtMs: Date.now() })}\n`);
+			writeFileSync(
+				join(leases, "interactive-1.json"),
+				`${JSON.stringify({ pid: 1, kind: "interactive", slot: 0, updatedAtMs: Date.now() })}\n`,
+			);
 			assert.equal(activeInteractiveLeases().length, 1, "a Python-written lease must block a JavaScript worker");
 
 			// Absent `kind` means interactive on both sides.
-			writeFileSync(join(leases, "interactive-2.json"), `${JSON.stringify({ pid: 2, slot: 0, updatedAtMs: Date.now() })}\n`);
+			writeFileSync(
+				join(leases, "interactive-2.json"),
+				`${JSON.stringify({ pid: 2, slot: 0, updatedAtMs: Date.now() })}\n`,
+			);
 			assert.equal(activeInteractiveLeases().length, 2, "a lease without kind defaults to interactive");
 
 			// A background lease is not a claim on the interactive slot.
-			writeFileSync(join(leases, "background-3.json"), `${JSON.stringify({ pid: 3, kind: "background", slot: 1, updatedAtMs: Date.now() })}\n`);
+			writeFileSync(
+				join(leases, "background-3.json"),
+				`${JSON.stringify({ pid: 3, kind: "background", slot: 1, updatedAtMs: Date.now() })}\n`,
+			);
 			assert.equal(activeInteractiveLeases().length, 2);
 
 			// Stale leases expire at the same boundary in both runtimes.
-			writeFileSync(join(leases, "interactive-4.json"), `${JSON.stringify({ pid: 4, kind: "interactive", slot: 0, updatedAtMs: Date.now() - LEASE_STALE_MS - 1000 })}\n`);
+			writeFileSync(
+				join(leases, "interactive-4.json"),
+				`${JSON.stringify({ pid: 4, kind: "interactive", slot: 0, updatedAtMs: Date.now() - LEASE_STALE_MS - 1000 })}\n`,
+			);
 			assert.equal(activeInteractiveLeases().length, 2, "a stale lease is not a claim");
 
 			// And the Python client must agree about what this one wrote.
@@ -364,7 +409,12 @@ sys.path.insert(0, ${JSON.stringify(libraryRoot)})
 import forge_llm
 print(json.dumps({"active": len(forge_llm.active_interactive_leases()), "stale": forge_llm.LEASE_STALE_MS}))
 `;
-			const output = JSON.parse(execFileSync(python, ["-c", script], { encoding: "utf8", env: { ...process.env, PI_FORGE_AGENT_DIR: agentDirectory } }));
+			const output = JSON.parse(
+				execFileSync(python, ["-c", script], {
+					encoding: "utf8",
+					env: { ...process.env, PI_FORGE_AGENT_DIR: agentDirectory },
+				}),
+			);
 			assert.equal(output.active, 2, "the Python client must see the same active leases");
 			assert.equal(output.stale, LEASE_STALE_MS, "both runtimes must expire leases at the same boundary");
 		} finally {
@@ -380,7 +430,10 @@ test("an unwritable agent directory costs scheduling, not the call", async () =>
 	// A path under /dev/null cannot be created.
 	process.env.PI_FORGE_AGENT_DIR = "/dev/null/agent";
 	try {
-		const scheduled = { ...service(stub.url, "think"), scheduling: { enabled: true, interactiveSlot: 0, backgroundSlot: 1, idleGraceMs: 0 } };
+		const scheduled = {
+			...service(stub.url, "think"),
+			scheduling: { enabled: true, interactiveSlot: 0, backgroundSlot: 1, idleGraceMs: 0 },
+		};
 		const { record } = await call(scheduled, [{ role: "user", content: "go" }], { background: true });
 		assert.equal(record.mode, "foreground", "the work still runs, it just cannot announce itself");
 	} finally {
@@ -392,9 +445,15 @@ test("an unwritable agent directory costs scheduling, not the call", async () =>
 
 test("packets are bounded by count and by serialized size", () => {
 	const many = Array.from({ length: 45 }, (_value, index) => ({ id: `n${index}`, text: "x" }));
-	assert.deepEqual(buildPackets(many, 20).map((packet) => packet.length), [20, 20, 5]);
+	assert.deepEqual(
+		buildPackets(many, 20).map((packet) => packet.length),
+		[20, 20, 5],
+	);
 	const large = Array.from({ length: 4 }, (_value, index) => ({ id: `n${index}`, text: "x".repeat(10_000) }));
-	assert.deepEqual(buildPackets(large, 20, 24_000).map((packet) => packet.length), [2, 2]);
+	assert.deepEqual(
+		buildPackets(large, 20, 24_000).map((packet) => packet.length),
+		[2, 2],
+	);
 });
 
 test("verification requires a verdict for every id and a reason on every flag", async () => {
@@ -410,9 +469,18 @@ test("verification requires a verdict for every id and a reason on every flag", 
 		await short.close();
 	}
 
-	const unreasoned = await startStub(() => ({ content: JSON.stringify({ verdicts: [{ id: "a", verdict: "flag" }, { id: "b", verdict: "ok" }] }) }));
+	const unreasoned = await startStub(() => ({
+		content: JSON.stringify({
+			verdicts: [
+				{ id: "a", verdict: "flag" },
+				{ id: "b", verdict: "ok" },
+			],
+		}),
+	}));
 	try {
-		await assert.rejects(() => verifyPackets(service(unreasoned.url, "think"), "Check.", items, { background: false }));
+		await assert.rejects(() =>
+			verifyPackets(service(unreasoned.url, "think"), "Check.", items, { background: false }),
+		);
 	} finally {
 		await unreasoned.close();
 	}
@@ -420,7 +488,11 @@ test("verification requires a verdict for every id and a reason on every flag", 
 
 test("an unreachable verifier raises rather than passing work", async () => {
 	await assert.rejects(
-		() => verifyPackets(service("http://127.0.0.1:9/v1/chat/completions", "think"), "Check.", [{ id: "a" }], { background: false, timeoutMs: 1000 }),
+		() =>
+			verifyPackets(service("http://127.0.0.1:9/v1/chat/completions", "think"), "Check.", [{ id: "a" }], {
+				background: false,
+				timeoutMs: 1000,
+			}),
 		(error) => error instanceof VerificationError,
 	);
 });
@@ -544,7 +616,10 @@ test("the doctor warns when the pinned slot does not exist", async () => {
 	let stack;
 	try {
 		stack = await startStackStub(portOfStub(stub.url), { totalSlots: 1 });
-		const report = await serviceDoctor({ ...service(stub.url), scheduling: { ...service(stub.url).scheduling, enabled: true } }, { env: stack.env });
+		const report = await serviceDoctor(
+			{ ...service(stub.url), scheduling: { ...service(stub.url).scheduling, enabled: true } },
+			{ env: stack.env },
+		);
 		assert.match(report.slotWarning, /slot 1/);
 		assert.match(report.slotWarning, /1 slot/);
 	} finally {
@@ -580,8 +655,11 @@ test("reports and records are unchanged without a stack", async () => {
 	const stub = await startStub(() => ({ content: "{}" }));
 	try {
 		const report = await serviceDoctor(service(stub.url), { env: { PI_FORGE_SKIP_STACK_DISCOVERY: "1" } });
-		const { record } = await call(service(stub.url), [{ role: "user", content: "hi" }], { env: { FORGE_STACK_STATE_URL: "http://127.0.0.1:1" } });
-		for (const key of ["backend", "stackDetail", "contextWarning", "slotWarning"]) assert.equal(report[key], undefined, key);
+		const { record } = await call(service(stub.url), [{ role: "user", content: "hi" }], {
+			env: { FORGE_STACK_STATE_URL: "http://127.0.0.1:1" },
+		});
+		for (const key of ["backend", "stackDetail", "contextWarning", "slotWarning"])
+			assert.equal(report[key], undefined, key);
 		assert.equal(record.backend, undefined);
 		assert.equal(record.stackWarnings, undefined);
 	} finally {

@@ -3,8 +3,8 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, join, resolve } from "node:path";
-import { okResult, requiredString, runTool, ToolInputError } from "../../../lib/tool_contract.mjs";
 import { htmlToCleanMarkdown } from "../../../lib/html-cleaner.mjs";
+import { okResult, requiredString, runTool, ToolInputError } from "../../../lib/tool_contract.mjs";
 
 function sha256(path) {
 	return createHash("sha256").update(readFileSync(path)).digest("hex");

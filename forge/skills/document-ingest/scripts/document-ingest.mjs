@@ -3,37 +3,37 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-	existsSync,
 	copyFileSync,
+	existsSync,
 	lstatSync,
 	mkdirSync,
 	readdirSync,
-	renameSync,
 	readFileSync,
+	renameSync,
 	rmSync,
 	statSync,
 	writeFileSync,
 } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { callJsonWithRetry, callTextWithRetry, resolveService, resolveThinkService } from "../../../lib/forge-llm.mjs";
+import { buildPackets, escalate, summarize, VERDICT_FLAG, verifyPackets } from "../../../lib/forge-verify.mjs";
 import {
-	DEFAULT_MAX_ATTEMPTS,
 	appendRunEvent,
 	assertCompatibleRun,
 	atomicWriteFile,
 	atomicWriteJson,
 	configurationFingerprint,
 	createRunState,
-	inputDrift,
+	DEFAULT_MAX_ATTEMPTS,
 	initializeRunState,
+	inputDrift,
 	isTransientFailure,
 	loadRunState,
 	retryableItem,
 	updateRunState,
 	withRunLock,
 } from "../../../lib/run-state.mjs";
-import { callJsonWithRetry, callTextWithRetry, resolveService, resolveThinkService } from "../../../lib/forge-llm.mjs";
-import { buildPackets, escalate, summarize, verifyPackets, VERDICT_FLAG } from "../../../lib/forge-verify.mjs";
 
 // The largest single prompt any forge skill sends: roughly 44k tokens, about a
 // third of a slot's 131,072. Raising it past ~440k characters would trip the
@@ -46,8 +46,34 @@ const MINIMUM_ALPHANUMERIC_RATIO = 0.2;
 const MAXIMUM_PUNCTUATION_RATIO = 0.55;
 const MAXIMUM_DOT_RUN_RATIO = 0.2;
 const IMAGE_EXTENSIONS = new Set([".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"]);
-const AUDIO_VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".mkv", ".webm", ".avi", ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus"]);
-const SUPPORTED_EXTENSIONS = new Set([".pdf", ".docx", ".pptx", ".txt", ".md", ".markdown", ".json", ".html", ".htm", ".rtf", ".eml", ...IMAGE_EXTENSIONS, ...AUDIO_VIDEO_EXTENSIONS]);
+const AUDIO_VIDEO_EXTENSIONS = new Set([
+	".mp4",
+	".mov",
+	".mkv",
+	".webm",
+	".avi",
+	".mp3",
+	".wav",
+	".m4a",
+	".flac",
+	".ogg",
+	".opus",
+]);
+const SUPPORTED_EXTENSIONS = new Set([
+	".pdf",
+	".docx",
+	".pptx",
+	".txt",
+	".md",
+	".markdown",
+	".json",
+	".html",
+	".htm",
+	".rtf",
+	".eml",
+	...IMAGE_EXTENSIONS,
+	...AUDIO_VIDEO_EXTENSIONS,
+]);
 const RESERVED_WORKSPACE_DIRECTORIES = new Set(["Ingest", "Originals", "Generated"]);
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const GENERATED_ARTIFACT_NAMES = new Set([
@@ -77,20 +103,19 @@ const MANIFEST_COLUMNS = [
 	"warning_count",
 	"error",
 ];
-const ARTIFACT_MANIFEST_COLUMNS = [
-	"role",
-	"document_id",
-	"source_path",
-	"destination_path",
-	"sha256",
-	"created_at",
-];
+const ARTIFACT_MANIFEST_COLUMNS = ["role", "document_id", "source_path", "destination_path", "sha256", "created_at"];
 const DOCUMENT_STATUSES = ["pending", "in_progress", "success", "needs_review", "failed", "skipped"];
 const RUN_STATE_WORKFLOW = "document-ingest";
 const EVIDENCE_FIELDS = ["title", "author", "date", "source"];
 const EVIDENCE_ORIGINS = ["embedded-metadata", "document-text", "filename", "user-provided"];
 const EVIDENCE_CONFIDENCES = ["high", "medium", "low"];
-const SOURCE_MAP_METHODS = ["page-extraction", "document-conversion", "transcript-conversion", "model-alignment", "vision-transcription"];
+const SOURCE_MAP_METHODS = [
+	"page-extraction",
+	"document-conversion",
+	"transcript-conversion",
+	"model-alignment",
+	"vision-transcription",
+];
 const EMAIL_EVIDENCE_PATH = "email_evidence.jsonl";
 const EMAIL_DIGEST_STATE_PATH = "email_digest_state.json";
 const EMAIL_DIGEST_JSON_PATH = "email_digest.json";
@@ -118,7 +143,8 @@ function toolInfo(command, args = ["--version"]) {
 }
 
 function inspectTools() {
-	const glmocrUrl = process.env.FORGE_GLMOCR_URL || process.env.FORGE_OCR_URL || process.env.OCR_URL || DEFAULT_GLMOCR_URL;
+	const glmocrUrl =
+		process.env.FORGE_GLMOCR_URL || process.env.FORGE_OCR_URL || process.env.OCR_URL || DEFAULT_GLMOCR_URL;
 	return {
 		pandoc: toolInfo("pandoc"),
 		pdftotext: toolInfo("pdftotext", ["-v"]),
@@ -147,14 +173,18 @@ function printDoctor(asJson) {
 		emlParsing: tools.python3.available,
 	};
 	const remediation = [];
-	if (!tools.pandoc.available) remediation.push("Install Pandoc (macOS: brew install pandoc; Debian/Ubuntu: apt install pandoc).");
+	if (!tools.pandoc.available)
+		remediation.push("Install Pandoc (macOS: brew install pandoc; Debian/Ubuntu: apt install pandoc).");
 	if (!tools.python3.available) remediation.push("Install Python 3 for standard-library PPTX extraction.");
-	if (!tools.ffmpeg.available) remediation.push("Install FFmpeg (macOS: brew install ffmpeg; Debian/Ubuntu: apt install ffmpeg).");
+	if (!tools.ffmpeg.available)
+		remediation.push("Install FFmpeg (macOS: brew install ffmpeg; Debian/Ubuntu: apt install ffmpeg).");
 	if (!capabilities.pdfText || !capabilities.pdfImageDetection || !capabilities.pdfPageRendering) {
 		remediation.push("Install Poppler (macOS: brew install poppler; Debian/Ubuntu: apt install poppler-utils).");
 	}
 	if (!capabilities.pdfOcr) {
-		remediation.push("Install OCRmyPDF and Tesseract (macOS: brew install ocrmypdf tesseract; Debian/Ubuntu: apt install ocrmypdf tesseract-ocr).");
+		remediation.push(
+			"Install OCRmyPDF and Tesseract (macOS: brew install ocrmypdf tesseract; Debian/Ubuntu: apt install ocrmypdf tesseract-ocr).",
+		);
 	}
 	if (asJson) {
 		process.stdout.write(`${JSON.stringify({ tools, capabilities, remediation }, null, 2)}\n`);
@@ -191,7 +221,9 @@ function safeStem(filePath) {
 }
 
 function safeFilenameStem(value) {
-	const raw = String(value ?? "").normalize("NFKC").trim();
+	const raw = String(value ?? "")
+		.normalize("NFKC")
+		.trim();
 	const safe = raw
 		.replace(/[<>:"/\\|?*\u0000-\u001F]+/gu, " ")
 		.replace(/\s+/g, " ")
@@ -201,7 +233,9 @@ function safeFilenameStem(value) {
 }
 
 function safeMarkdownFilename(value) {
-	const raw = String(value ?? "").normalize("NFKC").trim();
+	const raw = String(value ?? "")
+		.normalize("NFKC")
+		.trim();
 	const withoutExtension = raw.toLowerCase().endsWith(".md") ? raw.slice(0, -3) : raw;
 	return `${safeFilenameStem(withoutExtension)}.md`;
 }
@@ -239,7 +273,12 @@ function mimeType(filePath) {
 }
 
 function evidence(value, origin = null, confidence = null, locator = null) {
-	return { value: value || null, origin: value ? origin : null, confidence: value ? confidence : null, locator: value ? locator : null };
+	return {
+		value: value || null,
+		origin: value ? origin : null,
+		confidence: value ? confidence : null,
+		locator: value ? locator : null,
+	};
 }
 
 function parsePandocInline(value) {
@@ -311,10 +350,13 @@ function textWarnings(value) {
 	const replacementCharacters = (value.match(/\uFFFD/g) ?? []).length;
 	const controlCharacters = (value.match(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g) ?? []).length;
 	const quality = textQuality(value);
-	if (replacementCharacters > 0) warnings.push(`Found ${replacementCharacters} Unicode replacement characters; encoding may be damaged.`);
+	if (replacementCharacters > 0)
+		warnings.push(`Found ${replacementCharacters} Unicode replacement characters; encoding may be damaged.`);
 	if (controlCharacters > 0) warnings.push(`Found ${controlCharacters} unexpected control characters.`);
 	if (quality.nonWhitespace > 100 && quality.alphanumericRatio < MINIMUM_ALPHANUMERIC_RATIO) {
-		warnings.push("Extracted text has an unusually low proportion of letters and numbers; review for garbled output.");
+		warnings.push(
+			"Extracted text has an unusually low proportion of letters and numbers; review for garbled output.",
+		);
 	}
 	if (quality.nonWhitespace === 0) warnings.push("No readable text was extracted.");
 	return warnings;
@@ -352,24 +394,31 @@ function splitIntoChunks(markdown, maximumCharacters) {
 		current += block;
 	}
 	if (current) chunks.push(current);
-	if (chunks.join("") !== markdown) throw new Error("internal chunking error: chunks do not reconstruct the extracted document");
+	if (chunks.join("") !== markdown)
+		throw new Error("internal chunking error: chunks do not reconstruct the extracted document");
 	return chunks;
 }
 
 function extractPdfPages(filePath, pageCount) {
 	const result = run("pdftotext", ["-layout", "-enc", "UTF-8", filePath, "-"]);
-	if (result.error?.code === "ENOENT") throw new Error("pdftotext is required for PDF ingestion but was not found on PATH");
+	if (result.error?.code === "ENOENT")
+		throw new Error("pdftotext is required for PDF ingestion but was not found on PATH");
 	if (result.error) throw new Error(`pdftotext could not start: ${result.error.message}`);
-	if (result.status !== 0) throw new Error(`pdftotext failed: ${result.stderr.trim() || `exit status ${result.status}`}`);
+	if (result.status !== 0)
+		throw new Error(`pdftotext failed: ${result.stderr.trim() || `exit status ${result.status}`}`);
 	const pages = result.stdout.replace(/\r\n/g, "\n").split("\f");
 	if (pages.length > pageCount && pages.at(-1)?.trim() === "") pages.pop();
 	const observedPageSegments = pages.length;
 	const warnings = [];
 	if (observedPageSegments < pageCount) {
-		warnings.push(`pdftotext returned ${observedPageSegments} page segments for a ${pageCount}-page PDF; missing extraction pages were padded as empty.`);
+		warnings.push(
+			`pdftotext returned ${observedPageSegments} page segments for a ${pageCount}-page PDF; missing extraction pages were padded as empty.`,
+		);
 	}
 	if (observedPageSegments > pageCount) {
-		warnings.push(`pdftotext returned ${observedPageSegments} page segments for a ${pageCount}-page PDF; extra segments were merged into the final page.`);
+		warnings.push(
+			`pdftotext returned ${observedPageSegments} page segments for a ${pageCount}-page PDF; extra segments were merged into the final page.`,
+		);
 	}
 	while (pages.length < pageCount) pages.push("");
 	if (pages.length > pageCount && pageCount > 0) {
@@ -380,9 +429,18 @@ function extractPdfPages(filePath, pageCount) {
 
 function pdfImagePages(filePath) {
 	const result = run("pdfimages", ["-list", filePath]);
-	if (result.error?.code === "ENOENT") return { pages: new Set(), available: false, warning: "pdfimages is unavailable; image-backed page detection could not run." };
+	if (result.error?.code === "ENOENT")
+		return {
+			pages: new Set(),
+			available: false,
+			warning: "pdfimages is unavailable; image-backed page detection could not run.",
+		};
 	if (result.error || result.status !== 0) {
-		return { pages: new Set(), available: false, warning: `pdfimages failed: ${result.stderr.trim() || result.error?.message || `exit status ${result.status}`}` };
+		return {
+			pages: new Set(),
+			available: false,
+			warning: `pdfimages failed: ${result.stderr.trim() || result.error?.message || `exit status ${result.status}`}`,
+		};
 	}
 	const pages = new Set();
 	for (const line of result.stdout.split(/\r?\n/)) {
@@ -407,10 +465,23 @@ function renderVisionPages(filePath, documentDirectory, pages, tools) {
 	for (const page of pages) {
 		const name = `page-${String(page).padStart(4, "0")}`;
 		const outputPrefix = join(directory, name);
-		const result = run("pdftoppm", ["-f", String(page), "-l", String(page), "-singlefile", "-png", "-r", "180", filePath, outputPrefix]);
+		const result = run("pdftoppm", [
+			"-f",
+			String(page),
+			"-l",
+			String(page),
+			"-singlefile",
+			"-png",
+			"-r",
+			"180",
+			filePath,
+			outputPrefix,
+		]);
 		const outputPath = `${outputPrefix}.png`;
 		if (result.error || result.status !== 0 || !existsSync(outputPath)) {
-			warnings.push(`Could not render PDF page ${page} for vision fallback: ${result.stderr.trim() || result.error?.message || `exit status ${result.status}`}`);
+			warnings.push(
+				`Could not render PDF page ${page} for vision fallback: ${result.stderr.trim() || result.error?.message || `exit status ${result.status}`}`,
+			);
 			continue;
 		}
 		renderedPages.push({
@@ -518,7 +589,10 @@ async function extractGlmocr(filePath, documentDirectory, options, fallbackPageC
 	if (markdown.trim() === "") throw new Error("GLM-OCR response did not contain markdown_result, md_results, or text");
 	const layout = extractGlmocrLayout(body);
 	const artifacts = writeGlmocrArtifacts(documentDirectory, body, layout);
-	const pageCount = glmocrPageCount(body, fallbackPageCount ?? (IMAGE_EXTENSIONS.has(extname(filePath).toLowerCase()) ? 1 : null));
+	const pageCount = glmocrPageCount(
+		body,
+		fallbackPageCount ?? (IMAGE_EXTENSIONS.has(extname(filePath).toLowerCase()) ? 1 : null),
+	);
 	const warnings = textWarnings(markdown);
 	return {
 		markdown,
@@ -530,7 +604,10 @@ async function extractGlmocr(filePath, documentDirectory, options, fallbackPageC
 			{
 				markdownStartLine: markdown ? 1 : null,
 				markdownEndLine: markdown ? markdown.split("\n").length : null,
-				sourceLocator: { type: IMAGE_EXTENSIONS.has(extname(filePath).toLowerCase()) ? "image" : "document", path: filePath },
+				sourceLocator: {
+					type: IMAGE_EXTENSIONS.has(extname(filePath).toLowerCase()) ? "image" : "document",
+					path: filePath,
+				},
 				method: "document-conversion",
 				confidence: "medium",
 			},
@@ -571,7 +648,8 @@ async function extractPdf(filePath, documentDirectory, options, tools) {
 	if (!tools.pdfinfo.available) throw new Error("pdfinfo is required for PDF ingestion but was not found on PATH");
 	if (!tools.pdftotext.available) throw new Error("pdftotext is required for PDF ingestion but was not found on PATH");
 	const infoResult = run("pdfinfo", ["-isodates", filePath]);
-	if (infoResult.status !== 0) throw new Error(`pdfinfo failed: ${infoResult.stderr.trim() || `exit status ${infoResult.status}`}`);
+	if (infoResult.status !== 0)
+		throw new Error(`pdfinfo failed: ${infoResult.stderr.trim() || `exit status ${infoResult.status}`}`);
 	const info = parsePdfInfo(infoResult.stdout);
 	const pageCount = Number.parseInt(info.Pages, 10);
 	if (!Number.isInteger(pageCount) || pageCount < 1) throw new Error("pdfinfo did not report a valid page count");
@@ -584,7 +662,9 @@ async function extractPdf(filePath, documentDirectory, options, tools) {
 				const visionRendering = renderVisionPages(filePath, documentDirectory, allPages, tools);
 				remote.warnings.push(...visionRendering.warnings);
 				if (visionRendering.renderedPages.length > 0) {
-					remote.warnings.push(`GLM-OCR output is low quality; vision fallback is required for pages: ${visionRendering.renderedPages.map(({ page }) => page).join(", ")}.`);
+					remote.warnings.push(
+						`GLM-OCR output is low quality; vision fallback is required for pages: ${visionRendering.renderedPages.map(({ page }) => page).join(", ")}.`,
+					);
 					remote.ocr.unresolvedPages = allPages;
 					remote.vision = {
 						mode: "auto",
@@ -596,7 +676,9 @@ async function extractPdf(filePath, documentDirectory, options, tools) {
 						unavailableReason: null,
 					};
 				} else {
-					remote.warnings.push("GLM-OCR output is low quality, but pages could not be rendered for the vision fallback.");
+					remote.warnings.push(
+						"GLM-OCR output is low quality, but pages could not be rendered for the vision fallback.",
+					);
 				}
 			}
 			remote.warnings.unshift(...warnings);
@@ -616,7 +698,10 @@ async function extractPdf(filePath, documentDirectory, options, tools) {
 	if (images.warning) warnings.push(images.warning);
 	const detectedCandidatePages = beforeQuality
 		.map((quality, index) => ({ quality, page: index + 1 }))
-		.filter(({ quality, page }) => quality.suspicious && (quality.reasons.some((reason) => reason !== "low-text") || images.pages.has(page)))
+		.filter(
+			({ quality, page }) =>
+				quality.suspicious && (quality.reasons.some((reason) => reason !== "low-text") || images.pages.has(page)),
+		)
 		.map(({ page }) => page);
 	const candidatePages = ocrMode === "force" ? pages.map((_, index) => index + 1) : detectedCandidatePages;
 	let ocrUsed = false;
@@ -636,7 +721,9 @@ async function extractPdf(filePath, documentDirectory, options, tools) {
 			const derivedDirectory = join(documentDirectory, "derived");
 			mkdirSync(derivedDirectory, { recursive: true });
 			const ocrPath = join(derivedDirectory, "ocr.pdf");
-			const hasGarbledText = candidatePages.some((page) => beforeQuality[page - 1].reasons.some((reason) => reason !== "low-text"));
+			const hasGarbledText = candidatePages.some((page) =>
+				beforeQuality[page - 1].reasons.some((reason) => reason !== "low-text"),
+			);
 			ocrCommandMode = ocrMode === "force" || hasGarbledText ? "force" : "skip-text";
 			const textModeArgument = ocrCommandMode === "force" ? "--force-ocr" : "--skip-text";
 			const result = run("ocrmypdf", [textModeArgument, "--rotate-pages", "--deskew", "--quiet", filePath, ocrPath]);
@@ -673,7 +760,9 @@ async function extractPdf(filePath, documentDirectory, options, tools) {
 	const visionRendering = renderVisionPages(filePath, documentDirectory, unresolvedPages, tools);
 	warnings.push(...visionRendering.warnings);
 	if (visionRendering.renderedPages.length > 0) {
-		warnings.push(`Vision fallback is required for unresolved pages: ${visionRendering.renderedPages.map(({ page }) => page).join(", ")}.`);
+		warnings.push(
+			`Vision fallback is required for unresolved pages: ${visionRendering.renderedPages.map(({ page }) => page).join(", ")}.`,
+		);
 	}
 	const joined = joinPdfPages(pages);
 	warnings.push(...textWarnings(joined.markdown));
@@ -682,7 +771,11 @@ async function extractPdf(filePath, documentDirectory, options, tools) {
 	}
 	return {
 		markdown: joined.markdown,
-		method: ocrUsed ? (selectedPages.length === pageCount ? "ocrmypdf+pdftotext-layout" : "pdftotext-layout+ocr-fallback") : "pdftotext-layout",
+		method: ocrUsed
+			? selectedPages.length === pageCount
+				? "ocrmypdf+pdftotext-layout"
+				: "pdftotext-layout+ocr-fallback"
+			: "pdftotext-layout",
 		pageCount,
 		warnings,
 		embedded: {
@@ -696,7 +789,12 @@ async function extractPdf(filePath, documentDirectory, options, tools) {
 			mode: ocrMode,
 			attempted: ocrAttempted,
 			used: ocrUsed,
-			reason: candidatePages.length > 0 ? (ocrMode === "force" ? "forced by user" : "suspicious page text quality") : null,
+			reason:
+				candidatePages.length > 0
+					? ocrMode === "force"
+						? "forced by user"
+						: "suspicious page text quality"
+					: null,
 			commandMode: ocrCommandMode,
 			candidatePages,
 			selectedPages,
@@ -720,11 +818,16 @@ async function extractPdf(filePath, documentDirectory, options, tools) {
 }
 
 function extractPandoc(filePath, documentDirectory, format, tools) {
-	if (!tools.pandoc.available) throw new Error(`Pandoc is required for ${format.toUpperCase()} ingestion but was not found on PATH`);
+	if (!tools.pandoc.available)
+		throw new Error(`Pandoc is required for ${format.toUpperCase()} ingestion but was not found on PATH`);
 	const from = format === "md" ? "markdown" : format;
-	const result = run("pandoc", [filePath, `--from=${from}`, "--to=gfm", "--wrap=none", "--extract-media=derived"], { cwd: documentDirectory });
+	const result = run("pandoc", [filePath, `--from=${from}`, "--to=gfm", "--wrap=none", "--extract-media=derived"], {
+		cwd: documentDirectory,
+	});
 	if (result.error || result.status !== 0) {
-		throw new Error(`Pandoc conversion failed: ${result.stderr.trim() || result.error?.message || `exit status ${result.status}`}`);
+		throw new Error(
+			`Pandoc conversion failed: ${result.stderr.trim() || result.error?.message || `exit status ${result.status}`}`,
+		);
 	}
 	const warnings = result.stderr.trim() ? [result.stderr.trim()] : [];
 	const metadataResult = run("pandoc", [filePath, `--from=${from}`, "--to=json"], { cwd: documentDirectory });
@@ -736,7 +839,9 @@ function extractPandoc(filePath, documentDirectory, format, tools) {
 			warnings.push("Pandoc metadata output was not valid JSON.");
 		}
 	} else {
-		warnings.push(`Pandoc metadata extraction failed: ${metadataResult.stderr.trim() || `exit status ${metadataResult.status}`}`);
+		warnings.push(
+			`Pandoc metadata extraction failed: ${metadataResult.stderr.trim() || `exit status ${metadataResult.status}`}`,
+		);
 	}
 	const markdown = ensureFinalNewline(result.stdout.replace(/\r\n/g, "\n"));
 	warnings.push(...textWarnings(markdown));
@@ -760,7 +865,19 @@ function extractPandoc(filePath, documentDirectory, format, tools) {
 				confidence: "medium",
 			},
 		],
-		ocr: { mode: "not-applicable", attempted: false, used: false, reason: null, candidatePages: [], beforeContentCharacters: [], afterContentCharacters: [], remainingLowTextPages: [], derivedPath: null, derivedSha256: null, error: null },
+		ocr: {
+			mode: "not-applicable",
+			attempted: false,
+			used: false,
+			reason: null,
+			candidatePages: [],
+			beforeContentCharacters: [],
+			afterContentCharacters: [],
+			remainingLowTextPages: [],
+			derivedPath: null,
+			derivedSha256: null,
+			error: null,
+		},
 	};
 }
 
@@ -769,7 +886,9 @@ function extractPptx(filePath, tools) {
 	const helper = join(SCRIPT_DIRECTORY, "pptx_to_markdown.py");
 	const result = run("python3", [helper, filePath]);
 	if (result.error || result.status !== 0) {
-		throw new Error(`PPTX conversion failed: ${result.stderr.trim() || result.error?.message || `exit status ${result.status}`}`);
+		throw new Error(
+			`PPTX conversion failed: ${result.stderr.trim() || result.error?.message || `exit status ${result.status}`}`,
+		);
 	}
 	let extracted;
 	try {
@@ -819,7 +938,19 @@ function extractText(filePath) {
 				confidence: "high",
 			},
 		],
-		ocr: { mode: "not-applicable", attempted: false, used: false, reason: null, candidatePages: [], beforeContentCharacters: [], afterContentCharacters: [], remainingLowTextPages: [], derivedPath: null, derivedSha256: null, error: null },
+		ocr: {
+			mode: "not-applicable",
+			attempted: false,
+			used: false,
+			reason: null,
+			candidatePages: [],
+			beforeContentCharacters: [],
+			afterContentCharacters: [],
+			remainingLowTextPages: [],
+			derivedPath: null,
+			derivedSha256: null,
+			error: null,
+		},
 	};
 }
 
@@ -836,7 +967,9 @@ function extractEml(filePath, documentDirectory, tools) {
 		"derived/attachments",
 	]);
 	if (result.error || result.status !== 0) {
-		throw new Error(`EML conversion failed: ${result.stderr.trim() || result.error?.message || `exit status ${result.status}`}`);
+		throw new Error(
+			`EML conversion failed: ${result.stderr.trim() || result.error?.message || `exit status ${result.status}`}`,
+		);
 	}
 	let parsed;
 	try {
@@ -861,7 +994,19 @@ function extractEml(filePath, documentDirectory, tools) {
 		},
 		sourceMapEntries: parsed.sourceMapEntries ?? [],
 		email: parsed.email,
-		ocr: { mode: "not-applicable", attempted: false, used: false, reason: null, candidatePages: [], beforeQuality: [], afterQuality: [], unresolvedPages: [], derivedPath: null, derivedSha256: null, error: null },
+		ocr: {
+			mode: "not-applicable",
+			attempted: false,
+			used: false,
+			reason: null,
+			candidatePages: [],
+			beforeQuality: [],
+			afterQuality: [],
+			unresolvedPages: [],
+			derivedPath: null,
+			derivedSha256: null,
+			error: null,
+		},
 	};
 }
 
@@ -898,9 +1043,18 @@ function extractZoomTranscriptJson(filePath) {
 	} catch (error) {
 		throw new Error(`JSON input is invalid: ${error instanceof Error ? error.message : String(error)}`);
 	}
-	if (!Array.isArray(records) || records.length === 0) throw new Error("JSON input is not a nonempty Zoom transcript array");
+	if (!Array.isArray(records) || records.length === 0)
+		throw new Error("JSON input is not a nonempty Zoom transcript array");
 	for (const [index, record] of records.entries()) {
-		if (!record || typeof record !== "object" || Array.isArray(record) || typeof record.speaker !== "string" || record.speaker.trim() === "" || typeof record.text !== "string" || record.text.trim() === "") {
+		if (
+			!record ||
+			typeof record !== "object" ||
+			Array.isArray(record) ||
+			typeof record.speaker !== "string" ||
+			record.speaker.trim() === "" ||
+			typeof record.text !== "string" ||
+			record.text.trim() === ""
+		) {
 			throw new Error(`Zoom transcript record ${index + 1} must contain nonblank speaker and text strings`);
 		}
 	}
@@ -924,9 +1078,26 @@ function extractZoomTranscriptJson(filePath) {
 		method: "zoom-json-transcript",
 		pageCount: null,
 		warnings: [],
-		embedded: { title, author: null, date: basename(filePath).match(/\b(\d{4}-\d{2}-\d{2})\b/)?.[1] ?? null, source: basename(filePath) },
+		embedded: {
+			title,
+			author: null,
+			date: basename(filePath).match(/\b(\d{4}-\d{2}-\d{2})\b/)?.[1] ?? null,
+			source: basename(filePath),
+		},
 		sourceMapEntries,
-		ocr: { mode: "not-applicable", attempted: false, used: false, reason: null, candidatePages: [], beforeQuality: [], afterQuality: [], unresolvedPages: [], derivedPath: null, derivedSha256: null, error: null },
+		ocr: {
+			mode: "not-applicable",
+			attempted: false,
+			used: false,
+			reason: null,
+			candidatePages: [],
+			beforeQuality: [],
+			afterQuality: [],
+			unresolvedPages: [],
+			derivedPath: null,
+			derivedSha256: null,
+			error: null,
+		},
 	};
 }
 
@@ -937,7 +1108,9 @@ function extractMedia(filePath, documentDirectory, tools) {
 	const audioPath = join(derivedDirectory, "audio.mp3");
 	const result = run("ffmpeg", ["-i", filePath, "-vn", "-ar", "44100", "-ac", "2", "-b:a", "160k", audioPath]);
 	if (result.error || result.status !== 0 || !existsSync(audioPath)) {
-		throw new Error(`FFmpeg extraction failed: ${result.stderr?.trim() || result.error?.message || `exit status ${result.status}`}`);
+		throw new Error(
+			`FFmpeg extraction failed: ${result.stderr?.trim() || result.error?.message || `exit status ${result.status}`}`,
+		);
 	}
 	const markdown = `Media file extracted to derived/audio.mp3. Waiting for transcription.\\n`;
 	return {
@@ -955,7 +1128,19 @@ function extractMedia(filePath, documentDirectory, tools) {
 				confidence: "high",
 			},
 		],
-		ocr: { mode: "not-applicable", attempted: false, used: false, reason: null, candidatePages: [], beforeQuality: [], afterQuality: [], unresolvedPages: [], derivedPath: null, derivedSha256: null, error: null },
+		ocr: {
+			mode: "not-applicable",
+			attempted: false,
+			used: false,
+			reason: null,
+			candidatePages: [],
+			beforeQuality: [],
+			afterQuality: [],
+			unresolvedPages: [],
+			derivedPath: null,
+			derivedSha256: null,
+			error: null,
+		},
 	};
 }
 
@@ -1014,15 +1199,19 @@ function collectInputs(inputPath) {
 	const files = [];
 	const skipped = [];
 	const rootStat = lstatSync(inputPath);
-	if (rootStat.isSymbolicLink()) return { files, skipped: [{ path: inputPath, reason: "symlink input is not followed" }] };
+	if (rootStat.isSymbolicLink())
+		return { files, skipped: [{ path: inputPath, reason: "symlink input is not followed" }] };
 	if (rootStat.isFile()) {
 		if (SUPPORTED_EXTENSIONS.has(extname(inputPath).toLowerCase())) files.push(inputPath);
 		else skipped.push({ path: inputPath, reason: "unsupported file format" });
 		return { files, skipped };
 	}
-	if (!rootStat.isDirectory()) return { files, skipped: [{ path: inputPath, reason: "input is not a regular file or directory" }] };
+	if (!rootStat.isDirectory())
+		return { files, skipped: [{ path: inputPath, reason: "input is not a regular file or directory" }] };
 	const visit = (directory) => {
-		for (const entry of readdirSync(directory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
+		for (const entry of readdirSync(directory, { withFileTypes: true }).sort((left, right) =>
+			left.name.localeCompare(right.name),
+		)) {
 			const entryPath = join(directory, entry.name);
 			if (entry.name.startsWith(".")) {
 				skipped.push({ path: entryPath, reason: "hidden path" });
@@ -1047,7 +1236,8 @@ function collectInputs(inputPath) {
 function extractionReport(source, extraction, status) {
 	const ocr = extraction.ocr;
 	const vision = extraction.vision;
-	const warnings = extraction.warnings.length > 0 ? extraction.warnings.map((warning) => `- ${warning}`).join("\n") : "- None.";
+	const warnings =
+		extraction.warnings.length > 0 ? extraction.warnings.map((warning) => `- ${warning}`).join("\n") : "- None.";
 	const reviewState = String(status).includes("complete") ? "complete" : "pending";
 	return `# Extraction Report
 
@@ -1065,7 +1255,9 @@ ${status}
 ## Methods and Tools
 
 - Extraction method: ${extraction.method}
-${Object.entries(extraction.toolVersions).map(([name, version]) => `- ${name}: ${version}`).join("\n")}
+${Object.entries(extraction.toolVersions)
+	.map(([name, version]) => `- ${name}: ${version}`)
+	.join("\n")}
 
 ## Coverage and OCR
 
@@ -1139,9 +1331,10 @@ async function prepareDocument(filePath, runDirectory, options, tools, usedDirec
 		if (options.ocr === "never") throw new Error("image ingestion requires OCR, but OCR was disabled");
 		if (options.ocrBackend === "local") throw new Error("image ingestion requires --ocr-backend glmocr or auto");
 		extracted = await extractGlmocr(filePath, documentDirectory, options, 1);
-	}
-	else if (AUDIO_VIDEO_EXTENSIONS.has(extname(filePath).toLowerCase())) extracted = extractMedia(filePath, documentDirectory, tools);
-	else if (["docx", "html", "rtf", "md"].includes(format)) extracted = extractPandoc(filePath, documentDirectory, format, tools);
+	} else if (AUDIO_VIDEO_EXTENSIONS.has(extname(filePath).toLowerCase()))
+		extracted = extractMedia(filePath, documentDirectory, tools);
+	else if (["docx", "html", "rtf", "md"].includes(format))
+		extracted = extractPandoc(filePath, documentDirectory, format, tools);
 	else extracted = extractText(filePath);
 	const chunks = splitIntoChunks(extracted.markdown, options.chunkCharacters);
 	const workingDirectory = join(documentDirectory, "working");
@@ -1161,7 +1354,11 @@ async function prepareDocument(filePath, runDirectory, options, tools, usedDirec
 		modifiedAt: sourceStat.mtime.toISOString(),
 		sha256: sourceHash,
 	};
-	const toolVersions = Object.fromEntries(Object.entries(tools).filter(([, value]) => value.available).map(([name, value]) => [name, value.version]));
+	const toolVersions = Object.fromEntries(
+		Object.entries(tools)
+			.filter(([, value]) => value.available)
+			.map(([name, value]) => [name, value.version]),
+	);
 	const warnings = [...new Set(extracted.warnings)];
 	if (chunks.some((chunk) => unicodeLength(chunk) > options.chunkCharacters)) {
 		warnings.push("A single paragraph exceeds the chunk threshold and was preserved without splitting.");
@@ -1169,7 +1366,8 @@ async function prepareDocument(filePath, runDirectory, options, tools, usedDirec
 	const deterministicClean =
 		warnings.length === 0 &&
 		chunks.length === 1 &&
-		((extracted.method === "direct-clean-markdown" && /^#\s+\S/m.test(extracted.markdown)) || extracted.method === "python-email-parser");
+		((extracted.method === "direct-clean-markdown" && /^#\s+\S/m.test(extracted.markdown)) ||
+			extracted.method === "python-email-parser");
 	const extraction = {
 		status: deterministicClean ? "success" : "needs_review",
 		method: extracted.method,
@@ -1177,7 +1375,10 @@ async function prepareDocument(filePath, runDirectory, options, tools, usedDirec
 		warnings,
 		pageCount: extracted.pageCount,
 		chunkCharacters: options.chunkCharacters,
-		chunks: chunks.map((chunk, index) => ({ path: `working/chunks/chunk-${String(index + 1).padStart(4, "0")}.md`, characters: unicodeLength(chunk) })),
+		chunks: chunks.map((chunk, index) => ({
+			path: `working/chunks/chunk-${String(index + 1).padStart(4, "0")}.md`,
+			characters: unicodeLength(chunk),
+		})),
 		ocr: extracted.ocr,
 		vision: extracted.vision ?? {
 			mode: "not-applicable",
@@ -1195,22 +1396,52 @@ async function prepareDocument(filePath, runDirectory, options, tools, usedDirec
 		source,
 		extraction,
 		fields: {
-			title: evidence(extracted.embedded.title, "embedded-metadata", "high", extracted.embedded.title ? "embedded metadata: title" : null),
-			author: evidence(extracted.embedded.author, "embedded-metadata", "high", extracted.embedded.author ? "embedded metadata: author" : null),
-			date: evidence(extracted.embedded.date, "embedded-metadata", "medium", extracted.embedded.date ? "embedded metadata: date" : null),
-			source: evidence(extracted.embedded.source, "embedded-metadata", "medium", extracted.embedded.source ? "embedded metadata: source" : null),
+			title: evidence(
+				extracted.embedded.title,
+				"embedded-metadata",
+				"high",
+				extracted.embedded.title ? "embedded metadata: title" : null,
+			),
+			author: evidence(
+				extracted.embedded.author,
+				"embedded-metadata",
+				"high",
+				extracted.embedded.author ? "embedded metadata: author" : null,
+			),
+			date: evidence(
+				extracted.embedded.date,
+				"embedded-metadata",
+				"medium",
+				extracted.embedded.date ? "embedded metadata: date" : null,
+			),
+			source: evidence(
+				extracted.embedded.source,
+				"embedded-metadata",
+				"medium",
+				extracted.embedded.source ? "embedded metadata: source" : null,
+			),
 		},
 		structure: markdownStructure(extracted.markdown),
 		review: {
 			completed: deterministicClean,
 			notes: deterministicClean
-				? [extracted.method === "python-email-parser" ? "RFC/MIME email conversion validated deterministically." : "Clean Markdown validated deterministically during Inbox intake."]
+				? [
+						extracted.method === "python-email-parser"
+							? "RFC/MIME email conversion validated deterministically."
+							: "Clean Markdown validated deterministically during Inbox intake.",
+					]
 				: [],
 		},
 		finalOutput: deterministicClean
 			? extracted.method === "python-email-parser"
-				? { filename: emailMarkdownFilename(extracted.email, filePath), namingReason: "Uses the email date, subject, and sender when available." }
-				: { filename: basename(filePath).replace(/\.markdown$/i, ".md"), namingReason: "Preserved already-clean Markdown filename." }
+				? {
+						filename: emailMarkdownFilename(extracted.email, filePath),
+						namingReason: "Uses the email date, subject, and sender when available.",
+					}
+				: {
+						filename: basename(filePath).replace(/\.markdown$/i, ".md"),
+						namingReason: "Preserved already-clean Markdown filename.",
+					}
 			: { filename: null, namingReason: null },
 	};
 	if (extracted.email) metadata.email = extracted.email;
@@ -1221,7 +1452,17 @@ async function prepareDocument(filePath, runDirectory, options, tools, usedDirec
 		markdownFile: "document.md",
 		entries: extracted.sourceMapEntries,
 	});
-	writeFileSync(join(documentDirectory, "extraction_report.md"), extractionReport(source, extraction, deterministicClean ? "success — deterministic clean Markdown validation complete" : "needs_review — model normalization pending"), { flag: "wx" });
+	writeFileSync(
+		join(documentDirectory, "extraction_report.md"),
+		extractionReport(
+			source,
+			extraction,
+			deterministicClean
+				? "success — deterministic clean Markdown validation complete"
+				: "needs_review — model normalization pending",
+		),
+		{ flag: "wx" },
+	);
 	if (existsSync(finalDirectory)) throw new Error(`prepared output already exists: ${finalDirectory}`);
 	renameSync(documentDirectory, finalDirectory);
 	return {
@@ -1251,15 +1492,20 @@ function parsePrepareArguments(args) {
 	let output = null;
 	let ocr = "auto";
 	let ocrBackend = process.env.FORGE_OCR_BACKEND || "auto";
-	let glmocrUrl = process.env.FORGE_GLMOCR_URL || process.env.FORGE_OCR_URL || process.env.OCR_URL || DEFAULT_GLMOCR_URL;
-	let glmocrTimeoutMs = Number.parseInt(process.env.FORGE_GLMOCR_TIMEOUT_MS || process.env.FORGE_OCR_TIMEOUT_MS || String(DEFAULT_GLMOCR_TIMEOUT_MS), 10);
+	let glmocrUrl =
+		process.env.FORGE_GLMOCR_URL || process.env.FORGE_OCR_URL || process.env.OCR_URL || DEFAULT_GLMOCR_URL;
+	let glmocrTimeoutMs = Number.parseInt(
+		process.env.FORGE_GLMOCR_TIMEOUT_MS || process.env.FORGE_OCR_TIMEOUT_MS || String(DEFAULT_GLMOCR_TIMEOUT_MS),
+		10,
+	);
 	let glmocrLayoutVisualization = false;
 	let chunkCharacters = DEFAULT_CHUNK_CHARACTERS;
 	for (let index = 1; index < args.length; index += 1) {
 		const argument = args[index];
 		if (argument === "--output") output = resolve(args[++index] ?? fail("--output requires a path"));
 		else if (argument === "--ocr") ocr = args[++index] ?? fail("--ocr requires auto, force, or never");
-		else if (argument === "--ocr-backend") ocrBackend = args[++index] ?? fail("--ocr-backend requires local, glmocr, or auto");
+		else if (argument === "--ocr-backend")
+			ocrBackend = args[++index] ?? fail("--ocr-backend requires local, glmocr, or auto");
 		else if (argument === "--glmocr-url") glmocrUrl = args[++index] ?? fail("--glmocr-url requires a URL");
 		else if (argument === "--glmocr-timeout-ms") glmocrTimeoutMs = Number.parseInt(args[++index] ?? "", 10);
 		else if (argument === "--glmocr-layout-visualization") glmocrLayoutVisualization = true;
@@ -1276,9 +1522,20 @@ function parsePrepareArguments(args) {
 			fail("--glmocr-url must be a valid URL");
 		}
 	}
-	if (!Number.isInteger(glmocrTimeoutMs) || glmocrTimeoutMs < 1) fail("--glmocr-timeout-ms must be a positive integer");
+	if (!Number.isInteger(glmocrTimeoutMs) || glmocrTimeoutMs < 1)
+		fail("--glmocr-timeout-ms must be a positive integer");
 	if (!Number.isInteger(chunkCharacters) || chunkCharacters < 1) fail("--chunk-chars must be a positive integer");
-	return { input, output, ocr, ocrBackend, glmocrUrl, glmocrTimeoutMs, glmocrLayoutVisualization, chunkCharacters, cleanMarkdownFastPath: false };
+	return {
+		input,
+		output,
+		ocr,
+		ocrBackend,
+		glmocrUrl,
+		glmocrTimeoutMs,
+		glmocrLayoutVisualization,
+		chunkCharacters,
+		cleanMarkdownFastPath: false,
+	};
 }
 
 function prepareConfiguration(options) {
@@ -1300,11 +1557,18 @@ function prepareConfiguration(options) {
 
 function pipelineFor(format, folderCategory) {
 	if (format === "eml") return "email-digest";
-	if (format === "json") return folderCategory === "project" ? "transcript-cleanup,project-extraction" : "transcript-cleanup";
+	if (format === "json")
+		return folderCategory === "project" ? "transcript-cleanup,project-extraction" : "transcript-cleanup";
 	if (["mp4", "mov", "mkv", "webm", "avi", "mp3", "wav", "m4a", "flac", "ogg", "opus"].includes(format)) {
-		return folderCategory === "project" ? "transcription,transcript-cleanup,project-extraction" : "transcription,transcript-cleanup";
+		return folderCategory === "project"
+			? "transcription,transcript-cleanup,project-extraction"
+			: "transcription,transcript-cleanup";
 	}
-	return folderCategory === "general" ? "basic-markdown" : folderCategory === "project" ? "project-extraction" : folderCategory;
+	return folderCategory === "general"
+		? "basic-markdown"
+		: folderCategory === "project"
+			? "project-extraction"
+			: folderCategory;
 }
 
 function pendingManifestRow(item) {
@@ -1352,7 +1616,6 @@ function preparedRowFromDirectory(item, runDirectory, folderCategory) {
 	};
 }
 
-
 function representedZoomSidecars(files) {
 	const markdownFiles = files.filter((path) => [".md", ".markdown"].includes(extname(path).toLowerCase()));
 	const jsonFiles = files.filter((path) => extname(path).toLowerCase() === ".json");
@@ -1361,7 +1624,10 @@ function representedZoomSidecars(files) {
 		const markdown = readFileSync(markdownPath, "utf8");
 		for (const jsonPath of jsonFiles) {
 			const escaped = basename(jsonPath).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-			const explicitSource = new RegExp(`(?:source|derived from|zoom export)[^\\n]{0,160}${escaped}|${escaped}[^\\n]{0,160}(?:source|export)`, "iu");
+			const explicitSource = new RegExp(
+				`(?:source|derived from|zoom export)[^\\n]{0,160}${escaped}|${escaped}[^\\n]{0,160}(?:source|export)`,
+				"iu",
+			);
 			if (explicitSource.test(markdown)) represented.set(jsonPath, markdownPath);
 		}
 	}
@@ -1425,8 +1691,16 @@ async function prepareRun(options) {
 		writeManifest(options.output, items.map(pendingManifestRow));
 		const relationships = items
 			.filter((item) => item.representedBy)
-			.map((item) => JSON.stringify({ sourcePath: item.path, relationship: "represented_by_published_source", derivedPath: item.representedBy, sourceSha256: item.sha256 }));
-		if (relationships.length > 0) atomicWriteFile(join(options.output, "source_relationships.jsonl"), `${relationships.join("\n")}\n`);
+			.map((item) =>
+				JSON.stringify({
+					sourcePath: item.path,
+					relationship: "represented_by_published_source",
+					derivedPath: item.representedBy,
+					sourceSha256: item.sha256,
+				}),
+			);
+		if (relationships.length > 0)
+			atomicWriteFile(join(options.output, "source_relationships.jsonl"), `${relationships.join("\n")}\n`);
 	}
 	let state = loadRunState(options.output, RUN_STATE_WORKFLOW);
 	assertCompatibleRun(state, configuration);
@@ -1443,61 +1717,115 @@ async function prepareRun(options) {
 			}
 			if (!retryableItem(item, DEFAULT_MAX_ATTEMPTS)) continue;
 			const attempt = (item.attempts ?? 0) + 1;
-			state = updateRunState(options.output, (draft) => {
-				const current = draft.items.find((candidate) => candidate.path === item.path && candidate.sha256 === item.sha256);
-				current.status = "in_progress";
-				current.attempts = attempt;
-				current.error = null;
-				draft.phase = "preparing";
-				draft.nextAction = "prepare";
-				return draft;
-			}, { type: "item_started", itemId: item.id, phase: "prepare", attempt });
-			const active = state.items.find((candidate) => candidate.path === item.path && candidate.sha256 === item.sha256);
+			state = updateRunState(
+				options.output,
+				(draft) => {
+					const current = draft.items.find(
+						(candidate) => candidate.path === item.path && candidate.sha256 === item.sha256,
+					);
+					current.status = "in_progress";
+					current.attempts = attempt;
+					current.error = null;
+					draft.phase = "preparing";
+					draft.nextAction = "prepare";
+					return draft;
+				},
+				{ type: "item_started", itemId: item.id, phase: "prepare", attempt },
+			);
+			const active = state.items.find(
+				(candidate) => candidate.path === item.path && candidate.sha256 === item.sha256,
+			);
 			let row = rowsByKey.get(manifestRowKey(active)) ?? pendingManifestRow(active);
 			row.status = "in_progress";
 			row.error = "";
 			rowsByKey.set(manifestRowKey(active), row);
-			writeManifest(options.output, [...rowsByKey.values()].sort((left, right) => left.source_path.localeCompare(right.source_path) || left.source_sha256.localeCompare(right.source_sha256)));
+			writeManifest(
+				options.output,
+				[...rowsByKey.values()].sort(
+					(left, right) =>
+						left.source_path.localeCompare(right.source_path) ||
+						left.source_sha256.localeCompare(right.source_sha256),
+				),
+			);
 			try {
 				const finalDirectory = join(options.output, active.outputDirectory);
-				if (existsSync(join(finalDirectory, "metadata.json"))) row = preparedRowFromDirectory(active, options.output, state.folderCategory);
-				else row = (await prepareDocument(active.path, options.output, options, tools, usedDirectories, attempt)).row;
-				if (row.status === "needs_review") row.suggested_pipeline = pipelineFor(row.source_format, state.folderCategory);
+				if (existsSync(join(finalDirectory, "metadata.json")))
+					row = preparedRowFromDirectory(active, options.output, state.folderCategory);
+				else
+					row = (await prepareDocument(active.path, options.output, options, tools, usedDirectories, attempt)).row;
+				if (row.status === "needs_review")
+					row.suggested_pipeline = pipelineFor(row.source_format, state.folderCategory);
 				rowsByKey.set(manifestRowKey(active), row);
 				if (row.output_directory) usedDirectories.add(row.output_directory);
-				state = updateRunState(options.output, (draft) => {
-					const current = draft.items.find((candidate) => candidate.path === item.path && candidate.sha256 === item.sha256);
-					current.status = row.status === "skipped" ? "skipped" : "success";
-					current.resultStatus = row.status;
-					current.outputDirectory = row.output_directory;
-					current.error = row.error || null;
-					current.transient = false;
-					return draft;
-				}, { type: "item_completed", itemId: item.id, phase: "prepare", status: row.status, attempt });
+				state = updateRunState(
+					options.output,
+					(draft) => {
+						const current = draft.items.find(
+							(candidate) => candidate.path === item.path && candidate.sha256 === item.sha256,
+						);
+						current.status = row.status === "skipped" ? "skipped" : "success";
+						current.resultStatus = row.status;
+						current.outputDirectory = row.output_directory;
+						current.error = row.error || null;
+						current.transient = false;
+						return draft;
+					},
+					{ type: "item_completed", itemId: item.id, phase: "prepare", status: row.status, attempt },
+				);
 			} catch (error) {
 				const transient = isTransientFailure(error);
-				row = { ...pendingManifestRow(active), status: "failed", error: error instanceof Error ? error.message : String(error) };
+				row = {
+					...pendingManifestRow(active),
+					status: "failed",
+					error: error instanceof Error ? error.message : String(error),
+				};
 				rowsByKey.set(manifestRowKey(active), row);
-				state = updateRunState(options.output, (draft) => {
-					const current = draft.items.find((candidate) => candidate.path === item.path && candidate.sha256 === item.sha256);
-					current.status = "failed";
-					current.error = row.error;
-					current.transient = transient;
-					return draft;
-				}, { type: "item_failed", itemId: item.id, phase: "prepare", transient, attempt, error: row.error });
+				state = updateRunState(
+					options.output,
+					(draft) => {
+						const current = draft.items.find(
+							(candidate) => candidate.path === item.path && candidate.sha256 === item.sha256,
+						);
+						current.status = "failed";
+						current.error = row.error;
+						current.transient = transient;
+						return draft;
+					},
+					{ type: "item_failed", itemId: item.id, phase: "prepare", transient, attempt, error: row.error },
+				);
 			}
-			writeManifest(options.output, [...rowsByKey.values()].sort((left, right) => left.source_path.localeCompare(right.source_path) || left.source_sha256.localeCompare(right.source_sha256)));
+			writeManifest(
+				options.output,
+				[...rowsByKey.values()].sort(
+					(left, right) =>
+						left.source_path.localeCompare(right.source_path) ||
+						left.source_sha256.localeCompare(right.source_sha256),
+				),
+			);
 		}
 		const remaining = state.items.some((item) => retryableItem(item, DEFAULT_MAX_ATTEMPTS));
-		state = updateRunState(options.output, (draft) => {
-			draft.phase = remaining ? "preparing" : "review";
-			draft.nextAction = remaining ? "prepare" : "review";
-			return draft;
-		}, { type: "phase_updated", phase: remaining ? "preparing" : "review" });
+		state = updateRunState(
+			options.output,
+			(draft) => {
+				draft.phase = remaining ? "preparing" : "review";
+				draft.nextAction = remaining ? "prepare" : "review";
+				return draft;
+			},
+			{ type: "phase_updated", phase: remaining ? "preparing" : "review" },
+		);
 	});
 	const rows = readManifestRows(options.output);
-	const counts = Object.fromEntries(DOCUMENT_STATUSES.map((status) => [status, rows.filter((row) => row.status === status).length]));
-	return { runDirectory: options.output, resumed: state.createdAt !== state.updatedAt, documents: rows.length, counts, phase: state.phase, nextAction: state.nextAction };
+	const counts = Object.fromEntries(
+		DOCUMENT_STATUSES.map((status) => [status, rows.filter((row) => row.status === status).length]),
+	);
+	return {
+		runDirectory: options.output,
+		resumed: state.createdAt !== state.updatedAt,
+		documents: rows.length,
+		counts,
+		phase: state.phase,
+		nextAction: state.nextAction,
+	};
 }
 
 async function prepare(args) {
@@ -1538,7 +1866,8 @@ function parseCsv(value) {
 
 function tokenCounts(value) {
 	const counts = new Map();
-	for (const token of value.toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []) counts.set(token, (counts.get(token) ?? 0) + 1);
+	for (const token of value.toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [])
+		counts.set(token, (counts.get(token) ?? 0) + 1);
 	return counts;
 }
 
@@ -1556,15 +1885,19 @@ function contentCoverage(source, normalized) {
 
 function validateEvidence(value, label, errors) {
 	const keys = value && typeof value === "object" ? Object.keys(value).sort() : [];
-	if (keys.join(",") !== "confidence,locator,origin,value") errors.push(`${label} must contain exactly value, origin, confidence, and locator`);
+	if (keys.join(",") !== "confidence,locator,origin,value")
+		errors.push(`${label} must contain exactly value, origin, confidence, and locator`);
 	if (value?.value === null) {
-		if (value.origin !== null || value.confidence !== null || value.locator !== null) errors.push(`${label} must use all null evidence fields when value is null`);
+		if (value.origin !== null || value.confidence !== null || value.locator !== null)
+			errors.push(`${label} must use all null evidence fields when value is null`);
 		return;
 	}
-	if (typeof value?.value !== "string" || value.value.trim() === "") errors.push(`${label}.value must be a non-empty string or null`);
+	if (typeof value?.value !== "string" || value.value.trim() === "")
+		errors.push(`${label}.value must be a non-empty string or null`);
 	if (!EVIDENCE_ORIGINS.includes(value?.origin)) errors.push(`${label}.origin is invalid`);
 	if (!EVIDENCE_CONFIDENCES.includes(value?.confidence)) errors.push(`${label}.confidence is invalid`);
-	if (typeof value?.locator !== "string" || value.locator.trim() === "") errors.push(`${label}.locator must be a non-empty string`);
+	if (typeof value?.locator !== "string" || value.locator.trim() === "")
+		errors.push(`${label}.locator must be a non-empty string`);
 }
 
 function validateFinalOutput(value, label, errors) {
@@ -1597,13 +1930,20 @@ function validateEmailMetadata(documentDirectory, metadata, label, errors) {
 	for (const [index, attachment] of email.attachments.entries()) {
 		const attachmentPath = resolve(documentDirectory, attachment.path ?? "");
 		const attachmentRoot = resolve(documentDirectory, "derived", "attachments");
-		if (!attachmentPath.startsWith(`${attachmentRoot}${sep}`) || !existsSync(attachmentPath) || !lstatSync(attachmentPath).isFile()) {
+		if (
+			!attachmentPath.startsWith(`${attachmentRoot}${sep}`) ||
+			!existsSync(attachmentPath) ||
+			!lstatSync(attachmentPath).isFile()
+		) {
 			errors.push(`${label}.email attachment ${index + 1} is missing or outside derived/attachments`);
 			continue;
 		}
-		if (sha256(readFileSync(attachmentPath)) !== attachment.sha256) errors.push(`${label}.email attachment ${index + 1} hash does not match metadata`);
-		if (statSync(attachmentPath).size !== attachment.byteSize) errors.push(`${label}.email attachment ${index + 1} size does not match metadata`);
-		if (!document.includes(`(${attachment.link})`)) errors.push(`${label}.document.md does not link email attachment ${index + 1}`);
+		if (sha256(readFileSync(attachmentPath)) !== attachment.sha256)
+			errors.push(`${label}.email attachment ${index + 1} hash does not match metadata`);
+		if (statSync(attachmentPath).size !== attachment.byteSize)
+			errors.push(`${label}.email attachment ${index + 1} size does not match metadata`);
+		if (!document.includes(`(${attachment.link})`))
+			errors.push(`${label}.document.md does not link email attachment ${index + 1}`);
 	}
 }
 
@@ -1635,7 +1975,12 @@ function successfulEmailRows(runDirectory) {
 
 function emailSourceSnapshot(rows) {
 	return rows
-		.map((row) => ({ documentId: row.document_id, sourcePath: row.source_path, sourceSha256: row.source_sha256, outputDirectory: row.output_directory }))
+		.map((row) => ({
+			documentId: row.document_id,
+			sourcePath: row.source_path,
+			sourceSha256: row.source_sha256,
+			outputDirectory: row.output_directory,
+		}))
 		.sort((left, right) => left.documentId.localeCompare(right.documentId));
 }
 
@@ -1652,7 +1997,9 @@ function emailThreadIds(runDirectory, rows) {
 	for (const row of rows) {
 		const headers = headersByDocument.get(row.document_id);
 		const candidates = [...(headers.inReplyToIds ?? []), ...(headers.referencesIds ?? []).reverse()];
-		const parent = candidates.map((identifier) => documentByMessageId.get(identifier)).find((identifier) => identifier && identifier !== row.document_id);
+		const parent = candidates
+			.map((identifier) => documentByMessageId.get(identifier))
+			.find((identifier) => identifier && identifier !== row.document_id);
 		if (parent) parentByDocument.set(row.document_id, parent);
 	}
 	const rootOf = (documentId) => {
@@ -1664,7 +2011,9 @@ function emailThreadIds(runDirectory, rows) {
 		}
 		return current;
 	};
-	return new Map(rows.map((row) => [row.document_id, `thread-${sha256(Buffer.from(rootOf(row.document_id))).slice(0, 16)}`]));
+	return new Map(
+		rows.map((row) => [row.document_id, `thread-${sha256(Buffer.from(rootOf(row.document_id))).slice(0, 16)}`]),
+	);
 }
 
 function emailDigestRequired(runDirectory) {
@@ -1680,10 +2029,7 @@ function evidenceCitation(evidenceIds) {
 }
 
 function digestClaims(digest) {
-	return [
-		...(digest.summary ?? []),
-		...(digest.outline ?? []).flatMap((section) => section.items ?? []),
-	];
+	return [...(digest.summary ?? []), ...(digest.outline ?? []).flatMap((section) => section.items ?? [])];
 }
 
 function renderEmailDigest(digest, evidenceRows) {
@@ -1699,7 +2045,10 @@ function renderEmailDigest(digest, evidenceRows) {
 	lines.push("## Coverage", "");
 	lines.push(`- Included emails: ${digest.coverage.included}`);
 	lines.push(`- Excluded emails: ${digest.coverage.excluded.length}`);
-	for (const excluded of digest.coverage.excluded) lines.push(`- Excluded \`${excluded.sourcePath}\`: ${excluded.status}${excluded.error ? ` — ${excluded.error}` : ""}`);
+	for (const excluded of digest.coverage.excluded)
+		lines.push(
+			`- Excluded \`${excluded.sourcePath}\`: ${excluded.status}${excluded.error ? ` — ${excluded.error}` : ""}`,
+		);
 	lines.push("", "## Source Index", "");
 	const usedIds = [...new Set(digestClaims(digest).flatMap((claim) => claim.evidenceIds))].sort();
 	for (const identifier of usedIds) {
@@ -1718,8 +2067,15 @@ function validateEvidenceRecord(runDirectory, snapshotById, evidence, errors) {
 		errors.push(`email evidence ${evidence.id} names an unknown email ${evidence.emailId}`);
 		return;
 	}
-	if (evidence.sourceSha256 !== snapshot.sourceSha256) errors.push(`email evidence ${evidence.id} source hash is stale`);
-	if (!evidence.id || typeof evidence.statement !== "string" || !evidence.statement.trim() || typeof evidence.quote !== "string" || !evidence.quote.trim()) {
+	if (evidence.sourceSha256 !== snapshot.sourceSha256)
+		errors.push(`email evidence ${evidence.id} source hash is stale`);
+	if (
+		!evidence.id ||
+		typeof evidence.statement !== "string" ||
+		!evidence.statement.trim() ||
+		typeof evidence.quote !== "string" ||
+		!evidence.quote.trim()
+	) {
 		errors.push(`email evidence ${evidence.id ?? "(missing id)"} lacks a statement or exact quote`);
 		return;
 	}
@@ -1736,7 +2092,8 @@ function validateEvidenceRecord(runDirectory, snapshotById, evidence, errors) {
 		return;
 	}
 	const cited = lines.slice(evidence.markdownStartLine - 1, evidence.markdownEndLine).join("\n");
-	if (!cited.includes(evidence.quote)) errors.push(`email evidence ${evidence.id} quote is not present at its cited line range`);
+	if (!cited.includes(evidence.quote))
+		errors.push(`email evidence ${evidence.id} quote is not present at its cited line range`);
 }
 
 function validateEmailDigest(runDirectory, manifestRows, errors) {
@@ -1769,7 +2126,11 @@ function validateEmailDigest(runDirectory, manifestRows, errors) {
 	const snapshot = emailSourceSnapshot(rows);
 	const snapshotHash = hashJson(snapshot);
 	const snapshotById = new Map(snapshot.map((item) => [item.documentId, item]));
-	if (state.schemaVersion !== 1 || state.sourceSnapshotSha256 !== snapshotHash || digest.sourceSnapshotSha256 !== snapshotHash) {
+	if (
+		state.schemaVersion !== 1 ||
+		state.sourceSnapshotSha256 !== snapshotHash ||
+		digest.sourceSnapshotSha256 !== snapshotHash
+	) {
 		errors.push("email digest source snapshot is stale");
 	}
 	if (state.phase !== "complete") errors.push("email digest processing is not complete");
@@ -1780,18 +2141,25 @@ function validateEmailDigest(runDirectory, manifestRows, errors) {
 		validateEvidenceRecord(runDirectory, snapshotById, evidence, errors);
 	}
 	const evidenceHash = sha256(readFileSync(join(runDirectory, EMAIL_EVIDENCE_PATH)));
-	if (digest.evidenceSha256 !== evidenceHash || verification.evidenceSha256 !== evidenceHash) errors.push("email digest evidence hash is stale");
-	if (!Array.isArray(digest.summary) || digest.summary.length === 0) errors.push("email digest summary must contain at least one claim");
-	if (!Array.isArray(digest.outline) || digest.outline.length === 0) errors.push("email digest important-information outline must contain at least one section");
+	if (digest.evidenceSha256 !== evidenceHash || verification.evidenceSha256 !== evidenceHash)
+		errors.push("email digest evidence hash is stale");
+	if (!Array.isArray(digest.summary) || digest.summary.length === 0)
+		errors.push("email digest summary must contain at least one claim");
+	if (!Array.isArray(digest.outline) || digest.outline.length === 0)
+		errors.push("email digest important-information outline must contain at least one section");
 	const claims = digestClaims(digest);
 	const claimIds = new Set();
 	for (const claim of claims) {
-		if (!claim.id || claimIds.has(claim.id)) errors.push(`email digest claim id is missing or duplicated: ${claim.id ?? "(missing)"}`);
+		if (!claim.id || claimIds.has(claim.id))
+			errors.push(`email digest claim id is missing or duplicated: ${claim.id ?? "(missing)"}`);
 		claimIds.add(claim.id);
-		if (typeof claim.text !== "string" || !claim.text.trim()) errors.push(`email digest claim ${claim.id} has no text`);
-		if (!Array.isArray(claim.evidenceIds) || claim.evidenceIds.length === 0) errors.push(`email digest claim ${claim.id} has no provenance`);
+		if (typeof claim.text !== "string" || !claim.text.trim())
+			errors.push(`email digest claim ${claim.id} has no text`);
+		if (!Array.isArray(claim.evidenceIds) || claim.evidenceIds.length === 0)
+			errors.push(`email digest claim ${claim.id} has no provenance`);
 		for (const identifier of claim.evidenceIds ?? []) {
-			if (!evidenceIds.has(identifier)) errors.push(`email digest claim ${claim.id} cites unknown evidence ${identifier}`);
+			if (!evidenceIds.has(identifier))
+				errors.push(`email digest claim ${claim.id} cites unknown evidence ${identifier}`);
 		}
 	}
 	const expectedMarkdown = renderEmailDigest(digest, evidenceRows);
@@ -1810,7 +2178,8 @@ function validateEmailDigest(runDirectory, manifestRows, errors) {
 		errors.push("email digest final verification is missing, incomplete, or stale");
 	}
 	const verifiedClaimIds = [...(verification.claimIds ?? [])].sort();
-	if (verifiedClaimIds.join(",") !== [...claimIds].sort().join(",")) errors.push("email digest verification does not cover every current claim");
+	if (verifiedClaimIds.join(",") !== [...claimIds].sort().join(","))
+		errors.push("email digest verification does not cover every current claim");
 }
 
 const EMAIL_EVIDENCE_SYSTEM = `Extract only important information directly supported by one email segment.
@@ -1856,14 +2225,23 @@ function emailSegments(markdown, maximumCharacters = 60_000) {
 }
 
 function normalizeEvidenceItems(value, _document, segment, row) {
-	if (!value || typeof value !== "object" || !Array.isArray(value.items)) throw new Error('response must contain an "items" array');
+	if (!value || typeof value !== "object" || !Array.isArray(value.items))
+		throw new Error('response must contain an "items" array');
 	const records = [];
 	for (const item of value.items) {
-		if (!item || typeof item !== "object" || typeof item.statement !== "string" || !item.statement.trim() || typeof item.quote !== "string" || !item.quote.trim()) {
+		if (
+			!item ||
+			typeof item !== "object" ||
+			typeof item.statement !== "string" ||
+			!item.statement.trim() ||
+			typeof item.quote !== "string" ||
+			!item.quote.trim()
+		) {
 			throw new Error("every evidence item requires a nonblank statement and exact quote");
 		}
 		const localOffset = segment.markdown.indexOf(item.quote);
-		if (localOffset < 0) throw new Error(`quote was not copied exactly from the email segment: ${item.quote.slice(0, 80)}`);
+		if (localOffset < 0)
+			throw new Error(`quote was not copied exactly from the email segment: ${item.quote.slice(0, 80)}`);
 		const globalLine = segment.startLine + lineNumberAt(segment.markdown, localOffset) - 1;
 		const endLine = globalLine + (item.quote.match(/\n/g) ?? []).length;
 		const identifier = `ev-${sha256(Buffer.from(`${row.document_id}\n${globalLine}\n${item.quote}\n${item.statement}`)).slice(0, 16)}`;
@@ -1885,14 +2263,24 @@ function normalizeEvidenceItems(value, _document, segment, row) {
 async function extractEmailSegment(service, document, segment, row, timeoutMs) {
 	const messages = [
 		{ role: "system", content: EMAIL_EVIDENCE_SYSTEM },
-		{ role: "user", content: JSON.stringify({ emailId: row.document_id, startLine: segment.startLine, markdown: segment.markdown }) },
+		{
+			role: "user",
+			content: JSON.stringify({
+				emailId: row.document_id,
+				startLine: segment.startLine,
+				markdown: segment.markdown,
+			}),
+		},
 	];
 	let outcome;
 	try {
 		outcome = await callJsonWithRetry(service, messages, { timeoutMs, task: "email-evidence" });
 		return normalizeEvidenceItems(outcome.value, document, segment, row);
 	} catch (error) {
-		const repair = [...messages, { role: "user", content: `That response was unusable: ${error.message}. Return corrected JSON only.` }];
+		const repair = [
+			...messages,
+			{ role: "user", content: `That response was unusable: ${error.message}. Return corrected JSON only.` },
+		];
 		outcome = await callJsonWithRetry(service, repair, { timeoutMs, task: "email-evidence-repair" });
 		return normalizeEvidenceItems(outcome.value, document, segment, row);
 	}
@@ -1903,7 +2291,13 @@ function normalizeDigestCandidate(value, allowedEvidenceIds) {
 		throw new Error("digest response must contain summary and outline arrays");
 	}
 	const normalizeClaim = (claim) => {
-		if (!claim || typeof claim.text !== "string" || !claim.text.trim() || !Array.isArray(claim.evidenceIds) || claim.evidenceIds.length === 0) {
+		if (
+			!claim ||
+			typeof claim.text !== "string" ||
+			!claim.text.trim() ||
+			!Array.isArray(claim.evidenceIds) ||
+			claim.evidenceIds.length === 0
+		) {
 			throw new Error("every digest claim requires text and evidenceIds");
 		}
 		const evidenceIds = [...new Set(claim.evidenceIds.map(String))];
@@ -1914,7 +2308,12 @@ function normalizeDigestCandidate(value, allowedEvidenceIds) {
 	return {
 		summary: value.summary.map(normalizeClaim),
 		outline: value.outline.map((section) => {
-			if (!section || typeof section.heading !== "string" || !section.heading.trim() || !Array.isArray(section.items)) {
+			if (
+				!section ||
+				typeof section.heading !== "string" ||
+				!section.heading.trim() ||
+				!Array.isArray(section.items)
+			) {
 				throw new Error("every outline section requires a heading and items");
 			}
 			return { heading: section.heading.trim(), items: section.items.map(normalizeClaim) };
@@ -1931,7 +2330,10 @@ async function callDigestAuthor(service, payload, allowedEvidenceIds, timeoutMs,
 		const { value } = await callJsonWithRetry(service, messages, { timeoutMs, task });
 		return normalizeDigestCandidate(value, allowedEvidenceIds);
 	} catch (error) {
-		const repair = [...messages, { role: "user", content: `That response was unusable: ${error.message}. Return corrected JSON only.` }];
+		const repair = [
+			...messages,
+			{ role: "user", content: `That response was unusable: ${error.message}. Return corrected JSON only.` },
+		];
 		const { value } = await callJsonWithRetry(service, repair, { timeoutMs, task: `${task}-repair` });
 		return normalizeDigestCandidate(value, allowedEvidenceIds);
 	}
@@ -1960,13 +2362,25 @@ async function authorEmailDigest(chat, think, evidenceRows, timeoutMs) {
 		return callDigestAuthor(think, { evidence: packets[0] }, allowed, timeoutMs, "email-digest");
 	}
 	for (const packet of packets) {
-		const partial = await callDigestAuthor(chat, { evidence: packet, stage: "bounded reduction" }, allowed, timeoutMs, "email-digest-reduction");
+		const partial = await callDigestAuthor(
+			chat,
+			{ evidence: packet, stage: "bounded reduction" },
+			allowed,
+			timeoutMs,
+			"email-digest-reduction",
+		);
 		candidates.push(...compactDigestClaims(partial));
 	}
 	while (JSON.stringify(candidates).length > EMAIL_SYNTHESIS_PACKET_CHARACTERS) {
 		const reduced = [];
 		for (const packet of buildPackets(candidates, 40, EMAIL_SYNTHESIS_PACKET_CHARACTERS)) {
-			const partial = await callDigestAuthor(chat, { candidateClaims: packet, stage: "recursive bounded reduction" }, allowed, timeoutMs, "email-digest-reduction");
+			const partial = await callDigestAuthor(
+				chat,
+				{ candidateClaims: packet, stage: "recursive bounded reduction" },
+				allowed,
+				timeoutMs,
+				"email-digest-reduction",
+			);
 			reduced.push(...compactDigestClaims(partial));
 		}
 		if (reduced.length >= candidates.length && JSON.stringify(reduced).length >= JSON.stringify(candidates).length) {
@@ -1974,12 +2388,21 @@ async function authorEmailDigest(chat, think, evidenceRows, timeoutMs) {
 		}
 		candidates = reduced;
 	}
-	return callDigestAuthor(think, { candidateClaims: candidates, stage: "final synthesis" }, allowed, timeoutMs, "email-digest");
+	return callDigestAuthor(
+		think,
+		{ candidateClaims: candidates, stage: "final synthesis" },
+		allowed,
+		timeoutMs,
+		"email-digest",
+	);
 }
 
 function assignDigestClaimIds(candidate) {
 	return {
-		summary: candidate.summary.map((claim, index) => ({ id: `summary-${String(index + 1).padStart(3, "0")}`, ...claim })),
+		summary: candidate.summary.map((claim, index) => ({
+			id: `summary-${String(index + 1).padStart(3, "0")}`,
+			...claim,
+		})),
 		outline: candidate.outline.map((section, sectionIndex) => ({
 			heading: section.heading,
 			items: section.items.map((claim, itemIndex) => ({
@@ -2008,11 +2431,15 @@ async function correctDigestClaim(think, claim, evidenceById, reason, timeoutMs)
 }
 
 function replaceOrRemoveDigestClaim(digest, identifier, replacement) {
-	digest.summary = digest.summary.flatMap((claim) => (claim.id !== identifier ? [claim] : replacement?.omit ? [] : [replacement]));
+	digest.summary = digest.summary.flatMap((claim) =>
+		claim.id !== identifier ? [claim] : replacement?.omit ? [] : [replacement],
+	);
 	digest.outline = digest.outline
 		.map((section) => ({
 			...section,
-			items: section.items.flatMap((claim) => (claim.id !== identifier ? [claim] : replacement?.omit ? [] : [replacement])),
+			items: section.items.flatMap((claim) =>
+				claim.id !== identifier ? [claim] : replacement?.omit ? [] : [replacement],
+			),
 		}))
 		.filter((section) => section.items.length > 0);
 }
@@ -2033,15 +2460,21 @@ function parseProcessEmailsArguments(args) {
 	let timeoutMs = 600_000;
 	const resolveOptions = {};
 	for (let position = 1; position < args.length; position += 1) {
-		if (args[position] === "--base-url") resolveOptions.chatUrl = args[++position] ?? fail("--base-url requires a url");
-		else if (args[position] === "--model") resolveOptions.chatModel = args[++position] ?? fail("--model requires a name");
-		else if (args[position] === "--think-url") resolveOptions.thinkUrl = args[++position] ?? fail("--think-url requires a url");
-		else if (args[position] === "--think-model") resolveOptions.thinkModel = args[++position] ?? fail("--think-model requires a name");
-		else if (args[position] === "--verify-packet-size") verifyPacketSize = Number.parseInt(args[++position] ?? "", 10);
+		if (args[position] === "--base-url")
+			resolveOptions.chatUrl = args[++position] ?? fail("--base-url requires a url");
+		else if (args[position] === "--model")
+			resolveOptions.chatModel = args[++position] ?? fail("--model requires a name");
+		else if (args[position] === "--think-url")
+			resolveOptions.thinkUrl = args[++position] ?? fail("--think-url requires a url");
+		else if (args[position] === "--think-model")
+			resolveOptions.thinkModel = args[++position] ?? fail("--think-model requires a name");
+		else if (args[position] === "--verify-packet-size")
+			verifyPacketSize = Number.parseInt(args[++position] ?? "", 10);
 		else if (args[position] === "--request-timeout") timeoutMs = Number.parseFloat(args[++position] ?? "") * 1000;
 		else fail(`unknown process-emails option: ${args[position]}`);
 	}
-	if (!Number.isInteger(verifyPacketSize) || verifyPacketSize < 1) fail("--verify-packet-size must be a positive integer");
+	if (!Number.isInteger(verifyPacketSize) || verifyPacketSize < 1)
+		fail("--verify-packet-size must be a positive integer");
 	if (!Number.isFinite(timeoutMs) || timeoutMs < 1) fail("--request-timeout must be positive");
 	return { runDirectory, verifyPacketSize, timeoutMs, resolveOptions };
 }
@@ -2064,8 +2497,15 @@ async function commandProcessEmails(args) {
 	const statePath = join(options.runDirectory, EMAIL_DIGEST_STATE_PATH);
 	let state = existsSync(statePath)
 		? JSON.parse(readFileSync(statePath, "utf8"))
-		: { schemaVersion: 1, sourceSnapshot: snapshot, sourceSnapshotSha256: snapshotHash, completedEmailIds: [], phase: "extracting" };
-	if (state.sourceSnapshotSha256 !== snapshotHash) fail("existing email digest state uses a different source snapshot; run refresh and start a new digest");
+		: {
+				schemaVersion: 1,
+				sourceSnapshot: snapshot,
+				sourceSnapshotSha256: snapshotHash,
+				completedEmailIds: [],
+				phase: "extracting",
+			};
+	if (state.sourceSnapshotSha256 !== snapshotHash)
+		fail("existing email digest state uses a different source snapshot; run refresh and start a new digest");
 	if (state.phase === "complete") {
 		const validation = validateRun(options.runDirectory, { emit: false, exitOnError: false });
 		if (!validation.valid) fail(`completed email digest no longer validates: ${validation.errors.join("; ")}`);
@@ -2108,20 +2548,35 @@ async function commandProcessEmails(args) {
 		evidenceRows = evidenceRows.filter((item) => item.emailId !== row.document_id);
 		const unique = new Map(extracted.map((item) => [item.id, item]));
 		evidenceRows.push(...unique.values());
-		evidenceRows.sort((left, right) => left.emailId.localeCompare(right.emailId) || left.markdownStartLine - right.markdownStartLine || left.id.localeCompare(right.id));
+		evidenceRows.sort(
+			(left, right) =>
+				left.emailId.localeCompare(right.emailId) ||
+				left.markdownStartLine - right.markdownStartLine ||
+				left.id.localeCompare(right.id),
+		);
 		writeJsonLines(evidencePath, evidenceRows);
 		completed.add(row.document_id);
 		state = { ...state, completedEmailIds: [...completed].sort(), phase: "extracting" };
 		writeJsonReplacing(statePath, state);
-		appendRunEvent(options.runDirectory, { type: "email_evidence_completed", documentId: row.document_id, items: unique.size });
+		appendRunEvent(options.runDirectory, {
+			type: "email_evidence_completed",
+			documentId: row.document_id,
+			items: unique.size,
+		});
 	}
 	if (!evidenceRows.length) fail("email evidence extraction produced no supported important information");
 	const evidenceHash = sha256(readFileSync(evidencePath));
-	if (state.evidenceSha256 && state.evidenceSha256 !== evidenceHash) fail("email evidence changed after verification began; start a new digest run");
+	if (state.evidenceSha256 && state.evidenceSha256 !== evidenceHash)
+		fail("email evidence changed after verification began; start a new digest run");
 	state = { ...state, evidenceSha256: evidenceHash, phase: "verifying-evidence" };
 	writeJsonReplacing(statePath, state);
 
-	const evidenceItems = evidenceRows.map((item) => ({ id: item.id, statement: item.statement, quote: item.quote, kind: item.kind }));
+	const evidenceItems = evidenceRows.map((item) => ({
+		id: item.id,
+		statement: item.statement,
+		quote: item.quote,
+		kind: item.kind,
+	}));
 	const evidenceVerdicts = await verifyPackets(think, EMAIL_EVIDENCE_VERIFY_SYSTEM, evidenceItems, {
 		journalPath: join(options.runDirectory, EMAIL_EVIDENCE_VERIFICATION_PATH),
 		packetSize: options.verifyPacketSize,
@@ -2140,19 +2595,17 @@ async function commandProcessEmails(args) {
 			const snapshotItem = snapshot.find((candidate) => candidate.documentId === original.emailId);
 			const markdown = readFileSync(join(options.runDirectory, snapshotItem.outputDirectory, "document.md"), "utf8");
 			const attachmentsHeading = markdown.indexOf("\n## Attachments\n");
-			const segment = { startLine: 1, markdown: attachmentsHeading >= 0 ? markdown.slice(0, attachmentsHeading) : markdown };
+			const segment = {
+				startLine: 1,
+				markdown: attachmentsHeading >= 0 ? markdown.slice(0, attachmentsHeading) : markdown,
+			};
 			const row = rows.find((candidate) => candidate.document_id === original.emailId);
 			const workerRow = { ...row, threadId: threadIds.get(row.document_id) };
 			const metadata = loadDocumentMetadata(join(options.runDirectory, snapshotItem.outputDirectory));
-			const corrected = await extractEmailSegment(
-				think,
-				metadata,
-				segment,
-				workerRow,
-				options.timeoutMs,
-			);
+			const corrected = await extractEmailSegment(think, metadata, segment, workerRow, options.timeoutMs);
 			const replacement = corrected.find((candidate) => candidate.quote === original.quote) ?? corrected[0];
-			if (!replacement) throw new Error(`review rejected evidence and re-extraction produced no replacement: ${reason}`);
+			if (!replacement)
+				throw new Error(`review rejected evidence and re-extraction produced no replacement: ${reason}`);
 			return { ...replacement, id: original.id };
 		},
 		{ journalPath: join(options.runDirectory, EMAIL_EVIDENCE_VERIFICATION_PATH), progress },
@@ -2177,7 +2630,8 @@ async function commandProcessEmails(args) {
 		...candidate,
 		coverage: emailCoverage(allRows),
 	};
-	if (!digest.summary.length || !digest.outline.length) fail("email digest must contain both a summary and an important-information outline");
+	if (!digest.summary.length || !digest.outline.length)
+		fail("email digest must contain both a summary and an important-information outline");
 	const digestEvidenceById = new Map(evidenceRows.map((item) => [item.id, item]));
 	const claimItems = digestClaims(digest).map((claim) => ({
 		id: claim.id,
@@ -2197,7 +2651,8 @@ async function commandProcessEmails(args) {
 		.map((item) => [item, claimVerdicts[item.id].reason]);
 	const claimEscalations = await escalate(
 		flaggedClaims,
-		async (item, reason) => correctDigestClaim(think, claimById.get(item.id), digestEvidenceById, reason, options.timeoutMs),
+		async (item, reason) =>
+			correctDigestClaim(think, claimById.get(item.id), digestEvidenceById, reason, options.timeoutMs),
 		{ journalPath: join(options.runDirectory, EMAIL_DIGEST_VERDICTS_PATH), progress },
 	);
 	for (const [identifier, outcome] of Object.entries(claimEscalations)) {
@@ -2217,18 +2672,34 @@ async function commandProcessEmails(args) {
 		sourceSnapshotSha256: snapshotHash,
 		evidenceSha256: verifiedEvidenceHash,
 		digestSha256: sha256(Buffer.from(markdown)),
-		claimIds: digestClaims(digest).map((claim) => claim.id).sort(),
+		claimIds: digestClaims(digest)
+			.map((claim) => claim.id)
+			.sort(),
 		evidence: evidenceSummary,
 		claims: claimSummary,
 		needsReview: 0,
 	});
-	state = { ...state, evidenceSha256: verifiedEvidenceHash, digestSha256: sha256(Buffer.from(markdown)), phase: "complete" };
+	state = {
+		...state,
+		evidenceSha256: verifiedEvidenceHash,
+		digestSha256: sha256(Buffer.from(markdown)),
+		phase: "complete",
+	};
 	writeJsonReplacing(statePath, state);
-	updateRunState(options.runDirectory, (draft) => {
-		draft.phase = "validation";
-		draft.nextAction = "validate";
-		return draft;
-	}, { type: "email_digest_completed", emails: rows.length, evidence: evidenceRows.length, claims: digestClaims(digest).length });
+	updateRunState(
+		options.runDirectory,
+		(draft) => {
+			draft.phase = "validation";
+			draft.nextAction = "validate";
+			return draft;
+		},
+		{
+			type: "email_digest_completed",
+			emails: rows.length,
+			evidence: evidenceRows.length,
+			claims: digestClaims(digest).length,
+		},
+	);
 	process.stdout.write(
 		`${JSON.stringify(
 			{
@@ -2253,9 +2724,11 @@ function validateRun(runDirectory, { emit = true, exitOnError = true, fixHints =
 	if (!existsSync(manifestPath)) fail(`manifest.csv does not exist in ${runDirectory}`);
 	const parsed = parseCsv(readFileSync(manifestPath, "utf8"));
 	const headers = parsed.shift() ?? [];
-	if (headers.join(",") !== MANIFEST_COLUMNS.join(",")) errors.push("manifest.csv columns do not match the required contract");
+	if (headers.join(",") !== MANIFEST_COLUMNS.join(","))
+		errors.push("manifest.csv columns do not match the required contract");
 	for (const values of parsed.filter((row) => row.some((field) => field !== ""))) {
-		if (values.length !== MANIFEST_COLUMNS.length) errors.push(`manifest row has ${values.length} columns instead of ${MANIFEST_COLUMNS.length}`);
+		if (values.length !== MANIFEST_COLUMNS.length)
+			errors.push(`manifest row has ${values.length} columns instead of ${MANIFEST_COLUMNS.length}`);
 		const row = Object.fromEntries(MANIFEST_COLUMNS.map((column, index) => [column, values[index] ?? ""]));
 		if (!DOCUMENT_STATUSES.includes(row.status)) {
 			errors.push(`invalid manifest status for ${row.source_path}: ${row.status}`);
@@ -2267,97 +2740,155 @@ function validateRun(runDirectory, { emit = true, exitOnError = true, fixHints =
 			errors.push(`output directory escapes the run directory: ${row.output_directory}`);
 			continue;
 		}
-		for (const required of ["document.md", "metadata.json", "extraction_report.md", "source_map.json", "working/extracted.md"]) {
-			if (!existsSync(join(documentDirectory, required))) errors.push(`${row.output_directory}/${required} is missing`);
+		for (const required of [
+			"document.md",
+			"metadata.json",
+			"extraction_report.md",
+			"source_map.json",
+			"working/extracted.md",
+		]) {
+			if (!existsSync(join(documentDirectory, required)))
+				errors.push(`${row.output_directory}/${required} is missing`);
 		}
-		if (!existsSync(join(documentDirectory, "metadata.json")) || !existsSync(join(documentDirectory, "document.md"))) continue;
+		if (!existsSync(join(documentDirectory, "metadata.json")) || !existsSync(join(documentDirectory, "document.md")))
+			continue;
 		let metadata;
 		let sourceMap;
 		try {
 			metadata = JSON.parse(readFileSync(join(documentDirectory, "metadata.json"), "utf8"));
 			sourceMap = JSON.parse(readFileSync(join(documentDirectory, "source_map.json"), "utf8"));
 		} catch (error) {
-			errors.push(`${row.output_directory} contains invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+			errors.push(
+				`${row.output_directory} contains invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+			);
 			continue;
 		}
-		if (metadata.schemaVersion !== 1) errors.push(`${row.output_directory}/metadata.json has an unsupported schemaVersion`);
-		if (metadata.documentId !== row.document_id) errors.push(`${row.output_directory} documentId does not match manifest.csv`);
-		if (metadata.source?.sha256 !== row.source_sha256) errors.push(`${row.output_directory} source hash does not match manifest.csv`);
-		if (metadata.extraction?.status !== row.status) errors.push(`${row.output_directory} extraction status does not match manifest.csv`);
-		for (const field of ["title", "author", "date", "source"]) validateEvidence(metadata.fields?.[field], `${row.output_directory}.fields.${field}`, errors);
+		if (metadata.schemaVersion !== 1)
+			errors.push(`${row.output_directory}/metadata.json has an unsupported schemaVersion`);
+		if (metadata.documentId !== row.document_id)
+			errors.push(`${row.output_directory} documentId does not match manifest.csv`);
+		if (metadata.source?.sha256 !== row.source_sha256)
+			errors.push(`${row.output_directory} source hash does not match manifest.csv`);
+		if (metadata.extraction?.status !== row.status)
+			errors.push(`${row.output_directory} extraction status does not match manifest.csv`);
+		for (const field of ["title", "author", "date", "source"])
+			validateEvidence(metadata.fields?.[field], `${row.output_directory}.fields.${field}`, errors);
 		validateFinalOutput(metadata.finalOutput, `${row.output_directory}.finalOutput`, errors);
 		if (row.source_format === "eml") validateEmailMetadata(documentDirectory, metadata, row.output_directory, errors);
-		if (metadata.review?.completed !== true) errors.push(`${row.output_directory} model review is not marked complete`);
-		if (sourceMap.schemaVersion !== 1 || sourceMap.documentId !== row.document_id || sourceMap.markdownFile !== "document.md" || !Array.isArray(sourceMap.entries)) {
+		if (metadata.review?.completed !== true)
+			errors.push(`${row.output_directory} model review is not marked complete`);
+		if (
+			sourceMap.schemaVersion !== 1 ||
+			sourceMap.documentId !== row.document_id ||
+			sourceMap.markdownFile !== "document.md" ||
+			!Array.isArray(sourceMap.entries)
+		) {
 			errors.push(`${row.output_directory}/source_map.json is invalid`);
 		}
 		const document = readFileSync(join(documentDirectory, "document.md"), "utf8");
 		const extractedPath = join(documentDirectory, "working/extracted.md");
 		if (existsSync(extractedPath) && metadata.extraction?.vision?.used !== true) {
 			const coverage = contentCoverage(readFileSync(extractedPath, "utf8"), document);
-			if (coverage < 0.98) errors.push(`${row.output_directory} preserves only ${(coverage * 100).toFixed(2)}% of extracted word tokens`);
-			else if (coverage < 0.995) warnings.push(`${row.output_directory} content coverage is ${(coverage * 100).toFixed(2)}%`);
+			if (coverage < 0.98)
+				errors.push(
+					`${row.output_directory} preserves only ${(coverage * 100).toFixed(2)}% of extracted word tokens`,
+				);
+			else if (coverage < 0.995)
+				warnings.push(`${row.output_directory} content coverage is ${(coverage * 100).toFixed(2)}%`);
 		}
 		const lineCount = document.split("\n").length;
 		for (const [index, entry] of (sourceMap.entries ?? []).entries()) {
 			if (entry.markdownStartLine === null && entry.markdownEndLine === null) continue;
-			if (!Number.isInteger(entry.markdownStartLine) || !Number.isInteger(entry.markdownEndLine) || entry.markdownStartLine < 1 || entry.markdownEndLine < entry.markdownStartLine || entry.markdownEndLine > lineCount) {
+			if (
+				!Number.isInteger(entry.markdownStartLine) ||
+				!Number.isInteger(entry.markdownEndLine) ||
+				entry.markdownStartLine < 1 ||
+				entry.markdownEndLine < entry.markdownStartLine ||
+				entry.markdownEndLine > lineCount
+			) {
 				errors.push(`${row.output_directory}/source_map.json entry ${index + 1} has invalid line ranges`);
 			}
-			if (!entry.sourceLocator || typeof entry.sourceLocator !== "object") errors.push(`${row.output_directory}/source_map.json entry ${index + 1} lacks a source locator`);
-			if (!SOURCE_MAP_METHODS.includes(entry.method)) errors.push(`${row.output_directory}/source_map.json entry ${index + 1} has an invalid method`);
-			if (!EVIDENCE_CONFIDENCES.includes(entry.confidence)) errors.push(`${row.output_directory}/source_map.json entry ${index + 1} has an invalid confidence`);
+			if (!entry.sourceLocator || typeof entry.sourceLocator !== "object")
+				errors.push(`${row.output_directory}/source_map.json entry ${index + 1} lacks a source locator`);
+			if (!SOURCE_MAP_METHODS.includes(entry.method))
+				errors.push(`${row.output_directory}/source_map.json entry ${index + 1} has an invalid method`);
+			if (!EVIDENCE_CONFIDENCES.includes(entry.confidence))
+				errors.push(`${row.output_directory}/source_map.json entry ${index + 1} has an invalid confidence`);
 		}
 		const chunkMetadata = metadata.extraction?.chunks;
-		if (!Array.isArray(chunkMetadata) || chunkMetadata.length < 1) errors.push(`${row.output_directory} has no extraction chunk metadata`);
+		if (!Array.isArray(chunkMetadata) || chunkMetadata.length < 1)
+			errors.push(`${row.output_directory} has no extraction chunk metadata`);
 		if (Array.isArray(chunkMetadata) && existsSync(extractedPath)) {
 			let deterministicChunks = "";
 			for (const [index, chunk] of chunkMetadata.entries()) {
 				const chunkPath = resolve(documentDirectory, chunk.path ?? "");
-				if (!chunkPath.startsWith(`${resolve(documentDirectory, "working", "chunks")}${sep}`) || !existsSync(chunkPath)) {
-					errors.push(`${row.output_directory} extraction chunk ${index + 1} is missing or outside working/chunks`);
+				if (
+					!chunkPath.startsWith(`${resolve(documentDirectory, "working", "chunks")}${sep}`) ||
+					!existsSync(chunkPath)
+				) {
+					errors.push(
+						`${row.output_directory} extraction chunk ${index + 1} is missing or outside working/chunks`,
+					);
 					continue;
 				}
 				const chunkText = readFileSync(chunkPath, "utf8");
-				if (unicodeLength(chunkText) !== chunk.characters) errors.push(`${row.output_directory} extraction chunk ${index + 1} character count is incorrect`);
+				if (unicodeLength(chunkText) !== chunk.characters)
+					errors.push(`${row.output_directory} extraction chunk ${index + 1} character count is incorrect`);
 				deterministicChunks += chunkText;
 			}
-			if (deterministicChunks !== readFileSync(extractedPath, "utf8")) errors.push(`${row.output_directory} deterministic chunks do not reconstruct working/extracted.md`);
+			if (deterministicChunks !== readFileSync(extractedPath, "utf8"))
+				errors.push(`${row.output_directory} deterministic chunks do not reconstruct working/extracted.md`);
 		}
 		if (Array.isArray(chunkMetadata) && chunkMetadata.length > 1) {
 			const reviewedDirectory = join(documentDirectory, "working", "reviewed-chunks");
 			if (!existsSync(reviewedDirectory)) errors.push(`${row.output_directory}/working/reviewed-chunks is missing`);
 			else {
-				const reviewedFiles = readdirSync(reviewedDirectory).filter((name) => /^chunk-\d{4}\.md$/.test(name)).sort();
-				if (reviewedFiles.length !== chunkMetadata.length) errors.push(`${row.output_directory} reviewed chunk count does not match extraction metadata`);
+				const reviewedFiles = readdirSync(reviewedDirectory)
+					.filter((name) => /^chunk-\d{4}\.md$/.test(name))
+					.sort();
+				if (reviewedFiles.length !== chunkMetadata.length)
+					errors.push(`${row.output_directory} reviewed chunk count does not match extraction metadata`);
 				else {
-					const assembled = reviewedFiles.map((name) => readFileSync(join(reviewedDirectory, name), "utf8")).join("");
-					if (assembled !== document) errors.push(`${row.output_directory} document.md is not the exact concatenation of reviewed chunks`);
+					const assembled = reviewedFiles
+						.map((name) => readFileSync(join(reviewedDirectory, name), "utf8"))
+						.join("");
+					if (assembled !== document)
+						errors.push(`${row.output_directory} document.md is not the exact concatenation of reviewed chunks`);
 				}
 			}
 		}
 		if (metadata.extraction?.ocr?.used) {
 			if (metadata.extraction.ocr.backend === "glmocr") {
 				const responsePath = join(documentDirectory, metadata.extraction.ocr.derivedPath ?? "");
-				if (!responsePath.startsWith(`${resolve(documentDirectory, "derived")}${sep}`) || !existsSync(responsePath)) errors.push(`${row.output_directory} GLM-OCR response artifact is missing`);
-				else if (sha256(readFileSync(responsePath)) !== metadata.extraction.ocr.derivedSha256) errors.push(`${row.output_directory} GLM-OCR response artifact hash does not match metadata`);
+				if (!responsePath.startsWith(`${resolve(documentDirectory, "derived")}${sep}`) || !existsSync(responsePath))
+					errors.push(`${row.output_directory} GLM-OCR response artifact is missing`);
+				else if (sha256(readFileSync(responsePath)) !== metadata.extraction.ocr.derivedSha256)
+					errors.push(`${row.output_directory} GLM-OCR response artifact hash does not match metadata`);
 				if (metadata.extraction.ocr.layoutPath) {
 					const layoutPath = join(documentDirectory, metadata.extraction.ocr.layoutPath);
-					if (!layoutPath.startsWith(`${resolve(documentDirectory, "derived")}${sep}`) || !existsSync(layoutPath)) errors.push(`${row.output_directory} GLM-OCR layout artifact is missing`);
-					else if (sha256(readFileSync(layoutPath)) !== metadata.extraction.ocr.layoutSha256) errors.push(`${row.output_directory} GLM-OCR layout artifact hash does not match metadata`);
+					if (!layoutPath.startsWith(`${resolve(documentDirectory, "derived")}${sep}`) || !existsSync(layoutPath))
+						errors.push(`${row.output_directory} GLM-OCR layout artifact is missing`);
+					else if (sha256(readFileSync(layoutPath)) !== metadata.extraction.ocr.layoutSha256)
+						errors.push(`${row.output_directory} GLM-OCR layout artifact hash does not match metadata`);
 				}
 			} else {
 				const ocrPath = join(documentDirectory, "derived", "ocr.pdf");
 				if (!existsSync(ocrPath)) errors.push(`${row.output_directory}/derived/ocr.pdf is missing`);
-				else if (sha256(readFileSync(ocrPath)) !== metadata.extraction.ocr.derivedSha256) errors.push(`${row.output_directory}/derived/ocr.pdf hash does not match metadata`);
+				else if (sha256(readFileSync(ocrPath)) !== metadata.extraction.ocr.derivedSha256)
+					errors.push(`${row.output_directory}/derived/ocr.pdf hash does not match metadata`);
 			}
 		}
 		const vision = metadata.extraction?.vision;
 		if (vision?.required) {
 			for (const rendered of vision.renderedPages ?? []) {
 				const imagePath = resolve(documentDirectory, rendered.path ?? "");
-				if (!imagePath.startsWith(`${resolve(documentDirectory, "derived", "vision-pages")}${sep}`) || !existsSync(imagePath)) {
-					errors.push(`${row.output_directory} vision image for page ${rendered.page} is missing or outside derived/vision-pages`);
+				if (
+					!imagePath.startsWith(`${resolve(documentDirectory, "derived", "vision-pages")}${sep}`) ||
+					!existsSync(imagePath)
+				) {
+					errors.push(
+						`${row.output_directory} vision image for page ${rendered.page} is missing or outside derived/vision-pages`,
+					);
 				} else if (sha256(readFileSync(imagePath)) !== rendered.sha256) {
 					errors.push(`${row.output_directory} vision image for page ${rendered.page} has changed`);
 				}
@@ -2369,35 +2900,65 @@ function validateRun(runDirectory, { emit = true, exitOnError = true, fixHints =
 					errors.push(`${row.output_directory} vision fallback does not cover every candidate page`);
 				}
 				for (const page of completedPages) {
-					const transcriptPath = join(documentDirectory, "working", "vision-pages", `page-${String(page).padStart(4, "0")}.md`);
+					const transcriptPath = join(
+						documentDirectory,
+						"working",
+						"vision-pages",
+						`page-${String(page).padStart(4, "0")}.md`,
+					);
 					if (!existsSync(transcriptPath) || readFileSync(transcriptPath, "utf8").trim() === "") {
 						errors.push(`${row.output_directory} vision transcript for page ${page} is missing or empty`);
 					} else if (!document.includes(readFileSync(transcriptPath, "utf8").trim())) {
-						errors.push(`${row.output_directory} document.md does not contain the vision transcript for page ${page}`);
+						errors.push(
+							`${row.output_directory} document.md does not contain the vision transcript for page ${page}`,
+						);
 					}
-					if (!(sourceMap.entries ?? []).some((entry) => entry.method === "vision-transcription" && entry.sourceLocator?.page === page)) {
+					if (
+						!(sourceMap.entries ?? []).some(
+							(entry) => entry.method === "vision-transcription" && entry.sourceLocator?.page === page,
+						)
+					) {
 						errors.push(`${row.output_directory}/source_map.json lacks a vision mapping for page ${page}`);
 					}
 				}
 			} else if (metadata.review?.completed && !vision.unavailableReason) {
-				errors.push(`${row.output_directory} completed review without using required vision fallback or recording why it was unavailable`);
+				errors.push(
+					`${row.output_directory} completed review without using required vision fallback or recording why it was unavailable`,
+				);
 			}
 		}
-		if (String(metadata.extraction?.ocr?.used ?? false) !== row.ocr_used) errors.push(`${row.output_directory} OCR state does not match manifest.csv`);
-		if (String(metadata.extraction?.pageCount ?? "") !== row.page_count) errors.push(`${row.output_directory} page count does not match manifest.csv`);
-		if ((metadata.extraction?.method ?? "") !== row.extraction_method) errors.push(`${row.output_directory} extraction method does not match manifest.csv`);
-		if (String(metadata.extraction?.warnings?.length ?? 0) !== row.warning_count) errors.push(`${row.output_directory} warning count does not match manifest.csv`);
+		if (String(metadata.extraction?.ocr?.used ?? false) !== row.ocr_used)
+			errors.push(`${row.output_directory} OCR state does not match manifest.csv`);
+		if (String(metadata.extraction?.pageCount ?? "") !== row.page_count)
+			errors.push(`${row.output_directory} page count does not match manifest.csv`);
+		if ((metadata.extraction?.method ?? "") !== row.extraction_method)
+			errors.push(`${row.output_directory} extraction method does not match manifest.csv`);
+		if (String(metadata.extraction?.warnings?.length ?? 0) !== row.warning_count)
+			errors.push(`${row.output_directory} warning count does not match manifest.csv`);
 		const reportPath = join(documentDirectory, "extraction_report.md");
 		if (existsSync(reportPath)) {
 			const report = readFileSync(reportPath, "utf8");
-			for (const heading of ["## Status", "## Source", "## Methods and Tools", "## Coverage and OCR", "## Structure and Encoding", "## Warnings", "## Review"]) {
-				if (!report.includes(heading)) errors.push(`${row.output_directory}/extraction_report.md is missing ${heading}`);
+			for (const heading of [
+				"## Status",
+				"## Source",
+				"## Methods and Tools",
+				"## Coverage and OCR",
+				"## Structure and Encoding",
+				"## Warnings",
+				"## Review",
+			]) {
+				if (!report.includes(heading))
+					errors.push(`${row.output_directory}/extraction_report.md is missing ${heading}`);
 			}
-			if (metadata.review?.completed && report.includes("model normalization pending")) errors.push(`${row.output_directory}/extraction_report.md still reports pending model normalization`);
+			if (metadata.review?.completed && report.includes("model normalization pending"))
+				errors.push(`${row.output_directory}/extraction_report.md still reports pending model normalization`);
 		}
-		if ((metadata.fields.title.value ?? "") !== row.title) errors.push(`${row.output_directory} title does not match manifest.csv`);
-		if ((metadata.fields.author.value ?? "") !== row.author) errors.push(`${row.output_directory} author does not match manifest.csv`);
-		if ((metadata.fields.date.value ?? "") !== row.document_date) errors.push(`${row.output_directory} date does not match manifest.csv`);
+		if ((metadata.fields.title.value ?? "") !== row.title)
+			errors.push(`${row.output_directory} title does not match manifest.csv`);
+		if ((metadata.fields.author.value ?? "") !== row.author)
+			errors.push(`${row.output_directory} author does not match manifest.csv`);
+		if ((metadata.fields.date.value ?? "") !== row.document_date)
+			errors.push(`${row.output_directory} date does not match manifest.csv`);
 	}
 	validateEmailDigest(
 		runDirectory,
@@ -2431,7 +2992,9 @@ function parseFinalizeArguments(args) {
 
 function pathInside(parent, child) {
 	const relativePath = relative(parent, child);
-	return relativePath === "" || (!relativePath.startsWith("..") && !relativePath.startsWith("/") && relativePath !== "..");
+	return (
+		relativePath === "" || (!relativePath.startsWith("..") && !relativePath.startsWith("/") && relativePath !== "..")
+	);
 }
 
 function relativeSourcePath(destination, sourcePath) {
@@ -2440,10 +3003,14 @@ function relativeSourcePath(destination, sourcePath) {
 }
 
 function detectWorkspaceLayout(destination) {
-	const entries = readdirSync(destination, { withFileTypes: true }).filter((entry) => !entry.name.startsWith(".") && !RESERVED_WORKSPACE_DIRECTORIES.has(entry.name));
+	const entries = readdirSync(destination, { withFileTypes: true }).filter(
+		(entry) => !entry.name.startsWith(".") && !RESERVED_WORKSPACE_DIRECTORIES.has(entry.name),
+	);
 	const sourceDirectories = entries.filter((entry) => entry.isDirectory());
 	if (sourceDirectories.length === 0) return "flat";
-	const directoriesWithSources = sourceDirectories.filter((entry) => collectInputs(join(destination, entry.name)).files.length > 0);
+	const directoriesWithSources = sourceDirectories.filter(
+		(entry) => collectInputs(join(destination, entry.name)).files.length > 0,
+	);
 	return directoriesWithSources.length >= 2 ? "structured" : "flat";
 }
 
@@ -2456,7 +3023,8 @@ function inferredMarkdownFilename(row, metadata, sourcePath) {
 	const sourceStem = basename(sourcePath, extname(sourcePath));
 	let stem = title || sourceStem || "document";
 	if (pipeline.includes("transcription") && !/\btranscript\b/i.test(stem)) stem = `${stem} transcript`;
-	if (pipeline.includes("personal-admin") && /^\d{4}-\d{2}-\d{2}/.test(date) && !stem.startsWith(date)) stem = `${date} ${stem}`;
+	if (pipeline.includes("personal-admin") && /^\d{4}-\d{2}-\d{2}/.test(date) && !stem.startsWith(date))
+		stem = `${date} ${stem}`;
 	return safeMarkdownFilename(stem);
 }
 
@@ -2470,7 +3038,9 @@ function markdownOutputRelativePath(destination, sourcePath, layout, row, metada
 function collectGeneratedArtifacts(runDirectory) {
 	const artifacts = [];
 	const visit = (directory) => {
-		for (const entry of readdirSync(directory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
+		for (const entry of readdirSync(directory, { withFileTypes: true }).sort((left, right) =>
+			left.name.localeCompare(right.name),
+		)) {
 			const entryPath = join(directory, entry.name);
 			if (entry.isDirectory()) visit(entryPath);
 			else if (entry.isFile() && GENERATED_ARTIFACT_NAMES.has(entry.name)) artifacts.push(entryPath);
@@ -2483,20 +3053,23 @@ function collectGeneratedArtifacts(runDirectory) {
 function readManifestRows(runDirectory) {
 	const parsed = parseCsv(readFileSync(join(runDirectory, "manifest.csv"), "utf8"));
 	const headers = parsed.shift() ?? [];
-	if (headers.join(",") !== MANIFEST_COLUMNS.join(",")) fail("manifest.csv columns do not match the required contract");
+	if (headers.join(",") !== MANIFEST_COLUMNS.join(","))
+		fail("manifest.csv columns do not match the required contract");
 	return parsed
 		.filter((row) => row.some((field) => field !== ""))
 		.map((values) => Object.fromEntries(MANIFEST_COLUMNS.map((column, index) => [column, values[index] ?? ""])));
 }
 
 function requireRunDirectory(runDirectory) {
-	if (!existsSync(runDirectory) || !lstatSync(runDirectory).isDirectory()) fail(`run directory does not exist: ${runDirectory}`);
+	if (!existsSync(runDirectory) || !lstatSync(runDirectory).isDirectory())
+		fail(`run directory does not exist: ${runDirectory}`);
 	if (!existsSync(join(runDirectory, "manifest.csv"))) fail(`manifest.csv does not exist in ${runDirectory}`);
 }
 
 function documentDirectoryForRow(runDirectory, row) {
 	const documentDirectory = resolve(runDirectory, row.output_directory);
-	if (!documentDirectory.startsWith(`${resolve(runDirectory)}${sep}`)) fail(`output directory escapes the run directory: ${row.output_directory}`);
+	if (!documentDirectory.startsWith(`${resolve(runDirectory)}${sep}`))
+		fail(`output directory escapes the run directory: ${row.output_directory}`);
 	return documentDirectory;
 }
 
@@ -2538,7 +3111,11 @@ function finalizedArtifactState(runDirectory, sourceRoot) {
 	const owned = new Set(rows.map((row) => resolve(sourceRoot, row.destination_path)));
 	const relocated = rows
 		.filter((row) => row.role === "original")
-		.map((row) => ({ path: row.source_path, currentPath: resolve(sourceRoot, row.destination_path), sha256: row.sha256 }));
+		.map((row) => ({
+			path: row.source_path,
+			currentPath: resolve(sourceRoot, row.destination_path),
+			sha256: row.sha256,
+		}));
 	return { owned, relocated };
 }
 
@@ -2547,10 +3124,23 @@ function currentInputSnapshot(runDirectory, state) {
 	if (!existsSync(root)) return [];
 	const artifacts = finalizedArtifactState(runDirectory, root);
 	const files = collectInputs(root).files.filter((filePath) => !artifacts.owned.has(resolve(filePath)));
-	const current = files.map((filePath) => ({ path: filePath, sha256: sha256(readFileSync(filePath)), format: sourceFormat(filePath) }));
+	const current = files.map((filePath) => ({
+		path: filePath,
+		sha256: sha256(readFileSync(filePath)),
+		format: sourceFormat(filePath),
+	}));
 	for (const relocated of artifacts.relocated) {
-		if (!existsSync(relocated.path) && existsSync(relocated.currentPath) && sha256(readFileSync(relocated.currentPath)) === relocated.sha256) {
-			current.push({ path: relocated.path, sha256: relocated.sha256, format: sourceFormat(relocated.path), relocatedTo: relocated.currentPath });
+		if (
+			!existsSync(relocated.path) &&
+			existsSync(relocated.currentPath) &&
+			sha256(readFileSync(relocated.currentPath)) === relocated.sha256
+		) {
+			current.push({
+				path: relocated.path,
+				sha256: relocated.sha256,
+				format: sourceFormat(relocated.path),
+				relocatedTo: relocated.currentPath,
+			});
 		}
 	}
 	return current.sort((left, right) => left.path.localeCompare(right.path));
@@ -2566,7 +3156,9 @@ function runInputDrift(runDirectory, state) {
 function conciseStatus(runDirectory) {
 	requireRunDirectory(runDirectory);
 	const rows = readManifestRows(runDirectory);
-	const counts = Object.fromEntries(DOCUMENT_STATUSES.map((status) => [status, rows.filter((row) => row.status === status).length]));
+	const counts = Object.fromEntries(
+		DOCUMENT_STATUSES.map((status) => [status, rows.filter((row) => row.status === status).length]),
+	);
 	const pendingReview = rows
 		.filter((row) => row.status === "needs_review")
 		.map((row) => ({
@@ -2580,7 +3172,8 @@ function conciseStatus(runDirectory) {
 	const state = loadRunState(runDirectory, RUN_STATE_WORKFLOW);
 	const drift = runInputDrift(runDirectory, state);
 	const digestStatePath = join(runDirectory, EMAIL_DIGEST_STATE_PATH);
-	const digestComplete = existsSync(digestStatePath) && JSON.parse(readFileSync(digestStatePath, "utf8")).phase === "complete";
+	const digestComplete =
+		existsSync(digestStatePath) && JSON.parse(readFileSync(digestStatePath, "utf8")).phase === "complete";
 	const nextAction =
 		pendingReview.length > 0
 			? "review"
@@ -2625,29 +3218,50 @@ function commandRefresh(args) {
 		const row = rowsByKey.get(key);
 		if (row) {
 			row.status = "skipped";
-			row.error = drift.changed.some((entry) => manifestRowKey(entry.before) === key) ? "superseded by refresh after source content changed" : "retired by refresh after source removal";
+			row.error = drift.changed.some((entry) => manifestRowKey(entry.before) === key)
+				? "superseded by refresh after source content changed"
+				: "retired by refresh after source removal";
 		}
 	}
 	const additions = [...drift.added, ...drift.changed.map((entry) => entry.after)];
 	const newItems = initialPrepareItems({ files: additions.map((item) => item.path), skipped: [] });
 	for (const item of newItems) rowsByKey.set(manifestRowKey(item), pendingManifestRow(item));
-	state = updateRunState(runDirectory, (draft) => {
-		for (const item of draft.items) {
-			const key = manifestRowKey(item);
-			if (!retiredKeys.has(key)) continue;
-			item.status = "skipped";
-			item.retired = true;
-			item.superseded = drift.changed.some((entry) => manifestRowKey(entry.before) === key);
-			item.error = item.superseded ? "superseded by refresh after source content changed" : "retired by refresh after source removal";
-		}
-		draft.items.push(...newItems);
-		draft.phase = "preparing";
-		draft.status = "running";
-		draft.nextAction = "prepare";
-		return draft;
-	}, { type: "input_refreshed", added: drift.added.length, changed: drift.changed.length, removed: drift.removed.length });
-	writeManifest(runDirectory, [...rowsByKey.values()].sort((left, right) => left.source_path.localeCompare(right.source_path) || left.source_sha256.localeCompare(right.source_sha256)));
-	process.stdout.write(`${JSON.stringify({ refreshed: true, runDirectory, inputDrift: drift, nextAction: state.nextAction }, null, 2)}\n`);
+	state = updateRunState(
+		runDirectory,
+		(draft) => {
+			for (const item of draft.items) {
+				const key = manifestRowKey(item);
+				if (!retiredKeys.has(key)) continue;
+				item.status = "skipped";
+				item.retired = true;
+				item.superseded = drift.changed.some((entry) => manifestRowKey(entry.before) === key);
+				item.error = item.superseded
+					? "superseded by refresh after source content changed"
+					: "retired by refresh after source removal";
+			}
+			draft.items.push(...newItems);
+			draft.phase = "preparing";
+			draft.status = "running";
+			draft.nextAction = "prepare";
+			return draft;
+		},
+		{
+			type: "input_refreshed",
+			added: drift.added.length,
+			changed: drift.changed.length,
+			removed: drift.removed.length,
+		},
+	);
+	writeManifest(
+		runDirectory,
+		[...rowsByKey.values()].sort(
+			(left, right) =>
+				left.source_path.localeCompare(right.source_path) || left.source_sha256.localeCompare(right.source_sha256),
+		),
+	);
+	process.stdout.write(
+		`${JSON.stringify({ refreshed: true, runDirectory, inputDrift: drift, nextAction: state.nextAction }, null, 2)}\n`,
+	);
 }
 
 function commandRetry(args) {
@@ -2660,32 +3274,43 @@ function commandRetry(args) {
 		else if (args[index] === "--all-failed") allFailed = true;
 		else fail(`unknown retry option: ${args[index]}`);
 	}
-	if ((!itemId && !allFailed) || (itemId && allFailed)) fail("retry requires exactly one of --item <id> or --all-failed");
+	if ((!itemId && !allFailed) || (itemId && allFailed))
+		fail("retry requires exactly one of --item <id> or --all-failed");
 	requireRunDirectory(runDirectory);
 	const rows = readManifestRows(runDirectory);
 	const rowsByKey = new Map(rows.map((row) => [manifestRowKey(row), row]));
 	let retried = 0;
-	const state = updateRunState(runDirectory, (draft) => {
-		for (const item of draft.items) {
-			if (item.status !== "failed" || (!allFailed && item.id !== itemId)) continue;
-			item.status = "pending";
-			item.attempts = 0;
-			item.transient = false;
-			item.error = null;
-			const row = rowsByKey.get(manifestRowKey(item));
-			if (row) {
-				row.status = "pending";
-				row.error = "";
+	const state = updateRunState(
+		runDirectory,
+		(draft) => {
+			for (const item of draft.items) {
+				if (item.status !== "failed" || (!allFailed && item.id !== itemId)) continue;
+				item.status = "pending";
+				item.attempts = 0;
+				item.transient = false;
+				item.error = null;
+				const row = rowsByKey.get(manifestRowKey(item));
+				if (row) {
+					row.status = "pending";
+					row.error = "";
+				}
+				retried += 1;
 			}
-			retried += 1;
-		}
-		if (retried === 0) fail(itemId ? `failed item not found: ${itemId}` : "run has no failed items");
-		draft.status = "running";
-		draft.phase = "preparing";
-		draft.nextAction = "prepare";
-		return draft;
-	}, { type: "items_retried", itemId, allFailed });
-	writeManifest(runDirectory, [...rowsByKey.values()].sort((left, right) => left.source_path.localeCompare(right.source_path) || left.source_sha256.localeCompare(right.source_sha256)));
+			if (retried === 0) fail(itemId ? `failed item not found: ${itemId}` : "run has no failed items");
+			draft.status = "running";
+			draft.phase = "preparing";
+			draft.nextAction = "prepare";
+			return draft;
+		},
+		{ type: "items_retried", itemId, allFailed },
+	);
+	writeManifest(
+		runDirectory,
+		[...rowsByKey.values()].sort(
+			(left, right) =>
+				left.source_path.localeCompare(right.source_path) || left.source_sha256.localeCompare(right.source_sha256),
+		),
+	);
 	process.stdout.write(`${JSON.stringify({ runDirectory, retried, nextAction: state.nextAction }, null, 2)}\n`);
 }
 
@@ -2699,7 +3324,9 @@ function reviewPacket(runDirectory, row) {
 				characters: chunk.characters,
 			}))
 		: [];
-	const derivedAudioPath = existsSync(join(documentDirectory, "derived", "audio.mp3")) ? join(documentDirectory, "derived", "audio.mp3") : null;
+	const derivedAudioPath = existsSync(join(documentDirectory, "derived", "audio.mp3"))
+		? join(documentDirectory, "derived", "audio.mp3")
+		: null;
 	let unit = { kind: "document", path: join(documentDirectory, "document.md") };
 	const vision = metadata.extraction?.vision;
 	if (vision?.required && vision.used !== true && !vision.unavailableReason) {
@@ -2763,13 +3390,17 @@ function reviewPacket(runDirectory, row) {
 		},
 		requiredReviewFileShape: {
 			documentId: row.document_id,
-			fields: Object.fromEntries(EVIDENCE_FIELDS.map((field) => [field, { value: null, origin: null, confidence: null, locator: null }])),
+			fields: Object.fromEntries(
+				EVIDENCE_FIELDS.map((field) => [field, { value: null, origin: null, confidence: null, locator: null }]),
+			),
 			finalOutput: { filename: null, namingReason: null },
 			reviewNotes: [],
 		},
 		commands: {
 			recordReview: `document-ingest.mjs record-review ${runDirectory} --review-file <review.json>`,
-			recordTranscript: derivedAudioPath ? `document-ingest.mjs record-transcript ${runDirectory} --doc-id ${row.document_id} --transcript <cleaned-transcript.md>` : null,
+			recordTranscript: derivedAudioPath
+				? `document-ingest.mjs record-transcript ${runDirectory} --doc-id ${row.document_id} --transcript <cleaned-transcript.md>`
+				: null,
 			validate: `document-ingest.mjs validate ${runDirectory} --fix-hints --json`,
 		},
 	};
@@ -2799,13 +3430,21 @@ function commandRecordReviewUnit(args) {
 		if (args[position] === "--doc-id") documentId = args[++position] ?? fail("--doc-id requires an id");
 		else if (args[position] === "--kind") kind = args[++position] ?? fail("--kind requires chunk or vision-page");
 		else if (args[position] === "--index") index = Number.parseInt(args[++position] ?? "", 10);
-		else if (args[position] === "--reviewed-file") reviewedFile = resolve(args[++position] ?? fail("--reviewed-file requires a path"));
+		else if (args[position] === "--reviewed-file")
+			reviewedFile = resolve(args[++position] ?? fail("--reviewed-file requires a path"));
 		else fail(`unknown record-review-unit option: ${args[position]}`);
 	}
-	if (!documentId || !["chunk", "vision-page"].includes(kind) || !Number.isInteger(index) || index < 1 || !reviewedFile) {
+	if (
+		!documentId ||
+		!["chunk", "vision-page"].includes(kind) ||
+		!Number.isInteger(index) ||
+		index < 1 ||
+		!reviewedFile
+	) {
 		fail("record-review-unit requires --doc-id, --kind chunk|vision-page, --index N, and --reviewed-file");
 	}
-	if (!existsSync(reviewedFile) || !lstatSync(reviewedFile).isFile()) fail(`reviewed file does not exist: ${reviewedFile}`);
+	if (!existsSync(reviewedFile) || !lstatSync(reviewedFile).isFile())
+		fail(`reviewed file does not exist: ${reviewedFile}`);
 	requireRunDirectory(runDirectory);
 	const rows = readManifestRows(runDirectory);
 	const row = matchingRow(rows, documentId);
@@ -2820,7 +3459,8 @@ function commandRecordReviewUnit(args) {
 		if (index > chunks.length) fail(`chunk index is out of range: ${index}`);
 		destination = reviewedChunkPath(documentDirectory, index);
 	} else {
-		if (!(metadata.extraction?.vision?.candidatePages ?? []).includes(index)) fail(`page is not a vision candidate: ${index}`);
+		if (!(metadata.extraction?.vision?.candidatePages ?? []).includes(index))
+			fail(`page is not a vision candidate: ${index}`);
 		destination = join(documentDirectory, "working", "vision-pages", `page-${String(index).padStart(4, "0")}.md`);
 		const completed = new Set(metadata.extraction.vision.completedPages ?? []);
 		completed.add(index);
@@ -2831,8 +3471,16 @@ function commandRecordReviewUnit(args) {
 		metadata.extraction.vision.completedPages = completedVisionPages;
 		writeJsonReplacing(join(documentDirectory, "metadata.json"), metadata);
 	}
-	appendRunEvent(runDirectory, { type: "review_unit_completed", documentId, kind, index, output: relative(runDirectory, destination) });
-	process.stdout.write(`${JSON.stringify({ recorded: true, documentId, kind, index, output: destination, nextCommand: `document-ingest.mjs next-review ${runDirectory}` }, null, 2)}\n`);
+	appendRunEvent(runDirectory, {
+		type: "review_unit_completed",
+		documentId,
+		kind,
+		index,
+		output: relative(runDirectory, destination),
+	});
+	process.stdout.write(
+		`${JSON.stringify({ recorded: true, documentId, kind, index, output: destination, nextCommand: `document-ingest.mjs next-review ${runDirectory}` }, null, 2)}\n`,
+	);
 }
 
 // --------------------------------------------------------------------------- //
@@ -2897,7 +3545,8 @@ async function attemptChunkCleanup(service, messages, source, timeoutMs) {
 		return { errors: [error.message] };
 	}
 	const markdown = value?.markdown;
-	if (typeof markdown !== "string" || !markdown.trim()) return { errors: ["response had no nonblank markdown string"] };
+	if (typeof markdown !== "string" || !markdown.trim())
+		return { errors: ["response had no nonblank markdown string"] };
 	const invented = addedWords(source, markdown);
 	if (invented.length) return { errors: [`these words are not in the chunk: ${invented.slice(0, 8).join(", ")}`] };
 	return { markdown };
@@ -2911,7 +3560,10 @@ async function cleanChunk(service, source, headingsSoFar, timeoutMs) {
 	];
 	let outcome = await attemptChunkCleanup(service, messages, source, timeoutMs);
 	if (outcome.errors) {
-		const repair = [...messages, { role: "user", content: `That response was unusable: ${outcome.errors[0]}. Return corrected JSON only.` }];
+		const repair = [
+			...messages,
+			{ role: "user", content: `That response was unusable: ${outcome.errors[0]}. Return corrected JSON only.` },
+		];
 		outcome = await attemptChunkCleanup(service, repair, source, timeoutMs);
 		if (outcome.errors) throw new Error(outcome.errors[0]);
 	}
@@ -2982,18 +3634,24 @@ async function commandProcessChunks(args) {
 	let timeoutMs = 600_000;
 	const resolveOptions = {};
 	for (let position = 1; position < args.length; position += 1) {
-		if (args[position] === "--base-url") resolveOptions.chatUrl = args[++position] ?? fail("--base-url requires a url");
-		else if (args[position] === "--model") resolveOptions.chatModel = args[++position] ?? fail("--model requires a name");
-		else if (args[position] === "--think-url") resolveOptions.thinkUrl = args[++position] ?? fail("--think-url requires a url");
-		else if (args[position] === "--think-model") resolveOptions.thinkModel = args[++position] ?? fail("--think-model requires a name");
+		if (args[position] === "--base-url")
+			resolveOptions.chatUrl = args[++position] ?? fail("--base-url requires a url");
+		else if (args[position] === "--model")
+			resolveOptions.chatModel = args[++position] ?? fail("--model requires a name");
+		else if (args[position] === "--think-url")
+			resolveOptions.thinkUrl = args[++position] ?? fail("--think-url requires a url");
+		else if (args[position] === "--think-model")
+			resolveOptions.thinkModel = args[++position] ?? fail("--think-model requires a name");
 		else if (args[position] === "--no-verify") verify = false;
-		else if (args[position] === "--verify-packet-size") verifyPacketSize = Number.parseInt(args[++position] ?? "", 10);
+		else if (args[position] === "--verify-packet-size")
+			verifyPacketSize = Number.parseInt(args[++position] ?? "", 10);
 		else if (args[position] === "--request-timeout") timeoutMs = Number.parseFloat(args[++position] ?? "") * 1000;
 		else fail(`unknown process-chunks option: ${args[position]}`);
 	}
 	requireRunDirectory(runDirectory);
 	const service = resolveService("chat", resolveOptions);
-	if (!service.enabled) fail("connectedServices.chat is disabled; configure the local chat endpoint before processing");
+	if (!service.enabled)
+		fail("connectedServices.chat is disabled; configure the local chat endpoint before processing");
 	const progress = (message) => process.stderr.write(`${message}\n`);
 
 	const rows = readManifestRows(runDirectory).filter((row) => row.status === "needs_review");
@@ -3015,7 +3673,9 @@ async function commandProcessChunks(args) {
 			const destination = reviewedChunkPath(documentDirectory, index);
 			const source = readFileSync(join(documentDirectory, chunk.path), "utf8");
 			if (existsSync(destination)) {
-				headingsSoFar = headingsSoFar.concat(headingsOf(readFileSync(destination, "utf8"))).slice(-HEADING_BRIEF_LIMIT);
+				headingsSoFar = headingsSoFar
+					.concat(headingsOf(readFileSync(destination, "utf8")))
+					.slice(-HEADING_BRIEF_LIMIT);
 				continue;
 			}
 			progress(`[${row.document_id}] chunk ${index}/${chunks.length}`);
@@ -3028,14 +3688,30 @@ async function commandProcessChunks(args) {
 				continue;
 			}
 			atomicWriteFile(destination, ensureFinalNewline(markdown));
-			appendRunEvent(runDirectory, { type: "review_unit_completed", documentId: row.document_id, kind: "chunk", index, output: relative(runDirectory, destination) });
-			cleaned.push({ id: `${row.document_id}#${index}`, documentId: row.document_id, index, source, markdown, headingsSoFar, destination });
+			appendRunEvent(runDirectory, {
+				type: "review_unit_completed",
+				documentId: row.document_id,
+				kind: "chunk",
+				index,
+				output: relative(runDirectory, destination),
+			});
+			cleaned.push({
+				id: `${row.document_id}#${index}`,
+				documentId: row.document_id,
+				index,
+				source,
+				markdown,
+				headingsSoFar,
+				destination,
+			});
 			headingsSoFar = headingsSoFar.concat(headingsOf(markdown)).slice(-HEADING_BRIEF_LIMIT);
 		}
 	}
 
 	const think = resolveThinkService(resolveOptions);
-	const verification = verify ? await verifyCleanedChunks(runDirectory, think, cleaned, { verifyPacketSize, timeoutMs, progress }) : null;
+	const verification = verify
+		? await verifyCleanedChunks(runDirectory, think, cleaned, { verifyPacketSize, timeoutMs, progress })
+		: null;
 	process.stdout.write(
 		`${JSON.stringify(
 			{
@@ -3100,7 +3776,12 @@ function updateSourceMapForDocument(documentDirectory, metadata, sourceLocatorTy
 	];
 	if (metadata.extraction?.vision?.used) {
 		for (const page of metadata.extraction.vision.completedPages ?? []) {
-			const transcriptPath = join(documentDirectory, "working", "vision-pages", `page-${String(page).padStart(4, "0")}.md`);
+			const transcriptPath = join(
+				documentDirectory,
+				"working",
+				"vision-pages",
+				`page-${String(page).padStart(4, "0")}.md`,
+			);
 			if (!existsSync(transcriptPath)) continue;
 			const transcript = readFileSync(transcriptPath, "utf8").trim();
 			const offset = document.indexOf(transcript);
@@ -3126,7 +3807,11 @@ function updateSourceMapForDocument(documentDirectory, metadata, sourceLocatorTy
 function completeMetadataReview(metadata, payload) {
 	metadata.extraction.status = "success";
 	for (const field of EVIDENCE_FIELDS) {
-		metadata.fields[field] = normalizeEvidenceObject(payload.fields?.[field], metadata.fields?.[field], `fields.${field}`);
+		metadata.fields[field] = normalizeEvidenceObject(
+			payload.fields?.[field],
+			metadata.fields?.[field],
+			`fields.${field}`,
+		);
 	}
 	metadata.finalOutput = normalizeFinalOutput(payload.finalOutput, metadata.finalOutput);
 	metadata.structure = markdownStructure(payload.documentMarkdown ?? "");
@@ -3138,7 +3823,10 @@ function completeMetadataReview(metadata, payload) {
 }
 
 function rewriteReport(documentDirectory, metadata) {
-	atomicWriteFile(join(documentDirectory, "extraction_report.md"), extractionReport(metadata.source, metadata.extraction, "success — model normalization complete"));
+	atomicWriteFile(
+		join(documentDirectory, "extraction_report.md"),
+		extractionReport(metadata.source, metadata.extraction, "success — model normalization complete"),
+	);
 }
 
 function parseRecordReviewArguments(args) {
@@ -3147,7 +3835,8 @@ function parseRecordReviewArguments(args) {
 	let reviewFile = null;
 	for (let index = 1; index < args.length; index += 1) {
 		const argument = args[index];
-		if (argument === "--review-file") reviewFile = resolve(args[++index] ?? fail("--review-file requires a JSON file"));
+		if (argument === "--review-file")
+			reviewFile = resolve(args[++index] ?? fail("--review-file requires a JSON file"));
 		else fail(`unknown record-review option: ${argument}`);
 	}
 	if (!reviewFile) fail("record-review requires --review-file <json>");
@@ -3168,13 +3857,22 @@ function commandRecordReview(args) {
 		atomicWriteFile(join(documentDirectory, "document.md"), ensureFinalNewline(payload.documentMarkdown));
 		documentChanged = true;
 	} else if (payload.documentMarkdownPath) {
-		atomicWriteFile(join(documentDirectory, "document.md"), ensureFinalNewline(readFileSync(resolve(payload.documentMarkdownPath), "utf8")));
+		atomicWriteFile(
+			join(documentDirectory, "document.md"),
+			ensureFinalNewline(readFileSync(resolve(payload.documentMarkdownPath), "utf8")),
+		);
 		documentChanged = true;
 	} else if ((metadata.extraction?.chunks ?? []).length > 1) {
 		const reviewedDirectory = join(documentDirectory, "working", "reviewed-chunks");
-		const expected = metadata.extraction.chunks.map((_, index) => join(reviewedDirectory, `chunk-${String(index + 1).padStart(4, "0")}.md`));
-		if (expected.some((path) => !existsSync(path))) fail("all reviewed chunks must be recorded before final document review");
-		atomicWriteFile(join(documentDirectory, "document.md"), expected.map((path) => readFileSync(path, "utf8")).join(""));
+		const expected = metadata.extraction.chunks.map((_, index) =>
+			join(reviewedDirectory, `chunk-${String(index + 1).padStart(4, "0")}.md`),
+		);
+		if (expected.some((path) => !existsSync(path)))
+			fail("all reviewed chunks must be recorded before final document review");
+		atomicWriteFile(
+			join(documentDirectory, "document.md"),
+			expected.map((path) => readFileSync(path, "utf8")).join(""),
+		);
 		documentChanged = true;
 	}
 	const reviewedDocument = readFileSync(join(documentDirectory, "document.md"), "utf8");
@@ -3184,10 +3882,15 @@ function commandRecordReview(args) {
 		else {
 			const expectedPages = [...(vision.candidatePages ?? [])].sort((left, right) => left - right);
 			const completedPages = [...(vision.completedPages ?? [])].sort((left, right) => left - right);
-			if (expectedPages.join(",") !== completedPages.join(",")) fail("all vision pages must be recorded before final document review");
+			if (expectedPages.join(",") !== completedPages.join(","))
+				fail("all vision pages must be recorded before final document review");
 			for (const page of completedPages) {
-				const transcript = readFileSync(join(documentDirectory, "working", "vision-pages", `page-${String(page).padStart(4, "0")}.md`), "utf8").trim();
-				if (!reviewedDocument.includes(transcript)) fail(`final document does not include the recorded vision transcript for page ${page}`);
+				const transcript = readFileSync(
+					join(documentDirectory, "working", "vision-pages", `page-${String(page).padStart(4, "0")}.md`),
+					"utf8",
+				).trim();
+				if (!reviewedDocument.includes(transcript))
+					fail(`final document does not include the recorded vision transcript for page ${page}`);
 			}
 			vision.used = true;
 		}
@@ -3199,14 +3902,22 @@ function commandRecordReview(args) {
 	writeUpdatedManifest(options.runDirectory, rows);
 	rewriteReport(documentDirectory, metadata);
 	const pending = rows.some((candidate) => candidate.status === "needs_review");
-	updateRunState(options.runDirectory, (draft) => {
-		const item = draft.items.find((candidate) => candidate.path === row.source_path && candidate.sha256 === row.source_sha256);
-		if (item) item.reviewStatus = "complete";
-		draft.phase = pending ? "review" : "validation";
-		draft.nextAction = pending ? "review" : "validate";
-		return draft;
-	}, { type: "document_review_completed", documentId: payload.documentId });
-	process.stdout.write(`${JSON.stringify({ recorded: payload.documentId, status: row.status, validateCommand: `document-ingest.mjs validate ${options.runDirectory} --fix-hints --json` }, null, 2)}\n`);
+	updateRunState(
+		options.runDirectory,
+		(draft) => {
+			const item = draft.items.find(
+				(candidate) => candidate.path === row.source_path && candidate.sha256 === row.source_sha256,
+			);
+			if (item) item.reviewStatus = "complete";
+			draft.phase = pending ? "review" : "validation";
+			draft.nextAction = pending ? "review" : "validate";
+			return draft;
+		},
+		{ type: "document_review_completed", documentId: payload.documentId },
+	);
+	process.stdout.write(
+		`${JSON.stringify({ recorded: payload.documentId, status: row.status, validateCommand: `document-ingest.mjs validate ${options.runDirectory} --fix-hints --json` }, null, 2)}\n`,
+	);
 }
 
 function parseRecordTranscriptArguments(args) {
@@ -3222,7 +3933,8 @@ function parseRecordTranscriptArguments(args) {
 	for (let index = 1; index < args.length; index += 1) {
 		const argument = args[index];
 		if (argument === "--doc-id") docId = args[++index] ?? fail("--doc-id requires a document id");
-		else if (argument === "--transcript") transcript = resolve(args[++index] ?? fail("--transcript requires a Markdown file"));
+		else if (argument === "--transcript")
+			transcript = resolve(args[++index] ?? fail("--transcript requires a Markdown file"));
 		else if (argument === "--title") title = args[++index] ?? fail("--title requires text");
 		else if (argument === "--author") author = args[++index] ?? fail("--author requires text");
 		else if (argument === "--filename") filename = args[++index] ?? fail("--filename requires a Markdown filename");
@@ -3238,10 +3950,12 @@ function parseRecordTranscriptArguments(args) {
 function commandRecordTranscript(args) {
 	const options = parseRecordTranscriptArguments(args);
 	requireRunDirectory(options.runDirectory);
-	if (!existsSync(options.transcript) || !lstatSync(options.transcript).isFile()) fail(`transcript does not exist: ${options.transcript}`);
+	if (!existsSync(options.transcript) || !lstatSync(options.transcript).isFile())
+		fail(`transcript does not exist: ${options.transcript}`);
 	const rows = readManifestRows(options.runDirectory);
 	const row = matchingRow(rows, options.docId);
-	if (!row.suggested_pipeline.includes("transcription")) fail(`document is not marked for transcription cleanup: ${options.docId}`);
+	if (!row.suggested_pipeline.includes("transcription"))
+		fail(`document is not marked for transcription cleanup: ${options.docId}`);
 	const documentDirectory = documentDirectoryForRow(options.runDirectory, row);
 	const metadata = loadDocumentMetadata(documentDirectory);
 	const transcript = ensureFinalNewline(readFileSync(options.transcript, "utf8"));
@@ -3252,28 +3966,46 @@ function commandRecordTranscript(args) {
 	atomicWriteFile(join(chunksDirectory, "chunk-0001.md"), transcript);
 	metadata.extraction.status = "success";
 	metadata.extraction.chunks = [{ path: "working/chunks/chunk-0001.md", characters: unicodeLength(transcript) }];
-	if (options.title) metadata.fields.title = evidence(options.title, "user-provided", "high", "record-transcript --title");
-	if (options.author) metadata.fields.author = evidence(options.author, "user-provided", "high", "record-transcript --author");
+	if (options.title)
+		metadata.fields.title = evidence(options.title, "user-provided", "high", "record-transcript --title");
+	if (options.author)
+		metadata.fields.author = evidence(options.author, "user-provided", "high", "record-transcript --author");
 	metadata.finalOutput = normalizeFinalOutput(
-		options.filename || options.namingReason ? { filename: options.filename ?? null, namingReason: options.namingReason ?? "Provided with record-transcript." } : metadata.finalOutput,
+		options.filename || options.namingReason
+			? {
+					filename: options.filename ?? null,
+					namingReason: options.namingReason ?? "Provided with record-transcript.",
+				}
+			: metadata.finalOutput,
 		metadata.finalOutput,
 	);
 	metadata.structure = markdownStructure(transcript);
-	metadata.review = { completed: true, notes: [options.note ?? "Transcript cleanup recorded as final document text."] };
+	metadata.review = {
+		completed: true,
+		notes: [options.note ?? "Transcript cleanup recorded as final document text."],
+	};
 	writeJsonReplacing(join(documentDirectory, "metadata.json"), metadata);
 	updateSourceMapForDocument(documentDirectory, metadata, "media-transcript");
 	updateRowFromMetadata(row, metadata);
 	writeUpdatedManifest(options.runDirectory, rows);
 	rewriteReport(documentDirectory, metadata);
 	const pending = rows.some((candidate) => candidate.status === "needs_review");
-	updateRunState(options.runDirectory, (draft) => {
-		const item = draft.items.find((candidate) => candidate.path === row.source_path && candidate.sha256 === row.source_sha256);
-		if (item) item.reviewStatus = "complete";
-		draft.phase = pending ? "review" : "validation";
-		draft.nextAction = pending ? "review" : "validate";
-		return draft;
-	}, { type: "document_review_completed", documentId: options.docId, kind: "transcript" });
-	process.stdout.write(`${JSON.stringify({ recorded: options.docId, status: row.status, transcript: options.transcript }, null, 2)}\n`);
+	updateRunState(
+		options.runDirectory,
+		(draft) => {
+			const item = draft.items.find(
+				(candidate) => candidate.path === row.source_path && candidate.sha256 === row.source_sha256,
+			);
+			if (item) item.reviewStatus = "complete";
+			draft.phase = pending ? "review" : "validation";
+			draft.nextAction = pending ? "review" : "validate";
+			return draft;
+		},
+		{ type: "document_review_completed", documentId: options.docId, kind: "transcript" },
+	);
+	process.stdout.write(
+		`${JSON.stringify({ recorded: options.docId, status: row.status, transcript: options.transcript }, null, 2)}\n`,
+	);
 }
 
 function issueForValidationError(message) {
@@ -3305,7 +4037,8 @@ function issueForValidationError(message) {
 		return {
 			code: "content_coverage",
 			message,
-			command: "For media transcripts, use record-transcript so document.md, working/extracted.md, and chunk metadata are updated together.",
+			command:
+				"For media transcripts, use record-transcript so document.md, working/extracted.md, and chunk metadata are updated together.",
 		};
 	}
 	return { code: "validation_error", message };
@@ -3321,28 +4054,45 @@ function requireNoDuplicateDestinations(operations) {
 }
 
 function createFinalizePlan(options) {
-	if (!existsSync(options.runDirectory) || !lstatSync(options.runDirectory).isDirectory()) fail(`run directory does not exist: ${options.runDirectory}`);
-	if (!existsSync(options.destination) || !lstatSync(options.destination).isDirectory()) fail(`destination folder does not exist: ${options.destination}`);
-	const expectedRunDirectory = options.intakeRoot ? join(options.destination, "Ingest", "Inbox") : join(options.destination, "Ingest");
-	if (options.intakeRoot ? !pathInside(expectedRunDirectory, options.runDirectory) : resolve(options.runDirectory) !== resolve(expectedRunDirectory)) {
-		fail(`finalize expects the run directory ${options.intakeRoot ? "under" : "to be"} the destination Ingest folder: ${expectedRunDirectory}`);
+	if (!existsSync(options.runDirectory) || !lstatSync(options.runDirectory).isDirectory())
+		fail(`run directory does not exist: ${options.runDirectory}`);
+	if (!existsSync(options.destination) || !lstatSync(options.destination).isDirectory())
+		fail(`destination folder does not exist: ${options.destination}`);
+	const expectedRunDirectory = options.intakeRoot
+		? join(options.destination, "Ingest", "Inbox")
+		: join(options.destination, "Ingest");
+	if (
+		options.intakeRoot
+			? !pathInside(expectedRunDirectory, options.runDirectory)
+			: resolve(options.runDirectory) !== resolve(expectedRunDirectory)
+	) {
+		fail(
+			`finalize expects the run directory ${options.intakeRoot ? "under" : "to be"} the destination Ingest folder: ${expectedRunDirectory}`,
+		);
 	}
 	if (options.intakeRoot) {
 		const inboxDirectory = join(options.destination, "Inbox");
-		if (!pathInside(inboxDirectory, options.intakeRoot)) fail(`intake source is outside the destination Inbox folder: ${options.intakeRoot}`);
+		if (!pathInside(inboxDirectory, options.intakeRoot))
+			fail(`intake source is outside the destination Inbox folder: ${options.intakeRoot}`);
 		const state = loadRunState(options.runDirectory, RUN_STATE_WORKFLOW);
-		if (resolve(state.input.path) !== resolve(options.intakeRoot)) fail("intake run input does not match the requested intake source");
+		if (resolve(state.input.path) !== resolve(options.intakeRoot))
+			fail("intake run input does not match the requested intake source");
 	}
 	const validation = validateRun(options.runDirectory, { emit: false, exitOnError: false });
 	if (!validation.valid) fail(`run must validate before finalize: ${validation.errors.join("; ")}`);
-	const layout = options.intakeRoot ? "structured" : options.layout === "auto" ? detectWorkspaceLayout(options.destination) : options.layout;
+	const layout = options.intakeRoot
+		? "structured"
+		: options.layout === "auto"
+			? detectWorkspaceLayout(options.destination)
+			: options.layout;
 	const rows = readManifestRows(options.runDirectory);
 	const completedRows = rows.filter((row) => row.status === "success");
 	const operations = [];
 	const movableSourcePaths = new Set();
 	for (const row of completedRows) {
 		const sourcePath = resolve(row.source_path);
-		if (!existsSync(sourcePath) || !lstatSync(sourcePath).isFile()) fail(`source file is missing before finalize: ${sourcePath}`);
+		if (!existsSync(sourcePath) || !lstatSync(sourcePath).isFile())
+			fail(`source file is missing before finalize: ${sourcePath}`);
 		const sourceRelative = relativeSourcePath(options.intakeRoot ?? options.destination, sourcePath);
 		const originalDestination = options.intakeRoot
 			? join(options.destination, "Originals", "Inbox", sourceRelative)
@@ -3352,20 +4102,57 @@ function createFinalizePlan(options) {
 		if (!existsSync(documentPath)) fail(`final document is missing: ${documentPath}`);
 		const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
 		const markdownDestination = options.intakeRoot
-			? join(options.destination, "Sources", "Inbox", dirname(sourceRelative), inferredMarkdownFilename(row, metadata, sourcePath))
-			: join(options.destination, markdownOutputRelativePath(options.destination, sourcePath, layout, row, metadata));
-		operations.push({ id: `original:${row.document_id}`, role: "original", documentId: row.document_id, from: sourcePath, to: originalDestination, sha256: row.source_sha256, status: "pending" });
-		operations.push({ id: `final_markdown:${row.document_id}`, role: "final_markdown", documentId: row.document_id, from: documentPath, to: markdownDestination, sha256: sha256(readFileSync(documentPath)), status: "pending" });
+			? join(
+					options.destination,
+					"Sources",
+					"Inbox",
+					dirname(sourceRelative),
+					inferredMarkdownFilename(row, metadata, sourcePath),
+				)
+			: join(
+					options.destination,
+					markdownOutputRelativePath(options.destination, sourcePath, layout, row, metadata),
+				);
+		operations.push({
+			id: `original:${row.document_id}`,
+			role: "original",
+			documentId: row.document_id,
+			from: sourcePath,
+			to: originalDestination,
+			sha256: row.source_sha256,
+			status: "pending",
+		});
+		operations.push({
+			id: `final_markdown:${row.document_id}`,
+			role: "final_markdown",
+			documentId: row.document_id,
+			from: documentPath,
+			to: markdownDestination,
+			sha256: sha256(readFileSync(documentPath)),
+			status: "pending",
+		});
 		movableSourcePaths.add(sourcePath);
 	}
-	for (const row of rows.filter((candidate) => candidate.status === "skipped" && candidate.error.startsWith("represented_by_published_source:"))) {
+	for (const row of rows.filter(
+		(candidate) => candidate.status === "skipped" && candidate.error.startsWith("represented_by_published_source:"),
+	)) {
 		const sourcePath = resolve(row.source_path);
-		if (!existsSync(sourcePath) || !lstatSync(sourcePath).isFile()) fail(`represented provenance sidecar is missing before finalize: ${sourcePath}`);
+		if (!existsSync(sourcePath) || !lstatSync(sourcePath).isFile())
+			fail(`represented provenance sidecar is missing before finalize: ${sourcePath}`);
 		const sourceRelative = relativeSourcePath(options.intakeRoot ?? options.destination, sourcePath);
 		const originalDestination = options.intakeRoot
 			? join(options.destination, "Originals", "Inbox", sourceRelative)
 			: join(options.destination, "Originals", sourceRelative);
-		operations.push({ id: `represented_sidecar:${row.document_id}`, role: "original", documentId: row.document_id, from: sourcePath, to: originalDestination, sha256: row.source_sha256, status: "pending", relationship: row.error });
+		operations.push({
+			id: `represented_sidecar:${row.document_id}`,
+			role: "original",
+			documentId: row.document_id,
+			from: sourcePath,
+			to: originalDestination,
+			sha256: row.source_sha256,
+			status: "pending",
+			relationship: row.error,
+		});
 		movableSourcePaths.add(sourcePath);
 	}
 	for (const artifactPath of collectGeneratedArtifacts(options.runDirectory)) {
@@ -3382,7 +4169,8 @@ function createFinalizePlan(options) {
 	}
 	requireNoDuplicateDestinations(operations);
 	for (const operation of operations) {
-		if (existsSync(operation.to) && !movableSourcePaths.has(operation.to)) fail(`finalize destination already exists: ${operation.to}`);
+		if (existsSync(operation.to) && !movableSourcePaths.has(operation.to))
+			fail(`finalize destination already exists: ${operation.to}`);
 	}
 	return {
 		schemaVersion: 1,
@@ -3390,7 +4178,9 @@ function createFinalizePlan(options) {
 		destination: options.destination,
 		intakeRoot: options.intakeRoot ?? null,
 		layout,
-		operations: operations.sort((left, right) => (left.role === "original" ? -1 : right.role === "original" ? 1 : left.id.localeCompare(right.id))),
+		operations: operations.sort((left, right) =>
+			left.role === "original" ? -1 : right.role === "original" ? 1 : left.id.localeCompare(right.id),
+		),
 	};
 }
 
@@ -3399,17 +4189,24 @@ function executeFinalize(options) {
 	let plan;
 	if (existsSync(planPath)) {
 		plan = JSON.parse(readFileSync(planPath, "utf8"));
-		if (resolve(plan.destination) !== resolve(options.destination)) fail("existing finalize plan uses a different destination");
-		if (resolve(plan.intakeRoot ?? "") !== resolve(options.intakeRoot ?? "")) fail("existing finalize plan uses a different intake source");
-		if (options.layout !== "auto" && plan.layout !== options.layout) fail("existing finalize plan uses a different layout");
+		if (resolve(plan.destination) !== resolve(options.destination))
+			fail("existing finalize plan uses a different destination");
+		if (resolve(plan.intakeRoot ?? "") !== resolve(options.intakeRoot ?? ""))
+			fail("existing finalize plan uses a different intake source");
+		if (options.layout !== "auto" && plan.layout !== options.layout)
+			fail("existing finalize plan uses a different layout");
 	} else {
 		plan = createFinalizePlan(options);
 		atomicWriteJson(planPath, plan);
-		updateRunState(options.runDirectory, (draft) => {
-			draft.phase = "finalizing";
-			draft.nextAction = "finalize";
-			return draft;
-		}, { type: "finalize_planned", operations: plan.operations.length, layout: plan.layout });
+		updateRunState(
+			options.runDirectory,
+			(draft) => {
+				draft.phase = "finalizing";
+				draft.nextAction = "finalize";
+				return draft;
+			},
+			{ type: "finalize_planned", operations: plan.operations.length, layout: plan.layout },
+		);
 	}
 	let completedThisInvocation = 0;
 	const failAfter = Number.parseInt(process.env.PI_FORGE_FAIL_AFTER_FINALIZE_OPERATIONS ?? "", 10);
@@ -3420,21 +4217,30 @@ function executeFinalize(options) {
 		if (destinationExists) {
 			const actual = sha256(readFileSync(operation.to));
 			if (actual !== operation.sha256) fail(`finalize destination hash mismatch: ${operation.to}`);
-			if (operation.role === "original" && sourceExists) fail(`both original source and destination exist during recovery: ${operation.from}`);
+			if (operation.role === "original" && sourceExists)
+				fail(`both original source and destination exist during recovery: ${operation.from}`);
 		} else {
 			if (!sourceExists) fail(`both finalize source and destination are missing: ${operation.from}`);
-			if (sha256(readFileSync(operation.from)) !== operation.sha256) fail(`finalize source hash mismatch: ${operation.from}`);
+			if (sha256(readFileSync(operation.from)) !== operation.sha256)
+				fail(`finalize source hash mismatch: ${operation.from}`);
 			mkdirSync(dirname(operation.to), { recursive: true });
 			if (operation.role === "original") renameSync(operation.from, operation.to);
 			else copyFileSync(operation.from, operation.to);
-			if (sha256(readFileSync(operation.to)) !== operation.sha256) fail(`finalize copy verification failed: ${operation.to}`);
+			if (sha256(readFileSync(operation.to)) !== operation.sha256)
+				fail(`finalize copy verification failed: ${operation.to}`);
 		}
 		operation.status = "complete";
 		operation.completedAt = new Date().toISOString();
 		atomicWriteJson(planPath, plan);
-		appendRunEvent(options.runDirectory, { type: "finalize_operation_completed", operationId: operation.id, role: operation.role, sha256: operation.sha256 });
+		appendRunEvent(options.runDirectory, {
+			type: "finalize_operation_completed",
+			operationId: operation.id,
+			role: operation.role,
+			sha256: operation.sha256,
+		});
 		completedThisInvocation += 1;
-		if (Number.isInteger(failAfter) && failAfter > 0 && completedThisInvocation >= failAfter) throw new Error("fault injection after finalize operation");
+		if (Number.isInteger(failAfter) && failAfter > 0 && completedThisInvocation >= failAfter)
+			throw new Error("fault injection after finalize operation");
 	}
 	const artifactRows = plan.operations.map((operation) => ({
 		role: operation.role,
@@ -3445,11 +4251,15 @@ function executeFinalize(options) {
 		created_at: operation.completedAt,
 	}));
 	writeArtifactManifest(options.runDirectory, artifactRows);
-	updateRunState(options.runDirectory, (draft) => {
-		draft.phase = "finalized";
-		draft.nextAction = "handoff_or_complete";
-		return draft;
-	}, { type: "finalize_completed", operations: plan.operations.length });
+	updateRunState(
+		options.runDirectory,
+		(draft) => {
+			draft.phase = "finalized";
+			draft.nextAction = "handoff_or_complete";
+			return draft;
+		},
+		{ type: "finalize_completed", operations: plan.operations.length },
+	);
 	return {
 		finalized: true,
 		resumed: completedThisInvocation < plan.operations.length,
@@ -3475,7 +4285,11 @@ function parseIntakeArguments(args) {
 		if (argument === "--destination") destination = resolve(args[++index] ?? fail("--destination requires a folder"));
 		else {
 			prepareArgs.push(argument);
-			if (["--output", "--ocr", "--ocr-backend", "--glmocr-url", "--glmocr-timeout-ms", "--chunk-chars"].includes(argument)) {
+			if (
+				["--output", "--ocr", "--ocr-backend", "--glmocr-url", "--glmocr-timeout-ms", "--chunk-chars"].includes(
+					argument,
+				)
+			) {
 				prepareArgs.push(args[++index] ?? fail(`${argument} requires a value`));
 			}
 		}
@@ -3483,8 +4297,10 @@ function parseIntakeArguments(args) {
 	if (!destination) fail("intake requires --destination <project-folder>");
 	const prepareOptions = parsePrepareArguments(prepareArgs);
 	prepareOptions.cleanMarkdownFastPath = true;
-	if (!pathInside(join(destination, "Inbox"), prepareOptions.input)) fail("intake input must be inside the destination Inbox folder");
-	if (!pathInside(join(destination, "Ingest", "Inbox"), prepareOptions.output)) fail("intake output must be inside <destination>/Ingest/Inbox");
+	if (!pathInside(join(destination, "Inbox"), prepareOptions.input))
+		fail("intake input must be inside the destination Inbox folder");
+	if (!pathInside(join(destination, "Ingest", "Inbox"), prepareOptions.output))
+		fail("intake output must be inside <destination>/Ingest/Inbox");
 	return { prepareOptions, destination };
 }
 
@@ -3508,12 +4324,16 @@ async function commandIntake(args) {
 			intakeRoot: options.prepareOptions.input,
 		});
 		result.nextAction = "project_refresh";
-		updateRunState(options.prepareOptions.output, (draft) => {
-			draft.status = "complete";
-			draft.phase = "complete";
-			draft.nextAction = null;
-			return draft;
-		}, { type: "intake_completed", destination: options.destination });
+		updateRunState(
+			options.prepareOptions.output,
+			(draft) => {
+				draft.status = "complete";
+				draft.phase = "complete";
+				draft.nextAction = null;
+				return draft;
+			},
+			{ type: "intake_completed", destination: options.destination },
+		);
 	}
 	process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
@@ -3529,11 +4349,16 @@ function parseRunArguments(args) {
 		const argument = args[index];
 		if (argument === "--literature") literature = true;
 		else if (argument === "--project") project = true;
-		else if (argument === "--destination") destination = resolve(args[++index] ?? fail("--destination requires a folder"));
+		else if (argument === "--destination")
+			destination = resolve(args[++index] ?? fail("--destination requires a folder"));
 		else if (argument === "--layout") layout = args[++index] ?? fail("--layout requires auto, flat, or structured");
 		else {
 			prepareArgs.push(argument);
-			if (["--output", "--ocr", "--ocr-backend", "--glmocr-url", "--glmocr-timeout-ms", "--chunk-chars"].includes(argument)) {
+			if (
+				["--output", "--ocr", "--ocr-backend", "--glmocr-url", "--glmocr-timeout-ms", "--chunk-chars"].includes(
+					argument,
+				)
+			) {
 				prepareArgs.push(args[++index] ?? fail(`${argument} requires a value`));
 			}
 		}
@@ -3554,7 +4379,14 @@ async function commandRun(args) {
 		runDirectory: options.prepareOptions.output,
 		prepared,
 		status,
-		nextAction: status.nextAction === "process_emails" ? "process_emails" : status.pendingReview.length > 0 ? "review" : status.valid ? "finalize_or_handoff" : "repair_validation_errors",
+		nextAction:
+			status.nextAction === "process_emails"
+				? "process_emails"
+				: status.pendingReview.length > 0
+					? "review"
+					: status.valid
+						? "finalize_or_handoff"
+						: "repair_validation_errors",
 	};
 	if (options.destination && status.valid) {
 		const finalized = commandFinalizeReturning({
@@ -3590,21 +4422,47 @@ async function commandRun(args) {
 	}
 	const childEntries = Object.fromEntries(
 		[
-			result.literature ? ["literature", { workflow: "literature-extraction", path: result.literature.output, status: existsSync(join(result.literature.output, "run_state.json")) ? JSON.parse(readFileSync(join(result.literature.output, "run_state.json"), "utf8")).status : "pending" }] : null,
-			result.project ? ["project", { workflow: "project-extraction", path: result.project.output, status: existsSync(join(result.project.output, "run_state.json")) ? JSON.parse(readFileSync(join(result.project.output, "run_state.json"), "utf8")).status : "pending" }] : null,
+			result.literature
+				? [
+						"literature",
+						{
+							workflow: "literature-extraction",
+							path: result.literature.output,
+							status: existsSync(join(result.literature.output, "run_state.json"))
+								? JSON.parse(readFileSync(join(result.literature.output, "run_state.json"), "utf8")).status
+								: "pending",
+						},
+					]
+				: null,
+			result.project
+				? [
+						"project",
+						{
+							workflow: "project-extraction",
+							path: result.project.output,
+							status: existsSync(join(result.project.output, "run_state.json"))
+								? JSON.parse(readFileSync(join(result.project.output, "run_state.json"), "utf8")).status
+								: "pending",
+						},
+					]
+				: null,
 		].filter(Boolean),
 	);
-	updateRunState(options.prepareOptions.output, (draft) => {
-		draft.children = { ...draft.children, ...childEntries };
-		if (result.finalized && Object.keys(childEntries).length === 0) {
-			draft.status = "complete";
-			draft.phase = "complete";
-			draft.nextAction = null;
-		} else if (result.finalized) {
-			draft.nextAction = result.nextAction;
-		}
-		return draft;
-	}, { type: "workflow_status_updated", nextAction: result.nextAction, children: Object.keys(childEntries) });
+	updateRunState(
+		options.prepareOptions.output,
+		(draft) => {
+			draft.children = { ...draft.children, ...childEntries };
+			if (result.finalized && Object.keys(childEntries).length === 0) {
+				draft.status = "complete";
+				draft.phase = "complete";
+				draft.nextAction = null;
+			} else if (result.finalized) {
+				draft.nextAction = result.nextAction;
+			}
+			return draft;
+		},
+		{ type: "workflow_status_updated", nextAction: result.nextAction, children: Object.keys(childEntries) },
+	);
 	process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
@@ -3660,7 +4518,8 @@ else if (command === "validate") {
 			// Validation output is already JSON; accept this for command symmetry.
 		} else fail(`unknown validate option: ${argument}`);
 	}
-	if (!existsSync(runDirectory) || !lstatSync(runDirectory).isDirectory()) fail(`run directory does not exist: ${runDirectory}`);
+	if (!existsSync(runDirectory) || !lstatSync(runDirectory).isDirectory())
+		fail(`run directory does not exist: ${runDirectory}`);
 	validateRun(runDirectory, { fixHints });
 } else if (command === "finalize") commandFinalize(args);
 else if (command === "intake") await commandIntake(args);

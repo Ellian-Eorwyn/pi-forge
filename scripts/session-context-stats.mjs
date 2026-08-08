@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
-import { createReadStream } from "node:fs";
-import { promises as fs } from "node:fs";
+import { createReadStream, promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
@@ -13,7 +12,18 @@ const REPORT_TIME_ZONE = "Europe/Berlin";
 const CHART_WIDTH = 40;
 
 function parseArgs(argv) {
-	const options = { sessionsDir: DEFAULT_SESSIONS_DIR, json: false, text: false, allSessions: false, since: undefined, modelFilter: undefined, modelPrefixes: [], bashContains: [], cwd: process.cwd(), help: false };
+	const options = {
+		sessionsDir: DEFAULT_SESSIONS_DIR,
+		json: false,
+		text: false,
+		allSessions: false,
+		since: undefined,
+		modelFilter: undefined,
+		modelPrefixes: [],
+		bashContains: [],
+		cwd: process.cwd(),
+		help: false,
+	};
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--help" || arg === "-h") options.help = true;
@@ -134,13 +144,16 @@ async function loadContextWindows() {
 		sources.push(MODELS_CONFIG_PATH);
 		const providers = config?.providers && typeof config.providers === "object" ? config.providers : {};
 		for (const [providerName, provider] of Object.entries(providers)) {
-			const overrides = provider?.modelOverrides && typeof provider.modelOverrides === "object" ? provider.modelOverrides : {};
+			const overrides =
+				provider?.modelOverrides && typeof provider.modelOverrides === "object" ? provider.modelOverrides : {};
 			for (const [modelId, override] of Object.entries(overrides)) {
-				if (typeof override?.contextWindow === "number") windows.set(`${providerName}/${modelId}`, override.contextWindow);
+				if (typeof override?.contextWindow === "number")
+					windows.set(`${providerName}/${modelId}`, override.contextWindow);
 			}
 			if (Array.isArray(provider?.models)) {
 				for (const model of provider.models) {
-					if (typeof model?.id === "string" && typeof model.contextWindow === "number") windows.set(`${providerName}/${model.id}`, model.contextWindow);
+					if (typeof model?.id === "string" && typeof model.contextWindow === "number")
+						windows.set(`${providerName}/${model.id}`, model.contextWindow);
 				}
 			}
 		}
@@ -166,7 +179,13 @@ function contextTokens(usage) {
 async function scanSessions(sessionsDir, sinceMs, contextWindows, cwdFilter) {
 	const windows = contextWindows.windows;
 	const sessions = [];
-	const meta = { sessionsDir, sessionFilesScanned: 0, sessionFilesIncluded: 0, sessionFilesSkippedOlderThanSince: 0, malformedLines: 0 };
+	const meta = {
+		sessionsDir,
+		sessionFilesScanned: 0,
+		sessionFilesIncluded: 0,
+		sessionFilesSkippedOlderThanSince: 0,
+		malformedLines: 0,
+	};
 	for await (const sessionFile of walkJsonlFiles(sessionsDir)) {
 		meta.sessionFilesScanned++;
 		const fileTimestampMs = parseSessionFileTimestamp(sessionFile);
@@ -265,7 +284,9 @@ function summarizeGroups(sessions, keyFn) {
 		if (!groups.has(key)) groups.set(key, []);
 		groups.get(key).push(session);
 	}
-	return [...groups.entries()].map(([key, group]) => summarizeSessionGroup(key, group)).sort((a, b) => a.key.localeCompare(b.key));
+	return [...groups.entries()]
+		.map(([key, group]) => summarizeSessionGroup(key, group))
+		.sort((a, b) => a.key.localeCompare(b.key));
 }
 
 function summarizeSessionGroup(key, group) {
@@ -274,19 +295,30 @@ function summarizeSessionGroup(key, group) {
 	const withPreCompactionUsage = group.filter((session) => session.preFirstCompactionUsagePercent !== null);
 	const compactions = group.filter((session) => session.compactions > 0).length;
 	const totalCompactions = group.reduce((sum, session) => sum + session.compactions, 0);
-	const contextWindows = [...new Set(group.map((session) => session.contextWindow).filter((value) => value !== null))].sort((a, b) => a - b);
+	const contextWindows = [
+		...new Set(group.map((session) => session.contextWindow).filter((value) => value !== null)),
+	].sort((a, b) => a - b);
 	return {
 		key,
 		sessions: group.length,
 		contextWindows,
 		assistantMessages: group.reduce((sum, session) => sum + session.assistantMessages, 0),
 		avgTurns: group.reduce((sum, session) => sum + session.userMessages, 0) / group.length,
-		avgDurationMinutes: group.reduce((sum, session) => sum + Math.max(0, session.endMs - session.startMs) / 60000, 0) / group.length,
-		avgMaxPromptTokens: withTokens.length === 0 ? null : withTokens.reduce((sum, session) => sum + (session.maxPromptTokens ?? 0), 0) / withTokens.length,
+		avgDurationMinutes:
+			group.reduce((sum, session) => sum + Math.max(0, session.endMs - session.startMs) / 60000, 0) / group.length,
+		avgMaxPromptTokens:
+			withTokens.length === 0
+				? null
+				: withTokens.reduce((sum, session) => sum + (session.maxPromptTokens ?? 0), 0) / withTokens.length,
 		medianMaxPromptTokens: median(withTokens.map((session) => session.maxPromptTokens)),
-		avgMaxContextUsagePercent: withUsage.length === 0 ? null : withUsage.reduce((sum, session) => sum + (session.maxContextUsagePercent ?? 0), 0) / withUsage.length,
+		avgMaxContextUsagePercent:
+			withUsage.length === 0
+				? null
+				: withUsage.reduce((sum, session) => sum + (session.maxContextUsagePercent ?? 0), 0) / withUsage.length,
 		medianMaxContextUsagePercent: median(withUsage.map((session) => session.maxContextUsagePercent)),
-		medianPreFirstCompactionUsagePercent: median(withPreCompactionUsage.map((session) => session.preFirstCompactionUsagePercent)),
+		medianPreFirstCompactionUsagePercent: median(
+			withPreCompactionUsage.map((session) => session.preFirstCompactionUsagePercent),
+		),
 		contextKnownSessions: withUsage.length,
 		sessionsWithCompaction: compactions,
 		totalCompactions,
@@ -311,18 +343,27 @@ function buildSummary(sessions, meta, options) {
 		return true;
 	});
 	return {
-		filters: { model: options.modelFilter ?? null, modelPrefixes: options.modelPrefixes, bashContains: options.bashContains, cwd: options.cwd ? path.resolve(options.cwd) : null },
+		filters: {
+			model: options.modelFilter ?? null,
+			modelPrefixes: options.modelPrefixes,
+			bashContains: options.bashContains,
+			cwd: options.cwd ? path.resolve(options.cwd) : null,
+		},
 		scan: { ...meta, timezone: REPORT_TIME_ZONE },
 		totals: summarizeSessionGroup("total", filtered),
 		byDay: summarizeGroups(filtered, (session) => formatDay(session.startMs)),
-		byModel: summarizeGroups(filtered, (session) => session.providerModel).sort((a, b) => b.sessions - a.sessions || a.key.localeCompare(b.key)),
-		byModelDay: summarizeGroups(filtered, (session) => session.providerModel).sort((a, b) => b.sessions - a.sessions || a.key.localeCompare(b.key)).map((model) => ({
-			...model,
-			byDay: summarizeGroups(
-				filtered.filter((session) => session.providerModel === model.key),
-				(session) => formatDay(session.startMs)
-			),
-		})),
+		byModel: summarizeGroups(filtered, (session) => session.providerModel).sort(
+			(a, b) => b.sessions - a.sessions || a.key.localeCompare(b.key),
+		),
+		byModelDay: summarizeGroups(filtered, (session) => session.providerModel)
+			.sort((a, b) => b.sessions - a.sessions || a.key.localeCompare(b.key))
+			.map((model) => ({
+				...model,
+				byDay: summarizeGroups(
+					filtered.filter((session) => session.providerModel === model.key),
+					(session) => formatDay(session.startMs),
+				),
+			})),
 	};
 }
 
@@ -336,10 +377,14 @@ function buildTextReport(summary) {
 	lines.push(`Report timezone: ${summary.scan.timezone} (CET/CEST)`);
 	lines.push(`Context window sources: ${summary.scan.contextWindowSources.join(", ") || "none"}`);
 	if (summary.filters.model) lines.push(`Filters: model contains "${summary.filters.model}"`);
-	if (summary.filters.modelPrefixes.length > 0) lines.push(`Filters: model prefixes = ${summary.filters.modelPrefixes.join(", ")}`);
-	if (summary.filters.bashContains.length > 0) lines.push(`Filters: bash contains any of = ${summary.filters.bashContains.join(", ")}`);
+	if (summary.filters.modelPrefixes.length > 0)
+		lines.push(`Filters: model prefixes = ${summary.filters.modelPrefixes.join(", ")}`);
+	if (summary.filters.bashContains.length > 0)
+		lines.push(`Filters: bash contains any of = ${summary.filters.bashContains.join(", ")}`);
 	if (summary.filters.cwd) lines.push(`Filters: cwd = ${summary.filters.cwd}`);
-	lines.push("Context usage parses full session JSONL files. max context uses max assistant usage.totalTokens per session, falling back to input + output + cacheRead + cacheWrite, plus compaction tokensBefore. medPreCompactCtx uses the last assistant usage before the first compaction, or the first compaction tokensBefore when present, divided by model contextWindow from packages/ai/src/models.generated.ts when known.");
+	lines.push(
+		"Context usage parses full session JSONL files. max context uses max assistant usage.totalTokens per session, falling back to input + output + cacheRead + cacheWrite, plus compaction tokensBefore. medPreCompactCtx uses the last assistant usage before the first compaction, or the first compaction tokensBefore when present, divided by model contextWindow from packages/ai/src/models.generated.ts when known.",
+	);
 	lines.push("");
 	lines.push("Totals");
 	lines.push(lineForGroup(summary.totals));
@@ -353,7 +398,10 @@ function buildTextReport(summary) {
 	lines.push("By model, then by day");
 	for (const model of summary.byModelDay) {
 		lines.push("");
-		const contextWindowLabel = model.contextWindows.length === 0 ? "unknown" : model.contextWindows.map((value) => formatInt(value)).join(", ");
+		const contextWindowLabel =
+			model.contextWindows.length === 0
+				? "unknown"
+				: model.contextWindows.map((value) => formatInt(value)).join(", ");
 		lines.push(`${model.key} contextWindow=${contextWindowLabel}`);
 		lines.push(lineForGroup(model, "  total "));
 		for (const group of model.byDay) lines.push(lineForGroup(group, "  "));

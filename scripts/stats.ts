@@ -193,7 +193,8 @@ for (const file of readdirSync(sessionsDir)) {
 
 		if (entry.type !== "message" || entry.message?.role !== "assistant" || !entry.message.usage) continue;
 
-		const timestamp = entry.message.timestamp !== undefined ? new Date(entry.message.timestamp) : new Date(entry.timestamp ?? 0);
+		const timestamp =
+			entry.message.timestamp !== undefined ? new Date(entry.message.timestamp) : new Date(entry.timestamp ?? 0);
 		if (timestamp < start || timestamp >= end) continue;
 
 		const dayKey = localDayKey(timestamp);

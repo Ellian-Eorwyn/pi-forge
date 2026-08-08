@@ -4,10 +4,10 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
+	configurePackage,
 	DEFAULT_PI_PACKAGE_SPEC,
 	DEFAULT_SOURCE_ARCHIVE_URL,
 	DEFAULT_UPSTREAM_SOURCE_ARCHIVE_URL,
-	configurePackage,
 	exitWithResult,
 	getForgePaths,
 	installConfiguredPackage,
@@ -60,7 +60,8 @@ function finishUpdate(packageRoot) {
 	if (process.env.PI_FORGE_PI_PACKAGE_SPEC) {
 		installConfiguredPiPackage();
 	} else {
-		const upstreamArchiveUrl = process.env.PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL || DEFAULT_UPSTREAM_SOURCE_ARCHIVE_URL;
+		const upstreamArchiveUrl =
+			process.env.PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL || DEFAULT_UPSTREAM_SOURCE_ARCHIVE_URL;
 		process.stderr.write(`pi-forge-update: installing Pi runtime from ${upstreamArchiveUrl}.\n`);
 		installConfiguredPiPackage(packSourceArchivePiPackageSpecs(upstreamArchiveUrl));
 		piPackageLabel = `runtime packages from ${upstreamArchiveUrl}`;

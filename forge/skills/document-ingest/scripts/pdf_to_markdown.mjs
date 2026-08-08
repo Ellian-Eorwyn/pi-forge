@@ -6,7 +6,8 @@ import { artifactsForDocuments, metadataForDocument, prepareSingleFile } from ".
 
 await runTool(async (input) => {
 	const source = resolve(requiredString(input, "input"));
-	if (extname(source).toLowerCase() !== ".pdf") throw new ToolInputError("unsupported_input_format", "pdf_to_markdown requires a .pdf input");
+	if (extname(source).toLowerCase() !== ".pdf")
+		throw new ToolInputError("unsupported_input_format", "pdf_to_markdown requires a .pdf input");
 	const prepared = prepareSingleFile(source, requiredString(input, "output"), {
 		ocr: typeof input.ocr === "string" ? input.ocr : undefined,
 		ocrBackend: typeof input.ocrBackend === "string" ? input.ocrBackend : undefined,

@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ToolInputError } from "../../../lib/tool_contract.mjs";
@@ -23,7 +23,10 @@ export function runCollection(url, output, options = {}) {
 		maxBuffer: 100 * 1024 * 1024,
 	});
 	if (result.status !== 0) {
-		throw new ToolInputError("collection_command_failed", result.stderr.trim() || result.stdout.trim() || `exit status ${result.status}`);
+		throw new ToolInputError(
+			"collection_command_failed",
+			result.stderr.trim() || result.stdout.trim() || `exit status ${result.status}`,
+		);
 	}
 	return JSON.parse(result.stdout);
 }
@@ -41,12 +44,17 @@ export function collectionArtifacts(output) {
 		if (existsSync(path)) artifacts.push({ role: name.replace(/\.[^.]+$/, ""), path });
 	}
 	for (const record of readCollectionManifest(output)?.resources ?? []) {
-		if (record.outputPath) artifacts.push({ role: "download", path: join(output, record.outputPath), sourceUrl: record.sourceUrl });
+		if (record.outputPath)
+			artifacts.push({ role: "download", path: join(output, record.outputPath), sourceUrl: record.sourceUrl });
 		if (record.capture) {
 			for (const name of record.captureArtifacts ?? []) {
 				artifacts.push({ role: "capture", path: join(output, record.capture, name), sourceUrl: record.sourceUrl });
 			}
-			artifacts.push({ role: "capture_metadata", path: join(output, record.capture, "capture.json"), sourceUrl: record.sourceUrl });
+			artifacts.push({
+				role: "capture_metadata",
+				path: join(output, record.capture, "capture.json"),
+				sourceUrl: record.sourceUrl,
+			});
 		}
 	}
 	return artifacts;
@@ -153,5 +161,7 @@ export function metadataForInput(inputPath, options = {}) {
 			}
 		}
 	}
-	return entries.sort((left, right) => (left.relativePath ?? left.path).localeCompare(right.relativePath ?? right.path));
+	return entries.sort((left, right) =>
+		(left.relativePath ?? left.path).localeCompare(right.relativePath ?? right.path),
+	);
 }

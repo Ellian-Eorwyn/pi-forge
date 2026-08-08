@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	chmodSync,
 	copyFileSync,
 	existsSync,
-	mkdtempSync,
 	mkdirSync,
-	readFileSync,
+	mkdtempSync,
 	readdirSync,
+	readFileSync,
 	realpathSync,
 	rmSync,
 	statSync,
@@ -15,13 +16,13 @@ import {
 	utimesSync,
 	writeFileSync,
 } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { spawn, spawnSync } from "node:child_process";
-import { createServer } from "node:http";
 import test from "node:test";
-import webResearchExtension, { formatRunFailure } from "../forge/extensions/web-research.ts";
 import { addInteractiveSlot } from "../forge/extensions/inference-scheduling.ts";
+import webResearchExtension, { formatRunFailure } from "../forge/extensions/web-research.ts";
+import { DEFAULT_CONNECTED_SERVICES } from "../forge/lib/connected-services.mjs";
 import {
 	appendRunEvent,
 	assertCompatibleRun,
@@ -32,7 +33,6 @@ import {
 	readJsonlRecoverTail,
 	updateRunState,
 } from "../forge/lib/run-state.mjs";
-import { DEFAULT_CONNECTED_SERVICES } from "../forge/lib/connected-services.mjs";
 
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const skillsRoot = join(repositoryRoot, "forge", "skills");
@@ -62,24 +62,39 @@ test("shared run state is atomic, compatible, and recovers a malformed journal t
 			nextAction: "next",
 		});
 		initializeRunState(workspace, state);
-		assertCompatibleRun(loadRunState(workspace, "test-batch"), { workflow: "test-batch", command: "run", input, options });
+		assertCompatibleRun(loadRunState(workspace, "test-batch"), {
+			workflow: "test-batch",
+			command: "run",
+			input,
+			options,
+		});
 		assert.throws(
-			() => assertCompatibleRun(state, { workflow: "test-batch", command: "run", input, options: { mode: "changed" } }),
+			() =>
+				assertCompatibleRun(state, { workflow: "test-batch", command: "run", input, options: { mode: "changed" } }),
 			/options or input do not match/,
 		);
 		updateRunState(workspace, (draft) => {
 			draft.items[0].status = "success";
 		});
 		assert.equal(loadRunState(workspace).items[0].status, "success");
-		writeFileSync(join(workspace, "run_events.jsonl"), `${readFileSync(join(workspace, "run_events.jsonl"), "utf8")}{"broken":`);
+		writeFileSync(
+			join(workspace, "run_events.jsonl"),
+			`${readFileSync(join(workspace, "run_events.jsonl"), "utf8")}{"broken":`,
+		);
 		appendRunEvent(workspace, { type: "recovered" });
 		const journal = readJsonlRecoverTail(join(workspace, "run_events.jsonl"));
 		assert.equal(journal.rows.at(-1).type, "recovered");
-		assert.deepEqual(inputDrift(input.snapshot, [{ path: "a.md", sha256: "new" }, { path: "b.md", sha256: "added" }]), {
-			changed: [{ before: { path: "a.md", sha256: "old" }, after: { path: "a.md", sha256: "new" } }],
-			added: [{ path: "b.md", sha256: "added" }],
-			removed: [],
-		});
+		assert.deepEqual(
+			inputDrift(input.snapshot, [
+				{ path: "a.md", sha256: "new" },
+				{ path: "b.md", sha256: "added" },
+			]),
+			{
+				changed: [{ before: { path: "a.md", sha256: "old" }, after: { path: "a.md", sha256: "new" } }],
+				added: [{ path: "b.md", sha256: "added" }],
+				removed: [],
+			},
+		);
 	});
 });
 
@@ -242,7 +257,13 @@ function authorProjectFiles(directory) {
 	]) {
 		const path = join(directory, name);
 		if (!existsSync(path)) continue;
-		writeFileSync(path, readFileSync(path, "utf8").replaceAll(placeholder, "Authored from cited project controls and the human status overlay."));
+		writeFileSync(
+			path,
+			readFileSync(path, "utf8").replaceAll(
+				placeholder,
+				"Authored from cited project controls and the human status overlay.",
+			),
+		);
 	}
 }
 
@@ -280,15 +301,17 @@ function readManifestRows(runDirectory) {
 	const columns = rows.shift();
 	return {
 		columns,
-		rows: rows.filter((row) => row.some((field) => field !== "")).map((row) => Object.fromEntries(columns.map((column, index) => [column, row[index] ?? ""]))),
+		rows: rows
+			.filter((row) => row.some((field) => field !== ""))
+			.map((row) => Object.fromEntries(columns.map((column, index) => [column, row[index] ?? ""]))),
 	};
 }
 
 function writeManifestRows(runDirectory, columns, rows) {
-	writeCsvRows(
-		join(runDirectory, "manifest.csv"),
-		[columns, ...rows.map((row) => columns.map((column) => row[column] ?? ""))],
-	);
+	writeCsvRows(join(runDirectory, "manifest.csv"), [
+		columns,
+		...rows.map((row) => columns.map((column) => row[column] ?? "")),
+	]);
 }
 
 function completeIngestRun(runDirectory) {
@@ -303,7 +326,10 @@ function completeIngestRun(runDirectory) {
 		metadata.finalOutput = metadata.finalOutput ?? { filename: null, namingReason: null };
 		writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
 		const reportPath = join(documentDirectory, "extraction_report.md");
-		writeFileSync(reportPath, readFileSync(reportPath, "utf8").replace("model normalization pending", "model normalization complete"));
+		writeFileSync(
+			reportPath,
+			readFileSync(reportPath, "utf8").replace("model normalization pending", "model normalization complete"),
+		);
 		row.status = "success";
 	}
 	writeManifestRows(runDirectory, manifest.columns, manifest.rows);
@@ -338,13 +364,37 @@ function startDeepResearchFixture({ flagVerdicts = new Map() } = {}) {
 			const results = [];
 			if (/alpha/i.test(query)) {
 				results.push(
-					{ title: "Alpha Source", url: `${origin}/page-alpha`, content: "Alpha snippet", engine: "fixture", score: 1 },
-					{ title: "Alpha Source Duplicate", url: `${origin}/page-alpha#duplicate`, content: "Duplicate snippet", engine: "fixture", score: 0.9 },
+					{
+						title: "Alpha Source",
+						url: `${origin}/page-alpha`,
+						content: "Alpha snippet",
+						engine: "fixture",
+						score: 1,
+					},
+					{
+						title: "Alpha Source Duplicate",
+						url: `${origin}/page-alpha#duplicate`,
+						content: "Duplicate snippet",
+						engine: "fixture",
+						score: 0.9,
+					},
 				);
 			} else if (/beta/i.test(query)) {
-				results.push({ title: "Beta Source", url: `${origin}/page-beta`, content: "Beta snippet", engine: "fixture", score: 1 });
+				results.push({
+					title: "Beta Source",
+					url: `${origin}/page-beta`,
+					content: "Beta snippet",
+					engine: "fixture",
+					score: 1,
+				});
 			} else if (/follow-up/i.test(query)) {
-				results.push({ title: "Gamma Source", url: `${origin}/page-gamma`, content: "Gamma snippet", engine: "fixture", score: 1 });
+				results.push({
+					title: "Gamma Source",
+					url: `${origin}/page-gamma`,
+					content: "Gamma snippet",
+					engine: "fixture",
+					score: 1,
+				});
 			} else if (/many/i.test(query)) {
 				for (let index = 1; index <= 8; index += 1) {
 					results.push({
@@ -356,9 +406,21 @@ function startDeepResearchFixture({ flagVerdicts = new Map() } = {}) {
 					});
 				}
 			} else if (/mismatch/i.test(query)) {
-				results.push({ title: "Mismatch Source", url: `${origin}/page-mismatch`, content: "Mismatch snippet", engine: "fixture", score: 1 });
+				results.push({
+					title: "Mismatch Source",
+					url: `${origin}/page-mismatch`,
+					content: "Mismatch snippet",
+					engine: "fixture",
+					score: 1,
+				});
 			} else if (/checkpoint/i.test(query)) {
-				results.push({ title: "Checkpoint Source", url: `${origin}/page-checkpoint`, content: "Checkpoint snippet", engine: "fixture", score: 1 });
+				results.push({
+					title: "Checkpoint Source",
+					url: `${origin}/page-checkpoint`,
+					content: "Checkpoint snippet",
+					engine: "fixture",
+					score: 1,
+				});
 			} else if (/structured/i.test(query)) {
 				results.push(
 					{
@@ -378,9 +440,21 @@ function startDeepResearchFixture({ flagVerdicts = new Map() } = {}) {
 					},
 				);
 			} else if (/binary/i.test(query)) {
-				results.push({ title: "Binary Source", url: `${origin}/paper.pdf`, content: "PDF snippet", engine: "fixture", score: 1 });
+				results.push({
+					title: "Binary Source",
+					url: `${origin}/paper.pdf`,
+					content: "PDF snippet",
+					engine: "fixture",
+					score: 1,
+				});
 			} else if (/unsafe/i.test(query)) {
-				results.push({ title: "Unsafe Source", url: "http://127.0.0.1:9/unsafe", content: "Unsafe snippet", engine: "fixture", score: 1 });
+				results.push({
+					title: "Unsafe Source",
+					url: "http://127.0.0.1:9/unsafe",
+					content: "Unsafe snippet",
+					engine: "fixture",
+					score: 1,
+				});
 			}
 			response.writeHead(200, { "Content-Type": "application/json" });
 			response.end(JSON.stringify({ results }));
@@ -411,7 +485,10 @@ function startDeepResearchFixture({ flagVerdicts = new Map() } = {}) {
 						})),
 					});
 				} else if (prompt.includes("Plan follow-up web searches")) {
-					content = JSON.stringify({ queries: ["follow-up provenance validation"], rationale: "Need validation source." });
+					content = JSON.stringify({
+						queries: ["follow-up provenance validation"],
+						rationale: "Need validation source.",
+					});
 				} else if (prompt.includes("Extract source-backed evidence")) {
 					const sourceId = prompt.match(/source_id: (src-[a-f0-9]+)/)?.[1] ?? "src-unknown";
 					let quote = "Alpha evidence quote supports deep research provenance.";
@@ -419,7 +496,8 @@ function startDeepResearchFixture({ flagVerdicts = new Map() } = {}) {
 					if (prompt.includes("Gamma Source")) quote = "Gamma follow up quote identifies remaining gap.";
 					const manyQuote = prompt.match(/Many evidence quote \d+ for [^.]+\./)?.[0];
 					if (manyQuote) quote = manyQuote;
-					if (prompt.includes("Mismatch Source")) quote = "Invented quote that is absent from the archived source.";
+					if (prompt.includes("Mismatch Source"))
+						quote = "Invented quote that is absent from the archived source.";
 					content = JSON.stringify({
 						evidence: [
 							{
@@ -446,7 +524,13 @@ function startDeepResearchFixture({ flagVerdicts = new Map() } = {}) {
 								notes: "Fixture claim.",
 							},
 						],
-						gaps: [{ text: "Long-term WARC export is not covered.", reason: "No fixture evidence.", source_ids: sourceIds }],
+						gaps: [
+							{
+								text: "Long-term WARC export is not covered.",
+								reason: "No fixture evidence.",
+								source_ids: sourceIds,
+							},
+						],
 					});
 				}
 				response.writeHead(200, { "Content-Type": "application/json" });
@@ -686,10 +770,17 @@ function startAcademicResearchFixture() {
 							primary_location: {
 								landing_page_url: "https://doi.org/10.1234/alpha",
 								pdf_url: null,
-								source: { display_name: "Journal of Test Metadata", issn: ["1234-5678"], type: "journal", host_organization_name: "Fixture Press" },
+								source: {
+									display_name: "Journal of Test Metadata",
+									issn: ["1234-5678"],
+									type: "journal",
+									host_organization_name: "Fixture Press",
+								},
 							},
 							open_access: { is_oa: true, oa_status: "hybrid", oa_url: "https://example.test/alpha-oa.pdf" },
-							authorships: [{ author: { display_name: "Ada Lovelace", orcid: "https://orcid.org/0000-0002-1825-0097" } }],
+							authorships: [
+								{ author: { display_name: "Ada Lovelace", orcid: "https://orcid.org/0000-0002-1825-0097" } },
+							],
 						},
 					],
 				}),
@@ -873,7 +964,8 @@ server.listen(0, "127.0.0.1", () => {
 		});
 		child.once("error", rejectServer);
 		child.once("exit", (code) => {
-			if (!stdout.trim()) rejectServer(new Error(`GLM-OCR fixture exited before startup with code ${code}: ${stderr}`));
+			if (!stdout.trim())
+				rejectServer(new Error(`GLM-OCR fixture exited before startup with code ${code}: ${stderr}`));
 		});
 	});
 }
@@ -940,7 +1032,8 @@ server.listen(0, "127.0.0.1", () => {
 		});
 		child.once("error", rejectServer);
 		child.once("exit", (code) => {
-			if (!stdout.trim()) rejectServer(new Error(`embeddings fixture exited before startup with code ${code}: ${stderr}`));
+			if (!stdout.trim())
+				rejectServer(new Error(`embeddings fixture exited before startup with code ${code}: ${stderr}`));
 		});
 	});
 }
@@ -1084,17 +1177,28 @@ server.listen(0, "127.0.0.1", () => process.stdout.write(String(server.address()
 			resolveServer({
 				url: `http://127.0.0.1:${port.trim()}/v1/chat/completions`,
 				requestsPath,
-				close: () => new Promise((resolveClose) => { child.once("exit", resolveClose); child.kill(); }),
+				close: () =>
+					new Promise((resolveClose) => {
+						child.once("exit", resolveClose);
+						child.kill();
+					}),
 			});
 		});
 		child.once("error", rejectServer);
 		child.once("exit", (code) => {
-			if (!stdout.trim()) rejectServer(new Error(`email digest fixture exited before startup with code ${code}: ${stderr}`));
+			if (!stdout.trim())
+				rejectServer(new Error(`email digest fixture exited before startup with code ${code}: ${stderr}`));
 		});
 	});
 }
 
-function startProjectExtractionWorkerFixture(workspace, rejectBackgroundSlot = false, cachedTokens = 500, extractionDelayMs = 0, responseMode = "normal") {
+function startProjectExtractionWorkerFixture(
+	workspace,
+	rejectBackgroundSlot = false,
+	cachedTokens = 500,
+	extractionDelayMs = 0,
+	responseMode = "normal",
+) {
 	const requestsPath = join(workspace, "project-worker-requests.jsonl");
 	const serverPath = join(workspace, "project-worker-server.mjs");
 	writeFileSync(
@@ -1200,11 +1304,17 @@ server.listen(0, "127.0.0.1", () => process.stdout.write(String(server.address()
 			resolveServer({
 				url: `http://127.0.0.1:${port.trim()}/v1/chat/completions`,
 				requestsPath,
-				close: () => new Promise((resolveClose) => { child.once("exit", resolveClose); child.kill(); }),
+				close: () =>
+					new Promise((resolveClose) => {
+						child.once("exit", resolveClose);
+						child.kill();
+					}),
 			});
 		});
 		child.once("error", rejectServer);
-		child.once("exit", (code) => { if (!stdout.trim()) rejectServer(new Error(`project worker fixture exited ${code}: ${stderr}`)); });
+		child.once("exit", (code) => {
+			if (!stdout.trim()) rejectServer(new Error(`project worker fixture exited ${code}: ${stderr}`));
+		});
 	});
 }
 
@@ -1225,13 +1335,29 @@ test("transcript cleanup and file conversion preserve their source", () => {
 
 		const conversionRun = join(workspace, "conversion");
 		const conversion = jsonOutput(
-			run(python, [script("file-conversion", "file-conversion.py"), "convert", source, "--to", "txt", "--output", conversionRun]),
+			run(python, [
+				script("file-conversion", "file-conversion.py"),
+				"convert",
+				source,
+				"--to",
+				"txt",
+				"--output",
+				conversionRun,
+			]),
 		);
 		assert.equal(conversion.success, 1);
 		run(python, [script("file-conversion", "file-conversion.py"), "validate", conversionRun]);
 		assert.equal(sha256(source), sourceHash);
 		const resumedConversion = jsonOutput(
-			run(python, [script("file-conversion", "file-conversion.py"), "convert", source, "--to", "txt", "--output", conversionRun]),
+			run(python, [
+				script("file-conversion", "file-conversion.py"),
+				"convert",
+				source,
+				"--to",
+				"txt",
+				"--output",
+				conversionRun,
+			]),
 		);
 		assert.equal(resumedConversion.complete, true);
 		assert.equal(resumedConversion.success, 1);
@@ -1242,15 +1368,33 @@ test("transcript cleanup and file conversion preserve their source", () => {
 			[script("file-conversion", "file-conversion.py"), "validate", conversionRun],
 			/source file hash differs/,
 		);
-		const drift = jsonOutput(run(python, [script("file-conversion", "file-conversion.py"), "status", conversionRun, "--json"]));
+		const drift = jsonOutput(
+			run(python, [script("file-conversion", "file-conversion.py"), "status", conversionRun, "--json"]),
+		);
 		assert.equal(drift.refreshRequired, true);
 		assert.equal(drift.inputDrift.changed.length, 1);
-		assert.equal(jsonOutput(run(python, [script("file-conversion", "file-conversion.py"), "refresh", conversionRun])).refreshed, true);
 		assert.equal(
-			jsonOutput(run(python, [script("file-conversion", "file-conversion.py"), "convert", source, "--to", "txt", "--output", conversionRun])).success,
+			jsonOutput(run(python, [script("file-conversion", "file-conversion.py"), "refresh", conversionRun])).refreshed,
+			true,
+		);
+		assert.equal(
+			jsonOutput(
+				run(python, [
+					script("file-conversion", "file-conversion.py"),
+					"convert",
+					source,
+					"--to",
+					"txt",
+					"--output",
+					conversionRun,
+				]),
+			).success,
 			1,
 		);
-		assert.equal(jsonOutput(run(python, [script("file-conversion", "file-conversion.py"), "validate", conversionRun])).valid, true);
+		assert.equal(
+			jsonOutput(run(python, [script("file-conversion", "file-conversion.py"), "validate", conversionRun])).valid,
+			true,
+		);
 	});
 });
 
@@ -1283,7 +1427,15 @@ YnVkZ2V0IGRhdGE=
 		const sourceHash = sha256(source);
 		const runDirectory = join(workspace, "eml-conversion");
 		const converted = jsonOutput(
-			run(python, [script("file-conversion", "file-conversion.py"), "convert", source, "--to", "md", "--output", runDirectory]),
+			run(python, [
+				script("file-conversion", "file-conversion.py"),
+				"convert",
+				source,
+				"--to",
+				"md",
+				"--output",
+				runDirectory,
+			]),
 		);
 		assert.equal(converted.success, 1);
 		assert.equal(sha256(source), sourceHash);
@@ -1307,7 +1459,10 @@ YnVkZ2V0IGRhdGE=
 		]);
 		const attachmentPath = join(runDirectory, attachmentRows[1][10]);
 		assert.equal(readFileSync(attachmentPath, "utf8"), "budget data");
-		assert.equal(jsonOutput(run(python, [script("file-conversion", "file-conversion.py"), "validate", runDirectory])).valid, true);
+		assert.equal(
+			jsonOutput(run(python, [script("file-conversion", "file-conversion.py"), "validate", runDirectory])).valid,
+			true,
+		);
 		writeFileSync(attachmentPath, "tampered");
 		runFailure(
 			python,
@@ -1358,7 +1513,9 @@ I will send the revised budget on Tuesday.
 				),
 			);
 			assert.equal(prepared.counts.success, 2);
-			const status = jsonOutput(run(process.execPath, [script("document-ingest", "document-ingest.mjs"), "status", runDirectory]));
+			const status = jsonOutput(
+				run(process.execPath, [script("document-ingest", "document-ingest.mjs"), "status", runDirectory]),
+			);
 			assert.equal(status.nextAction, "process_emails");
 			assert.equal(status.valid, false);
 			assert.match(status.errors.join("\n"), /email_evidence\.jsonl is required/);
@@ -1385,17 +1542,31 @@ I will send the revised budget on Tuesday.
 			assert.equal(processed.emails, 2);
 			assert.equal(processed.verification.evidence.needsReview, 0);
 			assert.equal(processed.verification.claims.needsReview, 0);
-			assert.equal(jsonOutput(run(process.execPath, [script("document-ingest", "document-ingest.mjs"), "validate", runDirectory])).valid, true);
+			assert.equal(
+				jsonOutput(
+					run(process.execPath, [script("document-ingest", "document-ingest.mjs"), "validate", runDirectory]),
+				).valid,
+				true,
+			);
 
 			const digestPath = join(runDirectory, "email_digest.md");
 			const digest = readFileSync(digestPath, "utf8");
 			assert.ok(digest.indexOf("## Summary") < digest.indexOf("## Important Information"));
 			assert.match(digest, /\[evidence:ev-[a-f0-9]{16}/);
-			const evidence = readFileSync(join(runDirectory, "email_evidence.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			const evidence = readFileSync(join(runDirectory, "email_evidence.jsonl"), "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
 			assert.equal(evidence.length, 2);
 			assert.equal(new Set(evidence.map((item) => item.threadId)).size, 1);
-			assert.equal(evidence.every((item) => item.quote && item.markdownStartLine >= 1), true);
-			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			assert.equal(
+				evidence.every((item) => item.quote && item.markdownStartLine >= 1),
+				true,
+			);
+			const requests = readFileSync(fixture.requestsPath, "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
 			assert.ok(requests.some((request) => request.model === "chat-fixture"));
 			assert.ok(requests.some((request) => request.model === "think-fixture"));
 
@@ -1571,7 +1742,7 @@ test("EPUB to Markdown synthesizes chapter headings and reports unsupported EPUB
 			chapterPath,
 			readFileSync(chapterPath, "utf8").replace(
 				/<h1([^>]*)>Navigation Chapter<\/h1>/,
-				'<p$1>Opening without a source heading.</p>',
+				"<p$1>Opening without a source heading.</p>",
 			),
 		);
 		const packagePath = join(unpacked, "EPUB", "content.opf");
@@ -1696,11 +1867,10 @@ if [[ "$severity" == "ERROR" ]]; then exit 1; fi
 		assert.equal(install.installed, true);
 		assert.equal(existsSync(join(agentDirectory, "tools", "epubcheck", "5.3.0", "epubcheck.jar")), true);
 		const doctor = jsonOutput(
-			runWithEnvironment(
-				python,
-				[script("file-conversion", "file-conversion.py"), "doctor", "--json"],
-				{ PATH: `${fakeBin}:${process.env.PATH}`, PI_CODING_AGENT_DIR: agentDirectory },
-			),
+			runWithEnvironment(python, [script("file-conversion", "file-conversion.py"), "doctor", "--json"], {
+				PATH: `${fakeBin}:${process.env.PATH}`,
+				PI_CODING_AGENT_DIR: agentDirectory,
+			}),
 		);
 		assert.equal(doctor.java, true);
 		assert.equal(doctor.epubcheckSource, "managed");
@@ -1709,24 +1879,19 @@ if [[ "$severity" == "ERROR" ]]; then exit 1; fi
 		const explicitJar = join(workspace, "explicit.jar");
 		writeFileSync(explicitJar, "explicit synthetic jar\n");
 		const explicitDoctor = jsonOutput(
-			runWithEnvironment(
-				python,
-				[script("file-conversion", "file-conversion.py"), "doctor", "--json"],
-				{
-					EPUBCHECK_JAR: explicitJar,
-					PATH: `${fakeBin}:${process.env.PATH}`,
-					PI_CODING_AGENT_DIR: agentDirectory,
-				},
-			),
+			runWithEnvironment(python, [script("file-conversion", "file-conversion.py"), "doctor", "--json"], {
+				EPUBCHECK_JAR: explicitJar,
+				PATH: `${fakeBin}:${process.env.PATH}`,
+				PI_CODING_AGENT_DIR: agentDirectory,
+			}),
 		);
 		assert.equal(explicitDoctor.epubcheckSource, "explicit-jar");
 
 		const pathDoctor = jsonOutput(
-			runWithEnvironment(
-				python,
-				[script("file-conversion", "file-conversion.py"), "doctor", "--json"],
-				{ PATH: `${fakeBin}:${process.env.PATH}`, PI_CODING_AGENT_DIR: join(workspace, "empty-agent") },
-			),
+			runWithEnvironment(python, [script("file-conversion", "file-conversion.py"), "doctor", "--json"], {
+				PATH: `${fakeBin}:${process.env.PATH}`,
+				PI_CODING_AGENT_DIR: join(workspace, "empty-agent"),
+			}),
 		);
 		assert.equal(pathDoctor.epubcheckSource, "path");
 
@@ -1800,7 +1965,12 @@ if [[ "$severity" == "ERROR" ]]; then exit 1; fi
 		mkdirSync(emptyBin);
 		const missingJava = runWithEnvironment(
 			pythonExecutable,
-			[script("file-conversion", "file-conversion.py"), "install-epubcheck", "--tools-dir", join(workspace, "no-java")],
+			[
+				script("file-conversion", "file-conversion.py"),
+				"install-epubcheck",
+				"--tools-dir",
+				join(workspace, "no-java"),
+			],
 			{ PATH: emptyBin },
 			1,
 		);
@@ -1819,11 +1989,10 @@ if [[ "$severity" == "ERROR" ]]; then exit 1; fi
 			runDirectory,
 		]);
 		const warningValidation = jsonOutput(
-			runWithEnvironment(
-				python,
-				[script("file-conversion", "file-conversion.py"), "validate", runDirectory],
-				{ PATH: `${fakeBin}:${process.env.PATH}`, PI_CODING_AGENT_DIR: agentDirectory },
-			),
+			runWithEnvironment(python, [script("file-conversion", "file-conversion.py"), "validate", runDirectory], {
+				PATH: `${fakeBin}:${process.env.PATH}`,
+				PI_CODING_AGENT_DIR: agentDirectory,
+			}),
 		);
 		assert.match(warningValidation.warnings.join("\n"), /TEST-001: synthetic finding/);
 		const errorValidation = runWithEnvironment(
@@ -1912,7 +2081,10 @@ test("Markdown to EPUB handles fallbacks and rejects invalid covers", () => {
 			]),
 		);
 		assert.equal(jpegResult.failed, 0);
-		assert.equal(jsonOutput(run(python, [script("file-conversion", "file-conversion.py"), "validate", jpegRun])).valid, true);
+		assert.equal(
+			jsonOutput(run(python, [script("file-conversion", "file-conversion.py"), "validate", jpegRun])).valid,
+			true,
+		);
 
 		const missingImageSource = join(workspace, "missing-image.md");
 		writeFileSync(missingImageSource, "# Chapter\n\n![Missing](does-not-exist.png)\n");
@@ -1929,7 +2101,10 @@ test("Markdown to EPUB handles fallbacks and rejects invalid covers", () => {
 			]),
 		);
 		assert.equal(missingImageResult.failed, 1);
-		assert.match(readFileSync(join(missingImageRun, "conversion_manifest.csv"), "utf8"), /referenced local image is missing/);
+		assert.match(
+			readFileSync(join(missingImageRun, "conversion_manifest.csv"), "utf8"),
+			/referenced local image is missing/,
+		);
 	});
 });
 
@@ -2000,11 +2175,17 @@ server.listen(0, "127.0.0.1", () => process.stdout.write(String(server.address()
 			resolveServer({
 				url: `http://127.0.0.1:${port.trim()}/v1/chat/completions`,
 				requestsPath,
-				close: () => new Promise((resolveClose) => { child.once("exit", resolveClose); child.kill(); }),
+				close: () =>
+					new Promise((resolveClose) => {
+						child.once("exit", resolveClose);
+						child.kill();
+					}),
 			});
 		});
 		child.once("error", rejectServer);
-		child.once("exit", (code) => { if (!stdout.trim()) rejectServer(new Error(`literature worker fixture exited ${code}: ${stderr}`)); });
+		child.once("exit", (code) => {
+			if (!stdout.trim()) rejectServer(new Error(`literature worker fixture exited ${code}: ${stderr}`));
+		});
 	});
 }
 
@@ -2031,14 +2212,14 @@ test("literature extraction processes documents on the bulk service and reviews 
 			assert.equal(results[0].status, "success");
 			assert.equal(results[0].items.length, 1);
 
-			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			const requests = readFileSync(fixture.requestsPath, "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
 			// One extraction call plus one batched review call.
 			assert.equal(requests.length, 2);
-			assert.ok(requests[1].messages.at(-1).content.includes("\"items\""), "second call is the review");
-			assert.deepEqual(
-				JSON.parse(readFileSync(join(runDirectory, "verified.jsonl"), "utf8").trim()).verdict,
-				"ok",
-			);
+			assert.ok(requests[1].messages.at(-1).content.includes('"items"'), "second call is the review");
+			assert.deepEqual(JSON.parse(readFileSync(join(runDirectory, "verified.jsonl"), "utf8").trim()).verdict, "ok");
 		} finally {
 			await fixture.close();
 		}
@@ -2060,7 +2241,10 @@ test("literature extraction rejects a fabricated quote and retries", async () =>
 				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
 			);
 
-			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			const requests = readFileSync(fixture.requestsPath, "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
 			assert.equal(requests.length, 2, "the fabricated quote costs one corrective retry");
 			assert.match(requests[1].messages.at(-1).content, /direct_quotes not found in the document/);
 			const results = JSON.parse(readFileSync(join(runDirectory, "extraction_results.jsonl"), "utf8").trim());
@@ -2107,7 +2291,13 @@ test("literature extraction rejects scaffolds and accepts authored deliverables"
 		writeFileSync(source, "# Study\n\nThe study reports a 12 percent increase.\n");
 		const sourceHash = sha256(source);
 		const runDirectory = join(workspace, "literature");
-		run(python, [script("literature-extraction", "literature-extraction.py"), "init", source, "--output", runDirectory]);
+		run(python, [
+			script("literature-extraction", "literature-extraction.py"),
+			"init",
+			source,
+			"--output",
+			runDirectory,
+		]);
 		const pending = jsonOutput(
 			run(python, [script("literature-extraction", "literature-extraction.py"), "next", runDirectory]),
 		);
@@ -2162,7 +2352,12 @@ test("literature extraction rejects scaffolds and accepts authored deliverables"
 			"--extraction-file",
 			extractionPath,
 		]);
-		run(python, [script("literature-extraction", "literature-extraction.py"), "build", runDirectory, "--no-claim-clusters"]);
+		run(python, [
+			script("literature-extraction", "literature-extraction.py"),
+			"build",
+			runDirectory,
+			"--no-claim-clusters",
+		]);
 		const evidenceRows = parseCsvRows(readFileSync(join(runDirectory, "evidence_table.csv"), "utf8"));
 		assert.deepEqual(evidenceRows[0], [
 			"document_id",
@@ -2180,21 +2375,36 @@ test("literature extraction rejects scaffolds and accepts authored deliverables"
 		assert.match(readFileSync(join(runDirectory, "evidence_table.csv"), "utf8"), /author/);
 		assert.equal(existsSync(join(runDirectory, "evidence_table.xlsx")), false);
 		assert.match(readFileSync(join(runDirectory, "item_index.jsonl"), "utf8"), /"itemId": "i000001"/);
-		assert.match(readFileSync(join(runDirectory, "source_profile.csv"), "utf8"), /claim_count,finding_count,definition_count/);
+		assert.match(
+			readFileSync(join(runDirectory, "source_profile.csv"), "utf8"),
+			/claim_count,finding_count,definition_count/,
+		);
 		assert.equal(existsSync(join(runDirectory, "key_terms.md")), true);
 		runFailure(
 			python,
 			[script("literature-extraction", "literature-extraction.py"), "validate", runDirectory],
 			/unresolved placeholder/,
 		);
-		authorFiles(runDirectory, ["literature_summary.md", "claims_matrix.md", "key_terms.md", "research_gaps.md", "citation_notes.md"]);
+		authorFiles(runDirectory, [
+			"literature_summary.md",
+			"claims_matrix.md",
+			"key_terms.md",
+			"research_gaps.md",
+			"citation_notes.md",
+		]);
 		const validation = jsonOutput(
 			run(python, [script("literature-extraction", "literature-extraction.py"), "validate", runDirectory]),
 		);
 		assert.equal(validation.valid, true);
 		assert.equal(sha256(source), sourceHash);
 		const resumed = jsonOutput(
-			run(python, [script("literature-extraction", "literature-extraction.py"), "init", source, "--output", runDirectory]),
+			run(python, [
+				script("literature-extraction", "literature-extraction.py"),
+				"init",
+				source,
+				"--output",
+				runDirectory,
+			]),
 		);
 		assert.equal(resumed.resumed, true);
 		assert.equal(resumed.complete, true);
@@ -2220,7 +2430,13 @@ test("literature extraction ignores finalized ingest workspace folders by defaul
 
 		const defaultRun = join(workspace, "literature-default");
 		const initialized = jsonOutput(
-			run(python, [script("literature-extraction", "literature-extraction.py"), "init", source, "--output", defaultRun]),
+			run(python, [
+				script("literature-extraction", "literature-extraction.py"),
+				"init",
+				source,
+				"--output",
+				defaultRun,
+			]),
 		);
 		assert.equal(initialized.documents, 1);
 		const defaultDocuments = readFileSync(join(defaultRun, "documents.csv"), "utf8");
@@ -2254,7 +2470,17 @@ test("literature extraction recovers journal tails and explicitly refreshes and 
 		const pending = jsonOutput(run(python, [cli, "next", runDirectory]));
 		assert.equal(pending.complete, false);
 		assert.equal(readFileSync(join(runDirectory, "extraction_results.jsonl"), "utf8"), "");
-		run(python, [cli, "record", runDirectory, "--doc-id", pending.documentId, "--status", "failed", "--note", "permanent validation failure"]);
+		run(python, [
+			cli,
+			"record",
+			runDirectory,
+			"--doc-id",
+			pending.documentId,
+			"--status",
+			"failed",
+			"--note",
+			"permanent validation failure",
+		]);
 		run(python, [cli, "retry", runDirectory, "--item", pending.documentId]);
 		assert.equal(jsonOutput(run(python, [cli, "next", runDirectory])).documentId, pending.documentId);
 		writeFileSync(join(sourceDirectory, "two.md"), "# Two\n\nMore evidence.\n");
@@ -2282,11 +2508,16 @@ test("project extraction builds distinct controls and refreshes sources without 
 		})) {
 			writeFileSync(join(sources, name), content);
 		}
-		writeCsvRows(join(sources, "budget.csv"), [["category", "amount"], ["Evaluation", "5000"]]);
+		writeCsvRows(join(sources, "budget.csv"), [
+			["category", "amount"],
+			["Evaluation", "5000"],
+		]);
 
 		const scriptPath = script("project-extraction", "project-extraction.py");
 		const runDirectory = join(workspace, "project-run");
-		const initialized = jsonOutput(run(python, [scriptPath, "init", sources, "--output", runDirectory, "--title", "Grant Delivery"]));
+		const initialized = jsonOutput(
+			run(python, [scriptPath, "init", sources, "--output", runDirectory, "--title", "Grant Delivery"]),
+		);
 		assert.equal(initialized.sources, 8);
 
 		const extractionFor = (sourcePath, changed = false) => {
@@ -2303,20 +2534,123 @@ test("project extraction builds distinct controls and refreshes sources without 
 				"contract.md": "approval is required before publication",
 			};
 			const definitions = {
-				"award.md": ["award", { item_type: "deliverable", title: "Final evaluation report", date_text: changed ? "August 15, 2026" : "July 31, 2026", date_kind: "exact", date: changed ? "2026-08-15" : "2026-07-31", acceptance_criteria: "Sponsor acceptance", commitment_level: "required" }],
-				"scope-of-work.md": ["scope_of_work", { item_type: "reporting_requirement", title: "Quarterly progress report", date_text: "30 days after each quarter ends", date_kind: "relative", date: null, trigger: "each quarter ends", offset_days: 30, recurrence: "quarterly", commitment_level: "required" }],
-				"proposal.md": ["proposal", { item_type: "proposal_requirement", title: "Community workshop series", date_kind: "none", date: null, commitment_level: "proposed" }],
-				"report.md": ["report", { item_type: "requirement", title: "Monthly steering updates", date_text: "monthly", date_kind: "recurring", date: null, recurrence: "monthly", commitment_level: "committed" }],
-				"presentation.md": ["presentation", { item_type: "milestone", title: "Project kickoff", date_text: "July 20, 2026", date_kind: "exact", date: "2026-07-20", commitment_level: "discussed" }],
-				"meeting.md": ["meeting", { item_type: "action_item", title: "Circulate revised minutes", date_kind: "none", date: null, party: "Alex", commitment_level: "committed" }],
-				"interview.md": ["interview", { item_type: "risk", title: "Staff availability may delay field work", date_kind: "none", date: null, commitment_level: "discussed" }],
-				"budget.csv": ["budget", { item_type: "budget_fact", title: "Evaluation budget", amount: "5000", currency: "USD", date_kind: "none", date: null, commitment_level: "informational" }],
-				"contract.md": ["contract", { item_type: "requirement", title: "Approval before publication", date_text: "before publication", date_kind: "conditional", date: null, trigger: "publication", commitment_level: "required" }],
+				"award.md": [
+					"award",
+					{
+						item_type: "deliverable",
+						title: "Final evaluation report",
+						date_text: changed ? "August 15, 2026" : "July 31, 2026",
+						date_kind: "exact",
+						date: changed ? "2026-08-15" : "2026-07-31",
+						acceptance_criteria: "Sponsor acceptance",
+						commitment_level: "required",
+					},
+				],
+				"scope-of-work.md": [
+					"scope_of_work",
+					{
+						item_type: "reporting_requirement",
+						title: "Quarterly progress report",
+						date_text: "30 days after each quarter ends",
+						date_kind: "relative",
+						date: null,
+						trigger: "each quarter ends",
+						offset_days: 30,
+						recurrence: "quarterly",
+						commitment_level: "required",
+					},
+				],
+				"proposal.md": [
+					"proposal",
+					{
+						item_type: "proposal_requirement",
+						title: "Community workshop series",
+						date_kind: "none",
+						date: null,
+						commitment_level: "proposed",
+					},
+				],
+				"report.md": [
+					"report",
+					{
+						item_type: "requirement",
+						title: "Monthly steering updates",
+						date_text: "monthly",
+						date_kind: "recurring",
+						date: null,
+						recurrence: "monthly",
+						commitment_level: "committed",
+					},
+				],
+				"presentation.md": [
+					"presentation",
+					{
+						item_type: "milestone",
+						title: "Project kickoff",
+						date_text: "July 20, 2026",
+						date_kind: "exact",
+						date: "2026-07-20",
+						commitment_level: "discussed",
+					},
+				],
+				"meeting.md": [
+					"meeting",
+					{
+						item_type: "action_item",
+						title: "Circulate revised minutes",
+						date_kind: "none",
+						date: null,
+						party: "Alex",
+						commitment_level: "committed",
+					},
+				],
+				"interview.md": [
+					"interview",
+					{
+						item_type: "risk",
+						title: "Staff availability may delay field work",
+						date_kind: "none",
+						date: null,
+						commitment_level: "discussed",
+					},
+				],
+				"budget.csv": [
+					"budget",
+					{
+						item_type: "budget_fact",
+						title: "Evaluation budget",
+						amount: "5000",
+						currency: "USD",
+						date_kind: "none",
+						date: null,
+						commitment_level: "informational",
+					},
+				],
+				"contract.md": [
+					"contract",
+					{
+						item_type: "requirement",
+						title: "Approval before publication",
+						date_text: "before publication",
+						date_kind: "conditional",
+						date: null,
+						trigger: "publication",
+						commitment_level: "required",
+					},
+				],
 			};
 			const [documentRole, item] = definitions[filename];
 			return {
 				documentRole,
-				items: [{ description: "Source-backed project record.", direct_quotes: [quotes[filename]], interpretation: "explicit", confidence: "high", ...item }],
+				items: [
+					{
+						description: "Source-backed project record.",
+						direct_quotes: [quotes[filename]],
+						interpretation: "explicit",
+						confidence: "high",
+						...item,
+					},
+				],
 			};
 		};
 
@@ -2330,14 +2664,35 @@ test("project extraction builds distinct controls and refreshes sources without 
 					const invalid = structuredClone(extraction);
 					invalid.items[0].date = "2026-08-30";
 					writeFileSync(extractionPath, `${JSON.stringify(invalid)}\n`);
-					runFailure(python, [scriptPath, "record", runDirectory, "--packet-id", packet.packetId, "--items-file", extractionPath], /must not normalize a non-exact date/);
+					runFailure(
+						python,
+						[scriptPath, "record", runDirectory, "--packet-id", packet.packetId, "--items-file", extractionPath],
+						/must not normalize a non-exact date/,
+					);
 				}
 				writeFileSync(extractionPath, `${JSON.stringify(extraction)}\n`);
-				run(python, [scriptPath, "record", runDirectory, "--packet-id", packet.packetId, "--items-file", extractionPath]);
+				run(python, [
+					scriptPath,
+					"record",
+					runDirectory,
+					"--packet-id",
+					packet.packetId,
+					"--items-file",
+					extractionPath,
+				]);
 			}
 		};
 
-		const prefixes = { deliverable: "DEL", reporting_requirement: "RPT", proposal_requirement: "PRP", requirement: "REQ", milestone: "MIL", action_item: "ACT", risk: "RSK", budget_fact: "BUD" };
+		const prefixes = {
+			deliverable: "DEL",
+			reporting_requirement: "RPT",
+			proposal_requirement: "PRP",
+			requirement: "REQ",
+			milestone: "MIL",
+			action_item: "ACT",
+			risk: "RSK",
+			budget_fact: "BUD",
+		};
 		const reconcileAndReview = () => {
 			run(python, [scriptPath, "reconcile", runDirectory]);
 			while (true) {
@@ -2362,7 +2717,10 @@ test("project extraction builds distinct controls and refreshes sources without 
 					relationships: { parent: [], depends_on: [], satisfies: [], supersedes: [], conflicts_with: [] },
 				}));
 				const reviewPath = join(runDirectory, "working", `${pending.reviewPacketId}-review.json`);
-				writeFileSync(reviewPath, `${JSON.stringify({ reviewPacketId: pending.reviewPacketId, controls, dispositions: [] })}\n`);
+				writeFileSync(
+					reviewPath,
+					`${JSON.stringify({ reviewPacketId: pending.reviewPacketId, controls, dispositions: [] })}\n`,
+				);
 				run(python, [scriptPath, "record-review", runDirectory, "--review-file", reviewPath]);
 			}
 		};
@@ -2389,13 +2747,26 @@ test("project extraction builds distinct controls and refreshes sources without 
 		deliverableStatus[statusHeader.indexOf("notes")] = "Human status note.";
 		writeCsvRows(join(runDirectory, "project_status.csv"), [statusHeader, ...statusRows]);
 
-		writeFileSync(join(sources, "award.md"), "# Award Amendment\n\nThe final evaluation report is now due August 15, 2026 and still requires sponsor acceptance.\n");
+		writeFileSync(
+			join(sources, "award.md"),
+			"# Award Amendment\n\nThe final evaluation report is now due August 15, 2026 and still requires sponsor acceptance.\n",
+		);
 		rmSync(join(sources, "meeting.md"));
 		writeFileSync(join(sources, "contract.md"), "# Contract\n\nSponsor approval is required before publication.\n");
 		const refreshed = jsonOutput(run(python, [scriptPath, "refresh", runDirectory]));
-		assert.deepEqual({ added: refreshed.added, changed: refreshed.changed, removed: refreshed.removed, unchanged: refreshed.unchanged }, { added: 1, changed: 1, removed: 1, unchanged: 6 });
+		assert.deepEqual(
+			{
+				added: refreshed.added,
+				changed: refreshed.changed,
+				removed: refreshed.removed,
+				unchanged: refreshed.unchanged,
+			},
+			{ added: 1, changed: 1, removed: 1, unchanged: 6 },
+		);
 		assert.equal(refreshed.pendingPackets, 2);
-		const staleSearch = jsonOutput(run(python, [scriptPath, "search", runDirectory, "--query", "final evaluation report"]));
+		const staleSearch = jsonOutput(
+			run(python, [scriptPath, "search", runDirectory, "--query", "final evaluation report"]),
+		);
 		assert.equal(staleSearch.indexStale, true);
 		assert.match(staleSearch.warnings.join(" "), /last completed|stale/);
 		processPending(true);
@@ -2456,7 +2827,12 @@ test("project extraction Inbox drains reviewed files, resumes finalization, and 
 		assert.equal(duplicateSync.synced, false);
 		assert.equal(duplicateSync.archivedDuplicates.length, 1);
 		assert.equal(existsSync(join(projectRoot, "Originals", "Inbox", "Duplicates", "update-copy.txt")), true);
-		assert.equal(JSON.parse(readFileSync(join(runDirectory, "source_manifest.json"), "utf8")).sources.filter((source) => source.active !== false).length, 2);
+		assert.equal(
+			JSON.parse(readFileSync(join(runDirectory, "source_manifest.json"), "utf8")).sources.filter(
+				(source) => source.active !== false,
+			).length,
+			2,
+		);
 	});
 });
 
@@ -2492,7 +2868,10 @@ test("project extraction worker isolates its slot and completes cache-aware arti
 				FORGE_EMBEDDINGS_URL: embeddings.url,
 			};
 			await runAsyncWithEnvironment(python, [cli, "process", runDirectory, "--worker"], projectEnvironment);
-			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			const requests = readFileSync(fixture.requestsPath, "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
 			assert.ok(requests.length >= 2);
 			assert.ok(requests.every((request) => request.id_slot === 1 && request.cache_prompt === true));
 			assert.equal(JSON.parse(readFileSync(join(runDirectory, "run_state.json"), "utf8")).status, "complete");
@@ -2501,12 +2880,32 @@ test("project extraction worker isolates its slot and completes cache-aware arti
 			assert.match(readFileSync(join(runDirectory, "gantt.html"), "utf8"), /Project Gantt/);
 			const indexed = jsonOutput(runWithEnvironment(python, [cli, "index", runDirectory], projectEnvironment));
 			assert.ok(indexed.embeddings.reused > 0);
-			const search = jsonOutput(runWithEnvironment(python, [cli, "search", runDirectory, "--query", "final report deadline"], projectEnvironment));
+			const search = jsonOutput(
+				runWithEnvironment(
+					python,
+					[cli, "search", runDirectory, "--query", "final report deadline"],
+					projectEnvironment,
+				),
+			);
 			assert.equal(search.ranking, "hybrid");
-			assert.equal(search.hits[0].controlIds.includes("DEL-001") || search.hits[0].title.includes("Final report"), true);
-			const shown = jsonOutput(runWithEnvironment(python, [cli, "show", runDirectory, "--hit-id", search.hits[0].hitId, "--full-source"], projectEnvironment));
+			assert.equal(
+				search.hits[0].controlIds.includes("DEL-001") || search.hits[0].title.includes("Final report"),
+				true,
+			);
+			const shown = jsonOutput(
+				runWithEnvironment(
+					python,
+					[cli, "show", runDirectory, "--hit-id", search.hits[0].hitId, "--full-source"],
+					projectEnvironment,
+				),
+			);
 			assert.match(JSON.stringify(shown), /Final report due 2026-08-01/);
-			const lexical = jsonOutput(runWithEnvironment(python, [cli, "search", runDirectory, "--query", "DEL-001"], { ...projectEnvironment, FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings" }));
+			const lexical = jsonOutput(
+				runWithEnvironment(python, [cli, "search", runDirectory, "--query", "DEL-001"], {
+					...projectEnvironment,
+					FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
+				}),
+			);
 			assert.equal(lexical.ranking, "lexical");
 			assert.equal(lexical.hits[0].controlIds.includes("DEL-001"), true);
 
@@ -2527,10 +2926,17 @@ test("project extraction run completes 100-plus packets serially without schedul
 		try {
 			const agentDirectory = join(workspace, "agent");
 			mkdirSync(agentDirectory);
-			writeFileSync(join(agentDirectory, "settings.json"), `${JSON.stringify({ connectedServices: { chat: { enabled: true, baseUrl: fixture.url, model: "code", scheduling: { enabled: false } } } })}\n`);
+			writeFileSync(
+				join(agentDirectory, "settings.json"),
+				`${JSON.stringify({ connectedServices: { chat: { enabled: true, baseUrl: fixture.url, model: "code", scheduling: { enabled: false } } } })}\n`,
+			);
 			const sources = join(workspace, "sources");
 			mkdirSync(sources);
-			const sections = Array.from({ length: 101 }, (_, offset) => `# Award ${offset + 1}\n\nFinal report due 2026-08-01.\n\n${"Packet-specific context. ".repeat(38)}\n`);
+			const sections = Array.from(
+				{ length: 101 },
+				(_, offset) =>
+					`# Award ${offset + 1}\n\nFinal report due 2026-08-01.\n\n${"Packet-specific context. ".repeat(38)}\n`,
+			);
 			writeFileSync(join(sources, "awards.md"), sections.join("\n"));
 			const runDirectory = join(workspace, "run");
 			const cli = script("project-extraction", "project-extraction.py");
@@ -2546,7 +2952,10 @@ test("project extraction run completes 100-plus packets serially without schedul
 				FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
 			});
 			assert.equal(JSON.parse(readFileSync(join(runDirectory, "run_state.json"), "utf8")).status, "complete");
-			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			const requests = readFileSync(fixture.requestsPath, "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
 			assert.ok(requests.length >= 4);
 			assert.ok(requests.every((request) => request.id_slot === undefined));
 			const metrics = JSON.parse(readFileSync(join(runDirectory, "run_metrics.json"), "utf8"));
@@ -2554,12 +2963,18 @@ test("project extraction run completes 100-plus packets serially without schedul
 			assert.ok(metrics.foregroundModelCalls >= 4);
 			assert.equal(metrics.backgroundModelCalls, 0);
 			assert.equal(metrics.coverage.completionEligible, true);
-			const resumed = jsonOutput(await runAsyncWithEnvironment(python, [cli, "run", sources, "--output", runDirectory, "--packet-chars", "1000"], {
-				PI_FORGE_AGENT_DIR: agentDirectory,
-				FORGE_BASE_CHAT_URL: fixture.url,
-				FORGE_THINK_URL: fixture.url,
-				FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
-			}));
+			const resumed = jsonOutput(
+				await runAsyncWithEnvironment(
+					python,
+					[cli, "run", sources, "--output", runDirectory, "--packet-chars", "1000"],
+					{
+						PI_FORGE_AGENT_DIR: agentDirectory,
+						FORGE_BASE_CHAT_URL: fixture.url,
+						FORGE_THINK_URL: fixture.url,
+						FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
+					},
+				),
+			);
 			assert.equal(resumed.complete, true);
 		} finally {
 			await fixture.close();
@@ -2575,7 +2990,25 @@ test("project extraction rejects deferred screening and labels incomplete drafts
 		const runDirectory = join(workspace, "run");
 		run(python, [cli, "init", source, "--output", runDirectory]);
 		const packet = jsonOutput(run(python, [cli, "next", runDirectory]));
-		runFailure(python, [cli, "record", runDirectory, "--packet-id", packet.packetId, "--status", "screened_no_controls", "--note", "Awaiting full extraction.", "--screening-method", "human", "--disposition-source", "manual"], /substantive finding/);
+		runFailure(
+			python,
+			[
+				cli,
+				"record",
+				runDirectory,
+				"--packet-id",
+				packet.packetId,
+				"--status",
+				"screened_no_controls",
+				"--note",
+				"Awaiting full extraction.",
+				"--screening-method",
+				"human",
+				"--disposition-source",
+				"manual",
+			],
+			/substantive finding/,
+		);
 		runFailure(python, [cli, "build", runDirectory], /complete build requires substantive coverage/);
 		const draft = jsonOutput(run(python, [cli, "build", runDirectory, "--draft"]));
 		assert.equal(draft.draft, true);
@@ -2597,8 +3030,27 @@ test("project extraction validation reports all extraction errors together", () 
 		run(python, [cli, "init", source, "--output", runDirectory]);
 		const packet = jsonOutput(run(python, [cli, "next", runDirectory]));
 		const invalidPath = join(workspace, "invalid.json");
-		writeFileSync(invalidPath, JSON.stringify({ documentRole: "invalid", items: [{ item_type: "unknown", title: "", date_kind: "exact", date: "tomorrow", direct_quotes: ["absent quote"] }] }));
-		const result = runWithEnvironment(python, [cli, "validate-extraction", runDirectory, "--packet-id", packet.packetId, "--items-file", invalidPath], {}, 1);
+		writeFileSync(
+			invalidPath,
+			JSON.stringify({
+				documentRole: "invalid",
+				items: [
+					{
+						item_type: "unknown",
+						title: "",
+						date_kind: "exact",
+						date: "tomorrow",
+						direct_quotes: ["absent quote"],
+					},
+				],
+			}),
+		);
+		const result = runWithEnvironment(
+			python,
+			[cli, "validate-extraction", runDirectory, "--packet-id", packet.packetId, "--items-file", invalidPath],
+			{},
+			1,
+		);
 		const validation = JSON.parse(result.stdout);
 		assert.ok(validation.errors.length >= 5);
 		assert.match(validation.errors.join(" "), /documentRole.*item_type.*title.*YYYY-MM-DD.*quote/s);
@@ -2612,20 +3064,29 @@ test("project extraction splits truncated responses and retries malformed respon
 			try {
 				const agentDirectory = join(workspace, "agent");
 				mkdirSync(agentDirectory);
-				writeFileSync(join(agentDirectory, "settings.json"), `${JSON.stringify({ connectedServices: { chat: { enabled: true, baseUrl: fixture.url, model: "code", scheduling: { enabled: false, yieldMs: 0 } } } })}\n`);
+				writeFileSync(
+					join(agentDirectory, "settings.json"),
+					`${JSON.stringify({ connectedServices: { chat: { enabled: true, baseUrl: fixture.url, model: "code", scheduling: { enabled: false, yieldMs: 0 } } } })}\n`,
+				);
 				const source = join(workspace, "award.md");
-				writeFileSync(source, `# Award\n\nFinal report due 2026-08-01.\n\n${"Project context and reporting detail. ".repeat(250)}\n`);
+				writeFileSync(
+					source,
+					`# Award\n\nFinal report due 2026-08-01.\n\n${"Project context and reporting detail. ".repeat(250)}\n`,
+				);
 				const runDirectory = join(workspace, "run");
 				const cli = script("project-extraction", "project-extraction.py");
 				run(python, [cli, "init", source, "--output", runDirectory]);
 				await runAsyncWithEnvironment(python, [cli, "process", runDirectory], {
 					PI_FORGE_AGENT_DIR: agentDirectory,
 					FORGE_BASE_CHAT_URL: fixture.url,
-				FORGE_THINK_URL: fixture.url,
+					FORGE_THINK_URL: fixture.url,
 					FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
 				});
 				assert.equal(JSON.parse(readFileSync(join(runDirectory, "run_state.json"), "utf8")).status, "complete");
-				assert.equal(JSON.parse(readFileSync(join(runDirectory, "run_metrics.json"), "utf8")).dispositions.extracted, 1);
+				assert.equal(
+					JSON.parse(readFileSync(join(runDirectory, "run_metrics.json"), "utf8")).dispositions.extracted,
+					1,
+				);
 				const schedule = readFileSync(join(runDirectory, "inference_schedule.jsonl"), "utf8");
 				assert.match(schedule, mode === "truncate-once" ? /truncation_split/ : /validation_retry/);
 			} finally {
@@ -2641,26 +3102,43 @@ test("project extraction model reconciliation merges duplicate evidence and pres
 		try {
 			const agentDirectory = join(workspace, "agent");
 			mkdirSync(agentDirectory);
-			writeFileSync(join(agentDirectory, "settings.json"), `${JSON.stringify({ connectedServices: { chat: { enabled: true, baseUrl: fixture.url, model: "code", scheduling: { enabled: false, yieldMs: 0 } } } })}\n`);
+			writeFileSync(
+				join(agentDirectory, "settings.json"),
+				`${JSON.stringify({ connectedServices: { chat: { enabled: true, baseUrl: fixture.url, model: "code", scheduling: { enabled: false, yieldMs: 0 } } } })}\n`,
+			);
 			const sources = join(workspace, "sources");
 			mkdirSync(sources);
 			writeFileSync(join(sources, "award.md"), "# Award\n\nFinal report due 2026-08-01.\n");
 			writeFileSync(join(sources, "work-plan.md"), "# Work Plan\n\nFinal report due 2026-08-01.\n");
 			const runDirectory = join(workspace, "run");
 			const cli = script("project-extraction", "project-extraction.py");
-			const environment = { PI_FORGE_AGENT_DIR: agentDirectory, FORGE_BASE_CHAT_URL: fixture.url, FORGE_THINK_URL: fixture.url, FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings" };
+			const environment = {
+				PI_FORGE_AGENT_DIR: agentDirectory,
+				FORGE_BASE_CHAT_URL: fixture.url,
+				FORGE_THINK_URL: fixture.url,
+				FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
+			};
 			run(python, [cli, "init", sources, "--output", runDirectory]);
 			await runAsyncWithEnvironment(python, [cli, "process", runDirectory], environment);
-			let controls = readFileSync(join(runDirectory, "controls.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			let controls = readFileSync(join(runDirectory, "controls.jsonl"), "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
 			assert.equal(controls.length, 1);
 			assert.equal(controls[0].control_id, "DEL-001");
 			assert.equal(controls[0].source_evidence_ids.length, 2);
 			assert.match(controls[0].notes, /Merge justification/);
 
-			writeFileSync(join(sources, "award.md"), "# Award Update\n\nFinal report due 2026-08-01.\n\nStatus clarified.\n");
+			writeFileSync(
+				join(sources, "award.md"),
+				"# Award Update\n\nFinal report due 2026-08-01.\n\nStatus clarified.\n",
+			);
 			run(python, [cli, "refresh", runDirectory]);
 			await runAsyncWithEnvironment(python, [cli, "process", runDirectory], environment);
-			controls = readFileSync(join(runDirectory, "controls.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			controls = readFileSync(join(runDirectory, "controls.jsonl"), "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
 			assert.equal(controls.length, 1);
 			assert.equal(controls[0].control_id, "DEL-001");
 		} finally {
@@ -2675,7 +3153,10 @@ test("project extraction worker refuses a server without its reserved slot", asy
 		try {
 			const agentDirectory = join(workspace, "agent");
 			mkdirSync(agentDirectory);
-			writeFileSync(join(agentDirectory, "settings.json"), `${JSON.stringify({ connectedServices: { chat: { baseUrl: fixture.url, model: "code", scheduling: { enabled: true, interactiveSlot: 0, backgroundSlot: 1, idleGraceMs: 0, yieldMs: 0, backgroundOutputTokens: 4096 } } } })}\n`);
+			writeFileSync(
+				join(agentDirectory, "settings.json"),
+				`${JSON.stringify({ connectedServices: { chat: { baseUrl: fixture.url, model: "code", scheduling: { enabled: true, interactiveSlot: 0, backgroundSlot: 1, idleGraceMs: 0, yieldMs: 0, backgroundOutputTokens: 4096 } } } })}\n`,
+			);
 			const sources = join(workspace, "sources");
 			mkdirSync(sources);
 			writeFileSync(join(sources, "award.md"), "# Award\n\nFinal report due 2026-08-01.\n");
@@ -2685,11 +3166,19 @@ test("project extraction worker refuses a server without its reserved slot", asy
 			const result = await runAsyncWithEnvironment(
 				python,
 				[cli, "process", runDirectory, "--background"],
-				{ PI_FORGE_AGENT_DIR: agentDirectory, FORGE_BASE_CHAT_URL: fixture.url, FORGE_THINK_URL: fixture.url, FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings" },
+				{
+					PI_FORGE_AGENT_DIR: agentDirectory,
+					FORGE_BASE_CHAT_URL: fixture.url,
+					FORGE_THINK_URL: fixture.url,
+					FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
+				},
 				1,
 			);
 			assert.match(result.stderr, /background slot 1 is unavailable/);
-			assert.equal(JSON.parse(readFileSync(join(runDirectory, "run_state.json"), "utf8")).items[0].status, "pending");
+			assert.equal(
+				JSON.parse(readFileSync(join(runDirectory, "run_state.json"), "utf8")).items[0].status,
+				"pending",
+			);
 			assert.equal(existsSync(join(runDirectory, "worker_control.json")), false);
 		} finally {
 			await fixture.close();
@@ -2710,7 +3199,10 @@ test("project extraction worker pauses after repeated cache misses", async () =>
 			const sources = join(workspace, "sources");
 			mkdirSync(sources);
 			for (let index = 1; index <= 3; index += 1) {
-				writeFileSync(join(sources, `${index}.md`), `# Award ${index}\n\nFinal report due 2026-08-01.\n\nSource ${index}.\n`);
+				writeFileSync(
+					join(sources, `${index}.md`),
+					`# Award ${index}\n\nFinal report due 2026-08-01.\n\nSource ${index}.\n`,
+				);
 			}
 			const runDirectory = join(workspace, "run");
 			const cli = script("project-extraction", "project-extraction.py");
@@ -2721,9 +3213,15 @@ test("project extraction worker pauses after repeated cache misses", async () =>
 				FORGE_THINK_URL: fixture.url,
 				FORGE_EMBEDDINGS_URL: "http://127.0.0.1:1/v1/embeddings",
 			});
-			assert.equal(JSON.parse(readFileSync(join(runDirectory, "worker_control.json"), "utf8")).desiredState, "paused");
+			assert.equal(
+				JSON.parse(readFileSync(join(runDirectory, "worker_control.json"), "utf8")).desiredState,
+				"paused",
+			);
 			assert.match(readFileSync(join(runDirectory, "inference_schedule.jsonl"), "utf8"), /cache_warning/);
-			assert.equal(JSON.parse(readFileSync(join(runDirectory, "run_config.json"), "utf8")).worker.promptTokenCeiling, 36_864);
+			assert.equal(
+				JSON.parse(readFileSync(join(runDirectory, "run_config.json"), "utf8")).worker.promptTokenCeiling,
+				36_864,
+			);
 		} finally {
 			await fixture.close();
 		}
@@ -2755,7 +3253,9 @@ test("project extraction worker preempts and requeues for an interactive lease",
 			await new Promise((resolve, reject) => {
 				const deadline = Date.now() + 3000;
 				const poll = () => {
-					const calls = existsSync(fixture.requestsPath) ? readFileSync(fixture.requestsPath, "utf8").trim().split("\n").length : 0;
+					const calls = existsSync(fixture.requestsPath)
+						? readFileSync(fixture.requestsPath, "utf8").trim().split("\n").length
+						: 0;
 					if (calls >= 2) resolve();
 					else if (Date.now() >= deadline) reject(new Error("worker extraction request did not start"));
 					else setTimeout(poll, 20);
@@ -2794,7 +3294,13 @@ test("literature extraction clusters claims across documents", async () => {
 		const server = await startEmbeddingsFixture(workspace);
 		try {
 			const runDirectory = join(workspace, "literature");
-			run(python, [script("literature-extraction", "literature-extraction.py"), "init", sources, "--output", runDirectory]);
+			run(python, [
+				script("literature-extraction", "literature-extraction.py"),
+				"init",
+				sources,
+				"--output",
+				runDirectory,
+			]);
 			for (let index = 0; index < 2; index += 1) {
 				const pending = jsonOutput(
 					run(python, [script("literature-extraction", "literature-extraction.py"), "next", runDirectory]),
@@ -2844,9 +3350,17 @@ test("literature extraction clusters claims across documents", async () => {
 			assert.match(worksheet, /possible contradiction/);
 			assert.match(readFileSync(join(runDirectory, "claim_clusters.csv"), "utf8"), /negation_hint/);
 			// The optional worksheet does not block validation.
-			authorFiles(runDirectory, ["literature_summary.md", "claims_matrix.md", "key_terms.md", "research_gaps.md", "citation_notes.md"]);
+			authorFiles(runDirectory, [
+				"literature_summary.md",
+				"claims_matrix.md",
+				"key_terms.md",
+				"research_gaps.md",
+				"citation_notes.md",
+			]);
 			assert.equal(
-				jsonOutput(run(python, [script("literature-extraction", "literature-extraction.py"), "validate", runDirectory])).valid,
+				jsonOutput(
+					run(python, [script("literature-extraction", "literature-extraction.py"), "validate", runDirectory]),
+				).valid,
 				true,
 			);
 		} finally {
@@ -2865,8 +3379,16 @@ test("literature meta extraction packets completed prior runs", async () => {
 			const sourcePath = join(sourceDirectory, `${label}.md`);
 			writeFileSync(sourcePath, `# ${label}\n\n${sourceText}\n`);
 			const runDirectory = join(workspace, `${label}-run`);
-			run(python, [script("literature-extraction", "literature-extraction.py"), "init", sourceDirectory, "--output", runDirectory]);
-			const pending = jsonOutput(run(python, [script("literature-extraction", "literature-extraction.py"), "next", runDirectory]));
+			run(python, [
+				script("literature-extraction", "literature-extraction.py"),
+				"init",
+				sourceDirectory,
+				"--output",
+				runDirectory,
+			]);
+			const pending = jsonOutput(
+				run(python, [script("literature-extraction", "literature-extraction.py"), "next", runDirectory]),
+			);
 			const extractionPath = join(runDirectory, "working", `${label}-items.json`);
 			writeFileSync(extractionPath, `${JSON.stringify(items)}\n`);
 			run(python, [
@@ -2878,57 +3400,81 @@ test("literature meta extraction packets completed prior runs", async () => {
 				"--extraction-file",
 				extractionPath,
 			]);
-			run(python, [script("literature-extraction", "literature-extraction.py"), "build", runDirectory, "--no-claim-clusters"]);
-			authorFiles(runDirectory, ["literature_summary.md", "claims_matrix.md", "key_terms.md", "research_gaps.md", "citation_notes.md"]);
-			assert.equal(jsonOutput(run(python, [script("literature-extraction", "literature-extraction.py"), "validate", runDirectory])).valid, true);
+			run(python, [
+				script("literature-extraction", "literature-extraction.py"),
+				"build",
+				runDirectory,
+				"--no-claim-clusters",
+			]);
+			authorFiles(runDirectory, [
+				"literature_summary.md",
+				"claims_matrix.md",
+				"key_terms.md",
+				"research_gaps.md",
+				"citation_notes.md",
+			]);
+			assert.equal(
+				jsonOutput(
+					run(python, [script("literature-extraction", "literature-extraction.py"), "validate", runDirectory]),
+				).valid,
+				true,
+			);
 			return { runDirectory, sourcePath };
 		}
 
 		try {
-			const primary = createCompletedLiteratureRun("primary", "Archive labor shapes memory through daily record keeping.", [
-				{
-					item_type: "claim",
-					text: "Archive labor shapes memory through daily record keeping.",
-					direct_quotes: "Archive labor shapes memory",
-					locator: "primary",
-					interpretation: "explicit",
-					confidence: "high",
-					notes: null,
-				},
-				{
-					item_type: "quoted_evidence",
-					text: "Daily record keeping is described as archive labor.",
-					direct_quotes: "daily record keeping",
-					locator: "primary",
-					interpretation: "explicit",
-					confidence: "high",
-					notes: null,
-				},
-			]);
+			const primary = createCompletedLiteratureRun(
+				"primary",
+				"Archive labor shapes memory through daily record keeping.",
+				[
+					{
+						item_type: "claim",
+						text: "Archive labor shapes memory through daily record keeping.",
+						direct_quotes: "Archive labor shapes memory",
+						locator: "primary",
+						interpretation: "explicit",
+						confidence: "high",
+						notes: null,
+					},
+					{
+						item_type: "quoted_evidence",
+						text: "Daily record keeping is described as archive labor.",
+						direct_quotes: "daily record keeping",
+						locator: "primary",
+						interpretation: "explicit",
+						confidence: "high",
+						notes: null,
+					},
+				],
+			);
 			writeFileSync(
 				join(primary.runDirectory, "literature_summary.md"),
 				`${readFileSync(join(primary.runDirectory, "literature_summary.md"), "utf8")}\n99 of 100 documents processed.\n\n## Expanded Analysis\n\n${"Expanded prior synthesis with document-level argument structure. ".repeat(400)}\n`,
 			);
-			const secondary = createCompletedLiteratureRun("secondary", "Archive labor shapes memory as a theory of record keeping.", [
-				{
-					item_type: "definition",
-					text: "Archive labor is a theory for how record keeping shapes memory.",
-					direct_quotes: "Archive labor shapes memory",
-					locator: "secondary",
-					interpretation: "explicit",
-					confidence: "high",
-					notes: null,
-				},
-				{
-					item_type: "claim",
-					text: "Archive labor shapes memory through record keeping concepts.",
-					direct_quotes: "record keeping",
-					locator: "secondary",
-					interpretation: "explicit",
-					confidence: "high",
-					notes: null,
-				},
-			]);
+			const secondary = createCompletedLiteratureRun(
+				"secondary",
+				"Archive labor shapes memory as a theory of record keeping.",
+				[
+					{
+						item_type: "definition",
+						text: "Archive labor is a theory for how record keeping shapes memory.",
+						direct_quotes: "Archive labor shapes memory",
+						locator: "secondary",
+						interpretation: "explicit",
+						confidence: "high",
+						notes: null,
+					},
+					{
+						item_type: "claim",
+						text: "Archive labor shapes memory through record keeping concepts.",
+						direct_quotes: "record keeping",
+						locator: "secondary",
+						interpretation: "explicit",
+						confidence: "high",
+						notes: null,
+					},
+				],
+			);
 			rmSync(primary.sourcePath);
 
 			const metaRun = join(workspace, "meta-run");
@@ -2976,11 +3522,16 @@ test("literature meta extraction packets completed prior runs", async () => {
 			const priorArtifactIds = budget.packets
 				.filter((packet) => packet.packetKind === "prior-synthesis")
 				.flatMap((packet) => packet.artifactIds);
-			assert.ok(priorArtifactIds.length > new Set(priorArtifactIds).size, "an oversized authored section should span packets");
+			assert.ok(
+				priorArtifactIds.length > new Set(priorArtifactIds).size,
+				"an oversized authored section should span packets",
+			);
 
 			let rejectedUnknownCitation = false;
 			while (true) {
-				const next = jsonOutput(run(python, [script("literature-extraction", "literature-extraction.py"), "meta-next", metaRun]));
+				const next = jsonOutput(
+					run(python, [script("literature-extraction", "literature-extraction.py"), "meta-next", metaRun]),
+				);
 				if (next.complete) break;
 				assert.equal(next.estimatedTokens <= next.payloadContext, true);
 				assert.ok(["evidence", "prior-synthesis", "reduction"].includes(next.packetKind));
@@ -2990,12 +3541,23 @@ test("literature meta extraction packets completed prior runs", async () => {
 					writeFileSync(memoPath, "Unknown citation m999999.\n");
 					runFailure(
 						python,
-						[script("literature-extraction", "literature-extraction.py"), "meta-record", metaRun, "--packet-id", next.packetId, "--memo-file", memoPath],
+						[
+							script("literature-extraction", "literature-extraction.py"),
+							"meta-record",
+							metaRun,
+							"--packet-id",
+							next.packetId,
+							"--memo-file",
+							memoPath,
+						],
 						/cites unknown ids/,
 					);
 					rejectedUnknownCitation = true;
 				}
-				const detail = next.level === 1 ? " Preserve corpus roles, disagreements, methods, and limits.".repeat(20) : " Preserve inherited provenance.";
+				const detail =
+					next.level === 1
+						? " Preserve corpus roles, disagreements, methods, and limits.".repeat(20)
+						: " Preserve inherited provenance.";
 				writeFileSync(memoPath, `Memo for ${next.packetId}. Cites ${citation}.${detail}\n`);
 				run(python, [
 					script("literature-extraction", "literature-extraction.py"),
@@ -3013,17 +3575,51 @@ test("literature meta extraction packets completed prior runs", async () => {
 			assert.equal(completedBudget.authoringContext.estimatedTokens <= 800, true);
 			assert.equal(existsSync(join(metaRun, "authoring_context.md")), true);
 			run(python, [script("literature-extraction", "literature-extraction.py"), "meta-build", metaRun]);
-			runFailure(python, [script("literature-extraction", "literature-extraction.py"), "meta-validate", metaRun], /unresolved placeholder/);
-			for (const name of ["meta_synthesis.md", "primary_secondary_matrix.md", "concept_register.md", "negative_cases.md", "methods_and_limits.md"]) {
+			runFailure(
+				python,
+				[script("literature-extraction", "literature-extraction.py"), "meta-validate", metaRun],
+				/unresolved placeholder/,
+			);
+			for (const name of [
+				"meta_synthesis.md",
+				"primary_secondary_matrix.md",
+				"concept_register.md",
+				"negative_cases.md",
+				"methods_and_limits.md",
+			]) {
 				const path = join(metaRun, name);
-				writeFileSync(path, readFileSync(path, "utf8").replace(placeholder, "Authored prior synthesis citing a000001 without evidence support."));
+				writeFileSync(
+					path,
+					readFileSync(path, "utf8").replace(
+						placeholder,
+						"Authored prior synthesis citing a000001 without evidence support.",
+					),
+				);
 			}
-			runFailure(python, [script("literature-extraction", "literature-extraction.py"), "meta-validate", metaRun], /no evidence item citation/);
-			for (const name of ["meta_synthesis.md", "primary_secondary_matrix.md", "concept_register.md", "negative_cases.md", "methods_and_limits.md"]) {
+			runFailure(
+				python,
+				[script("literature-extraction", "literature-extraction.py"), "meta-validate", metaRun],
+				/no evidence item citation/,
+			);
+			for (const name of [
+				"meta_synthesis.md",
+				"primary_secondary_matrix.md",
+				"concept_register.md",
+				"negative_cases.md",
+				"methods_and_limits.md",
+			]) {
 				const path = join(metaRun, name);
-				writeFileSync(path, readFileSync(path, "utf8").replace("Authored prior synthesis citing a000001 without evidence support.", "Authored synthesis citing m000001 and m000003 with optional context from a000001."));
+				writeFileSync(
+					path,
+					readFileSync(path, "utf8").replace(
+						"Authored prior synthesis citing a000001 without evidence support.",
+						"Authored synthesis citing m000001 and m000003 with optional context from a000001.",
+					),
+				);
 			}
-			const validation = jsonOutput(run(python, [script("literature-extraction", "literature-extraction.py"), "meta-validate", metaRun]));
+			const validation = jsonOutput(
+				run(python, [script("literature-extraction", "literature-extraction.py"), "meta-validate", metaRun]),
+			);
 			assert.equal(validation.valid, true);
 			assert.match(validation.warnings.join("\n"), /source unavailable for m000001/);
 			assert.match(validation.warnings.join("\n"), /authored coverage mismatch/);
@@ -3098,9 +3694,16 @@ test("personal admin and report output enforce authored deliverables", () => {
 			factsPath,
 		]);
 		run(python, [script("personal-admin", "personal-admin.py"), "build", adminRun]);
-		runFailure(python, [script("personal-admin", "personal-admin.py"), "validate", adminRun], /unresolved placeholder/);
+		runFailure(
+			python,
+			[script("personal-admin", "personal-admin.py"), "validate", adminRun],
+			/unresolved placeholder/,
+		);
 		authorFiles(adminRun, ["admin_summary.md", "next_steps.md"]);
-		assert.equal(jsonOutput(run(python, [script("personal-admin", "personal-admin.py"), "validate", adminRun])).valid, true);
+		assert.equal(
+			jsonOutput(run(python, [script("personal-admin", "personal-admin.py"), "validate", adminRun])).valid,
+			true,
+		);
 
 		const reportRun = join(workspace, "report");
 		run(python, [
@@ -3112,9 +3715,16 @@ test("personal admin and report output enforce authored deliverables", () => {
 			"--detail",
 			"brief",
 		]);
-		runFailure(python, [script("report-output", "report-output.py"), "validate", reportRun], /unresolved placeholder/);
+		runFailure(
+			python,
+			[script("report-output", "report-output.py"), "validate", reportRun],
+			/unresolved placeholder/,
+		);
 		authorFiles(reportRun, ["executive_summary.md", "assumptions_and_limits.md"]);
-		assert.equal(jsonOutput(run(python, [script("report-output", "report-output.py"), "validate", reportRun])).valid, true);
+		assert.equal(
+			jsonOutput(run(python, [script("report-output", "report-output.py"), "validate", reportRun])).valid,
+			true,
+		);
 	});
 });
 
@@ -3190,11 +3800,17 @@ server.listen(0, "127.0.0.1", () => process.stdout.write(String(server.address()
 			resolveServer({
 				url: `http://127.0.0.1:${port.trim()}/v1/chat/completions`,
 				requestsPath,
-				close: () => new Promise((resolveClose) => { child.once("exit", resolveClose); child.kill(); }),
+				close: () =>
+					new Promise((resolveClose) => {
+						child.once("exit", resolveClose);
+						child.kill();
+					}),
 			});
 		});
 		child.once("error", rejectServer);
-		child.once("exit", (code) => { if (!stdout.trim()) rejectServer(new Error(`admin worker fixture exited ${code}: ${stderr}`)); });
+		child.once("exit", (code) => {
+			if (!stdout.trim()) rejectServer(new Error(`admin worker fixture exited ${code}: ${stderr}`));
+		});
 	});
 }
 
@@ -3223,16 +3839,19 @@ test("personal admin processes documents on the bulk service and reviews them on
 			assert.equal(results[0].status, "success");
 			assert.equal(results[0].facts.length, 1);
 
-			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			const requests = readFileSync(fixture.requestsPath, "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
 			// One extraction call plus one batched review call.
 			assert.equal(requests.length, 2);
 			assert.ok(requests[1].messages.at(-1).content.includes('"facts"'), "second call is the review");
 			// The reviewer cannot judge paraphrased facts without the document.
-			assert.ok(requests[1].messages.at(-1).content.includes('"source"'), "the review packet carries the source text");
-			assert.equal(
-				JSON.parse(readFileSync(join(runDirectory, "verified.jsonl"), "utf8").trim()).verdict,
-				"ok",
+			assert.ok(
+				requests[1].messages.at(-1).content.includes('"source"'),
+				"the review packet carries the source text",
 			);
+			assert.equal(JSON.parse(readFileSync(join(runDirectory, "verified.jsonl"), "utf8").trim()).verdict, "ok");
 		} finally {
 			await fixture.close();
 		}
@@ -3254,7 +3873,10 @@ test("personal admin rejects a fabricated reference number and retries", async (
 				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
 			);
 
-			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			const requests = readFileSync(fixture.requestsPath, "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
 			assert.equal(requests.length, 2, "the fabricated reference number costs one corrective retry");
 			assert.match(requests[1].messages.at(-1).content, /does not appear in the document/);
 			const results = JSON.parse(readFileSync(join(runDirectory, "facts_results.jsonl"), "utf8").trim());
@@ -3280,7 +3902,10 @@ test("personal admin rejects an unparseable due date and retries", async () => {
 				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
 			);
 
-			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			const requests = readFileSync(fixture.requestsPath, "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
 			// A due date that does not parse silently corrupts the deadline
 			// checklist, which sorts ISO strings lexically.
 			assert.equal(requests.length, 2, "the unparseable due date costs one corrective retry");
@@ -3404,11 +4029,17 @@ server.listen(0, "127.0.0.1", () => process.stdout.write(String(server.address()
 				url: `${origin}/v1/chat/completions`,
 				embeddingsUrl: `${origin}/v1/embeddings`,
 				requestsPath,
-				close: () => new Promise((resolveClose) => { child.once("exit", resolveClose); child.kill(); }),
+				close: () =>
+					new Promise((resolveClose) => {
+						child.once("exit", resolveClose);
+						child.kill();
+					}),
 			});
 		});
 		child.once("error", rejectServer);
-		child.once("exit", (code) => { if (!stdout.trim()) rejectServer(new Error(`row worker fixture exited ${code}: ${stderr}`)); });
+		child.once("exit", (code) => {
+			if (!stdout.trim()) rejectServer(new Error(`row worker fixture exited ${code}: ${stderr}`));
+		});
 	});
 }
 
@@ -3420,9 +4051,18 @@ function initRowRun(workspace, name = "rows") {
 	const runDirectory = join(workspace, name);
 	const cli = script("spreadsheet-analysis", "spreadsheet-analysis.py");
 	run(python, [
-		cli, "row-init", source, "--output", runDirectory,
-		"--column", "Category", "--input-columns", "name", "note",
-		"--instruction", "Classify the ticket.",
+		cli,
+		"row-init",
+		source,
+		"--output",
+		runDirectory,
+		"--column",
+		"Category",
+		"--input-columns",
+		"name",
+		"note",
+		"--instruction",
+		"Classify the ticket.",
 	]);
 	return { cli, runDirectory };
 }
@@ -3434,7 +4074,16 @@ test("row enrichment reuses one answer across near-identical rows", async () => 
 			const { cli, runDirectory } = initRowRun(workspace);
 			const output = await runAsyncWithEnvironment(
 				python,
-				[cli, "row-process", runDirectory, "--base-url", fixture.url, "--embeddings-url", fixture.embeddingsUrl, "--no-verify"],
+				[
+					cli,
+					"row-process",
+					runDirectory,
+					"--base-url",
+					fixture.url,
+					"--embeddings-url",
+					fixture.embeddingsUrl,
+					"--no-verify",
+				],
 				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
 			);
 			const report = JSON.parse(output.stdout.trim());
@@ -3444,8 +4093,13 @@ test("row enrichment reuses one answer across near-identical rows", async () => 
 			assert.equal(report.reusedFromNearIdenticalRows, 1);
 
 			const results = readFileSync(join(runDirectory, "row_results.jsonl"), "utf8")
-				.trim().split("\n").map((line) => JSON.parse(line));
-			assert.deepEqual(results.map((entry) => entry.rowId), [2, 3, 4]);
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+			assert.deepEqual(
+				results.map((entry) => entry.rowId),
+				[2, 3, 4],
+			);
 			assert.equal(results[1].derivedFrom, 2, "the reused row records where its answer came from");
 			assert.equal(results[0].value, results[1].value);
 			assert.ok(!results[2].derivedFrom, "an unrelated row is answered on its own");
@@ -3462,7 +4116,16 @@ test("row enrichment falls back to one call per row when embeddings are unavaila
 			const { cli, runDirectory } = initRowRun(workspace);
 			const output = await runAsyncWithEnvironment(
 				python,
-				[cli, "row-process", runDirectory, "--base-url", fixture.url, "--embeddings-url", "http://127.0.0.1:1/v1/embeddings", "--no-verify"],
+				[
+					cli,
+					"row-process",
+					runDirectory,
+					"--base-url",
+					fixture.url,
+					"--embeddings-url",
+					"http://127.0.0.1:1/v1/embeddings",
+					"--no-verify",
+				],
 				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
 			);
 			const report = JSON.parse(output.stdout.trim());
@@ -3483,14 +4146,25 @@ test("row enrichment harmonizes a stray trailing period across the column", asyn
 			const { cli, runDirectory } = initRowRun(workspace);
 			const output = await runAsyncWithEnvironment(
 				python,
-				[cli, "row-process", runDirectory, "--base-url", fixture.url, "--embeddings-url", fixture.embeddingsUrl, "--no-verify"],
+				[
+					cli,
+					"row-process",
+					runDirectory,
+					"--base-url",
+					fixture.url,
+					"--embeddings-url",
+					fixture.embeddingsUrl,
+					"--no-verify",
+				],
 				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
 			);
 			// Asking the prompt for this makes it worse; the script can see every
 			// row at once, which no single stateless call can.
 			assert.equal(JSON.parse(output.stdout.trim()).trailingPeriodHarmonized, 1);
 			const values = readFileSync(join(runDirectory, "row_results.jsonl"), "utf8")
-				.trim().split("\n").map((line) => JSON.parse(line).value);
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line).value);
 			assert.deepEqual(values, ["answer 1", "answer 2", "answer 3"]);
 		} finally {
 			await fixture.close();
@@ -3505,7 +4179,17 @@ test("a rejected reused answer breaks the group instead of copying a new one", a
 			const { cli, runDirectory } = initRowRun(workspace);
 			const output = await runAsyncWithEnvironment(
 				python,
-				[cli, "row-process", runDirectory, "--base-url", fixture.url, "--think-url", fixture.url, "--embeddings-url", fixture.embeddingsUrl],
+				[
+					cli,
+					"row-process",
+					runDirectory,
+					"--base-url",
+					fixture.url,
+					"--think-url",
+					fixture.url,
+					"--embeddings-url",
+					fixture.embeddingsUrl,
+				],
 				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
 			);
 			const report = JSON.parse(output.stdout.trim());
@@ -3513,7 +4197,9 @@ test("a rejected reused answer breaks the group instead of copying a new one", a
 			// replacement would repeat the mistake in every row that copied it.
 			assert.equal(report.verification.reusingRowsReAnsweredIndividually, 1);
 			const results = readFileSync(join(runDirectory, "row_results.jsonl"), "utf8")
-				.trim().split("\n").map((line) => JSON.parse(line));
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
 			const reused = results.find((entry) => entry.rowId === 3);
 			assert.ok(!reused.derivedFrom, "the row no longer copies a rejected answer");
 			assert.match(reused.note, /re-answered on its own/);
@@ -3531,10 +4217,25 @@ test("row enrichment reviews every reused answer even past the sample limit", as
 			const { cli, runDirectory } = initRowRun(workspace);
 			await runAsyncWithEnvironment(
 				python,
-				[cli, "row-process", runDirectory, "--base-url", fixture.url, "--think-url", fixture.url, "--embeddings-url", fixture.embeddingsUrl, "--verify-sample", "0"],
+				[
+					cli,
+					"row-process",
+					runDirectory,
+					"--base-url",
+					fixture.url,
+					"--think-url",
+					fixture.url,
+					"--embeddings-url",
+					fixture.embeddingsUrl,
+					"--verify-sample",
+					"0",
+				],
 				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
 			);
-			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			const requests = readFileSync(fixture.requestsPath, "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
 			const review = requests.find((entry) => (entry.messages.at(-1).content || "").includes('"items"'));
 			const items = JSON.parse(review.messages.at(-1).content).items;
 			// A sample limit of zero still reviews the representative, because its
@@ -3555,8 +4256,17 @@ test("spreadsheet inspection and row enrichment are reproducible", () => {
 		writeFileSync(source, "name,amount\nalpha,10\nbeta,20\n");
 		const sourceHash = sha256(source);
 		const profileRun = join(workspace, "profile");
-		run(python, [script("spreadsheet-analysis", "spreadsheet-analysis.py"), "inspect", source, "--output", profileRun]);
-		assert.match(readFileSync(join(profileRun, "transform_log.md"), "utf8"), /No data transformations were performed/);
+		run(python, [
+			script("spreadsheet-analysis", "spreadsheet-analysis.py"),
+			"inspect",
+			source,
+			"--output",
+			profileRun,
+		]);
+		assert.match(
+			readFileSync(join(profileRun, "transform_log.md"), "utf8"),
+			/No data transformations were performed/,
+		);
 
 		const rowRun = join(workspace, "rows");
 		run(python, [
@@ -3569,7 +4279,9 @@ test("spreadsheet inspection and row enrichment are reproducible", () => {
 			"Review",
 		]);
 		for (const value of ["reviewed alpha", "reviewed beta"]) {
-			const pending = jsonOutput(run(python, [script("spreadsheet-analysis", "spreadsheet-analysis.py"), "row-next", rowRun]));
+			const pending = jsonOutput(
+				run(python, [script("spreadsheet-analysis", "spreadsheet-analysis.py"), "row-next", rowRun]),
+			);
 			const valuePath = join(workspace, `value-${pending.rowId}.txt`);
 			writeFileSync(valuePath, `${value}\n`);
 			run(python, [
@@ -3583,7 +4295,10 @@ test("spreadsheet inspection and row enrichment are reproducible", () => {
 			]);
 		}
 		run(python, [script("spreadsheet-analysis", "spreadsheet-analysis.py"), "row-finalize", rowRun]);
-		assert.equal(jsonOutput(run(python, [script("spreadsheet-analysis", "spreadsheet-analysis.py"), "validate", rowRun])).valid, true);
+		assert.equal(
+			jsonOutput(run(python, [script("spreadsheet-analysis", "spreadsheet-analysis.py"), "validate", rowRun])).valid,
+			true,
+		);
 		assert.equal(sha256(source), sourceHash);
 		const finalizedAgain = jsonOutput(
 			run(python, [script("spreadsheet-analysis", "spreadsheet-analysis.py"), "row-finalize", rowRun]),
@@ -3626,7 +4341,10 @@ test("spreadsheet cluster groups similar rows for review", async () => {
 			assert.equal(result.groupedRows, 5);
 			assert.equal(result.multiRowGroupCount, 2);
 			const clusters = readFileSync(join(runDirectory, "clusters.csv"), "utf8");
-			assert.match(clusters, /cluster_id,group_size,is_representative,source_row,similarity_to_representative,key_text/);
+			assert.match(
+				clusters,
+				/cluster_id,group_size,is_representative,source_row,similarity_to_representative,key_text/,
+			);
 			const groups = readFileSync(join(runDirectory, "cluster_groups.md"), "utf8");
 			assert.match(groups, /Multi-row groups: 2/);
 			assert.match(groups, /John Smith/);
@@ -3697,19 +4415,26 @@ test("extracted organize-folder and spreadsheet tools expose structured executio
 
 		const organizeRun = join(workspace, "organize-run");
 		const scanInput = join(workspace, "scan-input.json");
-		writeFileSync(scanInput, `${JSON.stringify({ target: messy, output: organizeRun, fullHash: true, noEmbeddings: true })}\n`);
+		writeFileSync(
+			scanInput,
+			`${JSON.stringify({ target: messy, output: organizeRun, fullHash: true, noEmbeddings: true })}\n`,
+		);
 		const scanResult = jsonOutput(run(python, [script("organize-folder", "scan_folder.py"), "--input", scanInput]));
 		assert.equal(scanResult.status, "ok");
 		assert.equal(existsSync(join(organizeRun, "manifest.csv")), true);
 
 		const manifestInput = join(workspace, "manifest-input.json");
 		writeFileSync(manifestInput, `${JSON.stringify({ runDirectory: organizeRun })}\n`);
-		const manifestResult = jsonOutput(run(python, [script("organize-folder", "generate_manifest.py"), "--input", manifestInput]));
+		const manifestResult = jsonOutput(
+			run(python, [script("organize-folder", "generate_manifest.py"), "--input", manifestInput]),
+		);
 		assert.equal(manifestResult.status, "ok");
 		assert.equal(manifestResult.data.plan.valid, true);
 		assert.equal(existsSync(join(organizeRun, "plan_report.md")), true);
 
-		const applyResult = jsonOutput(run(python, [script("organize-folder", "apply_manifest.py"), "--input", manifestInput]));
+		const applyResult = jsonOutput(
+			run(python, [script("organize-folder", "apply_manifest.py"), "--input", manifestInput]),
+		);
 		assert.equal(applyResult.status, "ok");
 		assert.equal(applyResult.data.summary.moved, 1);
 		assert.equal(existsSync(join(messy, "Documents", "note.txt")), true);
@@ -3719,13 +4444,17 @@ test("extracted organize-folder and spreadsheet tools expose structured executio
 		const sourceHash = sha256(source);
 		const loadInput = join(workspace, "load-input.json");
 		writeFileSync(loadInput, `${JSON.stringify({ input: source, previewRows: 2 })}\n`);
-		const loadResult = jsonOutput(run(python, [script("spreadsheet-analysis", "load_table.py"), "--input", loadInput]));
+		const loadResult = jsonOutput(
+			run(python, [script("spreadsheet-analysis", "load_table.py"), "--input", loadInput]),
+		);
 		assert.equal(loadResult.status, "ok");
 		assert.deepEqual(loadResult.data.sheets[0].headers, ["name", "amount", "empty"]);
 
 		const profileInput = join(workspace, "profile-input.json");
 		writeFileSync(profileInput, `${JSON.stringify({ input: source, maxCategories: 5 })}\n`);
-		const profileResult = jsonOutput(run(python, [script("spreadsheet-analysis", "profile_columns.py"), "--input", profileInput]));
+		const profileResult = jsonOutput(
+			run(python, [script("spreadsheet-analysis", "profile_columns.py"), "--input", profileInput]),
+		);
 		assert.equal(profileResult.status, "ok");
 		assert.equal(profileResult.data.profile.sheets[0].columns[1].header, "amount");
 
@@ -3745,7 +4474,9 @@ test("extracted organize-folder and spreadsheet tools expose structured executio
 				],
 			})}\n`,
 		);
-		const cleanResult = jsonOutput(run(python, [script("spreadsheet-analysis", "clean_columns.py"), "--input", cleanInput]));
+		const cleanResult = jsonOutput(
+			run(python, [script("spreadsheet-analysis", "clean_columns.py"), "--input", cleanInput]),
+		);
 		assert.equal(cleanResult.status, "ok");
 		assert.equal(sha256(source), sourceHash);
 		assert.equal(readFileSync(cleaned, "utf8"), "name,Amount\nalpha,10\nbeta,20\n");
@@ -3753,7 +4484,9 @@ test("extracted organize-folder and spreadsheet tools expose structured executio
 		const exported = join(workspace, "cleaned.json");
 		const exportInput = join(workspace, "export-input.json");
 		writeFileSync(exportInput, `${JSON.stringify({ input: cleaned, output: exported })}\n`);
-		const exportResult = jsonOutput(run(python, [script("spreadsheet-analysis", "export_table.py"), "--input", exportInput]));
+		const exportResult = jsonOutput(
+			run(python, [script("spreadsheet-analysis", "export_table.py"), "--input", exportInput]),
+		);
 		assert.equal(exportResult.status, "ok");
 		assert.deepEqual(JSON.parse(readFileSync(exported, "utf8")), [
 			{ name: "alpha", Amount: "10" },
@@ -3878,11 +4611,17 @@ server.listen(0, "127.0.0.1", () => process.stdout.write(String(server.address()
 			resolveServer({
 				url: `http://127.0.0.1:${port.trim()}/v1/chat/completions`,
 				requestsPath,
-				close: () => new Promise((resolveClose) => { child.once("exit", resolveClose); child.kill(); }),
+				close: () =>
+					new Promise((resolveClose) => {
+						child.once("exit", resolveClose);
+						child.kill();
+					}),
 			});
 		});
 		child.once("error", rejectServer);
-		child.once("exit", (code) => { if (!stdout.trim()) rejectServer(new Error(`chunk worker fixture exited ${code}: ${stderr}`)); });
+		child.once("exit", (code) => {
+			if (!stdout.trim()) rejectServer(new Error(`chunk worker fixture exited ${code}: ${stderr}`));
+		});
 	});
 }
 
@@ -3910,10 +4649,26 @@ test("document ingest cleans chunks on the bulk service, carrying the outline fo
 			const document = join(workspace, "report.md");
 			writeFileSync(document, `${CHUNKED_DOCUMENT}\n`);
 			const ingestRun = join(workspace, "ingest");
-			run("node", [script("document-ingest", "document-ingest.mjs"), "prepare", document, "--output", ingestRun, "--chunk-chars", "400"]);
+			run("node", [
+				script("document-ingest", "document-ingest.mjs"),
+				"prepare",
+				document,
+				"--output",
+				ingestRun,
+				"--chunk-chars",
+				"400",
+			]);
 			const output = await runAsyncWithEnvironment(
 				"node",
-				[script("document-ingest", "document-ingest.mjs"), "process-chunks", ingestRun, "--base-url", fixture.url, "--think-url", fixture.url],
+				[
+					script("document-ingest", "document-ingest.mjs"),
+					"process-chunks",
+					ingestRun,
+					"--base-url",
+					fixture.url,
+					"--think-url",
+					fixture.url,
+				],
 				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
 			);
 			const report = JSON.parse(output.stdout.trim());
@@ -3921,18 +4676,26 @@ test("document ingest cleans chunks on the bulk service, carrying the outline fo
 			assert.equal(report.chunksLeftForReview, 0);
 			assert.equal(report.verification.ok, report.chunksCleaned);
 
-			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			const requests = readFileSync(fixture.requestsPath, "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
 			const cleanups = requests.filter((entry) => !(entry.messages.at(-1).content || "").includes('"items"'));
 			// Chunk N's heading depth depends on the outline chunk N-1 established.
 			// Without this every chunk after the first drifts a level.
 			assert.equal(JSON.parse(cleanups[0].messages.at(-1).content).headingsSoFar, undefined);
-			assert.ok(JSON.parse(cleanups[1].messages.at(-1).content).headingsSoFar.length > 0, "later chunks carry the outline so far");
+			assert.ok(
+				JSON.parse(cleanups[1].messages.at(-1).content).headingsSoFar.length > 0,
+				"later chunks carry the outline so far",
+			);
 			// The system prompt is what the server caches; it must not vary.
 			assert.equal(new Set(cleanups.map((entry) => entry.messages[0].content)).size, 1);
 
 			// The agent picks up where the worker stopped: chunks are recorded, so
 			// next-review moves on to the final document packet.
-			const packet = jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "next-review", ingestRun]));
+			const packet = jsonOutput(
+				run("node", [script("document-ingest", "document-ingest.mjs"), "next-review", ingestRun]),
+			);
 			assert.equal(packet.unit.kind, "document");
 		} finally {
 			await fixture.close();
@@ -3947,13 +4710,31 @@ test("document ingest rejects a chunk cleanup that invents words", async () => {
 			const document = join(workspace, "report.md");
 			writeFileSync(document, `${CHUNKED_DOCUMENT}\n`);
 			const ingestRun = join(workspace, "ingest");
-			run("node", [script("document-ingest", "document-ingest.mjs"), "prepare", document, "--output", ingestRun, "--chunk-chars", "400"]);
+			run("node", [
+				script("document-ingest", "document-ingest.mjs"),
+				"prepare",
+				document,
+				"--output",
+				ingestRun,
+				"--chunk-chars",
+				"400",
+			]);
 			await runAsyncWithEnvironment(
 				"node",
-				[script("document-ingest", "document-ingest.mjs"), "process-chunks", ingestRun, "--no-verify", "--base-url", fixture.url],
+				[
+					script("document-ingest", "document-ingest.mjs"),
+					"process-chunks",
+					ingestRun,
+					"--no-verify",
+					"--base-url",
+					fixture.url,
+				],
 				{ PI_FORGE_AGENT_DIR: join(workspace, "missing-agent") },
 			);
-			const requests = readFileSync(fixture.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			const requests = readFileSync(fixture.requestsPath, "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
 			// Structure is the model's to fix; wording is not. A word either was in
 			// the chunk or was invented.
 			assert.match(requests[1].messages.at(-1).content, /these words are not in the chunk/);
@@ -3974,22 +4755,42 @@ test("document ingest, coding, and web collection expose review and safety bound
 			run("node", [script("document-ingest", "document-ingest.mjs"), "prepare", document, "--output", ingestRun]),
 		);
 		assert.equal(ingest.documents, 1);
-		runFailure("node", [script("document-ingest", "document-ingest.mjs"), "validate", ingestRun], /model review is not marked complete/);
+		runFailure(
+			"node",
+			[script("document-ingest", "document-ingest.mjs"), "validate", ingestRun],
+			/model review is not marked complete/,
+		);
 		const hintedValidation = jsonOutput(
-			run("node", [script("document-ingest", "document-ingest.mjs"), "validate", ingestRun, "--fix-hints", "--json"], 1),
+			run(
+				"node",
+				[script("document-ingest", "document-ingest.mjs"), "validate", ingestRun, "--fix-hints", "--json"],
+				1,
+			),
 		);
 		assert.equal(hintedValidation.issues[0].code, "review_incomplete");
-		const packet = jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "next-review", ingestRun]));
+		const packet = jsonOutput(
+			run("node", [script("document-ingest", "document-ingest.mjs"), "next-review", ingestRun]),
+		);
 		assert.equal(packet.complete, false);
 		assert.equal(packet.documentId, firstManifestRow(ingestRun).document_id);
-		assert.deepEqual(packet.allowedValues.evidenceOrigins, ["embedded-metadata", "document-text", "filename", "user-provided"]);
+		assert.deepEqual(packet.allowedValues.evidenceOrigins, [
+			"embedded-metadata",
+			"document-text",
+			"filename",
+			"user-provided",
+		]);
 		const reviewFile = join(workspace, "review.json");
 		writeFileSync(
 			reviewFile,
 			`${JSON.stringify({
 				documentId: packet.documentId,
 				fields: {
-					title: { value: "Source Document", origin: "document-text", confidence: "high", locator: "document.md:1" },
+					title: {
+						value: "Source Document",
+						origin: "document-text",
+						confidence: "high",
+						locator: "document.md:1",
+					},
 					author: null,
 					date: null,
 					source: null,
@@ -4001,10 +4802,25 @@ test("document ingest, coding, and web collection expose review and safety bound
 				reviewNotes: ["Reviewed structure and title."],
 			})}\n`,
 		);
-		const recorded = jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "record-review", ingestRun, "--review-file", reviewFile]));
+		const recorded = jsonOutput(
+			run("node", [
+				script("document-ingest", "document-ingest.mjs"),
+				"record-review",
+				ingestRun,
+				"--review-file",
+				reviewFile,
+			]),
+		);
 		assert.equal(recorded.status, "success");
-		assert.equal(jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", ingestRun])).valid, true);
-		assert.equal(jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "status", ingestRun])).counts.success, 1);
+		assert.equal(
+			jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", ingestRun])).valid,
+			true,
+		);
+		assert.equal(
+			jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "status", ingestRun])).counts
+				.success,
+			1,
+		);
 		assert.equal(sha256(document), documentHash);
 
 		const repository = join(workspace, "repository");
@@ -4036,25 +4852,64 @@ test("document ingest, coding, and web collection expose review and safety bound
 			]),
 		);
 		assert.equal(rejected.counts.failed, 1);
-		assert.match(readFileSync(join(rejectedWebRun, "failed_downloads.csv"), "utf8"), /refused loopback or metadata host/);
+		assert.match(
+			readFileSync(join(rejectedWebRun, "failed_downloads.csv"), "utf8"),
+			/refused loopback or metadata host/,
+		);
 		assert.equal(
 			jsonOutput(run("node", [script("web-collection", "web-collection.mjs"), "validate", rejectedWebRun])).valid,
 			true,
 		);
 		const rejectedAgain = jsonOutput(
-			run("node", [script("web-collection", "web-collection.mjs"), "collect", "http://127.0.0.1/test", "--output", rejectedWebRun]),
+			run("node", [
+				script("web-collection", "web-collection.mjs"),
+				"collect",
+				"http://127.0.0.1/test",
+				"--output",
+				rejectedWebRun,
+			]),
 		);
 		assert.equal(rejectedAgain.complete, true);
 		assert.equal(rejectedAgain.resources, 1);
-		assert.equal(jsonOutput(run("node", [script("web-collection", "web-collection.mjs"), "status", rejectedWebRun, "--json"])).total, 1);
+		assert.equal(
+			jsonOutput(run("node", [script("web-collection", "web-collection.mjs"), "status", rejectedWebRun, "--json"]))
+				.total,
+			1,
+		);
 		const collectionList = join(workspace, "collection-urls.txt");
 		writeFileSync(collectionList, "http://127.0.0.1/two\n");
 		const refreshableWebRun = join(workspace, "web-refreshable");
-		run("node", [script("web-collection", "web-collection.mjs"), "collect", "http://127.0.0.1/one", "--input-file", collectionList, "--output", refreshableWebRun]);
+		run("node", [
+			script("web-collection", "web-collection.mjs"),
+			"collect",
+			"http://127.0.0.1/one",
+			"--input-file",
+			collectionList,
+			"--output",
+			refreshableWebRun,
+		]);
 		writeFileSync(collectionList, "http://127.0.0.1/two\nhttp://127.0.0.1/three\n");
-		assert.equal(jsonOutput(run("node", [script("web-collection", "web-collection.mjs"), "status", refreshableWebRun, "--json"])).refreshRequired, true);
-		assert.equal(jsonOutput(run("node", [script("web-collection", "web-collection.mjs"), "refresh", refreshableWebRun])).added, 1);
-		const refreshedCollection = jsonOutput(run("node", [script("web-collection", "web-collection.mjs"), "collect", "http://127.0.0.1/one", "--input-file", collectionList, "--output", refreshableWebRun]));
+		assert.equal(
+			jsonOutput(
+				run("node", [script("web-collection", "web-collection.mjs"), "status", refreshableWebRun, "--json"]),
+			).refreshRequired,
+			true,
+		);
+		assert.equal(
+			jsonOutput(run("node", [script("web-collection", "web-collection.mjs"), "refresh", refreshableWebRun])).added,
+			1,
+		);
+		const refreshedCollection = jsonOutput(
+			run("node", [
+				script("web-collection", "web-collection.mjs"),
+				"collect",
+				"http://127.0.0.1/one",
+				"--input-file",
+				collectionList,
+				"--output",
+				refreshableWebRun,
+			]),
+		);
 		assert.equal(refreshedCollection.resources, 3);
 
 		const webRun = join(workspace, "web-validation");
@@ -4069,7 +4924,10 @@ test("document ingest, coding, and web collection expose review and safety bound
 			join(webRun, "collection_report.md"),
 			"# Collection Report\n\n## Status\n\n## Run Summary\n\n## Sources\n\n## Captures\n\n## Duplicates\n\n## Failures and Blocks\n\n## Search\n\n## Review\n",
 		);
-		assert.equal(jsonOutput(run("node", [script("web-collection", "web-collection.mjs"), "validate", webRun])).valid, true);
+		assert.equal(
+			jsonOutput(run("node", [script("web-collection", "web-collection.mjs"), "validate", webRun])).valid,
+			true,
+		);
 	});
 });
 
@@ -4102,15 +4960,11 @@ test("skill builder scaffolds, validates, and checks trigger overlap", () => {
 		assert.equal(existsSync(join(scaffolded.skillDirectory, "references")), true);
 		assert.equal(existsSync(join(scaffolded.skillDirectory, "tests", "triggers.json")), true);
 		assert.equal(jsonOutput(run("node", [builder, "validate", scaffolded.skillDirectory, "--json"])).valid, true);
-		runFailure("node", [
-			builder,
-			"scaffold",
-			"example-skill",
-			"--target",
-			"project",
-			"--root",
-			projectRoot,
-		], /skill already exists/);
+		runFailure(
+			"node",
+			[builder, "scaffold", "example-skill", "--target", "project", "--root", projectRoot],
+			/skill already exists/,
+		);
 
 		const forgeRoot = join(workspace, "forge-repo");
 		const forgeSkill = jsonOutput(
@@ -4194,16 +5048,15 @@ test("skill builder scaffolds, validates, and checks trigger overlap", () => {
 			join(neighbor, "SKILL.md"),
 			"---\nname: source-research\ndescription: Research sources, source evidence, and research reports. Use when the user asks for source research.\n---\n",
 		);
-		const triggerReport = jsonOutput(run("node", [builder, "check-triggers", broad, "--against", overlapRoot, "--json"]));
+		const triggerReport = jsonOutput(
+			run("node", [builder, "check-triggers", broad, "--against", overlapRoot, "--json"]),
+		);
 		assert.equal(triggerReport.valid, true);
 		assert.match(triggerReport.warnings.join("\n"), /broad|vague|overlaps/);
 		assert.ok(triggerReport.overlaps.some((overlap) => overlap.name === "source-research"));
 
 		const inventory = jsonOutput(run("node", [builder, "inventory", "--root", overlapRoot, "--json"]));
-		assert.deepEqual(
-			inventory.skills.map((skill) => skill.name).sort(),
-			["broad-research", "source-research"],
-		);
+		assert.deepEqual(inventory.skills.map((skill) => skill.name).sort(), ["broad-research", "source-research"]);
 	});
 });
 
@@ -4252,7 +5105,10 @@ test("web-research deep creates validated provenance-backed artifacts", async ()
 			assert.equal(result.sources, 3);
 			assert.equal(result.evidence, 3);
 			assert.equal(result.claims, 1);
-			assert.equal(jsonOutput(run("node", [script("web-research", "web-research.mjs"), "validate", deepRun])).valid, true);
+			assert.equal(
+				jsonOutput(run("node", [script("web-research", "web-research.mjs"), "validate", deepRun])).valid,
+				true,
+			);
 			const sourceIndex = JSON.parse(readFileSync(join(deepRun, "source_index.json"), "utf8"));
 			assert.equal(sourceIndex.sources.length, 3);
 			assert.equal(sourceIndex.sources[0].searchOrigins.length, 2);
@@ -4268,7 +5124,11 @@ test("web-research deep creates validated provenance-backed artifacts", async ()
 				.map((line) => JSON.parse(line));
 			evidenceRows[0].directQuote = "This quote is not in the archived source text.";
 			writeFileSync(evidencePath, `${evidenceRows.map((row) => JSON.stringify(row)).join("\n")}\n`);
-			runFailure("node", [script("web-research", "web-research.mjs"), "validate", deepRun], /direct quote was not found/);
+			runFailure(
+				"node",
+				[script("web-research", "web-research.mjs"), "validate", deepRun],
+				/direct quote was not found/,
+			);
 
 			writeFileSync(evidencePath, originalEvidence);
 			const claimsPath = join(deepRun, "claim_register.jsonl");
@@ -4319,7 +5179,11 @@ test("web-research deep reviews its own evidence and claims on the thinking serv
 						"3",
 						"--no-render",
 					],
-					{ FORGE_BASE_CHAT_URL: fixture.chat, FORGE_THINK_URL: fixture.chat, FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1" },
+					{
+						FORGE_BASE_CHAT_URL: fixture.chat,
+						FORGE_THINK_URL: fixture.chat,
+						FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1",
+					},
 				),
 			);
 			assert.equal(result.valid, true, JSON.stringify(result.validationErrors));
@@ -4348,7 +5212,9 @@ test("web-research deep reviews its own evidence and claims on the thinking serv
 			assert.match(readFileSync(join(deepRun, "deep_research_report.md"), "utf8"), /## Verification/);
 
 			// The reviewer must see archived source text, not just the extraction.
-			const verifyRequest = fixture.requests.find((payload) => (payload.messages?.[0]?.content ?? "").includes('"verdicts"'));
+			const verifyRequest = fixture.requests.find((payload) =>
+				(payload.messages?.[0]?.content ?? "").includes('"verdicts"'),
+			);
 			const reviewed = JSON.parse(verifyRequest.messages.at(-1).content).items;
 			assert.ok(reviewed[0].sourceExcerpt, "the reviewer is given the source excerpt");
 		} finally {
@@ -4447,7 +5313,9 @@ test("web-research deep applies whole-run budgets and records budget gaps", asyn
 			assert.equal(runInfo.options.maxQueries, 6);
 			assert.equal(runInfo.options.maxSources, 12);
 			assert.equal(runInfo.options.maxModelCalls, 16);
-			assert.ok(runInfo.budgetEvents.some((event) => event.reason === "maxSources" || event.reason === "maxQueries"));
+			assert.ok(
+				runInfo.budgetEvents.some((event) => event.reason === "maxSources" || event.reason === "maxQueries"),
+			);
 			const gaps = readFileSync(join(deepRun, "gap_log.jsonl"), "utf8");
 			assert.match(gaps, /Deep research stopped early/);
 		} finally {
@@ -4503,7 +5371,10 @@ test("web-research deep batches local model work and records local-first schedul
 			);
 			assert.equal(first.valid, true);
 			assert.equal(first.sources, 5);
-			assert.ok(first.modelCalls < first.sources, "batched evidence extraction should use fewer model calls than sources");
+			assert.ok(
+				first.modelCalls < first.sources,
+				"batched evidence extraction should use fewer model calls than sources",
+			);
 			assert.equal(existsSync(join(firstRun, "chunks.jsonl")), true);
 			assert.equal(existsSync(join(firstRun, "embedding_log.jsonl")), true);
 			assert.equal(existsSync(join(firstRun, "source_rankings.jsonl")), true);
@@ -4618,7 +5489,10 @@ test("web-research deep repairs invalid direct quote candidates and skips checkp
 			assert.ok(checkpoint);
 			assert.equal(checkpoint.status, "needs_review");
 			assert.match(checkpoint.warnings.join("\n"), /skipped evidence extraction/);
-			assert.equal(jsonOutput(run("node", [script("web-research", "web-research.mjs"), "validate", deepRun])).valid, true);
+			assert.equal(
+				jsonOutput(run("node", [script("web-research", "web-research.mjs"), "validate", deepRun])).valid,
+				true,
+			);
 		} finally {
 			await fixture.close();
 		}
@@ -4640,17 +5514,31 @@ test("web-research extension blocks duplicate same-turn deep runs and preserves 
 	const toolCall = handlers.get("tool_call")[0];
 	const turnStart = handlers.get("turn_start")[0];
 	assert.ok(tools.some((tool) => tool.name === "forge_deep_web_research"));
-	assert.equal(await toolCall({ type: "tool_call", toolName: "forge_deep_web_research", toolCallId: "one", input: {} }), undefined);
-	const blocked = await toolCall({ type: "tool_call", toolName: "forge_deep_web_research", toolCallId: "two", input: {} });
+	assert.equal(
+		await toolCall({ type: "tool_call", toolName: "forge_deep_web_research", toolCallId: "one", input: {} }),
+		undefined,
+	);
+	const blocked = await toolCall({
+		type: "tool_call",
+		toolName: "forge_deep_web_research",
+		toolCallId: "two",
+		input: {},
+	});
 	assert.equal(blocked.block, true);
 	assert.match(blocked.reason, /Only one deep web research run/);
 	await turnStart({ type: "turn_start" });
-	assert.equal(await toolCall({ type: "tool_call", toolName: "forge_deep_web_research", toolCallId: "three", input: {} }), undefined);
+	assert.equal(
+		await toolCall({ type: "tool_call", toolName: "forge_deep_web_research", toolCallId: "three", input: {} }),
+		undefined,
+	);
 
 	const message = formatRunFailure(
 		["/tmp/web-research.mjs", "deep"],
 		1,
-		JSON.stringify({ valid: false, validationErrors: ["ev-0001 direct quote was not found in archived source text"] }),
+		JSON.stringify({
+			valid: false,
+			validationErrors: ["ev-0001 direct quote was not found in archived source text"],
+		}),
 		"Error: Could not parse CSS stylesheet\n".repeat(200),
 	);
 	assert.match(message, /validationErrors/);
@@ -4692,7 +5580,21 @@ test("web-research quick search and read produce report artifacts", async () => 
 			const searchAgain = jsonOutput(
 				await runAsyncWithEnvironment(
 					"node",
-					[script("web-research", "web-research.mjs"), "search", "seed alpha", "--output", searchRun, "--searxng", fixture.searxng, "--providers", "searxng", "--limit", "2", "--categories", "general"],
+					[
+						script("web-research", "web-research.mjs"),
+						"search",
+						"seed alpha",
+						"--output",
+						searchRun,
+						"--searxng",
+						fixture.searxng,
+						"--providers",
+						"searxng",
+						"--limit",
+						"2",
+						"--categories",
+						"general",
+					],
 					{},
 				),
 			);
@@ -4720,7 +5622,14 @@ test("web-research quick search and read produce report artifacts", async () => 
 			const readAgain = jsonOutput(
 				await runAsyncWithEnvironment(
 					"node",
-					[script("web-research", "web-research.mjs"), "read", `${fixture.origin}/page-alpha`, "--output", readRun, "--no-render"],
+					[
+						script("web-research", "web-research.mjs"),
+						"read",
+						`${fixture.origin}/page-alpha`,
+						"--output",
+						readRun,
+						"--no-render",
+					],
 					{ FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1" },
 				),
 			);
@@ -4729,12 +5638,31 @@ test("web-research quick search and read produce report artifacts", async () => 
 			const readList = join(workspace, "read-urls.txt");
 			writeFileSync(readList, `${fixture.origin}/page-beta\n`);
 			const refreshableReadRun = join(workspace, "quick-read-refreshable");
-			const refreshableCommand = [script("web-research", "web-research.mjs"), "read", `${fixture.origin}/page-alpha`, "--input-file", readList, "--output", refreshableReadRun, "--no-render"];
+			const refreshableCommand = [
+				script("web-research", "web-research.mjs"),
+				"read",
+				`${fixture.origin}/page-alpha`,
+				"--input-file",
+				readList,
+				"--output",
+				refreshableReadRun,
+				"--no-render",
+			];
 			await runAsyncWithEnvironment("node", refreshableCommand, { FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1" });
 			writeFileSync(readList, `${fixture.origin}/page-beta\n${fixture.origin}/page-gamma\n`);
-			assert.equal(jsonOutput(run("node", [script("web-research", "web-research.mjs"), "status", refreshableReadRun, "--json"])).refreshRequired, true);
-			assert.equal(jsonOutput(run("node", [script("web-research", "web-research.mjs"), "refresh", refreshableReadRun])).added, 1);
-			const refreshedRead = jsonOutput(await runAsyncWithEnvironment("node", refreshableCommand, { FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1" }));
+			assert.equal(
+				jsonOutput(
+					run("node", [script("web-research", "web-research.mjs"), "status", refreshableReadRun, "--json"]),
+				).refreshRequired,
+				true,
+			);
+			assert.equal(
+				jsonOutput(run("node", [script("web-research", "web-research.mjs"), "refresh", refreshableReadRun])).added,
+				1,
+			);
+			const refreshedRead = jsonOutput(
+				await runAsyncWithEnvironment("node", refreshableCommand, { FORGE_WEB_RESEARCH_ALLOW_UNSAFE: "1" }),
+			);
 			assert.equal(refreshedRead.urls, 3);
 			assert.equal(refreshedRead.readings, 3);
 		} finally {
@@ -4849,7 +5777,14 @@ test("web-research acquisition writes stage artifacts, cache records, and discov
 			);
 			assert.equal(discovered.candidateEndpoints, 1);
 			assert.equal(discovered.recommendedStrategy, "structured_static");
-			const reports = readFileSync(join(discoverRun, "discovery_reports", `${discovered.domain}-${createHash("sha256").update(`${discovered.domain}:${fixture.origin}/page-structured`).digest("hex").slice(0, 12)}.json`), "utf8");
+			const reports = readFileSync(
+				join(
+					discoverRun,
+					"discovery_reports",
+					`${discovered.domain}-${createHash("sha256").update(`${discovered.domain}:${fixture.origin}/page-structured`).digest("hex").slice(0, 12)}.json`,
+				),
+				"utf8",
+			);
 			assert.match(reports, /api\/structured-data/);
 
 			const binaryRun = join(workspace, "binary-read");
@@ -4919,7 +5854,10 @@ test("web-research deep records unsafe result URLs as failed sources", async () 
 			assert.equal(sourceIndex.sources.length, 1);
 			assert.equal(sourceIndex.sources[0].status, "failed");
 			assert.match(sourceIndex.sources[0].warnings.join("\n"), /refused loopback or metadata host/);
-			assert.equal(jsonOutput(run("node", [script("web-research", "web-research.mjs"), "validate", deepRun])).valid, true);
+			assert.equal(
+				jsonOutput(run("node", [script("web-research", "web-research.mjs"), "validate", deepRun])).valid,
+				true,
+			);
 		} finally {
 			await fixture.close();
 		}
@@ -4932,7 +5870,9 @@ test("web-research reference-resolve answers on stdout and caches the index it r
 		const server = createServer((_request, response) => {
 			served += 1;
 			response.writeHead(200, { "Content-Type": "text/html" });
-			response.end('<html><body><a href="entries/madhyamaka/">Madhyamaka</a><a href="entries/truth/">Truth</a></body></html>');
+			response.end(
+				'<html><body><a href="entries/madhyamaka/">Madhyamaka</a><a href="entries/truth/">Truth</a></body></html>',
+			);
 		});
 		await new Promise((ready) => server.listen(0, "127.0.0.1", ready));
 		const origin = `http://127.0.0.1:${server.address().port}`;
@@ -5036,7 +5976,10 @@ test("web-research academic dedupes works and exports RIS artifacts", async () =
 			assert.equal(result.valid, true);
 			assert.equal(result.works, 3);
 			assert.equal(result.risRecords, 3);
-			assert.equal(jsonOutput(run("node", [script("web-research", "web-research.mjs"), "validate", academicRun])).valid, true);
+			assert.equal(
+				jsonOutput(run("node", [script("web-research", "web-research.mjs"), "validate", academicRun])).valid,
+				true,
+			);
 			const works = readFileSync(join(academicRun, "works.jsonl"), "utf8")
 				.trim()
 				.split(/\r?\n/)
@@ -5049,7 +5992,10 @@ test("web-research academic dedupes works and exports RIS artifacts", async () =
 			const arxiv = works.find((work) => work.identifiers.arxiv_id === "2401.00001");
 			assert.ok(arxiv);
 			assert.equal(arxiv.type, "preprint");
-			assert.equal(arxiv.related_works.some((relation) => relation.relation === "preprint_published_version"), true);
+			assert.equal(
+				arxiv.related_works.some((relation) => relation.relation === "preprint_published_version"),
+				true,
+			);
 			const aggregateRis = readFileSync(join(academicRun, "works.ris"), "utf8");
 			assert.equal((aggregateRis.match(/^TY {2}- /gm) ?? []).length, 3);
 			assert.equal((aggregateRis.match(/^ER {2}-$/gm) ?? []).length, 3);
@@ -5108,17 +6054,23 @@ test("web-research academic folds OpenAlex, CORE, DBLP and OpenCitations into on
 				.map((line) => JSON.parse(line));
 			// OpenAlex ships abstracts as {word: [positions]}; rebuilding has to
 			// order by position rather than by key.
-			const openAlexAbstract = provenance.find((row) => row.field_name === "abstract_best" && row.source_provider === "openalex");
+			const openAlexAbstract = provenance.find(
+				(row) => row.field_name === "abstract_best" && row.source_provider === "openalex",
+			);
 			assert.equal(openAlexAbstract.value, "OpenAlex abstract alpha study");
 			// dblp appends a homonym-disambiguating number to a name and a full
 			// stop to a title.
 			const dblpAuthors = provenance.find((row) => row.field_name === "authors" && row.source_provider === "dblp");
 			assert.equal(dblpAuthors.value[0].name, "Ada Lovelace");
-			const dblpTitle = provenance.find((row) => row.field_name === "canonical_title" && row.source_provider === "dblp");
+			const dblpTitle = provenance.find(
+				(row) => row.field_name === "canonical_title" && row.source_provider === "dblp",
+			);
 			assert.equal(dblpTitle.value, "Alpha & Beta RIS Study");
 			// OpenCitations packs every identifier into one string and brackets the
 			// venue's; both come apart in normalization.
-			const openCitationsVenue = provenance.find((row) => row.field_name === "venue_name" && row.source_provider === "opencitations");
+			const openCitationsVenue = provenance.find(
+				(row) => row.field_name === "venue_name" && row.source_provider === "opencitations",
+			);
 			assert.equal(openCitationsVenue.value, "Journal of Test Metadata");
 
 			// OpenAlex reports its remaining daily allowance in every response, and
@@ -5141,7 +6093,17 @@ test("web-research academic redacts a provider key before archiving the request 
 			const academicRun = join(workspace, "academic-redaction");
 			await runAsyncWithEnvironment(
 				"node",
-				[script("web-research", "web-research.mjs"), "academic", "alpha", "--output", academicRun, "--providers", "pubmed", "--limit", "2"],
+				[
+					script("web-research", "web-research.mjs"),
+					"academic",
+					"alpha",
+					"--output",
+					academicRun,
+					"--providers",
+					"pubmed",
+					"--limit",
+					"2",
+				],
 				{ ...fixture.environment, FORGE_API_KEY_PUBMED: "sekrit-ncbi-key" },
 			);
 			const journal = readFileSync(join(academicRun, "provider_requests.jsonl"), "utf8");
@@ -5210,17 +6172,30 @@ test("extracted web and document tools expose metadata and conversion boundaries
 		}
 
 		const html = join(workspace, "page.html");
-		writeFileSync(html, '<!doctype html><title>Example Page</title><h1>Example</h1><a href="/source.pdf">Source</a>\n');
+		writeFileSync(
+			html,
+			'<!doctype html><title>Example Page</title><h1>Example</h1><a href="/source.pdf">Source</a>\n',
+		);
 		const metadataInput = join(workspace, "web-metadata-input.json");
-		writeFileSync(metadataInput, `${JSON.stringify({ input: html, baseUrl: "https://example.test/articles/page.html" })}\n`);
-		const metadata = jsonOutput(run("node", [script("web-collection", "extract_metadata.mjs"), "--input", metadataInput]));
+		writeFileSync(
+			metadataInput,
+			`${JSON.stringify({ input: html, baseUrl: "https://example.test/articles/page.html" })}\n`,
+		);
+		const metadata = jsonOutput(
+			run("node", [script("web-collection", "extract_metadata.mjs"), "--input", metadataInput]),
+		);
 		assert.equal(metadata.status, "ok");
 		assert.equal(metadata.data.entries[0].title, "Example Page");
 		assert.deepEqual(metadata.data.entries[0].links, ["https://example.test/source.pdf"]);
 
 		const fetchInput = join(workspace, "fetch-input.json");
-		writeFileSync(fetchInput, `${JSON.stringify({ url: "http://127.0.0.1/test", output: join(workspace, "rejected-fetch") })}\n`);
-		const rejectedFetch = jsonOutput(run("node", [script("web-collection", "fetch_url.mjs"), "--input", fetchInput], 1));
+		writeFileSync(
+			fetchInput,
+			`${JSON.stringify({ url: "http://127.0.0.1/test", output: join(workspace, "rejected-fetch") })}\n`,
+		);
+		const rejectedFetch = jsonOutput(
+			run("node", [script("web-collection", "fetch_url.mjs"), "--input", fetchInput], 1),
+		);
 		assert.equal(rejectedFetch.status, "error");
 		assert.equal(rejectedFetch.errors[0].code, "fetch_failed");
 		assert.match(rejectedFetch.errors[0].message, /refused loopback or metadata host/);
@@ -5230,7 +6205,9 @@ test("extracted web and document tools expose metadata and conversion boundaries
 			const markdown = join(workspace, "page.md");
 			const htmlInput = join(workspace, "html-input.json");
 			writeFileSync(htmlInput, `${JSON.stringify({ input: html, output: markdown })}\n`);
-			const htmlResult = jsonOutput(run("node", [script("web-collection", "html_to_markdown.mjs"), "--input", htmlInput]));
+			const htmlResult = jsonOutput(
+				run("node", [script("web-collection", "html_to_markdown.mjs"), "--input", htmlInput]),
+			);
 			assert.equal(htmlResult.status, "ok");
 			assert.match(readFileSync(markdown, "utf8"), /Example/);
 
@@ -5241,7 +6218,9 @@ test("extracted web and document tools expose metadata and conversion boundaries
 			const docxInput = join(workspace, "docx-input.json");
 			const docxRun = join(workspace, "docx-run");
 			writeFileSync(docxInput, `${JSON.stringify({ input: docx, output: docxRun })}\n`);
-			const docxResult = jsonOutput(run("node", [script("document-ingest", "docx_to_markdown.mjs"), "--input", docxInput]));
+			const docxResult = jsonOutput(
+				run("node", [script("document-ingest", "docx_to_markdown.mjs"), "--input", docxInput]),
+			);
 			assert.equal(docxResult.status, "ok");
 			assert.match(readFileSync(docxResult.data.documents[0].markdownPath, "utf8"), /DOCX Source|Converted body/);
 		}
@@ -5278,7 +6257,9 @@ printf 'Readable PDF text extracted by the fake pdftotext command for the tool w
 		assert.match(readFileSync(pdfResult.data.documents[0].markdownPath, "utf8"), /Readable PDF text/);
 		const ingestMetadataInput = join(workspace, "ingest-metadata-input.json");
 		writeFileSync(ingestMetadataInput, `${JSON.stringify({ input: pdfRun })}\n`);
-		const ingestMetadata = jsonOutput(run("node", [script("document-ingest", "extract_metadata.mjs"), "--input", ingestMetadataInput]));
+		const ingestMetadata = jsonOutput(
+			run("node", [script("document-ingest", "extract_metadata.mjs"), "--input", ingestMetadataInput]),
+		);
 		assert.equal(ingestMetadata.status, "ok");
 		assert.equal(ingestMetadata.data.documents[0].metadata.fields.title.value, "Synthetic PDF");
 	});
@@ -5302,7 +6283,10 @@ test("document ingest extracts ordered PPTX content and flags visual review", ()
 		assert.match(markdown, /Confirm sponsor approval/);
 		assert.match(markdown, /# Slide 2/);
 		const sourceMap = JSON.parse(readFileSync(document.sourceMapPath, "utf8"));
-		assert.deepEqual(sourceMap.entries.map((entry) => entry.sourceLocator.value), [1, 2]);
+		assert.deepEqual(
+			sourceMap.entries.map((entry) => entry.sourceLocator.value),
+			[1, 2],
+		);
 		assert.match(result.warnings.join("\n"), /image|visual-only|chart or unsupported drawing object/);
 		assert.equal(document.metadata.fields.title.value, "Project Deck");
 		assert.equal(document.metadata.extraction.method, "pptx-ooxml");
@@ -5324,11 +6308,9 @@ printf 'synthetic audio' > "$output"
 		);
 		chmodSync(join(fakeBin, "ffmpeg"), 0o755);
 		const doctor = jsonOutput(
-			runWithEnvironment(
-				"node",
-				[script("document-ingest", "document-ingest.mjs"), "doctor", "--json"],
-				{ PATH: `${fakeBin}:${process.env.PATH}` },
-			),
+			runWithEnvironment("node", [script("document-ingest", "document-ingest.mjs"), "doctor", "--json"], {
+				PATH: `${fakeBin}:${process.env.PATH}`,
+			}),
 		);
 		assert.equal(doctor.tools.ffmpeg.available, true);
 		assert.equal(doctor.capabilities.ffmpegMedia, true);
@@ -5348,7 +6330,10 @@ printf 'synthetic audio' > "$output"
 			assert.equal(prepared.counts.needs_review, 1);
 			const documentDirectoryName = firstManifestRow(runDirectory).output_directory;
 			assert.equal(existsSync(join(runDirectory, documentDirectoryName, "derived", "audio.mp3")), true);
-			assert.equal(firstManifestRow(runDirectory).suggested_pipeline, "transcription,transcript-cleanup,project-extraction");
+			assert.equal(
+				firstManifestRow(runDirectory).suggested_pipeline,
+				"transcription,transcript-cleanup,project-extraction",
+			);
 		} finally {
 			await chatServer.close();
 		}
@@ -5379,7 +6364,9 @@ printf 'synthetic audio' > "$output"
 			),
 		);
 		assert.equal(prepared.counts.needs_review, 1);
-		const packet = jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "next-review", runDirectory]));
+		const packet = jsonOutput(
+			run("node", [script("document-ingest", "document-ingest.mjs"), "next-review", runDirectory]),
+		);
 		assert.match(packet.commands.recordTranscript, /record-transcript/);
 		assert.equal(existsSync(packet.paths.derivedAudio), true);
 		const transcript = join(workspace, "cleaned-transcript.md");
@@ -5401,7 +6388,10 @@ printf 'synthetic audio' > "$output"
 		);
 		assert.equal(recorded.status, "success");
 		assert.match(readFileSync(packet.paths.extracted, "utf8"), /cleaned lecture transcript/);
-		assert.equal(jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", runDirectory])).valid, true);
+		assert.equal(
+			jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", runDirectory])).valid,
+			true,
+		);
 	});
 });
 
@@ -5412,25 +6402,49 @@ test("document ingest adapts Zoom JSON and archives represented provenance sidec
 		const staging = join(project, "Inbox", ".processing", "batch");
 		mkdirSync(staging, { recursive: true });
 		const zoomName = "meeting.zoom.json";
-		const zoomRecords = [{ speaker: "Alex", text: "The final report is due Friday." }, { speaker: "Sam", text: "I will circulate the draft." }];
+		const zoomRecords = [
+			{ speaker: "Alex", text: "The final report is due Friday." },
+			{ speaker: "Sam", text: "I will circulate the draft." },
+		];
 		writeFileSync(join(staging, zoomName), `${JSON.stringify(zoomRecords)}\n`);
-		writeFileSync(join(staging, "meeting.md"), `# Project Meeting\n\nSource: \`${zoomName}\`\n\n## Transcript\n\n**Alex:** The final report is due Friday.\n\n**Sam:** I will circulate the draft.\n`);
+		writeFileSync(
+			join(staging, "meeting.md"),
+			`# Project Meeting\n\nSource: \`${zoomName}\`\n\n## Transcript\n\n**Alex:** The final report is due Friday.\n\n**Sam:** I will circulate the draft.\n`,
+		);
 		const runDirectory = join(project, "Ingest", "Inbox", "batch");
-		const intake = jsonOutput(await runAsyncWithEnvironment(process.execPath, [cli, "intake", staging, "--destination", project, "--output", runDirectory], {}));
+		const intake = jsonOutput(
+			await runAsyncWithEnvironment(
+				process.execPath,
+				[cli, "intake", staging, "--destination", project, "--output", runDirectory],
+				{},
+			),
+		);
 		assert.equal(intake.finalized.finalized, true);
 		assert.equal(intake.finalized.publishedMarkdown, 1);
 		assert.equal(intake.finalized.movedOriginals, 2);
 		assert.equal(existsSync(join(project, "Sources", "Inbox", "meeting.md")), true);
 		assert.equal(existsSync(join(project, "Originals", "Inbox", zoomName)), true);
-		assert.match(readFileSync(join(runDirectory, "manifest.csv"), "utf8"), /represented_by_published_source:meeting\.md/);
-		assert.match(readFileSync(join(runDirectory, "source_relationships.jsonl"), "utf8"), /represented_by_published_source/);
+		assert.match(
+			readFileSync(join(runDirectory, "manifest.csv"), "utf8"),
+			/represented_by_published_source:meeting\.md/,
+		);
+		assert.match(
+			readFileSync(join(runDirectory, "source_relationships.jsonl"), "utf8"),
+			/represented_by_published_source/,
+		);
 
 		const standaloneProject = join(workspace, "standalone-project");
 		const standaloneStaging = join(standaloneProject, "Inbox", ".processing", "batch");
 		mkdirSync(standaloneStaging, { recursive: true });
 		writeFileSync(join(standaloneStaging, "standalone.json"), `${JSON.stringify(zoomRecords)}\n`);
 		const standaloneRun = join(standaloneProject, "Ingest", "Inbox", "batch");
-		const standalone = jsonOutput(await runAsyncWithEnvironment(process.execPath, [cli, "intake", standaloneStaging, "--destination", standaloneProject, "--output", standaloneRun], {}));
+		const standalone = jsonOutput(
+			await runAsyncWithEnvironment(
+				process.execPath,
+				[cli, "intake", standaloneStaging, "--destination", standaloneProject, "--output", standaloneRun],
+				{},
+			),
+		);
 		assert.equal(standalone.nextAction, "review");
 		const review = jsonOutput(run(process.execPath, [cli, "next-review", standaloneRun]));
 		assert.equal(review.current.extraction.method, "zoom-json-transcript");
@@ -5455,7 +6469,10 @@ test("document ingest categorizes folders with the base model endpoint", async (
 				),
 			);
 			assert.equal(prepared.counts.needs_review, 1);
-			const requests = readFileSync(chatServer.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			const requests = readFileSync(chatServer.requestsPath, "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
 			assert.equal(requests.length, 1);
 			assert.equal(requests[0].url, "/v1/chat/completions");
 			// Folder categorization is bulk work, so it belongs on the non-thinking model.
@@ -5474,7 +6491,10 @@ test("document ingest routes project folders to the fixed project extraction han
 		try {
 			const inputDirectory = join(workspace, "grant-project");
 			mkdirSync(inputDirectory);
-			writeFileSync(join(inputDirectory, "scope-of-work.txt"), "Deliver the final report by the contractual deadline.\n");
+			writeFileSync(
+				join(inputDirectory, "scope-of-work.txt"),
+				"Deliver the final report by the contractual deadline.\n",
+			);
 			const runDirectory = join(workspace, "project-ingest");
 			runWithEnvironment(
 				"node",
@@ -5510,7 +6530,13 @@ test("document ingest finalizes flat folders into Ingest Originals Generated lay
 		const runDirectory = join(sourceDirectory, "Ingest");
 
 		const prepared = jsonOutput(
-			run("node", [script("document-ingest", "document-ingest.mjs"), "prepare", sourceDirectory, "--output", runDirectory]),
+			run("node", [
+				script("document-ingest", "document-ingest.mjs"),
+				"prepare",
+				sourceDirectory,
+				"--output",
+				runDirectory,
+			]),
 		);
 		assert.equal(prepared.documents, 1);
 		assert.equal(prepared.counts.needs_review, 1);
@@ -5525,10 +6551,19 @@ test("document ingest finalizes flat folders into Ingest Originals Generated lay
 		};
 		writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
 		writeFileSync(join(runDirectory, "literature_summary.md"), "# Literature Summary\n\nGenerated synthesis.\n");
-		assert.equal(jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", runDirectory])).valid, true);
+		assert.equal(
+			jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", runDirectory])).valid,
+			true,
+		);
 
 		const finalized = jsonOutput(
-			run("node", [script("document-ingest", "document-ingest.mjs"), "finalize", runDirectory, "--destination", sourceDirectory]),
+			run("node", [
+				script("document-ingest", "document-ingest.mjs"),
+				"finalize",
+				runDirectory,
+				"--destination",
+				sourceDirectory,
+			]),
 		);
 		assert.equal(finalized.layout, "flat");
 		assert.equal(finalized.movedOriginals, 1);
@@ -5536,7 +6571,10 @@ test("document ingest finalizes flat folders into Ingest Originals Generated lay
 		assert.equal(finalized.generatedArtifacts, 1);
 		assert.equal(existsSync(join(sourceDirectory, "lecture.txt")), false);
 		assert.equal(existsSync(join(sourceDirectory, "Originals", "lecture.txt")), true);
-		assert.match(readFileSync(join(sourceDirectory, "Intro to Archival Practice Lecture Transcript.md"), "utf8"), /Clean this transcript/);
+		assert.match(
+			readFileSync(join(sourceDirectory, "Intro to Archival Practice Lecture Transcript.md"), "utf8"),
+			/Clean this transcript/,
+		);
 		assert.equal(existsSync(join(sourceDirectory, "Generated", "literature_summary.md")), true);
 		const artifactManifest = readFileSync(join(runDirectory, "artifact_manifest.csv"), "utf8");
 		assert.match(artifactManifest, /role,document_id,source_path,destination_path,sha256,created_at/);
@@ -5552,7 +6590,13 @@ test("document ingest resumes frozen inputs, refreshes drift, and recovers trans
 		mkdirSync(sourceDirectory);
 		writeFileSync(join(sourceDirectory, "one.txt"), "First restart-safe source.\n");
 		const runDirectory = join(sourceDirectory, "Ingest");
-		const command = [script("document-ingest", "document-ingest.mjs"), "prepare", sourceDirectory, "--output", runDirectory];
+		const command = [
+			script("document-ingest", "document-ingest.mjs"),
+			"prepare",
+			sourceDirectory,
+			"--output",
+			runDirectory,
+		];
 		const first = jsonOutput(run("node", command));
 		const resumed = jsonOutput(run("node", command));
 		assert.equal(first.documents, 1);
@@ -5566,12 +6610,17 @@ test("document ingest resumes frozen inputs, refreshes drift, and recovers trans
 		assert.equal(drift.inputDrift.added.length, 1);
 		const stillFrozen = jsonOutput(run("node", command));
 		assert.equal(stillFrozen.documents, 1);
-		const refreshed = jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "refresh", runDirectory]));
+		const refreshed = jsonOutput(
+			run("node", [script("document-ingest", "document-ingest.mjs"), "refresh", runDirectory]),
+		);
 		assert.equal(refreshed.refreshed, true);
 		const prepared = jsonOutput(run("node", command));
 		assert.equal(prepared.documents, 2);
 		completeIngestRun(runDirectory);
-		assert.equal(jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", runDirectory])).valid, true);
+		assert.equal(
+			jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", runDirectory])).valid,
+			true,
+		);
 		runWithEnvironment(
 			"node",
 			[script("document-ingest", "document-ingest.mjs"), "finalize", runDirectory, "--destination", sourceDirectory],
@@ -5579,11 +6628,24 @@ test("document ingest resumes frozen inputs, refreshes drift, and recovers trans
 			1,
 		);
 		const finalized = jsonOutput(
-			run("node", [script("document-ingest", "document-ingest.mjs"), "finalize", runDirectory, "--destination", sourceDirectory]),
+			run("node", [
+				script("document-ingest", "document-ingest.mjs"),
+				"finalize",
+				runDirectory,
+				"--destination",
+				sourceDirectory,
+			]),
 		);
 		assert.equal(finalized.finalized, true);
 		assert.equal(existsSync(join(runDirectory, "artifact_manifest.csv")), true);
-		assert.equal(new Set(parseCsvRows(readFileSync(join(runDirectory, "artifact_manifest.csv"), "utf8")).slice(1).map((row) => row.join("|"))).size, 4);
+		assert.equal(
+			new Set(
+				parseCsvRows(readFileSync(join(runDirectory, "artifact_manifest.csv"), "utf8"))
+					.slice(1)
+					.map((row) => row.join("|")),
+			).size,
+			4,
+		);
 	});
 });
 
@@ -5595,16 +6657,31 @@ test("document ingest finalizes structured folders and refuses unsafe finalize",
 		writeFileSync(join(sourceDirectory, "Week 1", "reading.txt"), "Reading one source text.\n");
 		writeFileSync(join(sourceDirectory, "Week 2", "reading.txt"), "Reading two source text.\n");
 		const runDirectory = join(sourceDirectory, "Ingest");
-		run("node", [script("document-ingest", "document-ingest.mjs"), "prepare", sourceDirectory, "--output", runDirectory]);
+		run("node", [
+			script("document-ingest", "document-ingest.mjs"),
+			"prepare",
+			sourceDirectory,
+			"--output",
+			runDirectory,
+		]);
 		runFailure(
 			"node",
 			[script("document-ingest", "document-ingest.mjs"), "finalize", runDirectory, "--destination", sourceDirectory],
 			/run must validate before finalize/,
 		);
 		completeIngestRun(runDirectory);
-		assert.equal(jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", runDirectory])).valid, true);
+		assert.equal(
+			jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", runDirectory])).valid,
+			true,
+		);
 		const finalized = jsonOutput(
-			run("node", [script("document-ingest", "document-ingest.mjs"), "finalize", runDirectory, "--destination", sourceDirectory]),
+			run("node", [
+				script("document-ingest", "document-ingest.mjs"),
+				"finalize",
+				runDirectory,
+				"--destination",
+				sourceDirectory,
+			]),
 		);
 		assert.equal(finalized.layout, "structured");
 		assert.equal(existsSync(join(sourceDirectory, "Week 1", "reading.md")), true);
@@ -5621,7 +6698,13 @@ test("document ingest finalize refuses generated artifact overwrite conflicts", 
 		writeFileSync(join(sourceDirectory, "note.txt"), "Source text.\n");
 		writeFileSync(join(sourceDirectory, "Generated", "literature_summary.md"), "# Existing\n");
 		const runDirectory = join(sourceDirectory, "Ingest");
-		run("node", [script("document-ingest", "document-ingest.mjs"), "prepare", sourceDirectory, "--output", runDirectory]);
+		run("node", [
+			script("document-ingest", "document-ingest.mjs"),
+			"prepare",
+			sourceDirectory,
+			"--output",
+			runDirectory,
+		]);
 		completeIngestRun(runDirectory);
 		writeFileSync(join(runDirectory, "literature_summary.md"), "# New\n");
 		runFailure(
@@ -5640,24 +6723,49 @@ test("document ingest final output filenames support administrative naming and r
 		mkdirSync(sourceDirectory);
 		writeFileSync(join(sourceDirectory, "scan.txt"), "Insurance claim for knee MRI at City Hospital.\n");
 		const runDirectory = join(sourceDirectory, "Ingest");
-		run("node", [script("document-ingest", "document-ingest.mjs"), "prepare", sourceDirectory, "--output", runDirectory]);
+		run("node", [
+			script("document-ingest", "document-ingest.mjs"),
+			"prepare",
+			sourceDirectory,
+			"--output",
+			runDirectory,
+		]);
 		const rows = completeIngestRun(runDirectory);
 		const metadataPath = join(runDirectory, rows[0].output_directory, "metadata.json");
 		const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
 		metadata.finalOutput = {
 			filename: "2026-05-03 Insurance Claim - Knee Pain - MRI - City Hospital.md",
-			namingReason: "Administrative insurance claim name starts with date and includes diagnosis, procedure, and facility.",
+			namingReason:
+				"Administrative insurance claim name starts with date and includes diagnosis, procedure, and facility.",
 		};
 		writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
-		assert.equal(jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", runDirectory])).valid, true);
-		run("node", [script("document-ingest", "document-ingest.mjs"), "finalize", runDirectory, "--destination", sourceDirectory]);
-		assert.equal(existsSync(join(sourceDirectory, "2026-05-03 Insurance Claim - Knee Pain - MRI - City Hospital.md")), true);
+		assert.equal(
+			jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", runDirectory])).valid,
+			true,
+		);
+		run("node", [
+			script("document-ingest", "document-ingest.mjs"),
+			"finalize",
+			runDirectory,
+			"--destination",
+			sourceDirectory,
+		]);
+		assert.equal(
+			existsSync(join(sourceDirectory, "2026-05-03 Insurance Claim - Knee Pain - MRI - City Hospital.md")),
+			true,
+		);
 
 		const unsafeDirectory = join(workspace, "unsafe-source");
 		mkdirSync(unsafeDirectory);
 		writeFileSync(join(unsafeDirectory, "note.txt"), "Administrative note.\n");
 		const unsafeRun = join(unsafeDirectory, "Ingest");
-		run("node", [script("document-ingest", "document-ingest.mjs"), "prepare", unsafeDirectory, "--output", unsafeRun]);
+		run("node", [
+			script("document-ingest", "document-ingest.mjs"),
+			"prepare",
+			unsafeDirectory,
+			"--output",
+			unsafeRun,
+		]);
 		const unsafeRows = completeIngestRun(unsafeRun);
 		const unsafeMetadataPath = join(unsafeRun, unsafeRows[0].output_directory, "metadata.json");
 		const unsafeMetadata = JSON.parse(readFileSync(unsafeMetadataPath, "utf8"));
@@ -5723,8 +6831,14 @@ test("transcription assembles committed chunks deterministically and exposes ret
 		writeFileSync(join(runDirectory, "audio", "normalized.wav"), "normalized first revision\n");
 		const firstResult = join(runDirectory, "chunk_results", "chunk-0001.json");
 		const secondResult = join(runDirectory, "chunk_results", "chunk-0002.json");
-		writeFileSync(firstResult, `${JSON.stringify({ sha256: "hash-1", segments: [{ start: 0, end: 1, text: "First" }] })}\n`);
-		writeFileSync(secondResult, `${JSON.stringify({ sha256: "hash-2", segments: [{ start: 1, end: 2, text: "Second" }] })}\n`);
+		writeFileSync(
+			firstResult,
+			`${JSON.stringify({ sha256: "hash-1", segments: [{ start: 0, end: 1, text: "First" }] })}\n`,
+		);
+		writeFileSync(
+			secondResult,
+			`${JSON.stringify({ sha256: "hash-2", segments: [{ start: 1, end: 2, text: "Second" }] })}\n`,
+		);
 		initializeRunState(
 			runDirectory,
 			createRunState({
@@ -5735,7 +6849,14 @@ test("transcription assembles committed chunks deterministically and exposes ret
 				items: [
 					{ id: "chunk-0001", sha256: "hash-1", status: "completed", attempts: 1, resultPath: firstResult },
 					{ id: "chunk-0002", sha256: "hash-2", status: "completed", attempts: 1, resultPath: secondResult },
-					{ id: "chunk-0003", sha256: "hash-3", status: "failed", attempts: 1, transient: false, error: "validation" },
+					{
+						id: "chunk-0003",
+						sha256: "hash-3",
+						status: "failed",
+						attempts: 1,
+						transient: false,
+						error: "validation",
+					},
 				],
 			}),
 		);
@@ -5744,16 +6865,29 @@ test("transcription assembles committed chunks deterministically and exposes ret
 			probe,
 			`import importlib.util, json, sys\nspec = importlib.util.spec_from_file_location("transcription_skill", sys.argv[1])\nmodule = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(module)\nstate = json.load(open(sys.argv[2], encoding="utf-8"))\nstate["items"] = state["items"][:2]\nprint(json.dumps(module.assemble_chunk_segments(state)))\n`,
 		);
-		const assembled = jsonOutput(run(python, [probe, script("transcription", "transcription.py"), join(runDirectory, "run_state.json")]));
-		assert.deepEqual(assembled.map((segment) => segment.text), ["First", "Second"]);
-		const status = jsonOutput(run(python, [script("transcription", "transcription.py"), "status", runDirectory, "--json"]));
+		const assembled = jsonOutput(
+			run(python, [probe, script("transcription", "transcription.py"), join(runDirectory, "run_state.json")]),
+		);
+		assert.deepEqual(
+			assembled.map((segment) => segment.text),
+			["First", "Second"],
+		);
+		const status = jsonOutput(
+			run(python, [script("transcription", "transcription.py"), "status", runDirectory, "--json"]),
+		);
 		assert.equal(status.items.completed, 2);
 		assert.equal(status.items.failed, 1);
-		const retried = jsonOutput(run(python, [script("transcription", "transcription.py"), "retry", runDirectory, "--item", "chunk-0003"]));
+		const retried = jsonOutput(
+			run(python, [script("transcription", "transcription.py"), "retry", runDirectory, "--item", "chunk-0003"]),
+		);
 		assert.deepEqual(retried.retried, ["chunk-0003"]);
 		assert.equal(loadRunState(runDirectory).items[2].status, "pending");
 		writeFileSync(source, "second media revision\n");
-		assert.equal(jsonOutput(run(python, [script("transcription", "transcription.py"), "status", runDirectory, "--json"])).inputDrift.changed, true);
+		assert.equal(
+			jsonOutput(run(python, [script("transcription", "transcription.py"), "status", runDirectory, "--json"]))
+				.inputDrift.changed,
+			true,
+		);
 		const refreshed = jsonOutput(run(python, [script("transcription", "transcription.py"), "refresh", runDirectory]));
 		assert.equal(refreshed.refreshed, true);
 		assert.equal(existsSync(join(runDirectory, "revisions", "revision-0001", "audio", "normalized.wav")), true);
@@ -5848,7 +6982,15 @@ printf 'synthetic png bytes' > "\${@: -1}.png"
 		const prepared = jsonOutput(
 			runWithEnvironment(
 				"node",
-				[script("document-ingest", "document-ingest.mjs"), "prepare", source, "--output", runDirectory, "--ocr-backend", "local"],
+				[
+					script("document-ingest", "document-ingest.mjs"),
+					"prepare",
+					source,
+					"--output",
+					runDirectory,
+					"--ocr-backend",
+					"local",
+				],
 				{ OCR_LOG: ocrLog, PATH: `${fakeBin}:${process.env.PATH}` },
 			),
 		);
@@ -5871,7 +7013,10 @@ printf 'synthetic png bytes' > "\${@: -1}.png"
 		const transcript = "# Page 2\n\nReadable vision transcription for the unresolved page.\n";
 		mkdirSync(join(documentDirectory, "working", "vision-pages"));
 		writeFileSync(join(documentDirectory, "working", "vision-pages", "page-0002.md"), transcript);
-		writeFileSync(join(documentDirectory, "document.md"), `${readFileSync(join(documentDirectory, "document.md"), "utf8")}\n${transcript}`);
+		writeFileSync(
+			join(documentDirectory, "document.md"),
+			`${readFileSync(join(documentDirectory, "document.md"), "utf8")}\n${transcript}`,
+		);
 		metadata.extraction.vision.used = true;
 		metadata.extraction.vision.completedPages = [2];
 		metadata.review.completed = true;
@@ -5887,7 +7032,10 @@ printf 'synthetic png bytes' > "\${@: -1}.png"
 		});
 		writeFileSync(sourceMapPath, `${JSON.stringify(sourceMap, null, 2)}\n`);
 		const reportPath = join(documentDirectory, "extraction_report.md");
-		writeFileSync(reportPath, readFileSync(reportPath, "utf8").replace("model normalization pending", "model normalization complete"));
+		writeFileSync(
+			reportPath,
+			readFileSync(reportPath, "utf8").replace("model normalization pending", "model normalization complete"),
+		);
 		assert.equal(
 			jsonOutput(
 				runWithEnvironment("node", [script("document-ingest", "document-ingest.mjs"), "validate", runDirectory], {
@@ -5926,7 +7074,10 @@ printf 'synthetic png bytes' > "\${@: -1}.png"
 		const localOnlyReportPath = join(localOnlyDirectory, "extraction_report.md");
 		writeFileSync(
 			localOnlyReportPath,
-			readFileSync(localOnlyReportPath, "utf8").replace("model normalization pending", "model normalization complete; vision unavailable"),
+			readFileSync(localOnlyReportPath, "utf8").replace(
+				"model normalization pending",
+				"model normalization complete; vision unavailable",
+			),
 		);
 		assert.equal(
 			jsonOutput(
@@ -5989,8 +7140,14 @@ test("document ingest sends image OCR to GLM-OCR SDK and preserves structured ar
 			metadata.review.completed = true;
 			writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
 			const reportPath = join(documentDirectory, "extraction_report.md");
-			writeFileSync(reportPath, readFileSync(reportPath, "utf8").replace("model normalization pending", "model normalization complete"));
-			assert.equal(jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", runDirectory])).valid, true);
+			writeFileSync(
+				reportPath,
+				readFileSync(reportPath, "utf8").replace("model normalization pending", "model normalization complete"),
+			);
+			assert.equal(
+				jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", runDirectory])).valid,
+				true,
+			);
 		} finally {
 			await server.close();
 		}
@@ -6023,7 +7180,8 @@ printf 'synthetic png bytes' > "\${@: -1}.png"
 		writeFileSync(source, "%PDF-1.4\nsynthetic text-layer fixture\n");
 
 		const cleanServer = await startGlmocrFixture(workspace, {
-			markdown_result: "# Report\n\nThis is a clean, high quality GLM-OCR transcription with plenty of readable words across the whole page.\n",
+			markdown_result:
+				"# Report\n\nThis is a clean, high quality GLM-OCR transcription with plenty of readable words across the whole page.\n",
 			data_info: { pages: [{ page_id: 1 }] },
 		});
 		try {
@@ -6036,7 +7194,10 @@ printf 'synthetic png bytes' > "\${@: -1}.png"
 				),
 			);
 			assert.equal(prepared.counts.needs_review, 1);
-			const requests = readFileSync(cleanServer.requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			const requests = readFileSync(cleanServer.requestsPath, "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
 			assert.equal(requests.length, 1);
 			assert.match(requests[0].body.file, /^data:application\/pdf;base64,/);
 			const cleanDirectoryName = firstManifestRow(cleanRun).output_directory;
@@ -6046,18 +7207,31 @@ printf 'synthetic png bytes' > "\${@: -1}.png"
 			assert.equal(cleanMetadata.extraction.method, "glm-ocr-sdk");
 			assert.equal(cleanMetadata.extraction.ocr.backend, "glmocr");
 			assert.equal(cleanMetadata.extraction.vision.required, false);
-			assert.match(readFileSync(join(cleanDirectory, "document.md"), "utf8"), /clean, high quality GLM-OCR transcription/);
+			assert.match(
+				readFileSync(join(cleanDirectory, "document.md"), "utf8"),
+				/clean, high quality GLM-OCR transcription/,
+			);
 			cleanMetadata.review.completed = true;
 			writeFileSync(cleanMetadataPath, `${JSON.stringify(cleanMetadata, null, 2)}\n`);
 			const cleanReportPath = join(cleanDirectory, "extraction_report.md");
-			writeFileSync(cleanReportPath, readFileSync(cleanReportPath, "utf8").replace("model normalization pending", "model normalization complete"));
-			assert.equal(jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", cleanRun])).valid, true);
+			writeFileSync(
+				cleanReportPath,
+				readFileSync(cleanReportPath, "utf8").replace(
+					"model normalization pending",
+					"model normalization complete",
+				),
+			);
+			assert.equal(
+				jsonOutput(run("node", [script("document-ingest", "document-ingest.mjs"), "validate", cleanRun])).valid,
+				true,
+			);
 		} finally {
 			await cleanServer.close();
 		}
 
 		const garbledServer = await startGlmocrFixture(workspace, {
-			markdown_result: "......................................................................................................................................\n",
+			markdown_result:
+				"......................................................................................................................................\n",
 			json_result: { blocks: [{ type: "table", page: 1 }] },
 			data_info: { pages: [{ page_id: 1 }] },
 		});
@@ -6094,7 +7268,10 @@ printf 'synthetic png bytes' > "\${@: -1}.png"
 			const transcript = "# Page 1\n\nReadable vision transcription recovered by the active model.\n";
 			mkdirSync(join(garbledDirectory, "working", "vision-pages"));
 			writeFileSync(join(garbledDirectory, "working", "vision-pages", "page-0001.md"), transcript);
-			writeFileSync(join(garbledDirectory, "document.md"), `${readFileSync(join(garbledDirectory, "document.md"), "utf8")}\n${transcript}`);
+			writeFileSync(
+				join(garbledDirectory, "document.md"),
+				`${readFileSync(join(garbledDirectory, "document.md"), "utf8")}\n${transcript}`,
+			);
 			garbledMetadata.extraction.vision.used = true;
 			garbledMetadata.extraction.vision.completedPages = [1];
 			garbledMetadata.review.completed = true;
@@ -6110,7 +7287,10 @@ printf 'synthetic png bytes' > "\${@: -1}.png"
 			});
 			writeFileSync(sourceMapPath, `${JSON.stringify(sourceMap, null, 2)}\n`);
 			const reportPath = join(garbledDirectory, "extraction_report.md");
-			writeFileSync(reportPath, readFileSync(reportPath, "utf8").replace("model normalization pending", "model normalization complete"));
+			writeFileSync(
+				reportPath,
+				readFileSync(reportPath, "utf8").replace("model normalization pending", "model normalization complete"),
+			);
 			assert.equal(
 				jsonOutput(
 					runWithEnvironment("node", [script("document-ingest", "document-ingest.mjs"), "validate", garbledRun], {
@@ -6153,7 +7333,11 @@ test("installed launcher symlinks resolve their source checkout", () => {
 			`${join(realpathSync(repository), "packages", "coding-agent", "dist", "cli.js")}\n--version`,
 		);
 
-		const updater = runFailure(join(binaryDirectory, "pi-forge-update"), [], /legacy updater requires a git checkout/);
+		const updater = runFailure(
+			join(binaryDirectory, "pi-forge-update"),
+			[],
+			/legacy updater requires a git checkout/,
+		);
 		assert.match(updater.stderr, new RegExp(realpathSync(repository).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 	});
 });
@@ -6181,7 +7365,11 @@ test("profile configuration installs local service defaults without dropping use
 				},
 			})}\n`,
 		);
-		run("node", [join(repositoryRoot, "scripts", "configure-pi-forge.mjs"), agentDirectory, join(repositoryRoot, "forge")]);
+		run("node", [
+			join(repositoryRoot, "scripts", "configure-pi-forge.mjs"),
+			agentDirectory,
+			join(repositoryRoot, "forge"),
+		]);
 
 		const settings = JSON.parse(readFileSync(join(agentDirectory, "settings.json"), "utf8"));
 		assert.equal(settings.defaultProvider, "forge-local");
@@ -6234,7 +7422,11 @@ test("profile configuration preserves connected service overrides", () => {
 				},
 			})}\n`,
 		);
-		run("node", [join(repositoryRoot, "scripts", "configure-pi-forge.mjs"), agentDirectory, join(repositoryRoot, "forge")]);
+		run("node", [
+			join(repositoryRoot, "scripts", "configure-pi-forge.mjs"),
+			agentDirectory,
+			join(repositoryRoot, "forge"),
+		]);
 
 		const settings = JSON.parse(readFileSync(join(agentDirectory, "settings.json"), "utf8"));
 		// Everything default except the two the user set, which keep their values
@@ -6283,7 +7475,10 @@ SCRIPT
 chmod +x "$output"
 `,
 		);
-		writeFileSync(join(fakeBin, "git"), "#!/usr/bin/env bash\nprintf 'git called\\n' > \"$INSTALLER_GIT_LOG\"\nexit 99\n");
+		writeFileSync(
+			join(fakeBin, "git"),
+			"#!/usr/bin/env bash\nprintf 'git called\\n' > \"$INSTALLER_GIT_LOG\"\nexit 99\n",
+		);
 		chmodSync(join(fakeBin, "curl"), 0o755);
 		chmodSync(join(fakeBin, "git"), 0o755);
 
@@ -6345,7 +7540,7 @@ test("checkout installer invokes local installer without cloning by default", ()
 		mkdirSync(fakeBin);
 		writeFileSync(
 			join(fakeBin, "git"),
-			"#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$INSTALLER_GIT_LOG\"\nexit 99\n",
+			'#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" > "$INSTALLER_GIT_LOG"\nexit 99\n',
 		);
 		chmodSync(join(fakeBin, "git"), 0o755);
 

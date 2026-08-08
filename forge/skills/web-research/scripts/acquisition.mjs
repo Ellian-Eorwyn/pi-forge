@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
-import { JSDOM, VirtualConsole } from "jsdom";
+import { basename, dirname, join, resolve } from "node:path";
 import { Readability } from "@mozilla/readability";
+import { JSDOM, VirtualConsole } from "jsdom";
 import * as playwright from "playwright";
 import { resolveConnectedServices } from "../../../lib/connected-services.mjs";
 import {
@@ -42,7 +42,8 @@ const REDIRECT_WRAPPERS = new Map([
 	["l.facebook.com", ["u"]],
 	["lm.facebook.com", ["u"]],
 ]);
-const TEXT_TYPES = /(?:text\/html|application\/xhtml\+xml|text\/plain|text\/xml|application\/xml|application\/json|application\/ld\+json)/i;
+const TEXT_TYPES =
+	/(?:text\/html|application\/xhtml\+xml|text\/plain|text\/xml|application\/xml|application\/json|application\/ld\+json)/i;
 const HTML_TYPES = /(?:text\/html|application\/xhtml\+xml)/i;
 const JSON_TYPES = /(?:application\/json|application\/ld\+json|\+json)/i;
 const quietJsdomConsole = new VirtualConsole();
@@ -85,7 +86,9 @@ function compactObject(value) {
 }
 
 function normalizeWhitespace(value) {
-	return String(value ?? "").replace(/\s+/g, " ").trim();
+	return String(value ?? "")
+		.replace(/\s+/g, " ")
+		.trim();
 }
 
 function htmlToReadableText(html) {
@@ -140,11 +143,15 @@ export function normalizeUrl(url) {
 		parsed.hostname = parsed.hostname.toLowerCase();
 		if (parsed.hostname.startsWith("m.")) parsed.hostname = parsed.hostname.slice(2);
 		if (parsed.hostname.startsWith("amp.")) parsed.hostname = parsed.hostname.slice(4);
-		if ((parsed.protocol === "http:" && parsed.port === "80") || (parsed.protocol === "https:" && parsed.port === "443")) {
+		if (
+			(parsed.protocol === "http:" && parsed.port === "80") ||
+			(parsed.protocol === "https:" && parsed.port === "443")
+		) {
 			parsed.port = "";
 		}
 		for (const key of [...parsed.searchParams.keys()]) {
-			if (TRACKING_PARAMS.has(key.toLowerCase()) || key.toLowerCase().startsWith("utm_")) parsed.searchParams.delete(key);
+			if (TRACKING_PARAMS.has(key.toLowerCase()) || key.toLowerCase().startsWith("utm_"))
+				parsed.searchParams.delete(key);
 		}
 		const sorted = [...parsed.searchParams.entries()].sort(([left], [right]) => left.localeCompare(right));
 		parsed.search = "";
@@ -169,12 +176,33 @@ export function defaultCacheDirectory() {
 
 export function modeDefaults(mode = "standard") {
 	if (mode === "fast") {
-		return { mode, allowBrowser: false, maxConcurrency: 3, perDomainConcurrency: 1, timeoutMs: 12_000, maxBytes: 6 * 1024 * 1024 };
+		return {
+			mode,
+			allowBrowser: false,
+			maxConcurrency: 3,
+			perDomainConcurrency: 1,
+			timeoutMs: 12_000,
+			maxBytes: 6 * 1024 * 1024,
+		};
 	}
 	if (mode === "deep") {
-		return { mode, allowBrowser: true, maxConcurrency: 3, perDomainConcurrency: 1, timeoutMs: DEFAULT_TIMEOUT_MS, maxBytes: DEFAULT_MAX_BYTES };
+		return {
+			mode,
+			allowBrowser: true,
+			maxConcurrency: 3,
+			perDomainConcurrency: 1,
+			timeoutMs: DEFAULT_TIMEOUT_MS,
+			maxBytes: DEFAULT_MAX_BYTES,
+		};
 	}
-	return { mode: "standard", allowBrowser: true, maxConcurrency: 3, perDomainConcurrency: 1, timeoutMs: DEFAULT_TIMEOUT_MS, maxBytes: DEFAULT_MAX_BYTES };
+	return {
+		mode: "standard",
+		allowBrowser: true,
+		maxConcurrency: 3,
+		perDomainConcurrency: 1,
+		timeoutMs: DEFAULT_TIMEOUT_MS,
+		maxBytes: DEFAULT_MAX_BYTES,
+	};
 }
 
 export function readDomainRegistry(registryPath = new URL("../references/domain-strategies.json", import.meta.url)) {
@@ -197,7 +225,9 @@ export function domainRuleForUrl(url, registry = []) {
 	return (
 		registry.find((rule) => {
 			if (rule.domain && host === rule.domain.toLowerCase()) return true;
-			return (rule.subdomains ?? []).some((pattern) => host === pattern.toLowerCase() || host.endsWith(`.${pattern.toLowerCase()}`));
+			return (rule.subdomains ?? []).some(
+				(pattern) => host === pattern.toLowerCase() || host.endsWith(`.${pattern.toLowerCase()}`),
+			);
 		}) ?? null
 	);
 }
@@ -347,7 +377,11 @@ export function createAcquisitionContext(options = {}) {
 		browser: null,
 	};
 	context.acquisitionQueue = createTaskQueue("acquisition", Math.max(1, context.maxConcurrency), context.schedulerLog);
-	context.browserQueue = createTaskQueue("browser", Math.max(1, options.playwrightConcurrency ?? 1), context.schedulerLog);
+	context.browserQueue = createTaskQueue(
+		"browser",
+		Math.max(1, options.playwrightConcurrency ?? 1),
+		context.schedulerLog,
+	);
 	return context;
 }
 
@@ -427,7 +461,10 @@ async function waitForDomainRateLimit(url, context, domainRule) {
 async function queuedDirectHttpAcquire(url, context, domainRule) {
 	const host = hostForUrl(url);
 	if (!context.domainQueues.has(host)) {
-		context.domainQueues.set(host, createTaskQueue(`domain:${host}`, Math.max(1, context.perDomainConcurrency), context.schedulerLog));
+		context.domainQueues.set(
+			host,
+			createTaskQueue(`domain:${host}`, Math.max(1, context.perDomainConcurrency), context.schedulerLog),
+		);
 	}
 	return context.domainQueues.get(host).run(
 		"domain_slot",
@@ -452,12 +489,24 @@ async function directHttpAcquire(url, context) {
 		const cached = JSON.parse(readFileSync(cachedMetaPath, "utf8"));
 		if (existsSync(cached.cacheBodyPath)) {
 			const buffer = readFileSync(cached.cacheBodyPath);
-			context.cacheLog.push({ layer: "raw", key: canonicalUrl, status: "hit", path: cached.cacheBodyPath, recordedAt: nowIso() });
+			context.cacheLog.push({
+				layer: "raw",
+				key: canonicalUrl,
+				status: "hit",
+				path: cached.cacheBodyPath,
+				recordedAt: nowIso(),
+			});
 			context.metrics.cacheHits += 1;
 			return { ...cached, buffer, fromCache: true, durationMs: Date.now() - startedAt };
 		}
 	}
-	context.cacheLog.push({ layer: "raw", key: canonicalUrl, status: "miss", path: cachedMetaPath, recordedAt: nowIso() });
+	context.cacheLog.push({
+		layer: "raw",
+		key: canonicalUrl,
+		status: "miss",
+		path: cachedMetaPath,
+		recordedAt: nowIso(),
+	});
 	context.metrics.cacheMisses += 1;
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), context.timeoutMs);
@@ -468,18 +517,24 @@ async function directHttpAcquire(url, context) {
 			redirect: "follow",
 			headers: {
 				"user-agent": context.userAgent,
-				accept: "text/html,application/xhtml+xml,application/json,application/ld+json,text/plain,application/xml;q=0.8,*/*;q=0.4",
+				accept:
+					"text/html,application/xhtml+xml,application/json,application/ld+json,text/plain,application/xml;q=0.8,*/*;q=0.4",
 				"accept-encoding": "gzip, deflate, br",
 			},
 		});
 	} catch (error) {
-		throw new Error(error.name === "AbortError" ? `request timed out after ${context.timeoutMs}ms` : `Fetch failed: ${error.message}`);
+		throw new Error(
+			error.name === "AbortError"
+				? `request timed out after ${context.timeoutMs}ms`
+				: `Fetch failed: ${error.message}`,
+		);
 	} finally {
 		clearTimeout(timer);
 	}
 	const contentType = response.headers.get("content-type") ?? "";
 	const declared = Number.parseInt(response.headers.get("content-length") || "", 10);
-	if (Number.isInteger(declared) && declared > context.maxBytes) throw new Error(`resource exceeds max-bytes (${declared} > ${context.maxBytes})`);
+	if (Number.isInteger(declared) && declared > context.maxBytes)
+		throw new Error(`resource exceeds max-bytes (${declared} > ${context.maxBytes})`);
 	const { buffer, truncated } = await readCappedBody(response, context.maxBytes);
 	if (truncated) throw new Error(`resource exceeded max-bytes (${context.maxBytes}); not saved`);
 	const finalUrl = response.url || url;
@@ -543,7 +598,9 @@ function extractStructuredDataFromDocument(document) {
 			parsedNextData = null;
 		}
 	}
-	for (const script of [...document.querySelectorAll("script[type='application/json'], script[type='application/graphql-response+json']")]) {
+	for (const script of [
+		...document.querySelectorAll("script[type='application/json'], script[type='application/graphql-response+json']"),
+	]) {
 		if (script.id === "__NEXT_DATA__") continue;
 		try {
 			applicationJson.push({ id: script.id || null, value: JSON.parse(script.textContent || "null") });
@@ -585,7 +642,10 @@ function readabilityExtract(html, url) {
 				publishedTime: article?.publishedTime ?? null,
 				length: article?.length ?? null,
 			}),
-			extractionKind: structured.jsonLd?.length || structured.nextData || structured.applicationJson?.length ? "structured_static" : "static_readability",
+			extractionKind:
+				structured.jsonLd?.length || structured.nextData || structured.applicationJson?.length
+					? "structured_static"
+					: "static_readability",
 		};
 	} finally {
 		dom?.window.close();
@@ -617,7 +677,12 @@ function extractDocument(acquired, context) {
 	} else if (contentType && !TEXT_TYPES.test(contentType)) {
 		throw new Error(`unsupported readable content type: ${contentType}`);
 	} else {
-		extracted = { title: null, text: htmlToReadableText(textValue) || textValue, metadata: {}, extractionKind: "static_text" };
+		extracted = {
+			title: null,
+			text: htmlToReadableText(textValue) || textValue,
+			metadata: {},
+			extractionKind: "static_text",
+		};
 	}
 	const text = String(extracted.text ?? "").trim();
 	const hash = sha256(text);
@@ -673,7 +738,8 @@ async function tryEndpointReplay(acquired, context, domainRule) {
 }
 
 function validationFailureType(warnings) {
-	if (warnings.some((warning) => /captcha|checkpoint|checking your browser|cloudflare|bot challenge/i.test(warning))) return "blocked_request";
+	if (warnings.some((warning) => /captcha|checkpoint|checking your browser|cloudflare|bot challenge/i.test(warning)))
+		return "blocked_request";
 	if (warnings.some((warning) => /login|authentication/i.test(warning))) return "authentication_required";
 	if (warnings.some((warning) => /unsupported readable content type/i.test(warning))) return "unsupported_format";
 	if (warnings.some((warning) => /HTTP 404/i.test(warning))) return "permanent_not_found";
@@ -685,17 +751,29 @@ function validationFailureType(warnings) {
 
 function validateAcquisition(acquired, extracted) {
 	const warnings = [];
-	if (acquired.statusCode !== null && acquired.statusCode !== undefined && (acquired.statusCode < 200 || acquired.statusCode >= 300)) {
+	if (
+		acquired.statusCode !== null &&
+		acquired.statusCode !== undefined &&
+		(acquired.statusCode < 200 || acquired.statusCode >= 300)
+	) {
 		warnings.push(`HTTP ${acquired.statusCode}`);
 	}
 	const contentType = acquired.contentType ?? "";
 	if (contentType && !TEXT_TYPES.test(contentType)) warnings.push(`unsupported readable content type: ${contentType}`);
-	if (!extracted.text || extracted.text.length < 120) warnings.push(`short extracted text (${extracted.text?.length ?? 0} chars)`);
+	if (!extracted.text || extracted.text.length < 120)
+		warnings.push(`short extracted text (${extracted.text?.length ?? 0} chars)`);
 	const combined = `${extracted.title ?? ""} ${extracted.text ?? ""}`.toLowerCase();
-	if (/\b(captcha|security checkpoint|checking your browser|just a moment|attention required|cloudflare)\b/.test(combined)) {
+	if (
+		/\b(captcha|security checkpoint|checking your browser|just a moment|attention required|cloudflare)\b/.test(
+			combined,
+		)
+	) {
 		warnings.push("bot challenge or checkpoint indicators detected");
 	}
-	if (/\b(sign in|log in|login required|authentication required)\b/.test(combined) && (extracted.text?.length ?? 0) < 2_000) {
+	if (
+		/\b(sign in|log in|login required|authentication required)\b/.test(combined) &&
+		(extracted.text?.length ?? 0) < 2_000
+	) {
 		warnings.push("login wall indicators detected");
 	}
 	if (/\b(enable javascript|javascript is required)\b/.test(combined) && (extracted.text?.length ?? 0) < 2_000) {
@@ -710,7 +788,7 @@ function validateAcquisition(acquired, extracted) {
 	qualityScore = Math.max(0, Number(qualityScore.toFixed(2)));
 	const browserRecoverable = warnings.some((warning) => /javascript-required|bot challenge|login wall/i.test(warning));
 	const unsupported = warnings.some((warning) => /unsupported readable content type/i.test(warning));
-	const fallbackRecommended = !unsupported && (browserRecoverable || (!qualityScore || qualityScore < 0.6));
+	const fallbackRecommended = !unsupported && (browserRecoverable || !qualityScore || qualityScore < 0.6);
 	const success = warnings.length === 0 || qualityScore >= 0.6;
 	return {
 		success,
@@ -789,11 +867,16 @@ async function getBrowser(context) {
 
 function shouldBlockResource(url, resourceType) {
 	if (["image", "media", "font"].includes(resourceType)) return true;
-	return /(?:doubleclick|googletagmanager|google-analytics|facebook\.net|analytics|adservice|adsystem|hotjar|segment|mixpanel)/i.test(url);
+	return /(?:doubleclick|googletagmanager|google-analytics|facebook\.net|analytics|adservice|adsystem|hotjar|segment|mixpanel)/i.test(
+		url,
+	);
 }
 
 async function extractWithPlaywright(url, context, domainRule) {
-	return context.browserQueue.run("playwright_dom", () => extractWithPlaywrightUnqueued(url, context, domainRule), { domain: hostForUrl(url), url });
+	return context.browserQueue.run("playwright_dom", () => extractWithPlaywrightUnqueued(url, context, domainRule), {
+		domain: hostForUrl(url),
+		url,
+	});
 }
 
 async function extractWithPlaywrightUnqueued(url, context, domainRule) {
@@ -829,7 +912,16 @@ async function extractWithPlaywrightUnqueued(url, context, domainRule) {
 				// Ignore response bodies Playwright cannot read.
 			}
 		});
-		const selectors = domainRule?.main_selectors ?? ["article", "main", "[role='main']", ".content", ".post", ".entry", "#content", "#main"];
+		const selectors = domainRule?.main_selectors ?? [
+			"article",
+			"main",
+			"[role='main']",
+			".content",
+			".post",
+			".entry",
+			"#content",
+			"#main",
+		];
 		const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: context.timeoutMs });
 		const selector = await waitForContentSelector(page, selectors, 8_000);
 		const html = await page.content();
@@ -954,7 +1046,10 @@ export async function acquireUrl(url, context) {
 					if (!validation.success) throw error;
 					validation = {
 						...validation,
-						warnings: [...validation.warnings, `browser fallback failed after successful direct extraction: ${error.message}`],
+						warnings: [
+							...validation.warnings,
+							`browser fallback failed after successful direct extraction: ${error.message}`,
+						],
 					};
 				}
 			}
@@ -1005,7 +1100,9 @@ export async function acquireUrl(url, context) {
 			extractedArtifact: null,
 			cache: {
 				rawPath: acquired.cacheBodyPath ? relativeArtifact(context.runDirectory, acquired.cacheBodyPath) : null,
-				documentPath: extracted.cacheDocumentPath ? relativeArtifact(context.runDirectory, extracted.cacheDocumentPath) : null,
+				documentPath: extracted.cacheDocumentPath
+					? relativeArtifact(context.runDirectory, extracted.cacheDocumentPath)
+					: null,
 				hit: Boolean(acquired.fromCache),
 			},
 			metadata: extracted.metadata,
@@ -1105,46 +1202,56 @@ export async function discoverUrl(url, context) {
 				dom?.window.close();
 			}
 		}
-		if (report.embedded_state?.nextData || report.embedded_state?.jsonLd?.length) report.recommended_strategy = "structured_static";
+		if (report.embedded_state?.nextData || report.embedded_state?.jsonLd?.length)
+			report.recommended_strategy = "structured_static";
 	} catch (error) {
 		report.warnings.push(error instanceof Error ? error.message : String(error));
 	}
 	if (context.allowBrowser) {
 		try {
-			await context.browserQueue.run("playwright_network_discovery", async () => {
-				const activeBrowser = await getBrowser(context);
-				const browserContext = await activeBrowser.newContext({ userAgent: context.userAgent });
-				try {
-					await browserContext.route("**/*", async (route) => {
-						const request = route.request();
-						if (shouldBlockResource(request.url(), request.resourceType())) await route.abort();
-						else await route.continue();
-					});
-					const page = await browserContext.newPage();
-					page.on("response", async (response) => {
-						const contentType = response.headers()["content-type"] ?? "";
-						if (!/(json|graphql)/i.test(contentType)) return;
-						report.candidate_endpoints.push({
-							url_pattern: new URL(response.url()).pathname,
-							method: response.request().method(),
-							content_type: contentType,
-							status: response.status(),
-							contains_primary_content: true,
-							requires_cookies: false,
+			await context.browserQueue.run(
+				"playwright_network_discovery",
+				async () => {
+					const activeBrowser = await getBrowser(context);
+					const browserContext = await activeBrowser.newContext({ userAgent: context.userAgent });
+					try {
+						await browserContext.route("**/*", async (route) => {
+							const request = route.request();
+							if (shouldBlockResource(request.url(), request.resourceType())) await route.abort();
+							else await route.continue();
 						});
-					});
-					await page.goto(url, { waitUntil: "domcontentloaded", timeout: context.timeoutMs });
-					await page.waitForTimeout(1000);
-					report.recommended_strategy = report.candidate_endpoints.length > 0 ? "direct_api" : report.recommended_strategy;
-				} finally {
-					await browserContext.close();
-				}
-			}, { domain: hostForUrl(url), url });
+						const page = await browserContext.newPage();
+						page.on("response", async (response) => {
+							const contentType = response.headers()["content-type"] ?? "";
+							if (!/(json|graphql)/i.test(contentType)) return;
+							report.candidate_endpoints.push({
+								url_pattern: new URL(response.url()).pathname,
+								method: response.request().method(),
+								content_type: contentType,
+								status: response.status(),
+								contains_primary_content: true,
+								requires_cookies: false,
+							});
+						});
+						await page.goto(url, { waitUntil: "domcontentloaded", timeout: context.timeoutMs });
+						await page.waitForTimeout(1000);
+						report.recommended_strategy =
+							report.candidate_endpoints.length > 0 ? "direct_api" : report.recommended_strategy;
+					} finally {
+						await browserContext.close();
+					}
+				},
+				{ domain: hostForUrl(url), url },
+			);
 		} catch (error) {
 			report.warnings.push(`Playwright discovery failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
-	report.candidate_endpoints = [...new Map(report.candidate_endpoints.map((endpoint) => [`${endpoint.method}:${endpoint.url_pattern}`, endpoint])).values()];
+	report.candidate_endpoints = [
+		...new Map(
+			report.candidate_endpoints.map((endpoint) => [`${endpoint.method}:${endpoint.url_pattern}`, endpoint]),
+		).values(),
+	];
 	context.discoveryReports.push(report);
 	return report;
 }

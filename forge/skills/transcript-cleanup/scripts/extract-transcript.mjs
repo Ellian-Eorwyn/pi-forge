@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	accessSync,
@@ -13,7 +14,6 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { basename, dirname, extname, join, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
 import { ensureWorkspaceMarker } from "../../../lib/vault-workspace.mjs";
 
 function fail(message) {

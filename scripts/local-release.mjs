@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
+import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
 
 const packages = [
 	{ directory: "packages/ai", name: "@earendil-works/pi-ai", build: true },
@@ -172,8 +172,14 @@ function createPiShim(installDirectory) {
 function createForgeShims(installDirectory) {
 	for (const command of ["pi-forge", "pi-forge-mcp", "pi-forge-update"]) {
 		if (process.platform === "win32") {
-			writeFileSync(join(installDirectory, `${command}.cmd`), `@ECHO off\r\n"%~dp0node_modules\\.bin\\${command}.cmd" %*\r\n`);
-			writeFileSync(join(installDirectory, `${command}.ps1`), `& "$PSScriptRoot/node_modules/.bin/${command}.ps1" @args\n`);
+			writeFileSync(
+				join(installDirectory, `${command}.cmd`),
+				`@ECHO off\r\n"%~dp0node_modules\\.bin\\${command}.cmd" %*\r\n`,
+			);
+			writeFileSync(
+				join(installDirectory, `${command}.ps1`),
+				`& "$PSScriptRoot/node_modules/.bin/${command}.ps1" @args\n`,
+			);
 			continue;
 		}
 		symlinkSync(join("node_modules", ".bin", command), join(installDirectory, command));
@@ -248,7 +254,10 @@ if (!options.skipInstall) {
 		const bunDependencies = Object.fromEntries(
 			packages.map((pkg) => [pkg.name, fileSpecifier(bunInstallDirectory, tarballs.get(pkg.name))]),
 		);
-		writeFileSync(join(bunInstallDirectory, "package.json"), `${JSON.stringify({ private: true, dependencies: bunDependencies, overrides: bunDependencies }, undefined, "\t")}\n`);
+		writeFileSync(
+			join(bunInstallDirectory, "package.json"),
+			`${JSON.stringify({ private: true, dependencies: bunDependencies, overrides: bunDependencies }, undefined, "\t")}\n`,
+		);
 		run("bun", ["install", "--production", "--ignore-scripts"], { cwd: bunInstallDirectory });
 		createPiShim(bunInstallDirectory);
 		createForgeShims(bunInstallDirectory);
@@ -265,7 +274,9 @@ for (const tarball of tarballs.values()) {
 if (!options.skipInstall) {
 	console.log("\nLocal Bun binary release:");
 	console.log(`  ${binaryDirectory}`);
-	console.log(`  ${join(outDir, `pi-${binaryPlatform}.${String(binaryPlatform).startsWith("windows-") ? "zip" : "tar.gz"}`)}`);
+	console.log(
+		`  ${join(outDir, `pi-${binaryPlatform}.${String(binaryPlatform).startsWith("windows-") ? "zip" : "tar.gz"}`)}`,
+	);
 	console.log("\nRun the local Bun binary release from outside the repository:");
 	console.log(`  ${join(binaryDirectory, String(binaryPlatform).startsWith("windows-") ? "pi.exe" : "pi")} --help`);
 

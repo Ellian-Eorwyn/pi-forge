@@ -1,5 +1,16 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	readlinkSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -148,11 +159,21 @@ test("a moshi-hook upgrade that rewrites the hook restarts the daemon again", po
 		const systemctl = context.stub("systemctl", RECORDING_SYSTEMCTL);
 		ensureMoshiHook({
 			agentDir: context.agentDir,
-			env: context.env({ PI_FORGE_MOSHI_HOOK_BIN: moshi, PI_FORGE_SYSTEMCTL_BIN: systemctl, SYSTEMCTL_LOG: context.systemctlLog, STUB_HOOK_BODY: "old hook" }),
+			env: context.env({
+				PI_FORGE_MOSHI_HOOK_BIN: moshi,
+				PI_FORGE_SYSTEMCTL_BIN: systemctl,
+				SYSTEMCTL_LOG: context.systemctlLog,
+				STUB_HOOK_BODY: "old hook",
+			}),
 		});
 		const result = ensureMoshiHook({
 			agentDir: context.agentDir,
-			env: context.env({ PI_FORGE_MOSHI_HOOK_BIN: moshi, PI_FORGE_SYSTEMCTL_BIN: systemctl, SYSTEMCTL_LOG: context.systemctlLog, STUB_HOOK_BODY: "new hook" }),
+			env: context.env({
+				PI_FORGE_MOSHI_HOOK_BIN: moshi,
+				PI_FORGE_SYSTEMCTL_BIN: systemctl,
+				SYSTEMCTL_LOG: context.systemctlLog,
+				STUB_HOOK_BODY: "new hook",
+			}),
 		});
 		assert.equal(result.status, "installed");
 		assert.equal(readFileSync(context.hookPath, "utf8").trim(), "new hook");
@@ -283,7 +304,10 @@ test("without systemd the changed hook asks the user to restart the daemon", pos
 	withWorkspace((context) => {
 		const result = ensureMoshiHook({
 			agentDir: context.agentDir,
-			env: context.env({ PI_FORGE_MOSHI_HOOK_BIN: context.stub("moshi-hook", INSTALLING_STUB), STUB_HOOK_BODY: "generated hook" }),
+			env: context.env({
+				PI_FORGE_MOSHI_HOOK_BIN: context.stub("moshi-hook", INSTALLING_STUB),
+				STUB_HOOK_BODY: "generated hook",
+			}),
 		});
 		assert.equal(result.status, "installed");
 		assert.equal(result.restart.ok, false);

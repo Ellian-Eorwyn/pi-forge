@@ -9,14 +9,13 @@ import { resolveConnectedServices } from "../../../lib/connected-services.mjs";
 import { callJsonWithRetry, resolveService } from "../../../lib/forge-llm.mjs";
 import { htmlToCleanMarkdown } from "../../../lib/html-cleaner.mjs";
 import { readCappedBody } from "../../../lib/http-fetch.mjs";
-import { pingSearxng, searchLimiter, searchSearxng } from "../../../lib/searxng.mjs";
 import {
-	DEFAULT_MAX_ATTEMPTS,
 	assertCompatibleRun,
 	atomicWriteFile,
 	atomicWriteJson,
 	configurationFingerprint,
 	createRunState,
+	DEFAULT_MAX_ATTEMPTS,
 	initializeRunState,
 	isTransientFailure,
 	loadRunState,
@@ -24,6 +23,7 @@ import {
 	updateRunState,
 	withRunLock,
 } from "../../../lib/run-state.mjs";
+import { pingSearxng, searchLimiter, searchSearxng } from "../../../lib/searxng.mjs";
 
 const DEFAULT_USER_AGENT = "pi-forge-web-collection/1 (+https://github.com/pi-forge)";
 const DEFAULT_DELAY_MS = 500;
@@ -95,7 +95,8 @@ function sleep(milliseconds) {
 
 function run(command, args = ["--version"]) {
 	const result = spawnSync(command, args, { encoding: "utf8" });
-	if (result.error?.code === "ENOENT" || result.error || result.status !== 0) return { available: false, version: null };
+	if (result.error?.code === "ENOENT" || result.error || result.status !== 0)
+		return { available: false, version: null };
 	const combined = `${result.stdout}\n${result.stderr}`.trim();
 	return { available: true, version: combined.split(/\r?\n/, 1)[0] || "available" };
 }
@@ -122,7 +123,10 @@ function normalizeUrl(url) {
 		const parsed = new URL(url);
 		parsed.hash = "";
 		parsed.hostname = parsed.hostname.toLowerCase();
-		if ((parsed.protocol === "http:" && parsed.port === "80") || (parsed.protocol === "https:" && parsed.port === "443")) {
+		if (
+			(parsed.protocol === "http:" && parsed.port === "80") ||
+			(parsed.protocol === "https:" && parsed.port === "443")
+		) {
 			parsed.port = "";
 		}
 		return parsed.toString();
@@ -229,7 +233,9 @@ async function fetchWithRedirects(url, options) {
 				headers: { "user-agent": options.userAgent, accept: "*/*" },
 			});
 		} catch (error) {
-			throw new Error(error.name === "AbortError" ? `request timed out after ${options.timeoutMs}ms` : error.message);
+			throw new Error(
+				error.name === "AbortError" ? `request timed out after ${options.timeoutMs}ms` : error.message,
+			);
 		} finally {
 			clearTimeout(timer);
 		}
@@ -339,11 +345,17 @@ async function doctor(options) {
 	};
 	const remediation = [];
 	if (!tools.fetch.available) remediation.push("Node 22.19+ with global fetch is required.");
-	if (!tools.playwright.available) remediation.push("Install Playwright (bundled with pi-forge; run pi-forge-update to refresh the installed package).");
+	if (!tools.playwright.available)
+		remediation.push(
+			"Install Playwright (bundled with pi-forge; run pi-forge-update to refresh the installed package).",
+		);
 	if (tools.playwright.available && !tools.playwrightEndpoint.available) {
-		remediation.push("Set connectedServices.playwright.wsEndpoint or FORGE_PLAYWRIGHT_WS_ENDPOINT for rendered capture.");
+		remediation.push(
+			"Set connectedServices.playwright.wsEndpoint or FORGE_PLAYWRIGHT_WS_ENDPOINT for rendered capture.",
+		);
 	}
-	if (!searxng.configured) remediation.push("Set connectedServices.searxng.baseUrl, FORGE_SEARXNG_URL, or --searxng to enable search.");
+	if (!searxng.configured)
+		remediation.push("Set connectedServices.searxng.baseUrl, FORGE_SEARXNG_URL, or --searxng to enable search.");
 	else if (!searxng.reachable) remediation.push(`SearXNG is configured but not reachable: ${searxng.detail}`);
 	const report = { tools, capabilities, searxng, remediation };
 	if (options.json) {
@@ -355,7 +367,9 @@ async function doctor(options) {
 	}
 	process.stdout.write(`HTTP collection: ${capabilities.httpCollect ? "available" : "unavailable"}\n`);
 	process.stdout.write(`Rendered capture: ${capabilities.renderedCapture ? "available" : "unavailable"}\n`);
-	process.stdout.write(`SearXNG search: ${capabilities.searxngSearch ? "available" : `unavailable (${searxng.detail})`}\n`);
+	process.stdout.write(
+		`SearXNG search: ${capabilities.searxngSearch ? "available" : `unavailable (${searxng.detail})`}\n`,
+	);
 	process.stdout.write(`SearXNG URL: ${searxngBase(options.searxng)}\n`);
 	for (const item of remediation) process.stdout.write(`Action: ${item}\n`);
 }
@@ -439,10 +453,12 @@ async function capturePage(playwright, url, captureDir, options) {
 		page.on("console", (message) => {
 			if (message.type() === "error") result.consoleErrors += 1;
 		});
-		const response = await page.goto(url, { waitUntil: "networkidle", timeout: options.timeoutMs }).catch(async (error) => {
-			result.warnings.push(`networkidle wait failed (${error.message}); retried with domcontentloaded`);
-			return page.goto(url, { waitUntil: "domcontentloaded", timeout: options.timeoutMs });
-		});
+		const response = await page
+			.goto(url, { waitUntil: "networkidle", timeout: options.timeoutMs })
+			.catch(async (error) => {
+				result.warnings.push(`networkidle wait failed (${error.message}); retried with domcontentloaded`);
+				return page.goto(url, { waitUntil: "domcontentloaded", timeout: options.timeoutMs });
+			});
 		result.finalUrl = page.url();
 		result.title = (await page.title()) || null;
 		const html = await page.content();
@@ -551,7 +567,8 @@ async function collectOne(url, runDirectory, state, options, playwright, sourceL
 		mkdirSync(downloadsDir, { recursive: true });
 		const downloadPath = join(downloadsDir, filename);
 		if (existsSync(downloadPath)) {
-			if (sha256(readFileSync(downloadPath)) !== hash) throw new Error(`existing download hash mismatch: ${filename}`);
+			if (sha256(readFileSync(downloadPath)) !== hash)
+				throw new Error(`existing download hash mismatch: ${filename}`);
 		} else atomicWriteFile(downloadPath, buffer);
 		let rendered = false;
 		let captureRelative = null;
@@ -660,7 +677,9 @@ function loadCollectionDomain(runDirectory) {
 	if (existsSync(join(runDirectory, "web_manifest.csv"))) {
 		const parsed = parseCsv(readFileSync(join(runDirectory, "web_manifest.csv"), "utf8"));
 		const headers = parsed.shift() ?? [];
-		state.rows = parsed.filter((row) => row.some(Boolean)).map((values) => Object.fromEntries(headers.map((header, index) => [header, values[index] ?? ""])));
+		state.rows = parsed
+			.filter((row) => row.some(Boolean))
+			.map((values) => Object.fromEntries(headers.map((header, index) => [header, values[index] ?? ""])));
 	}
 	if (existsSync(join(runDirectory, "web_manifest.json"))) {
 		state.records = JSON.parse(readFileSync(join(runDirectory, "web_manifest.json"), "utf8")).resources ?? [];
@@ -710,7 +729,9 @@ function writeRunArtifacts(runDirectory, state, extra) {
 }
 
 function counts(rows) {
-	return Object.fromEntries([...STATUSES].map((status) => [status, rows.filter((row) => row.status === status).length]));
+	return Object.fromEntries(
+		[...STATUSES].map((status) => [status, rows.filter((row) => row.status === status).length]),
+	);
 }
 
 function buildReport(state, extra) {
@@ -736,7 +757,8 @@ ${extra.command} run completed: ${tally.success} success, ${tally.needs_review} 
 
 ${list(
 	state.records,
-	(record) => `- \`${record.outputPath}\` — ${record.finalUrl} (${record.contentType || "unknown type"}, ${record.byteSize} bytes)`,
+	(record) =>
+		`- \`${record.outputPath}\` — ${record.finalUrl} (${record.contentType || "unknown type"}, ${record.byteSize} bytes)`,
 )}
 
 ## Captures
@@ -775,20 +797,41 @@ async function collectUrls(runDirectory, domain, options, playwright, sourceLabe
 			let item = snapshot;
 			while (retryableItem(item, DEFAULT_MAX_ATTEMPTS)) {
 				const attempt = (item.attempts ?? 0) + 1;
-				state = updateRunState(runDirectory, (draft) => {
-					const current = draft.items.find((candidate) => candidate.id === item.id);
-					Object.assign(current, { status: "in_progress", attempts: attempt, error: null });
-					return draft;
-				}, { type: "item_started", itemId: item.id, attempt });
+				state = updateRunState(
+					runDirectory,
+					(draft) => {
+						const current = draft.items.find((candidate) => candidate.id === item.id);
+						Object.assign(current, { status: "in_progress", attempts: attempt, error: null });
+						return draft;
+					},
+					{ type: "item_started", itemId: item.id, attempt },
+				);
 				item = state.items.find((candidate) => candidate.id === item.id);
 				const row = await collectOne(item.url, runDirectory, domain, options, playwright, sourceLabel);
 				const statusCode = Number(row.http_status);
-				const transient = row.status === "failed" && ((statusCode >= 500 && statusCode < 600) || isTransientFailure(new Error(row.error)));
-				state = updateRunState(runDirectory, (draft) => {
-					const current = draft.items.find((candidate) => candidate.id === item.id);
-					Object.assign(current, { status: row.status, transient, error: row.error || null, resourceId: row.resource_id || null });
-					return draft;
-				}, { type: row.status === "failed" ? "item_failed" : "item_completed", itemId: item.id, status: row.status, transient, attempt });
+				const transient =
+					row.status === "failed" &&
+					((statusCode >= 500 && statusCode < 600) || isTransientFailure(new Error(row.error)));
+				state = updateRunState(
+					runDirectory,
+					(draft) => {
+						const current = draft.items.find((candidate) => candidate.id === item.id);
+						Object.assign(current, {
+							status: row.status,
+							transient,
+							error: row.error || null,
+							resourceId: row.resource_id || null,
+						});
+						return draft;
+					},
+					{
+						type: row.status === "failed" ? "item_failed" : "item_completed",
+						itemId: item.id,
+						status: row.status,
+						transient,
+						attempt,
+					},
+				);
 				writeRunArtifacts(runDirectory, domain, extra);
 				item = state.items.find((candidate) => candidate.id === item.id);
 				if (!transient || attempt >= DEFAULT_MAX_ATTEMPTS) break;
@@ -796,11 +839,19 @@ async function collectUrls(runDirectory, domain, options, playwright, sourceLabe
 			}
 			processed += 1;
 		}
-		updateRunState(runDirectory, (draft) => {
-			const pending = draft.items.some((item) => retryableItem(item, DEFAULT_MAX_ATTEMPTS));
-			Object.assign(draft, { status: pending ? "running" : "complete", phase: pending ? "collecting" : "complete", nextAction: pending ? "collect" : null });
-			return draft;
-		}, { type: "phase_updated" });
+		updateRunState(
+			runDirectory,
+			(draft) => {
+				const pending = draft.items.some((item) => retryableItem(item, DEFAULT_MAX_ATTEMPTS));
+				Object.assign(draft, {
+					status: pending ? "running" : "complete",
+					phase: pending ? "collecting" : "complete",
+					nextAction: pending ? "collect" : null,
+				});
+				return draft;
+			},
+			{ type: "phase_updated" },
+		);
 	});
 }
 
@@ -837,7 +888,9 @@ async function commandCollect(positionals, flags) {
 	initializeCollectionRun(runDirectory, configuration, urls);
 	const domain = loadCollectionDomain(runDirectory);
 	await collectUrls(runDirectory, domain, options, playwright, "http-collect", extra);
-	process.stdout.write(`${JSON.stringify({ runDirectory, resources: domain.rows.length, counts: counts(domain.rows), complete: loadRunState(runDirectory).status === "complete" }, null, 2)}\n`);
+	process.stdout.write(
+		`${JSON.stringify({ runDirectory, resources: domain.rows.length, counts: counts(domain.rows), complete: loadRunState(runDirectory).status === "complete" }, null, 2)}\n`,
+	);
 }
 
 async function commandHarvest(positionals, flags) {
@@ -855,16 +908,27 @@ async function commandHarvest(positionals, flags) {
 		const domain = loadCollectionDomain(runDirectory);
 		const extra = { command: "harvest", options: reportedOptions };
 		await collectUrls(runDirectory, domain, options, playwright, "harvest", extra);
-		process.stdout.write(`${JSON.stringify({ runDirectory, matched: state.items.length, counts: counts(domain.rows), complete: loadRunState(runDirectory).status === "complete" }, null, 2)}\n`);
+		process.stdout.write(
+			`${JSON.stringify({ runDirectory, matched: state.items.length, counts: counts(domain.rows), complete: loadRunState(runDirectory).status === "complete" }, null, 2)}\n`,
+		);
 		return;
 	}
-	const extensions = flags.ext ? new Set(flags.ext.split(",").map((value) => value.trim().toLowerCase()).filter(Boolean)) : null;
+	const extensions = flags.ext
+		? new Set(
+				flags.ext
+					.split(",")
+					.map((value) => value.trim().toLowerCase())
+					.filter(Boolean),
+			)
+		: null;
 	const matcher = flags.match ? new RegExp(flags.match) : null;
 	const { response, finalUrl } = await fetchWithRedirects(pageUrl, options);
 	if (!response.ok) fail(`could not fetch page (HTTP ${response.status}): ${pageUrl}`);
 	const html = (await readCappedBody(response, options.maxBytes)).buffer.toString("utf8");
 	const links = extractLinks(html, finalUrl);
-	const disallows = flags.ignoreRobots ? [] : await fetchRobots(parsedPage.origin, options.userAgent, options.timeoutMs);
+	const disallows = flags.ignoreRobots
+		? []
+		: await fetchRobots(parsedPage.origin, options.userAgent, options.timeoutMs);
 	const selected = [];
 	for (const link of links) {
 		const parsed = new URL(link);
@@ -877,7 +941,12 @@ async function commandHarvest(positionals, flags) {
 	}
 	const extra = {
 		command: "harvest",
-		options: { ...reportOptions(options, flags), page: finalUrl, linkCount: links.length, matchedCount: selected.length },
+		options: {
+			...reportOptions(options, flags),
+			page: finalUrl,
+			linkCount: links.length,
+			matchedCount: selected.length,
+		},
 	};
 	initializeCollectionRun(runDirectory, configuration, selected);
 	const domain = loadCollectionDomain(runDirectory);
@@ -897,7 +966,10 @@ ${links.join("\n")}`;
 
 	let selected;
 	try {
-		({ value: selected } = await callJsonWithRetry(service, [{ role: "user", content: prompt }], { task: "filter-links", timeoutMs: 300_000 }));
+		({ value: selected } = await callJsonWithRetry(service, [{ role: "user", content: prompt }], {
+			task: "filter-links",
+			timeoutMs: 300_000,
+		}));
 	} catch (error) {
 		fail(`Failed to filter links with LLM: ${error.message}`);
 	}
@@ -908,7 +980,9 @@ ${links.join("\n")}`;
 	const offered = new Set(links);
 	const invented = selected.filter((url) => !offered.has(url));
 	if (invented.length) {
-		process.stderr.write(`Warning: ignoring ${invented.length} URL(s) the model returned that were not among the page's links.\n`);
+		process.stderr.write(
+			`Warning: ignoring ${invented.length} URL(s) the model returned that were not among the page's links.\n`,
+		);
 	}
 	return selected.filter((url) => offered.has(url));
 }
@@ -928,16 +1002,20 @@ async function commandSpider(positionals, flags) {
 		const domain = loadCollectionDomain(runDirectory);
 		const extra = { command: "spider", options: reportOptions(options, flags) };
 		await collectUrls(runDirectory, domain, options, playwright, "spider", extra);
-		process.stdout.write(`${JSON.stringify({ runDirectory, matched: loadRunState(runDirectory).items.length, counts: counts(domain.rows), complete: loadRunState(runDirectory).status === "complete" }, null, 2)}\n`);
+		process.stdout.write(
+			`${JSON.stringify({ runDirectory, matched: loadRunState(runDirectory).items.length, counts: counts(domain.rows), complete: loadRunState(runDirectory).status === "complete" }, null, 2)}\n`,
+		);
 		return;
 	}
-	
+
 	const { response, finalUrl } = await fetchWithRedirects(pageUrl, options);
 	if (!response.ok) fail(`could not fetch page (HTTP ${response.status}): ${pageUrl}`);
 	const html = (await readCappedBody(response, options.maxBytes)).buffer.toString("utf8");
 	const links = extractLinks(html, finalUrl);
-	const disallows = flags.ignoreRobots ? [] : await fetchRobots(parsedPage.origin, options.userAgent, options.timeoutMs);
-	
+	const disallows = flags.ignoreRobots
+		? []
+		: await fetchRobots(parsedPage.origin, options.userAgent, options.timeoutMs);
+
 	const validLinks = [];
 	for (const link of links) {
 		const parsed = new URL(link);
@@ -945,9 +1023,9 @@ async function commandSpider(positionals, flags) {
 		if (!flags.ignoreRobots && robotsBlocks(disallows, parsed.pathname)) continue;
 		validLinks.push(link);
 	}
-	
+
 	process.stdout.write(`Found ${validLinks.length} valid same-host links on ${finalUrl}\n`);
-	
+
 	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 	process.stdout.write(`What information are you looking for on this domain?
 1. All links (standard crawl)
@@ -957,13 +1035,19 @@ async function commandSpider(positionals, flags) {
 `);
 	const choice = (await rl.question("> ")).trim();
 	let selectedLinks = validLinks;
-	
+
 	if (choice === "2") {
 		process.stdout.write("Asking LLM to filter for Pricing, Packages, and Services...\n");
-		selectedLinks = await filterLinksWithLlm(validLinks, "Find URLs related to pricing, pricing plans, service packages, or product offerings.");
+		selectedLinks = await filterLinksWithLlm(
+			validLinks,
+			"Find URLs related to pricing, pricing plans, service packages, or product offerings.",
+		);
 	} else if (choice === "3") {
 		process.stdout.write("Asking LLM to filter for About and Contact...\n");
-		selectedLinks = await filterLinksWithLlm(validLinks, "Find URLs related to 'About Us', company background, team, or contact information.");
+		selectedLinks = await filterLinksWithLlm(
+			validLinks,
+			"Find URLs related to 'About Us', company background, team, or contact information.",
+		);
 	} else if (choice === "4") {
 		const customInstruction = await rl.question("Enter custom instruction: ");
 		process.stdout.write("Asking LLM to filter based on custom instruction...\n");
@@ -971,30 +1055,43 @@ async function commandSpider(positionals, flags) {
 	} else {
 		process.stdout.write("Collecting all links...\n");
 	}
-	
+
 	if (!options.cleanMarkdown) {
-		const cleanChoice = (await rl.question("Do you want to automatically clean downloaded HTML into Markdown? (y/N) ")).trim().toLowerCase();
-		if (cleanChoice === 'y' || cleanChoice === 'yes') {
+		const cleanChoice = (
+			await rl.question("Do you want to automatically clean downloaded HTML into Markdown? (y/N) ")
+		)
+			.trim()
+			.toLowerCase();
+		if (cleanChoice === "y" || cleanChoice === "yes") {
 			options.cleanMarkdown = true;
 		}
 	}
-	
+
 	rl.close();
-	
+
 	if (flags.limit && selectedLinks.length > flags.limit) {
 		selectedLinks = selectedLinks.slice(0, flags.limit);
 	}
-	
+
 	process.stdout.write(`Collecting ${selectedLinks.length} selected links...\n`);
 	const extra = {
 		command: "spider",
-		options: { ...reportOptions(options, flags), page: finalUrl, linkCount: validLinks.length, matchedCount: selectedLinks.length },
+		options: {
+			...reportOptions(options, flags),
+			page: finalUrl,
+			linkCount: validLinks.length,
+			matchedCount: selectedLinks.length,
+		},
 	};
 	initializeCollectionRun(runDirectory, configuration, selectedLinks);
-	updateRunState(runDirectory, (draft) => {
-		draft.runtimeOptions = options;
-		return draft;
-	}, { type: "runtime_options_recorded" });
+	updateRunState(
+		runDirectory,
+		(draft) => {
+			draft.runtimeOptions = options;
+			return draft;
+		},
+		{ type: "runtime_options_recorded" },
+	);
 	const domain = loadCollectionDomain(runDirectory);
 	await collectUrls(runDirectory, domain, options, playwright, "spider", extra);
 	process.stdout.write(
@@ -1007,7 +1104,10 @@ async function commandSearch(positionals, flags) {
 	if (!flags.output) fail("search requires --output <new-directory>");
 	const query = positionals.join(" ");
 	const base = searxngBase(flags.searxng);
-	if (!base) fail("search requires a SearXNG instance; set connectedServices.searxng.baseUrl, FORGE_SEARXNG_URL, or --searxng <url>");
+	if (!base)
+		fail(
+			"search requires a SearXNG instance; set connectedServices.searxng.baseUrl, FORGE_SEARXNG_URL, or --searxng <url>",
+		);
 	const options = commonOptions(flags);
 	const limit = flags.limit ?? 25;
 
@@ -1020,15 +1120,25 @@ async function commandSearch(positionals, flags) {
 		pageNo: flags.pageNo ?? null,
 	};
 	const runDirectory = resolve(flags.output);
-	const configuration = collectionConfiguration("search", { query, base, params: searchMeta }, reportOptions(options, flags));
+	const configuration = collectionConfiguration(
+		"search",
+		{ query, base, params: searchMeta },
+		reportOptions(options, flags),
+	);
 	if (existsSync(runDirectory)) {
 		initializeCollectionRun(runDirectory, configuration, []);
 		const stored = JSON.parse(readFileSync(join(runDirectory, "search_results.json"), "utf8"));
 		const domain = loadCollectionDomain(runDirectory);
-		const extra = { command: "search", options: reportOptions(options, flags), search: { query, base, params: searchMeta, results: stored.results } };
+		const extra = {
+			command: "search",
+			options: reportOptions(options, flags),
+			search: { query, base, params: searchMeta, results: stored.results },
+		};
 		const playwright = options.render ? await loadPlaywright() : null;
 		await collectUrls(runDirectory, domain, options, playwright, "search-collect", extra);
-		process.stdout.write(`${JSON.stringify({ runDirectory, query, results: stored.results.length, collected: domain.rows.length, counts: counts(domain.rows), complete: loadRunState(runDirectory).status === "complete" }, null, 2)}\n`);
+		process.stdout.write(
+			`${JSON.stringify({ runDirectory, query, results: stored.results.length, collected: domain.rows.length, counts: counts(domain.rows), complete: loadRunState(runDirectory).status === "complete" }, null, 2)}\n`,
+		);
 		return;
 	}
 
@@ -1052,7 +1162,13 @@ async function commandSearch(positionals, flags) {
 	}));
 	const urls = flags.collect ? results.map((result) => result.url).filter(Boolean) : [];
 	initializeCollectionRun(runDirectory, configuration, urls);
-	writeJson(join(runDirectory, "search_results.json"), { query, base, params: searchMeta, retrievedAt: nowIso(), results });
+	writeJson(join(runDirectory, "search_results.json"), {
+		query,
+		base,
+		params: searchMeta,
+		retrievedAt: nowIso(),
+		results,
+	});
 	const playwright = options.render ? await loadPlaywright() : null;
 	const domain = loadCollectionDomain(runDirectory);
 	const extra = {
@@ -1061,7 +1177,9 @@ async function commandSearch(positionals, flags) {
 		search: { query, base, params: searchMeta, results },
 	};
 	await collectUrls(runDirectory, domain, options, playwright, "search-collect", extra);
-	process.stdout.write(`${JSON.stringify({ runDirectory, query, results: results.length, collected: domain.rows.length, counts: counts(domain.rows) }, null, 2)}\n`);
+	process.stdout.write(
+		`${JSON.stringify({ runDirectory, query, results: results.length, collected: domain.rows.length, counts: counts(domain.rows) }, null, 2)}\n`,
+	);
 }
 
 // --- Validation -----------------------------------------------------------
@@ -1076,7 +1194,8 @@ function validate(runDirectory) {
 	}
 	const parsed = parseCsv(readFileSync(manifestPath, "utf8"));
 	const headers = parsed.shift() ?? [];
-	if (headers.join(",") !== MANIFEST_COLUMNS.join(",")) errors.push("web_manifest.csv columns do not match the required contract");
+	if (headers.join(",") !== MANIFEST_COLUMNS.join(","))
+		errors.push("web_manifest.csv columns do not match the required contract");
 	const seenIds = new Set();
 	for (const values of parsed.filter((row) => row.some((field) => field !== ""))) {
 		if (values.length !== MANIFEST_COLUMNS.length) {
@@ -1092,7 +1211,9 @@ function validate(runDirectory) {
 		if (row.status === "failed") continue;
 		if (row.status === "skipped") {
 			if (row.duplicate_of && !seenIds.has(row.duplicate_of)) {
-				warnings.push(`${row.source_url} references duplicate_of ${row.duplicate_of} which is not earlier in the manifest`);
+				warnings.push(
+					`${row.source_url} references duplicate_of ${row.duplicate_of} which is not earlier in the manifest`,
+				);
 			}
 			continue;
 		}
@@ -1106,10 +1227,15 @@ function validate(runDirectory) {
 			continue;
 		}
 		const buffer = readFileSync(outputPath);
-		if (`sha256:${sha256(buffer)}` !== row.resource_id) errors.push(`${row.output_path} SHA-256 does not match resource_id`);
+		if (`sha256:${sha256(buffer)}` !== row.resource_id)
+			errors.push(`${row.output_path} SHA-256 does not match resource_id`);
 		if (String(buffer.length) !== row.byte_size) errors.push(`${row.output_path} byte size does not match manifest`);
 		if (row.rendered === "true") {
-			const captureDir = join(runDirectory, "captures", `${stemFromUrl(row.final_url || row.source_url)}-${row.sha256.slice(0, 12)}`);
+			const captureDir = join(
+				runDirectory,
+				"captures",
+				`${stemFromUrl(row.final_url || row.source_url)}-${row.sha256.slice(0, 12)}`,
+			);
 			if (!existsSync(join(captureDir, "rendered.html")) || !existsSync(join(captureDir, "capture.json"))) {
 				errors.push(`${row.source_url} is marked rendered but capture artifacts are missing`);
 			}
@@ -1118,7 +1244,16 @@ function validate(runDirectory) {
 	const reportPath = join(runDirectory, "collection_report.md");
 	if (existsSync(reportPath)) {
 		const report = readFileSync(reportPath, "utf8");
-		for (const heading of ["## Status", "## Run Summary", "## Sources", "## Captures", "## Duplicates", "## Failures and Blocks", "## Search", "## Review"]) {
+		for (const heading of [
+			"## Status",
+			"## Run Summary",
+			"## Sources",
+			"## Captures",
+			"## Duplicates",
+			"## Failures and Blocks",
+			"## Search",
+			"## Review",
+		]) {
 			if (!report.includes(heading)) errors.push(`collection_report.md is missing ${heading}`);
 		}
 	}
@@ -1140,12 +1275,15 @@ function commandStatus(runDirectory) {
 			changed: [],
 		};
 	}
-	process.stdout.write(`${JSON.stringify({ runDirectory, status: state.status, phase: state.phase, nextAction: state.nextAction, counts: counts(domain.rows), processed: domain.rows.length, total: state.items.filter((item) => !item.retired).length, inputDrift, refreshRequired: inputDrift.added.length + inputDrift.removed.length > 0 }, null, 2)}\n`);
+	process.stdout.write(
+		`${JSON.stringify({ runDirectory, status: state.status, phase: state.phase, nextAction: state.nextAction, counts: counts(domain.rows), processed: domain.rows.length, total: state.items.filter((item) => !item.retired).length, inputDrift, refreshRequired: inputDrift.added.length + inputDrift.removed.length > 0 }, null, 2)}\n`,
+	);
 }
 
 function commandRefresh(runDirectory) {
 	const state = loadRunState(runDirectory, "web-collection");
-	if (state.command !== "collect" || !state.input.inputFile) fail("refresh is only applicable to collect runs created with --input-file");
+	if (state.command !== "collect" || !state.input.inputFile)
+		fail("refresh is only applicable to collect runs created with --input-file");
 	const currentUrls = [...state.input.staticUrls, ...readUrlList(state.input.inputFile)];
 	const frozen = new Map(state.input.urls.map((url) => [normalizeUrl(url), url]));
 	const current = new Map(currentUrls.map((url) => [normalizeUrl(url), url]));
@@ -1162,36 +1300,62 @@ function commandRefresh(runDirectory) {
 				if (removed.has(normalizeUrl(item.url))) item.retired = true;
 			}
 			for (const [offset, url] of added.entries()) {
-				draft.items.push({ id: `url:${configurationFingerprint({ index: draft.items.length + offset, url: normalizeUrl(url) }).slice(0, 20)}`, url, status: "pending", attempts: 0, transient: false, error: null });
+				draft.items.push({
+					id: `url:${configurationFingerprint({ index: draft.items.length + offset, url: normalizeUrl(url) }).slice(0, 20)}`,
+					url,
+					status: "pending",
+					attempts: 0,
+					transient: false,
+					error: null,
+				});
 			}
 			draft.input.urls = currentUrls;
-			draft.optionsFingerprint = configurationFingerprint({ workflow: draft.workflow, command: draft.command, input: draft.input, options: draft.options });
+			draft.optionsFingerprint = configurationFingerprint({
+				workflow: draft.workflow,
+				command: draft.command,
+				input: draft.input,
+				options: draft.options,
+			});
 			Object.assign(draft, { status: "running", phase: "collecting", nextAction: "collect" });
 			return draft;
 		},
 		{ type: "input_refreshed", added: added.length, removed: removed.size },
 	);
-	process.stdout.write(`${JSON.stringify({ runDirectory, refreshed: true, added: added.length, removed: removed.size, total: updated.items.filter((item) => !item.retired).length })}\n`);
+	process.stdout.write(
+		`${JSON.stringify({ runDirectory, refreshed: true, added: added.length, removed: removed.size, total: updated.items.filter((item) => !item.retired).length })}\n`,
+	);
 }
 
 function commandRetry(runDirectory, flags) {
 	const state = loadRunState(runDirectory, "web-collection");
-	const targets = state.items.filter((item) => item.status === "failed" && (flags.allFailed || item.id === flags.item));
+	const targets = state.items.filter(
+		(item) => item.status === "failed" && (flags.allFailed || item.id === flags.item),
+	);
 	if (targets.length === 0) fail(flags.item ? `failed item not found: ${flags.item}` : "run has no failed items");
 	const targetUrls = new Set(targets.map((item) => item.url));
 	const domain = loadCollectionDomain(runDirectory);
 	domain.rows = domain.rows.filter((row) => !targetUrls.has(row.source_url));
 	domain.records = domain.records.filter((record) => !targetUrls.has(record.sourceUrl));
-	updateRunState(runDirectory, (draft) => {
-		for (const item of draft.items) {
-			if (!targets.some((target) => target.id === item.id)) continue;
-			Object.assign(item, { status: "pending", attempts: 0, transient: false, error: null, resourceId: null });
-		}
-		Object.assign(draft, { status: "running", phase: "collecting", nextAction: "collect" });
-		return draft;
-	}, { type: "items_retried", itemIds: targets.map((item) => item.id) });
-	const manifest = existsSync(join(runDirectory, "web_manifest.json")) ? JSON.parse(readFileSync(join(runDirectory, "web_manifest.json"), "utf8")) : {};
-	writeRunArtifacts(runDirectory, domain, { command: manifest.command ?? state.command, options: manifest.options ?? state.options, search: manifest.search ?? null });
+	updateRunState(
+		runDirectory,
+		(draft) => {
+			for (const item of draft.items) {
+				if (!targets.some((target) => target.id === item.id)) continue;
+				Object.assign(item, { status: "pending", attempts: 0, transient: false, error: null, resourceId: null });
+			}
+			Object.assign(draft, { status: "running", phase: "collecting", nextAction: "collect" });
+			return draft;
+		},
+		{ type: "items_retried", itemIds: targets.map((item) => item.id) },
+	);
+	const manifest = existsSync(join(runDirectory, "web_manifest.json"))
+		? JSON.parse(readFileSync(join(runDirectory, "web_manifest.json"), "utf8"))
+		: {};
+	writeRunArtifacts(runDirectory, domain, {
+		command: manifest.command ?? state.command,
+		options: manifest.options ?? state.options,
+		search: manifest.search ?? null,
+	});
 	process.stdout.write(`${JSON.stringify({ runDirectory, retried: targets.length, nextAction: "collect" })}\n`);
 }
 
@@ -1286,7 +1450,8 @@ async function main() {
 	else if (command === "validate") {
 		if (positionals.length !== 1) fail("validate requires exactly one run directory");
 		const runDirectory = resolve(positionals[0]);
-		if (!existsSync(runDirectory) || !lstatSync(runDirectory).isDirectory()) fail(`run directory does not exist: ${runDirectory}`);
+		if (!existsSync(runDirectory) || !lstatSync(runDirectory).isDirectory())
+			fail(`run directory does not exist: ${runDirectory}`);
 		validate(runDirectory);
 	} else if (command === "status") {
 		if (positionals.length !== 1) fail("status requires exactly one run directory");
@@ -1295,7 +1460,8 @@ async function main() {
 		if (positionals.length !== 1) fail("refresh requires exactly one run directory");
 		commandRefresh(resolve(positionals[0]));
 	} else if (command === "retry") {
-		if (positionals.length !== 1 || Boolean(flags.item) === Boolean(flags.allFailed)) fail("retry requires a run directory and exactly one of --item or --all-failed");
+		if (positionals.length !== 1 || Boolean(flags.item) === Boolean(flags.allFailed))
+			fail("retry requires a run directory and exactly one of --item or --all-failed");
 		commandRetry(resolve(positionals[0]), flags);
 	} else fail(`unknown command: ${command}`, 2);
 }

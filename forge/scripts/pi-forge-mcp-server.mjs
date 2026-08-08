@@ -93,7 +93,12 @@ function resolveAllowedPath(path, roots, kind) {
 
 function safeStem(path) {
 	const name = basename(path).replace(/\.[^.]+$/, "");
-	return name.normalize("NFKC").replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "") || "output";
+	return (
+		name
+			.normalize("NFKC")
+			.replace(/[^\p{L}\p{N}]+/gu, "-")
+			.replace(/^-|-$/g, "") || "output"
+	);
 }
 
 function nextRunDirectory(outputRoot, category, stem) {
@@ -180,13 +185,19 @@ export function runChildProcess(command, args, { signal, cwd, label }) {
 			stdout += chunk;
 			if (Buffer.byteLength(stdout) > MAX_STDOUT_BYTES) {
 				child.kill("SIGKILL");
-				finish(() => rejectProcess(new BridgeError("worker_output_too_large", `${label} exceeded 10 MiB on stdout`)));
+				finish(() =>
+					rejectProcess(new BridgeError("worker_output_too_large", `${label} exceeded 10 MiB on stdout`)),
+				);
 			}
 		});
 		child.stderr.on("data", (chunk) => process.stderr.write(chunk));
-		child.on("error", (error) => finish(() => rejectProcess(new BridgeError("worker_start_failed", `${label}: ${error.message}`))));
+		child.on("error", (error) =>
+			finish(() => rejectProcess(new BridgeError("worker_start_failed", `${label}: ${error.message}`))),
+		);
 		child.on("close", (code, processSignal) =>
-			finish(() => resolveProcess({ code: code ?? 1, signal: processSignal, stdout: stdout.trim(), canceled: signal.aborted })),
+			finish(() =>
+				resolveProcess({ code: code ?? 1, signal: processSignal, stdout: stdout.trim(), canceled: signal.aborted }),
+			),
 		);
 	});
 }
@@ -258,7 +269,8 @@ export function createBridgeServer(configuration) {
 				const startedAt = new Date().toISOString();
 				const inputPath = requireFile(args.inputPath, readRoots, "input path");
 				const outputRoot = resolveAllowedPath(args.outputRoot, writeRoots, "output root");
-				if (!lstatSync(outputRoot).isDirectory()) throw new BridgeError("invalid_path", "output root must be a directory");
+				if (!lstatSync(outputRoot).isDirectory())
+					throw new BridgeError("invalid_path", "output root must be a directory");
 				const projectDictionary = args.projectDictionaryPath
 					? requireFile(args.projectDictionaryPath, readRoots, "project dictionary")
 					: undefined;
@@ -309,7 +321,10 @@ export function createBridgeServer(configuration) {
 						"transcription_failed",
 						"The transcription worker exited unsuccessfully.",
 						["Review MCP stderr and run the transcription skill doctor."],
-						{ runDirectory: existsSync(runDirectory) ? runDirectory : null, artifacts: listArtifacts(runDirectory) },
+						{
+							runDirectory: existsSync(runDirectory) ? runDirectory : null,
+							artifacts: listArtifacts(runDirectory),
+						},
 					);
 				}
 				let workerResult;
@@ -323,16 +338,15 @@ export function createBridgeServer(configuration) {
 				}
 				let actualRunDirectory;
 				try {
-					actualRunDirectory = resolveAllowedPath(workerResult.run_directory ?? runDirectory, writeRoots, "worker run directory");
-				} catch (error) {
-					return failedResult(
-						"transcribe",
-						taskId,
-						startedAt,
-						"invalid_worker_output",
-						error.message,
-						["Review the transcription worker and configured write roots."],
+					actualRunDirectory = resolveAllowedPath(
+						workerResult.run_directory ?? runDirectory,
+						writeRoots,
+						"worker run directory",
 					);
+				} catch (error) {
+					return failedResult("transcribe", taskId, startedAt, "invalid_worker_output", error.message, [
+						"Review the transcription worker and configured write roots.",
+					]);
 				}
 				const artifacts = listArtifacts(actualRunDirectory);
 				const requiredRoles = ["raw_transcript.txt", "corrected_transcript.md", "transcription_manifest.csv"];
@@ -352,7 +366,8 @@ export function createBridgeServer(configuration) {
 					schemaVersion: 1,
 					taskId,
 					operation: "transcribe",
-					status: Array.isArray(workerResult.warnings) && workerResult.warnings.length > 0 ? "needs_review" : "success",
+					status:
+						Array.isArray(workerResult.warnings) && workerResult.warnings.length > 0 ? "needs_review" : "success",
 					startedAt,
 					completedAt: new Date().toISOString(),
 					runDirectory: actualRunDirectory,
@@ -394,11 +409,20 @@ export function createBridgeServer(configuration) {
 				const startedAt = new Date().toISOString();
 				const inputPaths = args.inputPaths.map((path) => requireInput(path, readRoots));
 				const outputRoot = resolveAllowedPath(args.outputRoot, writeRoots, "output root");
-				if (!lstatSync(outputRoot).isDirectory()) throw new BridgeError("invalid_path", "output root must be a directory");
+				if (!lstatSync(outputRoot).isDirectory())
+					throw new BridgeError("invalid_path", "output root must be a directory");
 				const coverPath = args.coverPath ? requireFile(args.coverPath, readRoots, "cover path") : undefined;
 				const runStem = inputPaths.length === 1 ? safeStem(inputPaths[0]) : `batch-${taskId.slice(0, 8)}`;
 				const runDirectory = nextRunDirectory(outputRoot, "file-conversion", runStem);
-				const commandArgs = [conversionScript, "convert", ...inputPaths, "--to", args.target, "--output", runDirectory];
+				const commandArgs = [
+					conversionScript,
+					"convert",
+					...inputPaths,
+					"--to",
+					args.target,
+					"--output",
+					runDirectory,
+				];
 				for (const [flag, value] of [
 					["--from", args.sourceFormat],
 					["--cover", coverPath],
@@ -423,7 +447,10 @@ export function createBridgeServer(configuration) {
 						"conversion_failed",
 						"The conversion worker exited unsuccessfully.",
 						["Review MCP stderr and run the file-conversion doctor."],
-						{ runDirectory: existsSync(runDirectory) ? runDirectory : null, artifacts: listArtifacts(runDirectory) },
+						{
+							runDirectory: existsSync(runDirectory) ? runDirectory : null,
+							artifacts: listArtifacts(runDirectory),
+						},
 					);
 				}
 				let conversionResult;
@@ -443,14 +470,9 @@ export function createBridgeServer(configuration) {
 						"worker run directory",
 					);
 				} catch (error) {
-					return failedResult(
-						"convert_files",
-						taskId,
-						startedAt,
-						"invalid_worker_output",
-						error.message,
-						["Review the conversion worker and configured write roots."],
-					);
+					return failedResult("convert_files", taskId, startedAt, "invalid_worker_output", error.message, [
+						"Review the conversion worker and configured write roots.",
+					]);
 				}
 				const validation = await runChildProcess(python, [conversionScript, "validate", actualRunDirectory], {
 					signal: extra.signal,
@@ -487,7 +509,8 @@ export function createBridgeServer(configuration) {
 						{ runDirectory: actualRunDirectory, artifacts: listArtifacts(actualRunDirectory), counts, warnings },
 					);
 				}
-				if (counts.failed > 0) warnings.push(`${counts.failed} input files failed; inspect conversion_manifest.csv.`);
+				if (counts.failed > 0)
+					warnings.push(`${counts.failed} input files failed; inspect conversion_manifest.csv.`);
 				return {
 					schemaVersion: 1,
 					taskId,

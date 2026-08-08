@@ -74,7 +74,9 @@ try {
 // Captured before seeding, which fills every field in and would make a value
 // this install just defaulted indistinguishable from one the owner chose.
 const persistedServices = structuredClone(
-	settings.connectedServices && typeof settings.connectedServices === "object" && !Array.isArray(settings.connectedServices)
+	settings.connectedServices &&
+		typeof settings.connectedServices === "object" &&
+		!Array.isArray(settings.connectedServices)
 		? settings.connectedServices
 		: {},
 );
@@ -100,7 +102,9 @@ const existingCompaction =
 		? settings.compaction
 		: {};
 const existingContextBudget =
-	settings.contextBudget !== null && typeof settings.contextBudget === "object" && !Array.isArray(settings.contextBudget)
+	settings.contextBudget !== null &&
+	typeof settings.contextBudget === "object" &&
+	!Array.isArray(settings.contextBudget)
 		? settings.contextBudget
 		: {};
 delete settings.taskModel;
@@ -149,7 +153,10 @@ try {
 if (models === null || Array.isArray(models) || typeof models !== "object") {
 	throw new Error(`${modelsPath} must contain a JSON object`);
 }
-if (models.providers !== undefined && (models.providers === null || Array.isArray(models.providers) || typeof models.providers !== "object")) {
+if (
+	models.providers !== undefined &&
+	(models.providers === null || Array.isArray(models.providers) || typeof models.providers !== "object")
+) {
 	throw new Error(`${modelsPath} providers must contain a JSON object`);
 }
 models.providers = models.providers ?? {};
@@ -240,7 +247,9 @@ function adoptServedContext(service, persisted, capacity, label) {
 		);
 		return;
 	}
-	process.stdout.write(`${label}: read ${capacity.contextTokens} context tokens per slot from the stack (was ${service.contextTokens}).\n`);
+	process.stdout.write(
+		`${label}: read ${capacity.contextTokens} context tokens per slot from the stack (was ${service.contextTokens}).\n`,
+	);
 	service.contextTokens = capacity.contextTokens;
 }
 
@@ -256,7 +265,8 @@ function clampBackgroundSlot(service, capacity, label) {
 	const total = capacity?.totalSlots;
 	if (!Number.isInteger(total) || total < 1) return;
 	const scheduling = service.scheduling;
-	if (!scheduling?.enabled || !Number.isInteger(scheduling.backgroundSlot) || scheduling.backgroundSlot < total) return;
+	if (!scheduling?.enabled || !Number.isInteger(scheduling.backgroundSlot) || scheduling.backgroundSlot < total)
+		return;
 	const clamped = total - 1;
 	process.stderr.write(
 		`${label}: the backend runs ${total} slot${total === 1 ? "" : "s"}, so background work cannot pin slot ` +
@@ -297,7 +307,7 @@ function identityBlock(forgeUser) {
 		"## Who You Are Working With",
 		"",
 		`You are working with ${who}. Address them by name; do not call them "the user"`,
-		"or \"the owner\". Inside an Obsidian vault, that vault's own owner record wins",
+		'or "the owner". Inside an Obsidian vault, that vault\'s own owner record wins',
 		"over this one.",
 		"",
 	].join("\n");

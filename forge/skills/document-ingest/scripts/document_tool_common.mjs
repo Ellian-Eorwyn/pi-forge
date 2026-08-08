@@ -44,7 +44,10 @@ export function runIngest(args) {
 		maxBuffer: 100 * 1024 * 1024,
 	});
 	if (result.status !== 0) {
-		throw new ToolInputError("document_ingest_command_failed", result.stderr.trim() || result.stdout.trim() || `exit status ${result.status}`);
+		throw new ToolInputError(
+			"document_ingest_command_failed",
+			result.stderr.trim() || result.stdout.trim() || `exit status ${result.status}`,
+		);
 	}
 	return JSON.parse(result.stdout);
 }
@@ -63,13 +66,15 @@ export function prepareSingleFile(input, output, options = {}) {
 	const failed = rows.find((row) => row.status === "failed");
 	if (failed) throw new ToolInputError("document_extraction_failed", failed.error || "Document extraction failed");
 	const documents = documentRecords(runDirectory);
-	if (documents.length === 0) throw new ToolInputError("document_extraction_failed", "No prepared document was produced");
+	if (documents.length === 0)
+		throw new ToolInputError("document_extraction_failed", "No prepared document was produced");
 	return { source, extension, runDirectory, summary, documents };
 }
 
 export function manifestRows(runDirectory) {
 	const manifestPath = join(runDirectory, "manifest.csv");
-	if (!existsSync(manifestPath)) throw new ToolInputError("manifest_missing", `manifest.csv is missing: ${manifestPath}`);
+	if (!existsSync(manifestPath))
+		throw new ToolInputError("manifest_missing", `manifest.csv is missing: ${manifestPath}`);
 	const rows = csvRows(readFileSync(manifestPath, "utf8")).filter((row) => row.some((field) => field !== ""));
 	const headers = rows.shift() ?? [];
 	return rows.map((row) => Object.fromEntries(headers.map((header, index) => [header, row[index] ?? ""])));
@@ -116,12 +121,22 @@ export function preparedMetadata(input) {
 	const target = resolve(input);
 	const stat = statSync(target);
 	if (stat.isFile()) {
-		if (target.endsWith("metadata.json")) return [{ metadataPath: target, metadata: JSON.parse(readFileSync(target, "utf8")) }];
-		throw new ToolInputError("unsupported_input", "Prepared metadata input must be a metadata.json file or document-ingest directory");
+		if (target.endsWith("metadata.json"))
+			return [{ metadataPath: target, metadata: JSON.parse(readFileSync(target, "utf8")) }];
+		throw new ToolInputError(
+			"unsupported_input",
+			"Prepared metadata input must be a metadata.json file or document-ingest directory",
+		);
 	}
 	const directMetadata = join(target, "metadata.json");
 	if (existsSync(directMetadata)) {
-		return [{ documentDirectory: target, metadataPath: directMetadata, metadata: JSON.parse(readFileSync(directMetadata, "utf8")) }];
+		return [
+			{
+				documentDirectory: target,
+				metadataPath: directMetadata,
+				metadata: JSON.parse(readFileSync(directMetadata, "utf8")),
+			},
+		];
 	}
 	if (existsSync(join(target, "manifest.csv"))) {
 		return documentRecords(target).map(metadataForDocument);

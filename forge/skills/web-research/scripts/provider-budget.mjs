@@ -137,7 +137,11 @@ export function providerBudgetState(provider, options = {}) {
 	if (declared.reportedBy && entry?.remainingUsd !== undefined && entry.remainingUsd !== null) {
 		const nextCall = declared.perCallUsd ?? 0;
 		if (entry.remainingUsd <= nextCall) {
-			return { exhausted: true, reason: `${provider} reported $${entry.remainingUsd} of its daily allowance left`, entry };
+			return {
+				exhausted: true,
+				reason: `${provider} reported $${entry.remainingUsd} of its daily allowance left`,
+				entry,
+			};
 		}
 		return { exhausted: false, reason: null, entry };
 	}
@@ -145,13 +149,21 @@ export function providerBudgetState(provider, options = {}) {
 	if (declared.calls) {
 		const used = entry?.calls ?? 0;
 		if (used >= declared.calls) {
-			return { exhausted: true, reason: `${provider} has used its ${declared.calls}/day budget (${used} calls)`, entry };
+			return {
+				exhausted: true,
+				reason: `${provider} has used its ${declared.calls}/day budget (${used} calls)`,
+				entry,
+			};
 		}
 	}
 	if (declared.monthlyCalls) {
 		const used = callsInTrailingMonth(ledger, provider, now);
 		if (used >= declared.monthlyCalls) {
-			return { exhausted: true, reason: `${provider} has used its ${declared.monthlyCalls}/month budget (${used} calls)`, entry };
+			return {
+				exhausted: true,
+				reason: `${provider} has used its ${declared.monthlyCalls}/month budget (${used} calls)`,
+				entry,
+			};
 		}
 	}
 	return { exhausted: false, reason: null, entry };

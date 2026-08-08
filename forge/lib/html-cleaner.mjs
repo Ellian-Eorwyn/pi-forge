@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
+import { JSDOM } from "jsdom";
 import { resolveConnectedServices } from "./connected-services.mjs";
 
 /**
@@ -15,13 +15,16 @@ export async function htmlToCleanMarkdown(buffer, url) {
 	const htmlString = buffer.toString("utf8");
 	let rawMarkdown = "";
 	let isReadabilityPass = true;
-	
+
 	try {
 		const doc = new JSDOM(htmlString, { url }).window.document;
 		const reader = new Readability(doc);
 		const article = reader.parse();
 		if (article?.content) {
-			const result = spawnSync("pandoc", ["--from=html", "--to=gfm", "--wrap=none"], { input: article.content, encoding: "utf8" });
+			const result = spawnSync("pandoc", ["--from=html", "--to=gfm", "--wrap=none"], {
+				input: article.content,
+				encoding: "utf8",
+			});
 			if (result.status === 0 && result.stdout) {
 				rawMarkdown = result.stdout;
 			}
@@ -29,16 +32,19 @@ export async function htmlToCleanMarkdown(buffer, url) {
 	} catch (_e) {
 		// Ignore JSDOM/Readability errors and fall through to failure
 	}
-	
+
 	if (!rawMarkdown.trim()) {
 		isReadabilityPass = false;
-		const result = spawnSync("pandoc", ["--from=html", "--to=gfm", "--wrap=none"], { input: buffer, encoding: "utf8" });
+		const result = spawnSync("pandoc", ["--from=html", "--to=gfm", "--wrap=none"], {
+			input: buffer,
+			encoding: "utf8",
+		});
 		if (result.error || result.status !== 0) {
 			throw new Error(result.stderr?.trim() || result.error?.message || `pandoc exited with ${result.status}`);
 		}
 		rawMarkdown = result.stdout;
 	}
-	
+
 	if (!rawMarkdown.trim()) return null;
 
 	// Boilerplate stripping is mechanical and runs once per fetched page, so it
@@ -57,21 +63,28 @@ export async function htmlToCleanMarkdown(buffer, url) {
 	} else {
 		instruction = `The following is raw Markdown extracted from the document/webpage ${url}. Please strip out all boilerplate content, navigation menus, sidebars, headers, and footers. Return only the core informational content of the page, formatted as clean Markdown. Maintain all relevant headings, lists, and links. Do NOT wrap your response in markdown code blocks. Just output the clean markdown.`;
 	}
-	
+
 	let cleanMarkdown = "";
 	try {
 		const response = await fetch(baseChatUrl, {
 			method: "POST",
-			headers: { "Content-Type": "application/json", "Authorization": "Bearer local" },
+			headers: { "Content-Type": "application/json", Authorization: "Bearer local" },
 			body: JSON.stringify({
 				model: baseModel,
 				messages: [
-					{ role: "system", content: "You are an expert web scraper assistant that cleans raw webpage extracts into crisp, readable markdown." },
-					{ role: "user", content: `${instruction}\n\n=== EXTRACTED MARKDOWN ===\n${rawMarkdown.substring(0, 100000)}` }
+					{
+						role: "system",
+						content:
+							"You are an expert web scraper assistant that cleans raw webpage extracts into crisp, readable markdown.",
+					},
+					{
+						role: "user",
+						content: `${instruction}\n\n=== EXTRACTED MARKDOWN ===\n${rawMarkdown.substring(0, 100000)}`,
+					},
 				],
 				temperature: 0.1,
-				...(chatTemplateKwargs ? { chat_template_kwargs: chatTemplateKwargs } : {})
-			})
+				...(chatTemplateKwargs ? { chat_template_kwargs: chatTemplateKwargs } : {}),
+			}),
 		});
 		if (!response.ok) throw new Error(`LLM returned HTTP ${response.status}`);
 		const data = await response.json();
@@ -80,30 +93,41 @@ export async function htmlToCleanMarkdown(buffer, url) {
 		// If the LLM is completely unreachable (e.g. tests or network issues), just return the raw markdown
 		return rawMarkdown;
 	}
-	
+
 	if (isReadabilityPass && cleanMarkdown.includes("<EXTRACTION_FAILED>")) {
-		const result = spawnSync("pandoc", ["--from=html", "--to=gfm", "--wrap=none"], { input: buffer, encoding: "utf8" });
-		if (result.error || result.status !== 0) throw new Error(result.stderr?.trim() || result.error?.message || `pandoc exited with ${result.status}`);
-		
+		const result = spawnSync("pandoc", ["--from=html", "--to=gfm", "--wrap=none"], {
+			input: buffer,
+			encoding: "utf8",
+		});
+		if (result.error || result.status !== 0)
+			throw new Error(result.stderr?.trim() || result.error?.message || `pandoc exited with ${result.status}`);
+
 		const fallbackInstruction = `The following is raw Markdown extracted from the document/webpage ${url}. Please strip out all boilerplate content, navigation menus, sidebars, headers, and footers. Return only the core informational content of the page, formatted as clean Markdown. Maintain all relevant headings, lists, and links. Do NOT wrap your response in markdown code blocks. Just output the clean markdown.`;
-		
+
 		response = await fetch(baseChatUrl, {
 			method: "POST",
-			headers: { "Content-Type": "application/json", "Authorization": "Bearer local" },
+			headers: { "Content-Type": "application/json", Authorization: "Bearer local" },
 			body: JSON.stringify({
 				model: baseModel,
 				messages: [
-					{ role: "system", content: "You are an expert web scraper assistant that cleans raw webpage extracts into crisp, readable markdown." },
-					{ role: "user", content: `${fallbackInstruction}\n\n=== RAW MARKDOWN ===\n${result.stdout.substring(0, 100000)}` }
+					{
+						role: "system",
+						content:
+							"You are an expert web scraper assistant that cleans raw webpage extracts into crisp, readable markdown.",
+					},
+					{
+						role: "user",
+						content: `${fallbackInstruction}\n\n=== RAW MARKDOWN ===\n${result.stdout.substring(0, 100000)}`,
+					},
 				],
-				temperature: 0.1
-			})
+				temperature: 0.1,
+			}),
 		});
 		if (!response.ok) throw new Error(`LLM returned HTTP ${response.status}`);
 		data = await response.json();
 		cleanMarkdown = data.choices[0]?.message?.content?.trim() || "";
 	}
-	
+
 	if (cleanMarkdown.startsWith("```markdown")) {
 		cleanMarkdown = cleanMarkdown.replace(/^```markdown\n/, "").replace(/\n```$/, "");
 	} else if (cleanMarkdown.startsWith("```")) {

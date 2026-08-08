@@ -157,18 +157,24 @@ export function loadForgeSettings(env = process.env) {
 
 export function seedConnectedServicesSettings(settings) {
 	const current =
-		settings.connectedServices && typeof settings.connectedServices === "object" && !Array.isArray(settings.connectedServices)
+		settings.connectedServices &&
+		typeof settings.connectedServices === "object" &&
+		!Array.isArray(settings.connectedServices)
 			? settings.connectedServices
 			: {};
-	const searxng = current.searxng && typeof current.searxng === "object" && !Array.isArray(current.searxng) ? current.searxng : {};
+	const searxng =
+		current.searxng && typeof current.searxng === "object" && !Array.isArray(current.searxng) ? current.searxng : {};
 	const playwright =
 		current.playwright && typeof current.playwright === "object" && !Array.isArray(current.playwright)
 			? current.playwright
 			: {};
 	const stackState =
-		current.stackState && typeof current.stackState === "object" && !Array.isArray(current.stackState) ? current.stackState : {};
+		current.stackState && typeof current.stackState === "object" && !Array.isArray(current.stackState)
+			? current.stackState
+			: {};
 	const chat = current.chat && typeof current.chat === "object" && !Array.isArray(current.chat) ? current.chat : {};
-	const think = current.think && typeof current.think === "object" && !Array.isArray(current.think) ? current.think : {};
+	const think =
+		current.think && typeof current.think === "object" && !Array.isArray(current.think) ? current.think : {};
 	const task = current.task && typeof current.task === "object" && !Array.isArray(current.task) ? current.task : {};
 	const embeddings =
 		current.embeddings && typeof current.embeddings === "object" && !Array.isArray(current.embeddings)
@@ -242,7 +248,9 @@ function normalizeApiKeys(current) {
  * becomes FORGE_API_KEY_SEMANTIC_SCHOLAR.
  */
 export function apiKeyEnvName(provider) {
-	return `FORGE_API_KEY_${String(provider).toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`;
+	return `FORGE_API_KEY_${String(provider)
+		.toUpperCase()
+		.replace(/[^A-Z0-9]+/g, "_")}`;
 }
 
 function seedInferenceService(current, defaults) {

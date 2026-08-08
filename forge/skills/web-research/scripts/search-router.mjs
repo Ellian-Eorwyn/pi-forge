@@ -11,7 +11,12 @@
 // to be citable.
 
 import { DECLARED_BUDGETS, loadBudget, providerBudgetState, recordProviderSpend } from "./provider-budget.mjs";
-import { SEARCH_PROVIDERS, bookIdentifier, findSuttaReference, searchProviderAvailability } from "./search-providers.mjs";
+import {
+	bookIdentifier,
+	findSuttaReference,
+	SEARCH_PROVIDERS,
+	searchProviderAvailability,
+} from "./search-providers.mjs";
 
 /**
  * Budget state for every provider that declares one, in the shape
@@ -46,9 +51,15 @@ const TOPIC_PATTERNS = [
 		/\b(buddhis\w*|buddha|dharma|dhamma|sutta|sutra|sangha|nirvana|nibbana|bodhisattva|madhyamaka|yogacara|abhidharma|abhidhamma|vipassana|anapanasati|zen|chan|theravada|mahayana|vajrayana|tibetan buddhis\w*|pali canon|tripitaka|kangyur|tengyur|taisho)\b/i,
 	],
 	["religion", /\b(religio\w*|theolog\w*|scriptur\w*|liturg\w*|monastic\w*)\b/i],
-	["biomedical", /\b(clinical|biomedical|pubmed|disease|drug|therapy|genetic|neuroscience|epidemiolog\w*|public health|patient)\b/i],
+	[
+		"biomedical",
+		/\b(clinical|biomedical|pubmed|disease|drug|therapy|genetic|neuroscience|epidemiolog\w*|public health|patient)\b/i,
+	],
 	["psychology", /\b(psycholog\w*|cognitive|behaviou?ral|therapy|perception|memory)\b/i],
-	["computing", /\b(code|github|repository|npm|pypi|package|api|sdk|library|algorithm|programming|softwar\w*|typescript|javascript|python|rust\b)/i],
+	[
+		"computing",
+		/\b(code|github|repository|npm|pypi|package|api|sdk|library|algorithm|programming|softwar\w*|typescript|javascript|python|rust\b)/i,
+	],
 	["mathematics", /\b(mathematic\w*|theorem|proof|topolog\w*|algebra|calculus|geometr\w*)\b/i],
 	["history", /\b(histor\w*|century|medieval|ancient|dynasty|war\b|empire)/i],
 	["literature", /\b(novel|poem|poetry|literatur\w*|author|fiction)\b/i],
@@ -84,7 +95,10 @@ export function classifySearchQuery(query) {
 	// for "what is dependent origination" matches the words "what" and "is";
 	// asking it for "dependent origination" matches the term.
 	const term = text
-		.replace(/^\s*(?:what\s+(?:is|are|was|were)|who\s+(?:is|was)|define|definition\s+of|meaning\s+of|etymolog(?:y|ies)\s+of|tell\s+me\s+about)\s+/i, "")
+		.replace(
+			/^\s*(?:what\s+(?:is|are|was|were)|who\s+(?:is|was)|define|definition\s+of|meaning\s+of|etymolog(?:y|ies)\s+of|tell\s+me\s+about)\s+/i,
+			"",
+		)
 		.replace(/\?+\s*$/, "")
 		.trim();
 	const intents = [];
@@ -197,7 +211,8 @@ function finalize(ids, classification, decisions, options, { explicit }) {
 	// An identifier match outranks a topic match, then authority, as
 	// canonical-sources.json orders it: lower is tried first.
 	available.sort((left, right) => {
-		const identifierRank = Number(options.byIdentifier?.has(right) ?? false) - Number(options.byIdentifier?.has(left) ?? false);
+		const identifierRank =
+			Number(options.byIdentifier?.has(right) ?? false) - Number(options.byIdentifier?.has(left) ?? false);
 		if (identifierRank !== 0) return identifierRank;
 		return (SEARCH_PROVIDERS[left].authority ?? 50) - (SEARCH_PROVIDERS[right].authority ?? 50);
 	});

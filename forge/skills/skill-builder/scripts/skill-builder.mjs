@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,7 +12,8 @@ const MAX_DESCRIPTION_LENGTH = 1024;
 const TARGETS = new Set(["project", "user", "forge", "path"]);
 const RESOURCE_NAMES = new Set(["scripts", "references", "assets", "tests"]);
 const VAGUE_DESCRIPTION = /\b(helps?|helper|general|misc|utilities|tools?|stuff|various)\b/i;
-const ROUTING_LANGUAGE = /\b(use when|use for|when the user|requests?|tasks?|files?|urls?|repositories|datasets|skill|SKILL\.md)\b/i;
+const ROUTING_LANGUAGE =
+	/\b(use when|use for|when the user|requests?|tasks?|files?|urls?|repositories|datasets|skill|SKILL\.md)\b/i;
 const EXCLUSION_LANGUAGE = /\b(do not use|don't use|unless|exclude|not for|avoid using)\b/i;
 const BROAD_TERMS = new Set([
 	"research",
@@ -108,7 +109,10 @@ function parseFrontmatter(content) {
 
 function pathIsInside(parent, candidate) {
 	const relativePath = relative(parent, candidate);
-	return relativePath === "" || (relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath));
+	return (
+		relativePath === "" ||
+		(relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath))
+	);
 }
 
 function skillFilePath(skillDirectory) {
@@ -130,7 +134,10 @@ function tokenize(value) {
 			.toLowerCase()
 			.replace(/[^a-z0-9 -]+/g, " ")
 			.split(/\s+/)
-			.filter((word) => word.length > 3 && !["when", "with", "from", "that", "this", "into", "user", "users"].includes(word)),
+			.filter(
+				(word) =>
+					word.length > 3 && !["when", "with", "from", "that", "this", "into", "user", "users"].includes(word),
+			),
 	);
 }
 
@@ -241,7 +248,11 @@ function validateForgeManifest(skillDirectory, skillName) {
 	if (!manifest.safety || typeof manifest.safety !== "object" || Array.isArray(manifest.safety)) {
 		errors.push("invalid Forge manifest: safety object is required");
 	} else {
-		for (const field of ["destructive_by_default", "requires_review_for_filesystem_changes", "preserve_provenance_when_applicable"]) {
+		for (const field of [
+			"destructive_by_default",
+			"requires_review_for_filesystem_changes",
+			"preserve_provenance_when_applicable",
+		]) {
 			if (typeof manifest.safety[field] !== "boolean") {
 				errors.push(`invalid Forge manifest: safety.${field} must be boolean`);
 			}
@@ -616,7 +627,8 @@ function commandCheckTriggers(args) {
 	const errors = [...validation.errors, ...triggers.errors];
 
 	const sourceTerms = tokenize(validation.description ?? "");
-	const broadDescription = validation.description && (validation.description.length < 40 || VAGUE_DESCRIPTION.test(validation.description));
+	const broadDescription =
+		validation.description && (validation.description.length < 40 || VAGUE_DESCRIPTION.test(validation.description));
 	const minimumOverlapScore = broadDescription ? 1 : 3;
 	const overlaps = inventory(resolve(against))
 		.filter((skill) => resolve(skill.directory) !== resolvedSkillDirectory)
@@ -655,7 +667,8 @@ function commandCheckTriggers(args) {
 	} else {
 		process.stdout.write(`Positive triggers: ${triggers.positive.length}\n`);
 		process.stdout.write(`Negative triggers: ${triggers.negative.length}\n`);
-		if (overlaps.length > 0) process.stdout.write(`Overlaps: ${overlaps.map((overlap) => overlap.name).join(", ")}\n`);
+		if (overlaps.length > 0)
+			process.stdout.write(`Overlaps: ${overlaps.map((overlap) => overlap.name).join(", ")}\n`);
 		if (report.warnings.length > 0) process.stdout.write(`Warnings:\n- ${report.warnings.join("\n- ")}\n`);
 	}
 	if (!report.valid) process.exit(1);

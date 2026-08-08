@@ -51,7 +51,11 @@ function run(command, args, options = {}) {
 
 	if (result.status !== 0) {
 		const output = [result.stdout, result.stderr].filter(Boolean).join("\n");
-		throw new Error(output ? `Command failed: ${command} ${args.join(" ")}\n${output}` : `Command failed: ${command} ${args.join(" ")}`);
+		throw new Error(
+			output
+				? `Command failed: ${command} ${args.join(" ")}\n${output}`
+				: `Command failed: ${command} ${args.join(" ")}`,
+		);
 	}
 
 	return result.stdout ?? "";
@@ -80,7 +84,15 @@ function parseOptions(args) {
 			continue;
 		}
 
-		const optionNames = new Set(["--base-path", "--changelog", "--out", "--repo", "--since-tag", "--tag", "--version"]);
+		const optionNames = new Set([
+			"--base-path",
+			"--changelog",
+			"--out",
+			"--repo",
+			"--since-tag",
+			"--tag",
+			"--version",
+		]);
 		if (!optionNames.has(arg)) {
 			throw new Error(`Unknown option: ${arg}`);
 		}
@@ -266,9 +278,13 @@ function extractReleaseNotes(options) {
 }
 
 function listGithubReleases(repo) {
-	const output = run("gh", ["api", `repos/${repo}/releases`, "--paginate", "--jq", ".[] | {id, tag_name, body} | @json"], {
-		capture: true,
-	});
+	const output = run(
+		"gh",
+		["api", `repos/${repo}/releases`, "--paginate", "--jq", ".[] | {id, tag_name, body} | @json"],
+		{
+			capture: true,
+		},
+	);
 	return output
 		.split("\n")
 		.map((line) => line.trim())
@@ -304,7 +320,9 @@ function updateGithubRelease(repo, tag, body) {
 function fixGithubReleases(options) {
 	const tagFilter = normalizeTag(options.tag);
 	const sinceTag = normalizeTag(options.sinceTag);
-	const matchingReleases = listGithubReleases(options.repo).filter((release) => !tagFilter || release.tag_name === tagFilter);
+	const matchingReleases = listGithubReleases(options.repo).filter(
+		(release) => !tagFilter || release.tag_name === tagFilter,
+	);
 
 	if (tagFilter && matchingReleases.length === 0) {
 		throw new Error(`Release not found: ${tagFilter}`);
@@ -328,7 +346,9 @@ function fixGithubReleases(options) {
 
 		changedCount++;
 		const unique = uniqueChanges(result.changes);
-		console.log(`${options.dryRun ? "Would update" : "Updating"} ${tag} (${unique.length} link${unique.length === 1 ? "" : "s"})`);
+		console.log(
+			`${options.dryRun ? "Would update" : "Updating"} ${tag} (${unique.length} link${unique.length === 1 ? "" : "s"})`,
+		);
 		for (const change of unique) {
 			console.log(`  ${change.from}`);
 			console.log(`  -> ${change.to}`);

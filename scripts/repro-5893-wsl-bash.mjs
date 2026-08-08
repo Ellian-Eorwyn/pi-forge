@@ -19,15 +19,7 @@ async function runCase(label, command, expectedOutput) {
 	const result = await tool.execute(label, { command });
 	const output = getTextOutput(result).trimEnd();
 	if (output !== expectedOutput) {
-		throw new Error(
-			[
-				`${label} failed`,
-				"Expected:",
-				expectedOutput,
-				"Actual:",
-				output,
-			].join("\n"),
-		);
+		throw new Error([`${label} failed`, "Expected:", expectedOutput, "Actual:", output].join("\n"));
 	}
 	console.log(output);
 }
@@ -40,11 +32,7 @@ if (!existsSync(shellPath)) {
 	throw new Error(`WSL bash launcher not found at ${shellPath}. Install/enable WSL first.`);
 }
 
-await runCase(
-	"issue-5893-simple-variable",
-	`name='World'; echo "Hello, ${nameExpansion}!"`,
-	"Hello, World!",
-);
+await runCase("issue-5893-simple-variable", `name='World'; echo "Hello, ${nameExpansion}!"`, "Hello, World!");
 
 await runCase(
 	"issue-5893-loop-variable",

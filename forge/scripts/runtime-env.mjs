@@ -1,5 +1,4 @@
 import { spawnSync } from "node:child_process";
-import { createRequire } from "node:module";
 import {
 	copyFileSync,
 	existsSync,
@@ -12,6 +11,7 @@ import {
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,7 +21,8 @@ export const PACKAGE_NAME = "@ellian-eorwyn/pi-forge";
 export const PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
 export const DEFAULT_PI_PACKAGE_SPEC = "GitHub source archive runtime packages";
 export const DEFAULT_SOURCE_ARCHIVE_URL = "https://github.com/Ellian-Eorwyn/pi-forge/archive/refs/heads/main.tar.gz";
-export const DEFAULT_UPSTREAM_SOURCE_ARCHIVE_URL = "https://github.com/earendil-works/pi/archive/refs/heads/main.tar.gz";
+export const DEFAULT_UPSTREAM_SOURCE_ARCHIVE_URL =
+	"https://github.com/earendil-works/pi/archive/refs/heads/main.tar.gz";
 const RUNTIME_PACKAGE_SCOPE = `${PI_PACKAGE_NAME.split("/")[0]}/`;
 // Used only for source trees that do not declare npm workspaces; the packed set is
 // otherwise derived from the tree itself by resolveSourceRuntimePackageDirs.
@@ -40,7 +41,9 @@ export function getForgePaths() {
 	const binDir = resolve(process.env.PI_FORGE_BIN_DIR || join(home, "bin"));
 	const agentDir = resolve(process.env.PI_FORGE_AGENT_DIR || join(home, "agent"));
 	const npmCacheDir = resolve(process.env.PI_FORGE_NPM_CACHE || join(agentDir, "npm-cache"));
-	const playwrightBrowsersDir = resolve(process.env.PI_FORGE_PLAYWRIGHT_BROWSERS || join(agentDir, "playwright-browsers"));
+	const playwrightBrowsersDir = resolve(
+		process.env.PI_FORGE_PLAYWRIGHT_BROWSERS || join(agentDir, "playwright-browsers"),
+	);
 	return { home, appDir, binDir, agentDir, npmCacheDir, playwrightBrowsersDir };
 }
 
@@ -130,7 +133,10 @@ function installAppPackage(packageSpec, options = {}) {
 	return paths;
 }
 
-export function installConfiguredPackage(packageSpec = process.env.PI_FORGE_PACKAGE_SPEC || packSourceArchivePackageSpec(), options = {}) {
+export function installConfiguredPackage(
+	packageSpec = process.env.PI_FORGE_PACKAGE_SPEC || packSourceArchivePackageSpec(),
+	options = {},
+) {
 	const paths = installAppPackage(packageSpec, options);
 	return resolveInstalledPackageRoot(paths.appDir);
 }
@@ -168,11 +174,15 @@ function downloadFile(url, outputPath) {
 	throw new Error(output || `Command failed: wget -qO ${outputPath} ${url}`);
 }
 
-export function packSourceArchivePackageSpec(sourceArchiveUrl = process.env.PI_FORGE_SOURCE_ARCHIVE_URL || DEFAULT_SOURCE_ARCHIVE_URL) {
+export function packSourceArchivePackageSpec(
+	sourceArchiveUrl = process.env.PI_FORGE_SOURCE_ARCHIVE_URL || DEFAULT_SOURCE_ARCHIVE_URL,
+) {
 	return withSourceArchive(sourceArchiveUrl, (sourceRoot) => packPackageDirectory(join(sourceRoot, "forge")));
 }
 
-export function packSourceArchivePiPackageSpecs(sourceArchiveUrl = process.env.PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL || DEFAULT_UPSTREAM_SOURCE_ARCHIVE_URL) {
+export function packSourceArchivePiPackageSpecs(
+	sourceArchiveUrl = process.env.PI_FORGE_UPSTREAM_SOURCE_ARCHIVE_URL || DEFAULT_UPSTREAM_SOURCE_ARCHIVE_URL,
+) {
 	return withSourceArchive(sourceArchiveUrl, (sourceRoot) => packSourceRuntimePackageSpecs(sourceRoot));
 }
 
@@ -195,7 +205,11 @@ function findSourceRoot(extractDir, sourceArchiveUrl) {
 	const sourceRoot = readdirSync(extractDir, { withFileTypes: true })
 		.filter((entry) => entry.isDirectory())
 		.map((entry) => join(extractDir, entry.name))
-		.find((entry) => existsSync(join(entry, "forge", "package.json")) || existsSync(join(entry, "packages", "coding-agent", "package.json")));
+		.find(
+			(entry) =>
+				existsSync(join(entry, "forge", "package.json")) ||
+				existsSync(join(entry, "packages", "coding-agent", "package.json")),
+		);
 	if (!sourceRoot) {
 		throw new Error(`Source archive did not contain a valid pi or pi-forge checkout: ${sourceArchiveUrl}`);
 	}
@@ -209,7 +223,9 @@ function listWorkspacePackageDirs(sourceRoot) {
 	} catch {
 		return [];
 	}
-	const patterns = Array.isArray(rootManifest.workspaces) ? rootManifest.workspaces : (rootManifest.workspaces?.packages ?? []);
+	const patterns = Array.isArray(rootManifest.workspaces)
+		? rootManifest.workspaces
+		: (rootManifest.workspaces?.packages ?? []);
 	const packageDirs = [];
 	for (const pattern of patterns) {
 		const wildcard = pattern.indexOf("*");
@@ -239,7 +255,9 @@ function resolveSourceRuntimePackageDirs(sourceRoot) {
 		workspaces.set(manifest.name, { packageDir, dependencies: Object.keys(manifest.dependencies ?? {}) });
 	}
 	if (!workspaces.has(PI_PACKAGE_NAME)) {
-		return SOURCE_RUNTIME_FALLBACK_PACKAGE_DIRS.filter((packageDir) => existsSync(join(sourceRoot, packageDir, "package.json")));
+		return SOURCE_RUNTIME_FALLBACK_PACKAGE_DIRS.filter((packageDir) =>
+			existsSync(join(sourceRoot, packageDir, "package.json")),
+		);
 	}
 	const packageDirs = [];
 	const visited = new Set();

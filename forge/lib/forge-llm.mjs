@@ -21,7 +21,13 @@
 
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { getForgeAgentDir, resolveConnectedServices, resolveTaskOrChat, resolveThinkOrChat, SLOT_CONTEXT_TOKENS } from "./connected-services.mjs";
+import {
+	getForgeAgentDir,
+	resolveConnectedServices,
+	resolveTaskOrChat,
+	resolveThinkOrChat,
+	SLOT_CONTEXT_TOKENS,
+} from "./connected-services.mjs";
 import { isTransientFailure } from "./run-state.mjs";
 import { capacityForUrl, explainUnreachable, healthWarnings, identityForUrl, readSnapshot } from "./stack-state.mjs";
 
@@ -114,7 +120,9 @@ export function estimatePromptTokens(messages) {
  * embeddings, searxng, and playwright URLs, which must not gain this suffix.
  */
 export function normalizeChatUrl(value) {
-	const url = String(value ?? "").trim().replace(/\/+$/, "");
+	const url = String(value ?? "")
+		.trim()
+		.replace(/\/+$/, "");
 	if (!url || url.endsWith("/chat/completions")) return url;
 	if (url.endsWith("/v1")) return `${url}/chat/completions`;
 	return url;
@@ -189,7 +197,9 @@ export function resolveTaskService(options = {}) {
 
 /** Strip a stray think block and any code fence, returning JSON text. */
 export function extractJsonContent(content) {
-	let text = String(content ?? "").replace(THINK_BLOCK, "").trim();
+	let text = String(content ?? "")
+		.replace(THINK_BLOCK, "")
+		.trim();
 	if (text.startsWith("```")) {
 		text = text.replace(/^```[a-zA-Z]*\s*/, "").replace(/\s*```$/, "");
 	}
@@ -437,7 +447,10 @@ export async function call(service, messages, options = {}) {
 	const started = Date.now();
 	let payload;
 	try {
-		payload = lease === null ? await postSimple(service.url, body, timeoutMs) : await postPreemptible(service.url, body, timeoutMs, lease, scheduling);
+		payload =
+			lease === null
+				? await postSimple(service.url, body, timeoutMs)
+				: await postPreemptible(service.url, body, timeoutMs, lease, scheduling);
 	} finally {
 		if (lease !== null) rmSync(lease, { force: true });
 	}
@@ -468,7 +481,8 @@ export async function call(service, messages, options = {}) {
 		generationMs: timings.predicted_ms ?? null,
 		elapsedMs: Date.now() - started,
 		finishReason: choices.length ? (choices[0].finish_reason ?? null) : null,
-		reasoned: Boolean(message.reasoning_content || message.reasoning) || (hidden !== null && hidden > HIDDEN_TOKEN_MARGIN),
+		reasoned:
+			Boolean(message.reasoning_content || message.reasoning) || (hidden !== null && hidden > HIDDEN_TOKEN_MARGIN),
 	};
 	Object.assign(record, (await stackConditions(service, env)) ?? {});
 	return { content, record };
@@ -557,7 +571,9 @@ export async function servedModels(service, timeoutMs = 5000) {
  * caller printing both would say the same thing twice.
  */
 export function doctorWarnings(report) {
-	return ["warning", "contextWarning", "slotWarning"].map((key) => report?.[key]).filter((value) => typeof value === "string" && value.trim());
+	return ["warning", "contextWarning", "slotWarning"]
+		.map((key) => report?.[key])
+		.filter((value) => typeof value === "string" && value.trim());
 }
 
 /**
@@ -594,14 +610,22 @@ function describeBackend(report, snapshot, service) {
 	}
 	const scheduling = service.scheduling ?? {};
 	const totalSlots = capacity.totalSlots;
-	if (scheduling.enabled && Number.isInteger(totalSlots) && Number.isInteger(scheduling.backgroundSlot) && scheduling.backgroundSlot >= totalSlots) {
+	if (
+		scheduling.enabled &&
+		Number.isInteger(totalSlots) &&
+		Number.isInteger(scheduling.backgroundSlot) &&
+		scheduling.backgroundSlot >= totalSlots
+	) {
 		report.slotWarning =
 			`background work pins slot ${scheduling.backgroundSlot} but the backend runs ${totalSlots} ` +
 			`slot${totalSlots === 1 ? "" : "s"}; every background call is naming a slot that does not exist`;
 	}
 }
 
-export async function serviceDoctor(service, { expectNonThinking = false, timeoutMs = 30_000, env = process.env } = {}) {
+export async function serviceDoctor(
+	service,
+	{ expectNonThinking = false, timeoutMs = 30_000, env = process.env } = {},
+) {
 	const report = {
 		service: service.name,
 		url: service.url,
@@ -631,7 +655,9 @@ export async function serviceDoctor(service, { expectNonThinking = false, timeou
 	let content;
 	let record;
 	try {
-		({ content, record } = await call(service, [{ role: "user", content: "Reply with the single word: ready" }], { timeoutMs }));
+		({ content, record } = await call(service, [{ role: "user", content: "Reply with the single word: ready" }], {
+			timeoutMs,
+		}));
 	} catch (error) {
 		report.detail = `${error.name}: ${error.message}`;
 		// The transport error says the call did not land. The stack says why,

@@ -288,7 +288,10 @@ function mediaWikiProvider({ id, label, base, site, topics, authority, kinds, st
 			if (!best) return null;
 			const title = String(best.title).replace(/ /g, "_");
 			try {
-				const summary = await providerJson(`${context.base}/api/rest_v1/page/summary/${encodeURIComponent(title)}`, context);
+				const summary = await providerJson(
+					`${context.base}/api/rest_v1/page/summary/${encodeURIComponent(title)}`,
+					context,
+				);
 				if (summary?.type === "disambiguation") return null;
 				return {
 					...best,
@@ -382,7 +385,19 @@ export const SEARCH_PROVIDERS = {
 		kind: "reference",
 		base: "https://plato.stanford.edu",
 		site: "plato.stanford.edu",
-		topics: ["philosophy", "ethics", "epistemology", "metaphysics", "phenomenology", "logic", "buddhism", "feminism", "gender-studies", "science-technology-studies", "politics"],
+		topics: [
+			"philosophy",
+			"ethics",
+			"epistemology",
+			"metaphysics",
+			"phenomenology",
+			"logic",
+			"buddhism",
+			"feminism",
+			"gender-studies",
+			"science-technology-studies",
+			"politics",
+		],
 		authority: 1,
 		capabilities: () => ({
 			...noAuth,
@@ -430,7 +445,11 @@ export const SEARCH_PROVIDERS = {
 		 */
 		async referenceCandidates(_subject, context) {
 			const entries = await sepIndexPairs(context);
-			return entries.map((entry) => ({ title: entry.title, url: `https://plato.stanford.edu/entries/${entry.slug}/`, snippet: null }));
+			return entries.map((entry) => ({
+				title: entry.title,
+				url: `https://plato.stanford.edu/entries/${entry.slug}/`,
+				snippet: null,
+			}));
 		},
 		async resolve(topic, context) {
 			const [best] = await this.search(topic, { ...context, limit: 1 });
@@ -460,11 +479,16 @@ export const SEARCH_PROVIDERS = {
 		async search(query, context) {
 			const rows = [];
 			for (const kind of ["thinker", "idea"]) {
-				const payload = await providerJson(`${context.base}/${kind}.json?q=${encodeURIComponent(query)}`, context).catch(() => null);
+				const payload = await providerJson(
+					`${context.base}/${kind}.json?q=${encodeURIComponent(query)}`,
+					context,
+				).catch(() => null);
 				for (const hit of payload?.responseData?.results ?? []) {
 					rows.push({
 						title: hit.label ?? hit.wiki ?? null,
-						url: hit.sep_dir ? `https://plato.stanford.edu/entries/${hit.sep_dir}/` : `${context.base}${hit.url ?? ""}`,
+						url: hit.sep_dir
+							? `https://plato.stanford.edu/entries/${hit.sep_dir}/`
+							: `${context.base}${hit.url ?? ""}`,
 						content: hit.sep_dir ? `SEP entry: ${hit.sep_dir}` : null,
 						engine: `inpho:${kind}`,
 					});
@@ -480,7 +504,16 @@ export const SEARCH_PROVIDERS = {
 		kind: "reference",
 		base: "https://iep.utm.edu",
 		site: "iep.utm.edu",
-		topics: ["philosophy", "ethics", "epistemology", "metaphysics", "phenomenology", "logic", "feminism", "gender-studies"],
+		topics: [
+			"philosophy",
+			"ethics",
+			"epistemology",
+			"metaphysics",
+			"phenomenology",
+			"logic",
+			"feminism",
+			"gender-studies",
+		],
 		authority: 2,
 		capabilities: () => ({
 			...noAuth,
@@ -566,7 +599,9 @@ export const SEARCH_PROVIDERS = {
 				const [best] = await this.search(topic, { ...context, limit: 1 });
 				return best ?? null;
 			}
-			const payload = await providerJson(`${context.base}/api/suttaplex/${encodeURIComponent(uid)}`, context).catch(() => null);
+			const payload = await providerJson(`${context.base}/api/suttaplex/${encodeURIComponent(uid)}`, context).catch(
+				() => null,
+			);
 			const entry = Array.isArray(payload) ? payload[0] : payload;
 			if (!entry?.uid) return null;
 			const retrievedAt = context.retrievedAt ?? new Date().toISOString();
@@ -638,7 +673,9 @@ export const SEARCH_PROVIDERS = {
 		}),
 		/** Lookup-only. A BDRC id (P1614, W1KG4884) resolves; a phrase does not. */
 		async resolve(topic, context) {
-			const id = String(topic).trim().match(/^(?:bdr:)?([PWGCTR]\w{2,})$/i)?.[1];
+			const id = String(topic)
+				.trim()
+				.match(/^(?:bdr:)?([PWGCTR]\w{2,})$/i)?.[1];
 			if (!id) return null;
 			const payload = await providerJson(`${context.base}/resource/${id}.jsonld`, context, {
 				headers: { accept: "application/ld+json" },
@@ -684,13 +721,14 @@ export const SEARCH_PROVIDERS = {
 				(payload?.docs ?? []).map((doc) => ({
 					title: doc.title,
 					url: `${context.base}${doc.key}`,
-					content: [
-						(doc.author_name ?? []).join(", "),
-						doc.first_publish_year ? `first published ${doc.first_publish_year}` : null,
-						doc.edition_count ? `${doc.edition_count} editions` : null,
-					]
-						.filter(Boolean)
-						.join(" · ") || null,
+					content:
+						[
+							(doc.author_name ?? []).join(", "),
+							doc.first_publish_year ? `first published ${doc.first_publish_year}` : null,
+							doc.edition_count ? `${doc.edition_count} editions` : null,
+						]
+							.filter(Boolean)
+							.join(" · ") || null,
 					publishedAt: doc.first_publish_year ? String(doc.first_publish_year) : null,
 					engine: "openlibrary",
 				})),
@@ -759,7 +797,10 @@ export const SEARCH_PROVIDERS = {
 				(payload?.response?.docs ?? []).map((doc) => ({
 					title: doc.title ?? doc.identifier,
 					url: `${context.base}/details/${doc.identifier}`,
-					content: [Array.isArray(doc.creator) ? doc.creator.join(", ") : doc.creator, doc.year].filter(Boolean).join(" · ") || null,
+					content:
+						[Array.isArray(doc.creator) ? doc.creator.join(", ") : doc.creator, doc.year]
+							.filter(Boolean)
+							.join(" · ") || null,
 					publishedAt: doc.year ? String(doc.year) : null,
 					engine: "internetarchive",
 				})),
@@ -822,7 +863,9 @@ export const SEARCH_PROVIDERS = {
 		async resolve(topic, context) {
 			const identifier = bookIdentifier(topic);
 			if (!identifier) return null;
-			const payload = await providerJson(`${context.base}/api/volumes/brief/json/${identifier}`, context).catch(() => null);
+			const payload = await providerJson(`${context.base}/api/volumes/brief/json/${identifier}`, context).catch(
+				() => null,
+			);
 			const entry = payload?.[identifier];
 			const record = entry?.records ? Object.values(entry.records)[0] : null;
 			if (!record) return null;
@@ -831,7 +874,9 @@ export const SEARCH_PROVIDERS = {
 				{
 					title: record.titles?.[0] ?? identifier,
 					url: record.recordURL ?? null,
-					content: [record.publishDates?.[0], `${entry.items?.length ?? 0} scanned items`].filter(Boolean).join(" · "),
+					content: [record.publishDates?.[0], `${entry.items?.length ?? 0} scanned items`]
+						.filter(Boolean)
+						.join(" · "),
 					engine: "hathitrust",
 				},
 				0,
@@ -913,7 +958,11 @@ export const SEARCH_PROVIDERS = {
 				(payload?.items ?? []).map((item) => ({
 					title: stripHtml(item.title),
 					url: item.link,
-					content: [item.is_answered ? "answered" : "unanswered", `score ${item.score}`, (item.tags ?? []).join(", ")]
+					content: [
+						item.is_answered ? "answered" : "unanswered",
+						`score ${item.score}`,
+						(item.tags ?? []).join(", "),
+					]
 						.filter(Boolean)
 						.join(" · "),
 					score: item.score ?? null,
@@ -1064,7 +1113,10 @@ export const SEARCH_PROVIDERS = {
 			optionalAuth: false,
 			rateLimit: "free non-commercial key by emailing contact@marginalia-search.com",
 			fields: ["url", "title", "description", "quality"],
-			strengths: ["an independent index, not a reseller of Google's", "finds small and old sites nothing else surfaces"],
+			strengths: [
+				"an independent index, not a reseller of Google's",
+				"finds small and old sites nothing else surfaces",
+			],
 			limits: ["small index", "poor for news and for anything commercial"],
 		}),
 		async search(query, context) {
@@ -1121,7 +1173,13 @@ export const SEARCH_PROVIDERS = {
 					.map((pod) => ({
 						title: pod.title,
 						url: permalink,
-						content: truncate((pod.subpods ?? []).map((subpod) => subpod.plaintext).filter(Boolean).join(" · ")) || null,
+						content:
+							truncate(
+								(pod.subpods ?? [])
+									.map((subpod) => subpod.plaintext)
+									.filter(Boolean)
+									.join(" · "),
+							) || null,
 						score: pod.primary === true ? 1 : null,
 						engine: "wolfram",
 					}))
@@ -1291,7 +1349,9 @@ let sepIndexCache = null;
  */
 async function sepIndexPairs(context) {
 	if (sepIndexCache) return sepIndexCache;
-	const html = await cachedIndex(`${context.base}/contents.html`, context, () => providerText(`${context.base}/contents.html`, context));
+	const html = await cachedIndex(`${context.base}/contents.html`, context, () =>
+		providerText(`${context.base}/contents.html`, context),
+	);
 	const entries = [];
 	for (const match of html.matchAll(/<a\s[^>]*href="entries\/([^"#?/]+)\/?"[^>]*>([\s\S]*?)<\/a>/gi)) {
 		const title = stripHtml(match[2]);
@@ -1329,12 +1389,28 @@ export function __setSepIndexForTesting(entries) {
 // Words too common to carry a topic. Dropping them is what lets "phenomenology
 // of perception" reach the "Phenomenology" entry: SEP titles are short and
 // topic-shaped, so a query phrased as prose will rarely match one whole.
-const STOPWORDS = new Set(["the", "a", "an", "of", "in", "on", "and", "or", "for", "to", "is", "are", "what", "who", "how", "does", "do"]);
+const STOPWORDS = new Set([
+	"the",
+	"a",
+	"an",
+	"of",
+	"in",
+	"on",
+	"and",
+	"or",
+	"for",
+	"to",
+	"is",
+	"are",
+	"what",
+	"who",
+	"how",
+	"does",
+	"do",
+]);
 
 function significantWords(text) {
-	return text
-		.split(/[^\p{L}\p{N}]+/u)
-		.filter((word) => word.length > 2 && !STOPWORDS.has(word));
+	return text.split(/[^\p{L}\p{N}]+/u).filter((word) => word.length > 2 && !STOPWORDS.has(word));
 }
 
 function titleMatchScore(title, needle) {

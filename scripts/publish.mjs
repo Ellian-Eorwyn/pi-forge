@@ -34,7 +34,11 @@ function run(command, args, options = {}) {
 
 	if (result.status !== 0) {
 		const output = [result.stdout, result.stderr].filter(Boolean).join("\n");
-		throw new Error(output ? `Command failed: ${command} ${args.join(" ")}\n${output}` : `Command failed: ${command} ${args.join(" ")}`);
+		throw new Error(
+			output
+				? `Command failed: ${command} ${args.join(" ")}\n${output}`
+				: `Command failed: ${command} ${args.join(" ")}`,
+		);
 	}
 
 	return result;
@@ -53,7 +57,9 @@ function assertBuildOutputExists(directory) {
 function validatePack(directory) {
 	const result = run("npm", ["pack", "--dry-run", "--ignore-scripts", "--json"], { capture: true, cwd: directory });
 	const packed = JSON.parse(result.stdout)[0];
-	console.log(`  ${packed.filename}: ${packed.files.length} files, ${packed.size} bytes packed, ${packed.unpackedSize} bytes unpacked`);
+	console.log(
+		`  ${packed.filename}: ${packed.files.length} files, ${packed.size} bytes packed, ${packed.unpackedSize} bytes unpacked`,
+	);
 }
 
 function isPublished(name, version) {

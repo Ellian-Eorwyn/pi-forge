@@ -25,7 +25,10 @@ function requireStringField(manifest, field, expected, manifestPath) {
 
 function pathIsInside(parent, candidate) {
 	const relativePath = relative(parent, candidate);
-	return relativePath === "" || (relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath));
+	return (
+		relativePath === "" ||
+		(relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath))
+	);
 }
 
 function validateOptionalPath(value, field, skillDirectory, manifestPath) {
@@ -120,7 +123,11 @@ function validateSkillManifest(skillName, skillDirectory) {
 	if (!isRecord(manifest.safety)) {
 		errors.push(`${repositoryPath(manifestPath)}: safety must be a JSON object`);
 	} else {
-		for (const field of ["destructive_by_default", "requires_review_for_filesystem_changes", "preserve_provenance_when_applicable"]) {
+		for (const field of [
+			"destructive_by_default",
+			"requires_review_for_filesystem_changes",
+			"preserve_provenance_when_applicable",
+		]) {
 			if (typeof manifest.safety[field] !== "boolean") {
 				errors.push(`${repositoryPath(manifestPath)}: safety.${field} must be a boolean`);
 			}

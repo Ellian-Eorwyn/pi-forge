@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -91,7 +91,14 @@ test("an install still on the pre-split chat default is migrated to the non-thin
 				enabled: true,
 				baseUrl: "http://llms:8008/v1/chat/completions",
 				model: "code",
-				scheduling: { enabled: true, interactiveSlot: 0, backgroundSlot: 3, idleGraceMs: 2000, yieldMs: 1000, backgroundOutputTokens: 4096 },
+				scheduling: {
+					enabled: true,
+					interactiveSlot: 0,
+					backgroundSlot: 3,
+					idleGraceMs: 2000,
+					yieldMs: 1000,
+					backgroundOutputTokens: 4096,
+				},
 			},
 		},
 	};
@@ -111,7 +118,14 @@ test("chat scheduling seeded off by an older install is turned on", () => {
 		connectedServices: {
 			chat: {
 				enabled: true,
-				scheduling: { enabled: false, interactiveSlot: 0, backgroundSlot: 1, idleGraceMs: 2000, yieldMs: 1000, backgroundOutputTokens: 4096 },
+				scheduling: {
+					enabled: false,
+					interactiveSlot: 0,
+					backgroundSlot: 1,
+					idleGraceMs: 2000,
+					yieldMs: 1000,
+					backgroundOutputTokens: 4096,
+				},
 			},
 		},
 	};
@@ -128,7 +142,14 @@ test("a deliberate chat scheduling opt-out survives configuration", () => {
 			chat: {
 				enabled: true,
 				// Byte-different from the old default, so it was chosen rather than seeded.
-				scheduling: { enabled: false, interactiveSlot: 0, backgroundSlot: 2, idleGraceMs: 2000, yieldMs: 1000, backgroundOutputTokens: 4096 },
+				scheduling: {
+					enabled: false,
+					interactiveSlot: 0,
+					backgroundSlot: 2,
+					idleGraceMs: 2000,
+					yieldMs: 1000,
+					backgroundOutputTokens: 4096,
+				},
 			},
 		},
 	};
@@ -336,12 +357,15 @@ test("a forgeVault pointing at a file is ignored rather than declared", () => {
 
 test("identity and vault blocks coexist without either swallowing the other", () => {
 	withVault((vault) => {
-		withAgentDirectory({ forgeUser: { name: "Ellie", pronouns: "they/them" }, forgeVault: vault }, (agentDirectory) => {
-			configure(agentDirectory);
-			const profile = installedProfile(agentDirectory);
-			assert.match(profile, /## Who You Are Working With/);
-			assert.match(profile, /## Your Vault/);
-			assert.ok(profile.indexOf("## Who You Are Working With") < profile.indexOf("## Your Vault"));
-		});
+		withAgentDirectory(
+			{ forgeUser: { name: "Ellie", pronouns: "they/them" }, forgeVault: vault },
+			(agentDirectory) => {
+				configure(agentDirectory);
+				const profile = installedProfile(agentDirectory);
+				assert.match(profile, /## Who You Are Working With/);
+				assert.match(profile, /## Your Vault/);
+				assert.ok(profile.indexOf("## Who You Are Working With") < profile.indexOf("## Your Vault"));
+			},
+		);
 	});
 });

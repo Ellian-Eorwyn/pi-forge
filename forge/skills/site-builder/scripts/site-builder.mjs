@@ -6,8 +6,8 @@ import {
 	existsSync,
 	lstatSync,
 	mkdirSync,
-	readFileSync,
 	readdirSync,
+	readFileSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
@@ -19,16 +19,7 @@ const ASSETS_DIR = join(SKILL_ROOT, "assets");
 const TEMPLATES_DIR = join(ASSETS_DIR, "templates");
 const THEMES_DIR = join(ASSETS_DIR, "themes");
 const PLACEHOLDER = "<!-- TODO: author this section -->";
-const THEMES = new Set([
-	"editorial",
-	"technical",
-	"archival",
-	"gallery",
-	"magazine",
-	"academic",
-	"brand",
-	"terminal",
-]);
+const THEMES = new Set(["editorial", "technical", "archival", "gallery", "magazine", "academic", "brand", "terminal"]);
 const HERO_STYLES = new Set(["gradient", "centered", "split", "image"]);
 const TEXT_EXTENSIONS = new Set([".md", ".markdown", ".txt", ".rst", ".html", ".htm"]);
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif"]);
@@ -80,11 +71,7 @@ function slugify(value) {
 }
 
 function escapeHtml(text) {
-	return String(text)
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;");
+	return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
 function escapeAttribute(text) {
@@ -309,7 +296,9 @@ function renderMarkdown(markdown) {
 				quoteLines.push(lines[index].replace(/^>\s?/, ""));
 				index += 1;
 			}
-			const callout = quoteLines[0] ? quoteLines[0].match(/^\[!(NOTE|TIP|WARNING|IMPORTANT|CAUTION)\]\s*(.*)$/i) : null;
+			const callout = quoteLines[0]
+				? quoteLines[0].match(/^\[!(NOTE|TIP|WARNING|IMPORTANT|CAUTION)\]\s*(.*)$/i)
+				: null;
 			if (callout) {
 				const type = callout[1].toLowerCase();
 				const label = callout[2].trim() || callout[1][0].toUpperCase() + callout[1].slice(1).toLowerCase();
@@ -573,8 +562,20 @@ function commandInit(positionals, flags) {
 	const title = flags.title ?? safeStem(basename(runDirectory));
 	const pages = [
 		{ slug: "index", title: "Home", description: `${title} — overview.`, tags: [], file: "content/index.md" },
-		{ slug: "overview", title: "Overview", description: "Overview of the material.", tags: [], file: "content/overview.md" },
-		{ slug: "resources", title: "Resources", description: "References and further reading.", tags: [], file: "content/resources.md" },
+		{
+			slug: "overview",
+			title: "Overview",
+			description: "Overview of the material.",
+			tags: [],
+			file: "content/overview.md",
+		},
+		{
+			slug: "resources",
+			title: "Resources",
+			description: "References and further reading.",
+			tags: [],
+			file: "content/resources.md",
+		},
 	];
 	writeJson(join(runDirectory, "site.json"), {
 		schemaVersion: 1,
@@ -748,9 +749,18 @@ function commandBuild(positionals) {
 	rmSync(siteDir, { recursive: true, force: true });
 	mkdirSync(siteDir, { recursive: true });
 
-	const pageTemplate = readFileSync(resolveAsset(runDirectory, "templates/page.html", join(TEMPLATES_DIR, "page.html")), "utf8");
-	const indexTemplate = readFileSync(resolveAsset(runDirectory, "templates/index.html", join(TEMPLATES_DIR, "index.html")), "utf8");
-	const notFoundTemplate = readFileSync(resolveAsset(runDirectory, "templates/404.html", join(TEMPLATES_DIR, "404.html")), "utf8");
+	const pageTemplate = readFileSync(
+		resolveAsset(runDirectory, "templates/page.html", join(TEMPLATES_DIR, "page.html")),
+		"utf8",
+	);
+	const indexTemplate = readFileSync(
+		resolveAsset(runDirectory, "templates/index.html", join(TEMPLATES_DIR, "index.html")),
+		"utf8",
+	);
+	const notFoundTemplate = readFileSync(
+		resolveAsset(runDirectory, "templates/404.html", join(TEMPLATES_DIR, "404.html")),
+		"utf8",
+	);
 	const heroHtml = buildHero(site);
 	const footer = escapeHtml(site.footer || "");
 	const siteTitle = escapeHtml(site.title || "Site");
@@ -800,7 +810,10 @@ function commandBuild(positionals) {
 	if (tagMap.size > 0) {
 		for (const [key, entry] of tagMap) {
 			const list = entry.pages
-				.map((page) => `<li><a href="${escapeAttribute(`${page.slug}.html`)}">${escapeHtml(page.title || page.slug)}</a></li>`)
+				.map(
+					(page) =>
+						`<li><a href="${escapeAttribute(`${page.slug}.html`)}">${escapeHtml(page.title || page.slug)}</a></li>`,
+				)
 				.join("\n");
 			const content = `<h1>Tag: ${escapeHtml(entry.label)}</h1>\n<ul>\n${list}\n</ul>\n<p><a href="tags.html">All tags</a></p>`;
 			writeFileSync(
@@ -820,7 +833,10 @@ function commandBuild(positionals) {
 		}
 		const tagsList = [...tagMap.entries()]
 			.sort((left, right) => left[1].label.localeCompare(right[1].label))
-			.map(([key, entry]) => `<li><a href="tag-${key}.html">${escapeHtml(entry.label)}</a> (${entry.pages.length})</li>`)
+			.map(
+				([key, entry]) =>
+					`<li><a href="tag-${key}.html">${escapeHtml(entry.label)}</a> (${entry.pages.length})</li>`,
+			)
 			.join("\n");
 		writeFileSync(
 			join(siteDir, "tags.html"),
@@ -842,10 +858,7 @@ function commandBuild(positionals) {
 	copyFileSync(join(ASSETS_DIR, "app.js"), join(siteDir, "app.js"));
 	copyFileSync(join(ASSETS_DIR, "search.js"), join(siteDir, "search.js"));
 	writeJson(join(siteDir, "search-index.json"), searchIndex);
-	writeFileSync(
-		join(siteDir, "404.html"),
-		fillTemplate(notFoundTemplate, { lang, siteTitle, footer }),
-	);
+	writeFileSync(join(siteDir, "404.html"), fillTemplate(notFoundTemplate, { lang, siteTitle, footer }));
 	writeFileSync(join(siteDir, "robots.txt"), "User-agent: *\nAllow: /\n");
 
 	const runAssets = join(runDirectory, "assets");
@@ -925,24 +938,28 @@ function commandValidate(positionals) {
 				break;
 			}
 		}
-		const article = html.split('<article')[1] || "";
+		const article = html.split("<article")[1] || "";
 		for (const imgMatch of article.matchAll(/<img\b[^>]*>/gi)) {
 			if (!/\balt\s*=/.test(imgMatch[0])) errors.push(`${page.slug}.html has an image without an alt attribute`);
 		}
 		for (const refMatch of html.matchAll(/(?:href|src)="([^"]+)"/gi)) {
 			const target = refMatch[1];
 			if (/^(?:https?:|mailto:|tel:|data:|#)/i.test(target)) {
-				if (/^https?:/i.test(target)) warnings.push(`${page.slug}.html links externally to ${target} (not verified)`);
+				if (/^https?:/i.test(target))
+					warnings.push(`${page.slug}.html links externally to ${target} (not verified)`);
 				continue;
 			}
 			const localPath = decodeURI(target.split("#")[0].split("?")[0]);
 			if (!localPath) continue;
-			if (!existsSync(join(siteDir, localPath))) errors.push(`${page.slug}.html references missing local file: ${target}`);
+			if (!existsSync(join(siteDir, localPath)))
+				errors.push(`${page.slug}.html references missing local file: ${target}`);
 		}
 	}
 
 	const dedupedWarnings = [...new Set(warnings)];
-	process.stdout.write(`${JSON.stringify({ valid: errors.length === 0, errors, warnings: dedupedWarnings }, null, 2)}\n`);
+	process.stdout.write(
+		`${JSON.stringify({ valid: errors.length === 0, errors, warnings: dedupedWarnings }, null, 2)}\n`,
+	);
 	if (errors.length > 0) process.exit(1);
 }
 
@@ -1041,7 +1058,7 @@ function commandEject(positionals, flags) {
 		}
 	}
 	process.stdout.write(
-		`${JSON.stringify({ runDirectory, theme, copied, note: "Edit these files freely; build prefers run-local overrides. Set theme to \"custom\" for a fully bespoke look." }, null, 2)}\n`,
+		`${JSON.stringify({ runDirectory, theme, copied, note: 'Edit these files freely; build prefers run-local overrides. Set theme to "custom" for a fully bespoke look.' }, null, 2)}\n`,
 	);
 }
 

@@ -2,7 +2,14 @@
 
 import { resolve } from "node:path";
 import { okResult, optionalInteger, requiredString, runTool } from "../../../lib/tool_contract.mjs";
-import { assertDownloaded, assertRendered, collectionArtifacts, collectionWarnings, readCollectionManifest, runCollection } from "./web_tool_common.mjs";
+import {
+	assertDownloaded,
+	assertRendered,
+	collectionArtifacts,
+	collectionWarnings,
+	readCollectionManifest,
+	runCollection,
+} from "./web_tool_common.mjs";
 
 await runTool(async (input) => {
 	const url = requiredString(input, "url");

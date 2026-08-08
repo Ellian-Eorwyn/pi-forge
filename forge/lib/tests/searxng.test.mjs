@@ -101,7 +101,10 @@ test("a throttled instance raises transiently instead of reporting no sources", 
 
 test("results alongside unresponsive engines are still results", async () => {
 	const server = await startSearxng((_request, response) => {
-		json(response, { results: [{ title: "Alpha", url: "https://a.example/1" }], unresponsive_engines: [["bing", "timeout"]] });
+		json(response, {
+			results: [{ title: "Alpha", url: "https://a.example/1" }],
+			unresponsive_engines: [["bing", "timeout"]],
+		});
 	});
 	try {
 		// A partial outage is not a throttle. One engine failing while others

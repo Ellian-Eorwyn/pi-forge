@@ -13,14 +13,14 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { resolveConnectedServices } from "../../../lib/connected-services.mjs";
 import {
+	assertFetchableUrl,
 	DEFAULT_BREAKER_THRESHOLD as CIRCUIT_BREAKER_THRESHOLD,
 	HostLimiter,
-	assertFetchableUrl,
 	isRefusalStatus,
 	parseRetryAfterMs,
 	readCappedBody,
 } from "../../../lib/http-fetch.mjs";
-import { ToolInputError, okResult, optionalInteger, requiredString, runTool } from "../../../lib/tool_contract.mjs";
+import { okResult, optionalInteger, requiredString, runTool, ToolInputError } from "../../../lib/tool_contract.mjs";
 
 const UNPAYWALL_BASE = "https://api.unpaywall.org/v2";
 const DOI_RESOLVER = "https://doi.org";
@@ -224,17 +224,33 @@ async function acquireViaBrowser(_record, candidates, options, attempts) {
 						timeout: options.browserNavigationTimeoutMs,
 					});
 				} catch (error) {
-					attempts.push({ url: candidate.url, source: `browser:${candidate.source}`, outcome: "error", detail: error.message.slice(0, 160) });
+					attempts.push({
+						url: candidate.url,
+						source: `browser:${candidate.source}`,
+						outcome: "error",
+						detail: error.message.slice(0, 160),
+					});
 					continue;
 				}
 				if (!response) {
-					attempts.push({ url: candidate.url, source: `browser:${candidate.source}`, outcome: "error", detail: "no response" });
+					attempts.push({
+						url: candidate.url,
+						source: `browser:${candidate.source}`,
+						outcome: "error",
+						detail: "no response",
+					});
 					continue;
 				}
 
 				const status = response.status();
 				const contentType = response.headers()["content-type"] ?? "";
-				const base = { url: candidate.url, source: `browser:${candidate.source}`, finalUrl: page.url(), status, contentType };
+				const base = {
+					url: candidate.url,
+					source: `browser:${candidate.source}`,
+					finalUrl: page.url(),
+					status,
+					contentType,
+				};
 
 				// The navigation itself may have delivered the PDF.
 				let body = null;
@@ -265,7 +281,8 @@ async function acquireViaBrowser(_record, candidates, options, attempts) {
 						}
 						for (const anchor of document.querySelectorAll("a[href]")) {
 							const href = anchor.href || "";
-							if (/\.pdf($|[?#])|pdfdirect|\/content\/pdf\/|\/bitstream\/|\/pdf\/?$/i.test(href)) found.push(href);
+							if (/\.pdf($|[?#])|pdfdirect|\/content\/pdf\/|\/bitstream\/|\/pdf\/?$/i.test(href))
+								found.push(href);
 						}
 						return found.slice(0, 8);
 					})
@@ -279,21 +296,45 @@ async function acquireViaBrowser(_record, candidates, options, attempts) {
 					await limiter.wait(linkHost, options.hostDelayMs);
 					let fetched;
 					try {
-						fetched = await context.request.get(link, { timeout: options.browserNavigationTimeoutMs, maxRedirects: 5 });
+						fetched = await context.request.get(link, {
+							timeout: options.browserNavigationTimeoutMs,
+							maxRedirects: 5,
+						});
 					} catch (error) {
-						attempts.push({ url: link, source: "browser:in-page-request", outcome: "error", detail: error.message.slice(0, 160) });
+						attempts.push({
+							url: link,
+							source: "browser:in-page-request",
+							outcome: "error",
+							detail: error.message.slice(0, 160),
+						});
 						continue;
 					}
 					const buffer = Buffer.from(await fetched.body());
 					if (buffer.length > options.maxBytes) {
-						attempts.push({ url: link, source: "browser:in-page-request", outcome: "too-large", status: fetched.status() });
+						attempts.push({
+							url: link,
+							source: "browser:in-page-request",
+							outcome: "too-large",
+							status: fetched.status(),
+						});
 						continue;
 					}
 					if (isPdf(buffer)) {
-						attempts.push({ url: link, source: "browser:in-page-request", outcome: "pdf", status: fetched.status(), bytes: buffer.length });
+						attempts.push({
+							url: link,
+							source: "browser:in-page-request",
+							outcome: "pdf",
+							status: fetched.status(),
+							bytes: buffer.length,
+						});
 						return { outcome: "pdf", buffer, finalUrl: link, via: candidate.url };
 					}
-					attempts.push({ url: link, source: "browser:in-page-request", outcome: "not-pdf", status: fetched.status() });
+					attempts.push({
+						url: link,
+						source: "browser:in-page-request",
+						outcome: "not-pdf",
+						status: fetched.status(),
+					});
 				}
 			} finally {
 				await page.close().catch(() => {});
@@ -331,7 +372,13 @@ async function resolveOpenAccess(doi, options) {
 		for (const location of body.oa_locations ?? []) {
 			if (location !== body.best_oa_location) push(location);
 		}
-		return { found: true, oaStatus: body.oa_status ?? null, isOa: Boolean(body.is_oa), locations, title: body.title ?? null };
+		return {
+			found: true,
+			oaStatus: body.oa_status ?? null,
+			isOa: Boolean(body.is_oa),
+			locations,
+			title: body.title ?? null,
+		};
 	} finally {
 		clearTimeout(timer);
 	}
@@ -434,7 +481,9 @@ async function acquireOne(record, options) {
 	// the operator's institutional access. Refusing here rather than in prose
 	// keeps a licensed resource from being requested by an unrelated address.
 	if (institutional && options.browser) {
-		warnings.push("Browser-assisted fetching is not available for institutional records; a remote browser cannot carry institutional access.");
+		warnings.push(
+			"Browser-assisted fetching is not available for institutional records; a remote browser cannot carry institutional access.",
+		);
 	}
 
 	// Institutional records are only reachable when the operator's own machine is
@@ -504,7 +553,11 @@ async function acquireOne(record, options) {
 	for (const landing of landingPages.slice(0, 2)) {
 		const discovered = discoverPdfLinks(landing.html, landing.finalUrl);
 		for (const link of discovered.slice(0, options.maxDiscoveredLinks)) {
-			const result = await attemptDirect({ url: link.url, source: `landing:${link.source}` }, fetchOptions, attempts);
+			const result = await attemptDirect(
+				{ url: link.url, source: `landing:${link.source}` },
+				fetchOptions,
+				attempts,
+			);
 			if (result.outcome === "pdf") {
 				return {
 					id: record.id,
@@ -622,7 +675,9 @@ await runTool(async (input) => {
 
 	const trippedHosts = [...limiter.hosts.entries()].filter(([, state]) => state.tripped).map(([host]) => host);
 	return okResult({
-		warnings: trippedHosts.map((host) => `Stopped requesting ${host} after ${CIRCUIT_BREAKER_THRESHOLD} consecutive refusals.`),
+		warnings: trippedHosts.map(
+			(host) => `Stopped requesting ${host} after ${CIRCUIT_BREAKER_THRESHOLD} consecutive refusals.`,
+		),
 		data: {
 			results,
 			hosts: [...limiter.hosts.entries()].map(([host, state]) => ({

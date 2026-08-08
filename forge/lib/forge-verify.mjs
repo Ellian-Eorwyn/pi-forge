@@ -20,7 +20,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { callJson, ChatError, PreemptedError } from "./forge-llm.mjs";
+import { ChatError, callJson, PreemptedError } from "./forge-llm.mjs";
 import { appendJsonlFsync, readJsonlRecoverTail } from "./run-state.mjs";
 
 export const DEFAULT_PACKET_SIZE = 20;
@@ -102,16 +102,20 @@ function parseVerdicts(value, expectedIds) {
 		if (!entry || typeof entry !== "object") throw new VerificationError("every verdict must be an object");
 		const identifier = entry.id;
 		const verdict = entry.verdict;
-		if (!expected.has(identifier)) throw new VerificationError(`verdict for unknown id ${JSON.stringify(identifier)}`);
+		if (!expected.has(identifier))
+			throw new VerificationError(`verdict for unknown id ${JSON.stringify(identifier)}`);
 		if (verdict !== VERDICT_OK && verdict !== VERDICT_FLAG) {
-			throw new VerificationError(`verdict for ${JSON.stringify(identifier)} must be "${VERDICT_OK}" or "${VERDICT_FLAG}"`);
+			throw new VerificationError(
+				`verdict for ${JSON.stringify(identifier)} must be "${VERDICT_OK}" or "${VERDICT_FLAG}"`,
+			);
 		}
 		seen[identifier] = { verdict, reason: String(entry.reason ?? "").trim() };
 	}
 	const missing = expectedIds.filter((identifier) => !(identifier in seen));
 	if (missing.length) throw new VerificationError(`missing verdicts for: ${missing.slice(0, 5).join(", ")}`);
 	for (const [identifier, entry] of Object.entries(seen)) {
-		if (entry.verdict === VERDICT_FLAG && !entry.reason) throw new VerificationError(`flagged ${JSON.stringify(identifier)} without a reason`);
+		if (entry.verdict === VERDICT_FLAG && !entry.reason)
+			throw new VerificationError(`flagged ${JSON.stringify(identifier)} without a reason`);
 	}
 	return seen;
 }
@@ -119,7 +123,12 @@ function parseVerdicts(value, expectedIds) {
 /** One packet, with a single corrective retry that shows the model its own contract violation. */
 async function verifyOne(service, messages, expected, background, timeoutMs) {
 	try {
-		const { value } = await callJson(service, messages, { background, timeoutMs, task: "verify", responseFormat: { type: "json_object" } });
+		const { value } = await callJson(service, messages, {
+			background,
+			timeoutMs,
+			task: "verify",
+			responseFormat: { type: "json_object" },
+		});
 		return parseVerdicts(value, expected);
 	} catch (error) {
 		if (error instanceof PreemptedError) throw error;
@@ -131,7 +140,12 @@ async function verifyOne(service, messages, expected, background, timeoutMs) {
 				content: `That response was unusable: ${error.message}. Return corrected JSON only, with exactly one verdict for each of these ids: ${JSON.stringify(expected)}`,
 			},
 		];
-		const { value } = await callJson(service, repair, { background, timeoutMs, task: "verify-repair", responseFormat: { type: "json_object" } });
+		const { value } = await callJson(service, repair, {
+			background,
+			timeoutMs,
+			task: "verify-repair",
+			responseFormat: { type: "json_object" },
+		});
 		return parseVerdicts(value, expected);
 	}
 }
@@ -172,7 +186,8 @@ export async function verifyPackets(service, systemPrompt, items, options = {}) 
 		}
 		for (const identifier of expected) {
 			verdicts[identifier] = parsed[identifier];
-			if (journalPath) appendJsonlFsync(journalPath, { at: new Date().toISOString(), id: identifier, ...parsed[identifier] });
+			if (journalPath)
+				appendJsonlFsync(journalPath, { at: new Date().toISOString(), id: identifier, ...parsed[identifier] });
 		}
 		if (progress) {
 			const flagged = expected.filter((identifier) => parsed[identifier].verdict === VERDICT_FLAG).length;
@@ -222,7 +237,9 @@ export async function escalate(flagged, redo, { journalPath = null, progress = n
 		}
 		if (journalPath) appendJsonlFsync(journalPath, record);
 		if (progress) {
-			progress(`[escalate ${index + 1}/${pending.length}] ${identifier}: ${results[identifier].ok ? "redone" : "needs review"}`);
+			progress(
+				`[escalate ${index + 1}/${pending.length}] ${identifier}: ${results[identifier].ok ? "redone" : "needs review"}`,
+			);
 		}
 	}
 	return results;

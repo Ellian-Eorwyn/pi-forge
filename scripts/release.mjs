@@ -19,7 +19,7 @@
  */
 
 import { execSync } from "child_process";
-import { readFileSync, writeFileSync, readdirSync, existsSync } from "fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 
 const RELEASE_TARGET = process.argv[2];
@@ -69,7 +69,14 @@ function shellQuote(value) {
 
 function stageChangedFiles() {
 	const output = run("git ls-files -m -o -d --exclude-standard", { silent: true });
-	const paths = [...new Set((output || "").split("\n").map((line) => line.trim()).filter(Boolean))];
+	const paths = [
+		...new Set(
+			(output || "")
+				.split("\n")
+				.map((line) => line.trim())
+				.filter(Boolean),
+		),
+	];
 	if (paths.length === 0) {
 		return;
 	}
@@ -92,7 +99,9 @@ function bumpOrSetVersion(target) {
 	}
 
 	console.log(`Setting explicit version (${target})...`);
-	run(`npm version ${target} -ws --no-git-tag-version && node scripts/sync-versions.js && npm install --package-lock-only --ignore-scripts`);
+	run(
+		`npm version ${target} -ws --no-git-tag-version && node scripts/sync-versions.js && npm install --package-lock-only --ignore-scripts`,
+	);
 	return getVersion();
 }
 
@@ -118,10 +127,7 @@ function updateChangelogsForRelease(version) {
 			continue;
 		}
 
-		const updated = content.replace(
-			"## [Unreleased]",
-			`## [${version}] - ${date}`
-		);
+		const updated = content.replace("## [Unreleased]", `## [${version}] - ${date}`);
 		writeFileSync(changelog, updated);
 		console.log(`  Updated ${changelog}`);
 	}
@@ -135,10 +141,7 @@ function addUnreleasedSection() {
 		const content = readFileSync(changelog, "utf-8");
 
 		// Insert after "# Changelog\n\n"
-		const updated = content.replace(
-			/^(# Changelog\n\n)/,
-			`$1${unreleasedSection}`
-		);
+		const updated = content.replace(/^(# Changelog\n\n)/, `$1${unreleasedSection}`);
 		writeFileSync(changelog, updated);
 		console.log(`  Added [Unreleased] to ${changelog}`);
 	}

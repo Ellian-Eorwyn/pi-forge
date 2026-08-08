@@ -5,7 +5,7 @@
 // Only the block between the markers below is generated; the surrounding
 // orientation prose stays hand-written.
 
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -96,7 +96,9 @@ const missing = skillNames.filter((name) => !capabilities.has(name));
 const extra = [...capabilities.keys()].filter((name) => !skillNames.includes(name));
 if (missing.length > 0 || extra.length > 0) {
 	for (const name of missing) {
-		console.error(`${repositoryPath(capabilitiesPath)}: missing an entry for \`${name}\` (forge/skills/${name}/ exists)`);
+		console.error(
+			`${repositoryPath(capabilitiesPath)}: missing an entry for \`${name}\` (forge/skills/${name}/ exists)`,
+		);
 	}
 	for (const name of extra) {
 		console.error(`${repositoryPath(capabilitiesPath)}: lists \`${name}\`, but forge/skills/${name}/ does not exist`);

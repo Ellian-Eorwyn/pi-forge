@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 // `stack-state.mjs` is the counterpart of `stack_state.py` and the two must
 // agree: `configure-pi-forge` writes settings from this one while the eval suite
@@ -44,7 +44,8 @@ async function withStub({ payload = SNAPSHOT, status = 200, body = null }, run) 
 		}
 		res.setHeader("Content-Type", "application/json");
 		if (body !== null) return res.end(body);
-		if (req.url.endsWith("/health")) return res.end(JSON.stringify({ ok: true, api_version: payload.api_version ?? "1.0" }));
+		if (req.url.endsWith("/health"))
+			return res.end(JSON.stringify({ ok: true, api_version: payload.api_version ?? "1.0" }));
 		res.end(JSON.stringify(payload));
 	});
 	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -169,7 +170,9 @@ test("a live proxy with no live backend says so", () => {
 		mutated((snapshot) => {
 			for (const row of snapshot.services) {
 				if (row.name === "chat-proxy") {
-					row.upstreams = [{ any_of: ["chat-backend-dense"], ok: false, states: { "chat-backend-dense": "stopped" } }];
+					row.upstreams = [
+						{ any_of: ["chat-backend-dense"], ok: false, states: { "chat-backend-dense": "stopped" } },
+					];
 				}
 			}
 		}),
@@ -303,12 +306,21 @@ test("the skip switch disables every read", async () => {
 
 test("configuration precedence matches the python module", () => {
 	assert.equal(resolveStackState({ env: { FORGE_STACK_STATE_URL: "" } }).enabled, false);
-	assert.equal(resolveStackState({ env: {}, settings: { stackState: { baseUrl: "http://box:9000/" } } }).baseUrl, "http://box:9000");
 	assert.equal(
-		resolveStackState({ env: { FORGE_STACK_STATE_URL: "http://env:1" }, settings: { stackState: { baseUrl: "http://settings:2" } } }).baseUrl,
+		resolveStackState({ env: {}, settings: { stackState: { baseUrl: "http://box:9000/" } } }).baseUrl,
+		"http://box:9000",
+	);
+	assert.equal(
+		resolveStackState({
+			env: { FORGE_STACK_STATE_URL: "http://env:1" },
+			settings: { stackState: { baseUrl: "http://settings:2" } },
+		}).baseUrl,
 		"http://env:1",
 	);
 	assert.equal(resolveStackState({ env: {}, settings: { stackState: { enabled: false } } }).enabled, false);
-	assert.equal(resolveStackState({ env: {}, settings: { apiKeys: { "stack-state": "from-settings" } } }).token, "from-settings");
+	assert.equal(
+		resolveStackState({ env: {}, settings: { apiKeys: { "stack-state": "from-settings" } } }).token,
+		"from-settings",
+	);
 	assert.equal(resolveStackState({ env: {} }).baseUrl, "http://llms:8078");
 });

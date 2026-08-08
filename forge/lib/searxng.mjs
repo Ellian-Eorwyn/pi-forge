@@ -42,7 +42,8 @@ export function searxngSearchParams(query, params = {}) {
 	if (params.categories) search.set("categories", params.categories);
 	if (params.engines) search.set("engines", params.engines);
 	if (params.language) search.set("language", params.language);
-	if (params.safesearch !== undefined && params.safesearch !== null) search.set("safesearch", String(params.safesearch));
+	if (params.safesearch !== undefined && params.safesearch !== null)
+		search.set("safesearch", String(params.safesearch));
 	if (params.timeRange) search.set("time_range", params.timeRange);
 	if (params.pageNo) search.set("pageno", String(params.pageNo));
 	return search;

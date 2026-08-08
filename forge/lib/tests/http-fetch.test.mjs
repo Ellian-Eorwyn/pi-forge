@@ -52,14 +52,25 @@ test("assertFetchableUrl refuses non-http schemes and unparseable URLs", () => {
 });
 
 test("assertFetchableUrl blocks loopback, metadata and private ranges by default", () => {
-	for (const host of ["localhost", "127.0.0.1", "169.254.169.254", "metadata.google.internal", "10.0.0.5", "192.168.1.9", "172.20.0.1"]) {
+	for (const host of [
+		"localhost",
+		"127.0.0.1",
+		"169.254.169.254",
+		"metadata.google.internal",
+		"10.0.0.5",
+		"192.168.1.9",
+		"172.20.0.1",
+	]) {
 		assert.throws(() => assertFetchableUrl(`http://${host}/x`), /refused loopback, private, or metadata host/, host);
 	}
 });
 
 test("web-research rules keep RFC1918 reachable and preserve the asserted message", () => {
 	// Three tests in forge-skills.test.mjs match this exact string.
-	assert.throws(() => assertFetchableUrl("http://127.0.0.1/x", WEB_RESEARCH_HOST_RULES), /refused loopback or metadata host/);
+	assert.throws(
+		() => assertFetchableUrl("http://127.0.0.1/x", WEB_RESEARCH_HOST_RULES),
+		/refused loopback or metadata host/,
+	);
 	// The LLM stack and SearXNG live on the LAN; this policy must not refuse them.
 	assert.equal(assertFetchableUrl("http://10.0.0.5/x", WEB_RESEARCH_HOST_RULES).hostname, "10.0.0.5");
 	assert.equal(assertFetchableUrl("http://llms/searxng", WEB_RESEARCH_HOST_RULES).hostname, "llms");
@@ -204,11 +215,21 @@ test("a 429 defers the host but never trips the breaker", async () => {
 	const limiter = new HostLimiter({ breakerThreshold: 3 });
 	try {
 		for (let attempt = 0; attempt < 3; attempt += 1) {
-			const response = await httpRequest(`${server.origin}/x`, { hostRules: allowLoopback, limiter, attempts: 1, backoffMs: 1 });
+			const response = await httpRequest(`${server.origin}/x`, {
+				hostRules: allowLoopback,
+				limiter,
+				attempts: 1,
+				backoffMs: 1,
+			});
 			assert.equal(response.status, 429);
 		}
 		assert.equal(limiter.isTripped("127.0.0.1"), false, "a rate limit must not disable the provider");
-		const after = await httpRequest(`${server.origin}/x`, { hostRules: allowLoopback, limiter, attempts: 1, backoffMs: 1 });
+		const after = await httpRequest(`${server.origin}/x`, {
+			hostRules: allowLoopback,
+			limiter,
+			attempts: 1,
+			backoffMs: 1,
+		});
 		assert.equal(after.status, 429);
 	} finally {
 		await server.close();

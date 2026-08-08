@@ -87,7 +87,11 @@ const MISS = Symbol("stack-state-miss");
 const snapshotCache = new Map();
 
 function isTruthy(value) {
-	return ["1", "true", "yes", "on"].includes(String(value ?? "").trim().toLowerCase());
+	return ["1", "true", "yes", "on"].includes(
+		String(value ?? "")
+			.trim()
+			.toLowerCase(),
+	);
 }
 
 /**
@@ -99,14 +103,21 @@ function isTruthy(value) {
 export function resolveStackState({ env = process.env, settings } = {}) {
 	if (isTruthy(env.PI_FORGE_SKIP_STACK_DISCOVERY)) return { enabled: false, baseUrl: "", token: null };
 
-	const persisted = settings?.stackState && typeof settings.stackState === "object" && !Array.isArray(settings.stackState) ? settings.stackState : {};
+	const persisted =
+		settings?.stackState && typeof settings.stackState === "object" && !Array.isArray(settings.stackState)
+			? settings.stackState
+			: {};
 	let baseUrl;
 	if (Object.hasOwn(env, "FORGE_STACK_STATE_URL")) {
 		// An env var set to the empty string turns the integration off for this
 		// process, the same way FORGE_SEARXNG_URL="" disables search.
-		baseUrl = String(env.FORGE_STACK_STATE_URL ?? "").trim().replace(/\/+$/, "");
+		baseUrl = String(env.FORGE_STACK_STATE_URL ?? "")
+			.trim()
+			.replace(/\/+$/, "");
 	} else {
-		baseUrl = (typeof persisted.baseUrl === "string" ? persisted.baseUrl : "").trim().replace(/\/+$/, "") || DEFAULT_STACK_STATE_URL;
+		baseUrl =
+			(typeof persisted.baseUrl === "string" ? persisted.baseUrl : "").trim().replace(/\/+$/, "") ||
+			DEFAULT_STACK_STATE_URL;
 	}
 
 	let token = String(env.FORGE_STACK_STATE_TOKEN ?? "").trim() || null;
@@ -160,7 +171,12 @@ export async function stackHealth({ env = process.env, settings, timeoutMs = DEF
  * branch: a doctor pass over three services against a stack that is down should
  * wait one timeout, not three.
  */
-export async function readSnapshot({ env = process.env, settings, timeoutMs = DEFAULT_TIMEOUT_MS, refresh = false } = {}) {
+export async function readSnapshot({
+	env = process.env,
+	settings,
+	timeoutMs = DEFAULT_TIMEOUT_MS,
+	refresh = false,
+} = {}) {
 	const resolved = resolveStackState({ env, settings });
 	if (!resolved.enabled) return null;
 	const now = Date.now();
@@ -225,7 +241,9 @@ function servicesByName(snapshot) {
 function serviceForPort(snapshot, port) {
 	if (port === null) return null;
 	const services = Array.isArray(snapshot?.services) ? snapshot.services : [];
-	return services.find((row) => row?.probe && typeof row.probe === "object" && portOf(row.probe.target) === port) ?? null;
+	return (
+		services.find((row) => row?.probe && typeof row.probe === "object" && portOf(row.probe.target) === port) ?? null
+	);
 }
 
 /**
@@ -304,7 +322,9 @@ export function identityForUrl(snapshot, url) {
 		backendName: located.backend.name,
 		unit: located.backend.unit,
 	};
-	const kept = Object.fromEntries(Object.entries(identity).filter(([, value]) => value !== null && value !== undefined && value !== ""));
+	const kept = Object.fromEntries(
+		Object.entries(identity).filter(([, value]) => value !== null && value !== undefined && value !== ""),
+	);
 	return Object.keys(kept).length ? kept : null;
 }
 

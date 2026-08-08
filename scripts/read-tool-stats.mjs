@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
-import { createReadStream } from "node:fs";
-import { promises as fs } from "node:fs";
+import { createReadStream, promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
@@ -182,8 +181,10 @@ function extractTextContent(content) {
 
 function classifyRead(args) {
 	const normalizedArgs = args && typeof args === "object" ? args : {};
-	const hasOffset = Object.hasOwn(normalizedArgs, "offset") && normalizedArgs.offset !== undefined && normalizedArgs.offset !== null;
-	const hasLimit = Object.hasOwn(normalizedArgs, "limit") && normalizedArgs.limit !== undefined && normalizedArgs.limit !== null;
+	const hasOffset =
+		Object.hasOwn(normalizedArgs, "offset") && normalizedArgs.offset !== undefined && normalizedArgs.offset !== null;
+	const hasLimit =
+		Object.hasOwn(normalizedArgs, "limit") && normalizedArgs.limit !== undefined && normalizedArgs.limit !== null;
 	return {
 		path: typeof normalizedArgs.path === "string" ? normalizedArgs.path : "",
 		offset: hasOffset ? normalizedArgs.offset : null,
@@ -193,7 +194,9 @@ function classifyRead(args) {
 }
 
 function summarizeTimeBuckets(records, bucket) {
-	return summarizeGroups(records, (record) => getTimeBucket(record.timestampMs, bucket)).sort((a, b) => a.key.localeCompare(b.key));
+	return summarizeGroups(records, (record) => getTimeBucket(record.timestampMs, bucket)).sort((a, b) =>
+		a.key.localeCompare(b.key),
+	);
 }
 
 function summarizeNormalizedTimeBuckets(records, bucket) {
@@ -218,7 +221,12 @@ function summarizeNormalizedTimeBucketsByKey(records, keyFn) {
 			const sessions = [...sessionGroups.values()].map((sessionRecords) => {
 				const full = sessionRecords.filter((record) => record.mode === "full").length;
 				const partial = sessionRecords.length - full;
-				return { reads: sessionRecords.length, full, partial, partialRate: sessionRecords.length === 0 ? null : partial / sessionRecords.length };
+				return {
+					reads: sessionRecords.length,
+					full,
+					partial,
+					partialRate: sessionRecords.length === 0 ? null : partial / sessionRecords.length,
+				};
 			});
 			const reads = bucketRecords.length;
 			const full = bucketRecords.filter((record) => record.mode === "full").length;
@@ -251,8 +259,17 @@ function summarizeGroups(records, keyFn) {
 		.map(([key, group]) => {
 			const full = group.filter((record) => record.mode === "full").length;
 			const partial = group.length - full;
-			const assistantMessages = new Set(group.map((record) => `${record.sessionFile}::${record.assistantEntryId}`)).size;
-			return { key, reads: group.length, assistantMessages, full, partial, fullRate: group.length === 0 ? null : full / group.length, partialRate: group.length === 0 ? null : partial / group.length };
+			const assistantMessages = new Set(group.map((record) => `${record.sessionFile}::${record.assistantEntryId}`))
+				.size;
+			return {
+				key,
+				reads: group.length,
+				assistantMessages,
+				full,
+				partial,
+				fullRate: group.length === 0 ? null : full / group.length,
+				partialRate: group.length === 0 ? null : partial / group.length,
+			};
 		})
 		.sort((a, b) => b.reads - a.reads || a.key.localeCompare(b.key));
 }
@@ -263,26 +280,30 @@ function buildSummary(records, meta, options) {
 	const providerStats = summarizeGroups(records, (record) => record.providerModel);
 	const timeStats = summarizeTimeBuckets(records, options.bucket);
 	const normalizedTimeStats = summarizeNormalizedTimeBuckets(records, options.bucket);
-	const timeOfDayStats = summarizeGroups(records, (record) => getHourOfDayBucket(record.timestampMs)).sort((a, b) => a.key.localeCompare(b.key));
-	const normalizedTimeOfDayStats = summarizeNormalizedTimeBucketsByKey(records, (record) => getHourOfDayBucket(record.timestampMs));
+	const timeOfDayStats = summarizeGroups(records, (record) => getHourOfDayBucket(record.timestampMs)).sort((a, b) =>
+		a.key.localeCompare(b.key),
+	);
+	const normalizedTimeOfDayStats = summarizeNormalizedTimeBucketsByKey(records, (record) =>
+		getHourOfDayBucket(record.timestampMs),
+	);
 	const timeStatsByProvider = providerStats.map((provider) => ({
 		providerModel: provider.key,
 		...provider,
 		timeStats: summarizeTimeBuckets(
 			records.filter((record) => record.providerModel === provider.key),
-			options.bucket
+			options.bucket,
 		),
 		normalizedTimeStats: summarizeNormalizedTimeBuckets(
 			records.filter((record) => record.providerModel === provider.key),
-			options.bucket
+			options.bucket,
 		),
 		timeOfDayStats: summarizeGroups(
 			records.filter((record) => record.providerModel === provider.key),
-			(record) => getHourOfDayBucket(record.timestampMs)
+			(record) => getHourOfDayBucket(record.timestampMs),
 		).sort((a, b) => a.key.localeCompare(b.key)),
 		normalizedTimeOfDayStats: summarizeNormalizedTimeBucketsByKey(
 			records.filter((record) => record.providerModel === provider.key),
-			(record) => getHourOfDayBucket(record.timestampMs)
+			(record) => getHourOfDayBucket(record.timestampMs),
 		),
 	}));
 	return {
@@ -297,7 +318,9 @@ function buildSummary(records, meta, options) {
 			malformedLines: meta.malformedLines,
 		},
 		counts: {
-			assistantMessagesWithReadCalls: new Set(records.map((record) => `${record.sessionFile}::${record.assistantEntryId}`)).size,
+			assistantMessagesWithReadCalls: new Set(
+				records.map((record) => `${record.sessionFile}::${record.assistantEntryId}`),
+			).size,
 			totalReadCalls: records.length,
 			full,
 			partial,
@@ -343,45 +366,62 @@ pre { font: 13px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; 
 }
 
 function printHumanReport(summary) {
-	const { scan, counts, timeStats, normalizedTimeStats, timeOfDayStats, normalizedTimeOfDayStats, timeStatsByProvider, filters } = summary;
+	const {
+		scan,
+		counts,
+		timeStats,
+		normalizedTimeStats,
+		timeOfDayStats,
+		normalizedTimeOfDayStats,
+		timeStatsByProvider,
+		filters,
+	} = summary;
 	console.log(`Scanned ${formatInt(scan.sessionFilesIncluded)} session files in ${scan.sessionsDir}`);
 	console.log(`Report timezone: ${REPORT_TIME_ZONE} (CET/CEST)`);
 	if (scan.since) {
 		console.log(`Session filter: files created at or after ${scan.since.iso} (${scan.since.source})`);
-		console.log(`Skipped older session files: ${formatInt(scan.sessionFilesSkippedOlderThanSince)} of ${formatInt(scan.sessionFilesScanned)}`);
+		console.log(
+			`Skipped older session files: ${formatInt(scan.sessionFilesSkippedOlderThanSince)} of ${formatInt(scan.sessionFilesScanned)}`,
+		);
 	}
-	console.log(`Found ${formatInt(counts.totalReadCalls)} read tool calls in ${formatInt(counts.assistantMessagesWithReadCalls)} assistant messages`);
+	console.log(
+		`Found ${formatInt(counts.totalReadCalls)} read tool calls in ${formatInt(counts.assistantMessagesWithReadCalls)} assistant messages`,
+	);
 	if (filters.model) console.log(`Filters: model contains "${filters.model}"`);
 
 	console.log("\nFull vs partial reads");
-	console.log(`  full:    ${formatInt(counts.full).padStart(8)}  ${formatPercent(counts.full, counts.totalReadCalls).padStart(6)}  ${bar(counts.full, counts.totalReadCalls)}`);
-	console.log(`  partial: ${formatInt(counts.partial).padStart(8)}  ${formatPercent(counts.partial, counts.totalReadCalls).padStart(6)}  ${bar(counts.partial, counts.totalReadCalls)}`);
+	console.log(
+		`  full:    ${formatInt(counts.full).padStart(8)}  ${formatPercent(counts.full, counts.totalReadCalls).padStart(6)}  ${bar(counts.full, counts.totalReadCalls)}`,
+	);
+	console.log(
+		`  partial: ${formatInt(counts.partial).padStart(8)}  ${formatPercent(counts.partial, counts.totalReadCalls).padStart(6)}  ${bar(counts.partial, counts.totalReadCalls)}`,
+	);
 
 	console.log(`\nBy ${filters.bucket}`);
 	for (const group of timeStats) {
 		console.log(
-			`  ${group.key} reads=${formatInt(group.reads).padStart(5)} full=${formatPercent(group.full, group.reads).padStart(6)} partial=${formatPercent(group.partial, group.reads).padStart(6)} ${bar(group.partial, group.reads)}`
+			`  ${group.key} reads=${formatInt(group.reads).padStart(5)} full=${formatPercent(group.full, group.reads).padStart(6)} partial=${formatPercent(group.partial, group.reads).padStart(6)} ${bar(group.partial, group.reads)}`,
 		);
 	}
 
 	console.log("\nBy time of day");
 	for (const group of timeOfDayStats) {
 		console.log(
-			`  ${group.key} reads=${formatInt(group.reads).padStart(5)} full=${formatPercent(group.full, group.reads).padStart(6)} partial=${formatPercent(group.partial, group.reads).padStart(6)} ${bar(group.partial, group.reads)}`
+			`  ${group.key} reads=${formatInt(group.reads).padStart(5)} full=${formatPercent(group.full, group.reads).padStart(6)} partial=${formatPercent(group.partial, group.reads).padStart(6)} ${bar(group.partial, group.reads)}`,
 		);
 	}
 
 	console.log("\nBy time of day, session-normalized");
 	for (const group of normalizedTimeOfDayStats) {
 		console.log(
-			`  ${group.key} sessions=${formatInt(group.sessions).padStart(4)} reads/session=${formatRate(group.readsPerSession).padStart(5)} full/session=${formatRate(group.fullPerSession).padStart(5)} partial/session=${formatRate(group.partialPerSession).padStart(5)} medianSessionPartial=${group.medianSessionPartialRate === null ? "n/a" : formatPercent(group.medianSessionPartialRate, 1).padStart(6)} ${bar(group.medianSessionPartialRate ?? 0, 1)}`
+			`  ${group.key} sessions=${formatInt(group.sessions).padStart(4)} reads/session=${formatRate(group.readsPerSession).padStart(5)} full/session=${formatRate(group.fullPerSession).padStart(5)} partial/session=${formatRate(group.partialPerSession).padStart(5)} medianSessionPartial=${group.medianSessionPartialRate === null ? "n/a" : formatPercent(group.medianSessionPartialRate, 1).padStart(6)} ${bar(group.medianSessionPartialRate ?? 0, 1)}`,
 		);
 	}
 
 	console.log(`\nBy ${filters.bucket}, session-normalized`);
 	for (const group of normalizedTimeStats) {
 		console.log(
-			`  ${group.key} sessions=${formatInt(group.sessions).padStart(4)} reads/session=${formatRate(group.readsPerSession).padStart(5)} full/session=${formatRate(group.fullPerSession).padStart(5)} partial/session=${formatRate(group.partialPerSession).padStart(5)} medianSessionPartial=${group.medianSessionPartialRate === null ? "n/a" : formatPercent(group.medianSessionPartialRate, 1).padStart(6)} ${bar(group.medianSessionPartialRate ?? 0, 1)}`
+			`  ${group.key} sessions=${formatInt(group.sessions).padStart(4)} reads/session=${formatRate(group.readsPerSession).padStart(5)} full/session=${formatRate(group.fullPerSession).padStart(5)} partial/session=${formatRate(group.partialPerSession).padStart(5)} medianSessionPartial=${group.medianSessionPartialRate === null ? "n/a" : formatPercent(group.medianSessionPartialRate, 1).padStart(6)} ${bar(group.medianSessionPartialRate ?? 0, 1)}`,
 		);
 	}
 
@@ -389,30 +429,34 @@ function printHumanReport(summary) {
 	for (const group of timeStatsByProvider) {
 		console.log(`\n${group.providerModel}`);
 		console.log(`  total reads=${formatInt(group.reads)} assistantMessages=${formatInt(group.assistantMessages)}`);
-		console.log(`  total full    ${formatInt(group.full).padStart(8)} ${formatPercent(group.full, group.reads).padStart(6)} ${bar(group.full, group.reads)}`);
-		console.log(`  total partial ${formatInt(group.partial).padStart(8)} ${formatPercent(group.partial, group.reads).padStart(6)} ${bar(group.partial, group.reads)}`);
+		console.log(
+			`  total full    ${formatInt(group.full).padStart(8)} ${formatPercent(group.full, group.reads).padStart(6)} ${bar(group.full, group.reads)}`,
+		);
+		console.log(
+			`  total partial ${formatInt(group.partial).padStart(8)} ${formatPercent(group.partial, group.reads).padStart(6)} ${bar(group.partial, group.reads)}`,
+		);
 		console.log(`  By ${filters.bucket}`);
 		for (const bucket of group.timeStats) {
 			console.log(
-				`    ${bucket.key} reads=${formatInt(bucket.reads).padStart(5)} full=${formatPercent(bucket.full, bucket.reads).padStart(6)} partial=${formatPercent(bucket.partial, bucket.reads).padStart(6)} ${bar(bucket.partial, bucket.reads)}`
+				`    ${bucket.key} reads=${formatInt(bucket.reads).padStart(5)} full=${formatPercent(bucket.full, bucket.reads).padStart(6)} partial=${formatPercent(bucket.partial, bucket.reads).padStart(6)} ${bar(bucket.partial, bucket.reads)}`,
 			);
 		}
 		console.log(`  By ${filters.bucket}, session-normalized`);
 		for (const bucket of group.normalizedTimeStats) {
 			console.log(
-				`    ${bucket.key} sessions=${formatInt(bucket.sessions).padStart(4)} reads/session=${formatRate(bucket.readsPerSession).padStart(5)} full/session=${formatRate(bucket.fullPerSession).padStart(5)} partial/session=${formatRate(bucket.partialPerSession).padStart(5)} medianSessionPartial=${bucket.medianSessionPartialRate === null ? "n/a" : formatPercent(bucket.medianSessionPartialRate, 1).padStart(6)} ${bar(bucket.medianSessionPartialRate ?? 0, 1)}`
+				`    ${bucket.key} sessions=${formatInt(bucket.sessions).padStart(4)} reads/session=${formatRate(bucket.readsPerSession).padStart(5)} full/session=${formatRate(bucket.fullPerSession).padStart(5)} partial/session=${formatRate(bucket.partialPerSession).padStart(5)} medianSessionPartial=${bucket.medianSessionPartialRate === null ? "n/a" : formatPercent(bucket.medianSessionPartialRate, 1).padStart(6)} ${bar(bucket.medianSessionPartialRate ?? 0, 1)}`,
 			);
 		}
 		console.log("  By time of day");
 		for (const bucket of group.timeOfDayStats) {
 			console.log(
-				`    ${bucket.key} reads=${formatInt(bucket.reads).padStart(5)} full=${formatPercent(bucket.full, bucket.reads).padStart(6)} partial=${formatPercent(bucket.partial, bucket.reads).padStart(6)} ${bar(bucket.partial, bucket.reads)}`
+				`    ${bucket.key} reads=${formatInt(bucket.reads).padStart(5)} full=${formatPercent(bucket.full, bucket.reads).padStart(6)} partial=${formatPercent(bucket.partial, bucket.reads).padStart(6)} ${bar(bucket.partial, bucket.reads)}`,
 			);
 		}
 		console.log("  By time of day, session-normalized");
 		for (const bucket of group.normalizedTimeOfDayStats) {
 			console.log(
-				`    ${bucket.key} sessions=${formatInt(bucket.sessions).padStart(4)} reads/session=${formatRate(bucket.readsPerSession).padStart(5)} full/session=${formatRate(bucket.fullPerSession).padStart(5)} partial/session=${formatRate(bucket.partialPerSession).padStart(5)} medianSessionPartial=${bucket.medianSessionPartialRate === null ? "n/a" : formatPercent(bucket.medianSessionPartialRate, 1).padStart(6)} ${bar(bucket.medianSessionPartialRate ?? 0, 1)}`
+				`    ${bucket.key} sessions=${formatInt(bucket.sessions).padStart(4)} reads/session=${formatRate(bucket.readsPerSession).padStart(5)} full/session=${formatRate(bucket.fullPerSession).padStart(5)} partial/session=${formatRate(bucket.partialPerSession).padStart(5)} medianSessionPartial=${bucket.medianSessionPartialRate === null ? "n/a" : formatPercent(bucket.medianSessionPartialRate, 1).padStart(6)} ${bar(bucket.medianSessionPartialRate ?? 0, 1)}`,
 			);
 		}
 	}
@@ -425,7 +469,15 @@ function printHumanReport(summary) {
 
 async function scanSessions(sessionsDir, since) {
 	const records = [];
-	const meta = { sessionsDir, sessionFilesScanned: 0, sessionFilesIncluded: 0, sessionFilesSkippedOlderThanSince: 0, sessionFilesWithReadCalls: 0, since, malformedLines: 0 };
+	const meta = {
+		sessionsDir,
+		sessionFilesScanned: 0,
+		sessionFilesIncluded: 0,
+		sessionFilesSkippedOlderThanSince: 0,
+		sessionFilesWithReadCalls: 0,
+		since,
+		malformedLines: 0,
+	};
 
 	for await (const sessionFile of walkJsonlFiles(sessionsDir)) {
 		meta.sessionFilesScanned++;
@@ -474,7 +526,10 @@ async function scanSessions(sessionsDir, since) {
 }
 
 function applyFilters(records, options) {
-	return records.filter((record) => !options.modelFilter || record.providerModel.toLowerCase().includes(options.modelFilter.toLowerCase()));
+	return records.filter(
+		(record) =>
+			!options.modelFilter || record.providerModel.toLowerCase().includes(options.modelFilter.toLowerCase()),
+	);
 }
 
 async function main() {
@@ -490,7 +545,9 @@ async function main() {
 	const filteredRecords = applyFilters(records, options);
 	const summary = buildSummary(filteredRecords, meta, options);
 	if (options.json) {
-		console.log(JSON.stringify(options.includeRecords ? { summary, records: filteredRecords } : { summary }, null, 2));
+		console.log(
+			JSON.stringify(options.includeRecords ? { summary, records: filteredRecords } : { summary }, null, 2),
+		);
 		return;
 	}
 	if (options.text) {
