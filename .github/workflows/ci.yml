@@ -40,3 +40,32 @@ jobs:
 
       - name: Test
         run: npm test
+
+  # `npm test` is `--workspaces --if-present`, and the forge workspace has no
+  # test script, so nothing here ran the forge suites. They live in `test:slow`
+  # -- 104 tests across every skill's and shared library's Python suite -- and
+  # take ~13 minutes, so they get their own job rather than serializing behind
+  # the one above.
+  forge-suites:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
+          sudo ln -s $(which fdfind) /usr/local/bin/fd
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Forge suites
+        run: npm run test:slow

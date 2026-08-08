@@ -66,6 +66,16 @@ npm run check
 
 Both must pass.
 
+If you touched anything under `forge/`, run the forge suites too:
+
+```bash
+npm run check:full
+```
+
+`npm test` is `--workspaces --if-present` and the `forge` workspace has no test
+script, so it does not cover them. They are ~13 minutes; CI runs them in its own
+`forge-suites` job, so this is about finding out before the PR rather than after.
+
 Do not edit `CHANGELOG.md`. Changelog entries are added by maintainers.
 
 If you are adding a new provider to `packages/ai`, see `AGENTS.md` for required tests.
