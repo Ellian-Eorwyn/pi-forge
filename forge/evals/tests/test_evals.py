@@ -1000,10 +1000,6 @@ class CaseSizeTests(unittest.TestCase):
         self.assertLess(thin, 0.5)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class MeetingBriefTests(unittest.TestCase):
     """The reference keys are the case. If they drift from the transcripts, the
     numbers are confident and wrong, which is the failure mode this whole file
@@ -1229,14 +1225,46 @@ class ArchiveTests(unittest.TestCase):
         raw, why = self.archiving._from_frozen(fixture_id, harness.fixtures()[fixture_id])
         self.assertIsNotNone(raw, why)
 
+    def _both_sides(self, tmp, vault_text, archive_text):
+        """A vault and an archive that each hold a copy, pinned to ``vault_text``."""
+        spec = {"path": "99 Meta/99.02 Schemas/0.00 Vault Schema.md", "sha256": harness.sha256_text(vault_text)}
+        vault = Path(tmp) / "vault"
+        (vault / spec["path"]).parent.mkdir(parents=True, exist_ok=True)
+        (vault / spec["path"]).write_text(vault_text, encoding="utf-8")
+        root = Path(tmp) / "archive"
+        (root / "sources").mkdir(parents=True, exist_ok=True)
+        (root / "sources" / "fixture.md").write_text(archive_text, encoding="utf-8")
+        return spec, vault, root
+
     def test_the_vault_wins_when_it_still_has_the_fixture(self):
         # The archive must not mask a deliberate edit: drift is a finding, and
         # a backup that quietly supplies the old bytes would hide it.
-        fixtures = harness.fixtures()
-        fixture_id = "vault-schema"
-        raw, origin = self.archiving.resolve(fixture_id, fixtures[fixture_id], harness.DEFAULT_VAULT)
-        if raw is not None:
+        #
+        # Both sides are built here rather than read off the live vault. Reading
+        # it made the assertion depend on whether the owner had edited a note
+        # since the fixture was pinned -- which they had, so this failed on the
+        # developer machine and could not run in CI, where there is no vault at
+        # all. The property under test is the precedence rule, and the rule is
+        # observable without anyone's notes.
+        text = "# Vault Schema\n\n| `wiki` | 9 | Wiki | Wiki cards. |\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            spec, vault, root = self._both_sides(tmp, text, "# Stale archived copy\n")
+            raw, origin = self.archiving.resolve("fixture", spec, vault, root=root)
             self.assertEqual(origin, "vault")
+            self.assertEqual(raw, text)
+
+    def test_the_archive_supplies_the_fixture_once_the_vault_copy_has_drifted(self):
+        # The other half of the same rule, and the state the real vault is in:
+        # the note has been edited since it was pinned, so the vault can no
+        # longer supply those bytes and the archive is what keeps the case
+        # runnable.
+        text = "# Vault Schema\n\n| `wiki` | 9 | Wiki | Wiki cards. |\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            spec, vault, root = self._both_sides(tmp, text, text)
+            (vault / spec["path"]).write_text("# Vault Schema\n\nEdited since it was pinned.\n", encoding="utf-8")
+            raw, origin = self.archiving.resolve("fixture", spec, vault, root=root)
+            self.assertEqual(origin, "archive")
+            self.assertEqual(raw, text)
 
     def test_an_orphan_never_blocks_a_run(self):
         # An orphaned frozen file is information. An earlier version had `run`
@@ -1301,3 +1329,7 @@ class RoutingTableTests(unittest.TestCase):
                 f"{stage} is routed to `{service}` but the report puts `{case_id}` on the "
                 f"`{supported[case_id]}` tier. Re-run the report, or change the table.",
             )
+
+
+if __name__ == "__main__":
+    unittest.main()

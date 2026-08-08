@@ -34,7 +34,7 @@ answers, and demanding a clean sweep would let those veto every case.
 
 ```bash
 cd /Users/ellie/Documents/GitHub/pi-forge
-python3 -m pytest forge/evals/tests -q          # expect 107 passed
+npm run test:evals                              # expect 113 passed; also runs in `npm run check`
 python3 forge/evals/run.py freeze --check       # expect 0 needing attention
 python3 forge/evals/run.py archive --check      # expect 0 needing attention
 python3 forge/evals/run.py models               # which entries are runnable now
