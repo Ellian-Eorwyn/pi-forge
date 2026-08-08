@@ -30,6 +30,7 @@ import {
 	updateRunState,
 	withRunLock,
 } from "../../../lib/run-state.mjs";
+import { ensureWorkspaceMarker } from "../../../lib/vault-workspace.mjs";
 import {
 	DEFAULT_TIMEOUT_MS as ACQUISITION_DEFAULT_TIMEOUT_MS,
 	DEFAULT_USER_AGENT as ACQUISITION_DEFAULT_USER_AGENT,
@@ -214,7 +215,10 @@ function openResearchRun(runDirectory, command, input, options, items = [], phas
 		assertCompatibleRun(state, configuration);
 		return state;
 	}
-	mkdirSync(runDirectory, { recursive: true });
+	// Inside a vault this lands under the workflow root, whose category folder
+	// this mkdir creates. An unmarked run is counted, classified, filed and
+	// embedded as notes, so the run marks itself the moment it exists.
+	ensureWorkspaceMarker(runDirectory);
 	return initializeRunState(
 		runDirectory,
 		createRunState({

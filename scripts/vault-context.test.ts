@@ -450,8 +450,12 @@ test("a vault with every category folder marked gets no repair line", () => {
 		resolveWorkflowRoot(root, "web-research");
 		const message = vaultContextMessage(inspectVault(root) as NonNullable<ReturnType<typeof inspectVault>>);
 		assert.doesNotMatch(message, /Unmarked, so currently counted as notes/);
-		// The rule itself is always stated, with the text to write.
-		assert.match(message, /write it yourself as the directory's first file/);
+		// The rule is still stated, but as a fact about a hand-made directory rather
+		// than an instruction to write the marker on every run: the skill scripts do
+		// that in code now, so the marker text no longer has to be spelled out at
+		// startup for the model to copy.
+		assert.match(message, /writes one itself, so this needs nothing from you/);
+		assert.match(message, /a directory you create for generated output by hand still does/);
 		assert.match(message, /pi-forge workspace\. Generated run directories live here\./);
 	} finally {
 		rmSync(root, { recursive: true, force: true });

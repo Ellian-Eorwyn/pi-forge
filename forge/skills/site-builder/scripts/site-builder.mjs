@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ensureWorkspaceMarker } from "../../../lib/vault-workspace.mjs";
 
 const SKILL_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const ASSETS_DIR = join(SKILL_ROOT, "assets");
@@ -506,6 +507,10 @@ function commandInit(positionals, flags) {
 	const { files, recognizedRuns } = walkInputs(positionals);
 	if (files.length === 0) fail("no usable files found in the provided inputs");
 
+	// Inside a vault this lands under the workflow root, whose category folder
+	// this mkdir creates. An unmarked run is counted, classified, filed and
+	// embedded as notes, so the run marks itself the moment it exists.
+	ensureWorkspaceMarker(runDirectory);
 	mkdirSync(join(runDirectory, "content"), { recursive: true });
 	mkdirSync(join(runDirectory, "assets"), { recursive: true });
 

@@ -82,7 +82,8 @@ approved-property list is closed and unapproved keys are deleted on rewrite, so 
 ## Starting a hub from nothing
 
 `draft-hub` builds a skeleton from what the vault already knows. Without
-`--apply` it writes only to the workflow root, so the draft can be read first:
+`--apply` it writes only to the workflow root, under the `Project Packs`
+category, so the draft can be read first:
 
 ```bash
 python3 <skill-directory>/scripts/vault-projects.py draft-hub --vault <vault> --project "Article 2"

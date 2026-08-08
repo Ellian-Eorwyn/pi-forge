@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import { ensureWorkspaceMarker } from "../../../lib/vault-workspace.mjs";
 
 const REQUIRED_SUMMARY_HEADINGS = ["## Summary", "## Motivation", "## Files changed", "## Verification"];
 const IGNORED_DIRECTORIES = new Set([
@@ -335,7 +336,10 @@ function inspect(args) {
 		git: gitSnapshot(repository),
 	};
 
-	mkdirSync(outputDirectory, { recursive: true });
+	// Inside a vault this lands under the workflow root, whose category folder
+	// this mkdir creates. An unmarked run is counted, classified, filed and
+	// embedded as notes, so the run marks itself the moment it exists.
+	ensureWorkspaceMarker(outputDirectory);
 	writeFileSync(join(outputDirectory, "repo_profile.json"), `${JSON.stringify(profile, undefined, "\t")}\n`);
 	writeFileSync(join(outputDirectory, "repo_profile.md"), buildProfileMarkdown(profile));
 

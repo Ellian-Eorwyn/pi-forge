@@ -552,8 +552,7 @@ export function vaultContextMessage(vault: VaultInfo): string {
 			`- Workflow root: ${join(vault.root, vault.workflowsFolder)}`,
 			"- Every skill that would otherwise write to `forge-output/<skill>/` writes to `<workflow root>/<Category>/<stem>/` instead. Each SKILL.md names its own category; do not invent one. A skill whose SKILL.md names no category has none, and its output stays in `forge-output/<skill>/` — do not put it in the workflow root under a made-up folder.",
 			"- This wins over a skill's `<source-folder>/Generated/…` convention inside the vault, so no run directory lands in a domain folder.",
-			`- A run directory is only invisible to vault-organizer and vault-connections while it holds a \`${WORKSPACE_MARKER}\` file. The skill scripts write one, but if you create a directory for generated output yourself, write it yourself as the directory's first file, before anything else goes in. An unmarked run is counted, classified, filed, and embedded as notes.`,
-			`- Marker contents, verbatim:\n\n${WORKSPACE_MARKER_CONTENT}`,
+			`- A run directory is only invisible to vault-organizer and vault-connections while it holds a \`${WORKSPACE_MARKER}\` file. Every skill that writes to the workflow root now writes one itself, so this needs nothing from you — but a directory you create for generated output by hand still does, as its first file. Contents, verbatim:\n\n${WORKSPACE_MARKER_CONTENT}`,
 			"- To file a finished run artifact as a note more or less as it stands, use vault-connections `import-run`. To write a *new* note grounded in that run, use the compose tools below. Either way, never hand-copy a run artifact into a domain folder.",
 		);
 		// Naming what is already broken beats repeating the rule: these were made

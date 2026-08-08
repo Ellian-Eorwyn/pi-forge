@@ -24,6 +24,7 @@ import {
 	withRunLock,
 } from "../../../lib/run-state.mjs";
 import { pingSearxng, searchLimiter, searchSearxng } from "../../../lib/searxng.mjs";
+import { ensureWorkspaceMarker } from "../../../lib/vault-workspace.mjs";
 
 const DEFAULT_USER_AGENT = "pi-forge-web-collection/1 (+https://github.com/pi-forge)";
 const DEFAULT_DELAY_MS = 500;
@@ -656,7 +657,10 @@ function initializeCollectionRun(runDirectory, configuration, urls) {
 		assertCompatibleRun(state, configuration);
 		return state;
 	}
-	mkdirSync(runDirectory, { recursive: true });
+	// Inside a vault this lands under the workflow root, whose category folder
+	// this mkdir creates. An unmarked run is counted, classified, filed and
+	// embedded as notes, so the run marks itself the moment it exists.
+	ensureWorkspaceMarker(runDirectory);
 	const items = urls.map((url, index) => ({
 		id: `url:${configurationFingerprint({ index, url: normalizeUrl(url) }).slice(0, 20)}`,
 		url,

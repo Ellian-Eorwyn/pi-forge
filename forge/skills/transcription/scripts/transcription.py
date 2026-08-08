@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
+from vault_schema import ensure_workspace_marker  # noqa: E402
 import run_state
 import vault_lexicon
 from vault_lexicon import (  # noqa: F401  (re-exported for callers and tests)
@@ -731,6 +732,9 @@ def command_transcribe(args):
             return
     else:
         run_directory.mkdir(parents=True)
+        # An unmarked run under the vault's workflow root is counted,
+        # classified, filed and embedded as notes.
+        ensure_workspace_marker(run_directory)
         state = run_state.create_run_state("transcription", "transcribe", configuration["input"], configuration["options"], phase="normalizing", next_action="transcribe")
         run_state.initialize_run_state(run_directory, state)
     audio_dir = run_directory / "audio"

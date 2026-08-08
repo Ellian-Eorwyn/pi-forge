@@ -7668,3 +7668,65 @@ test("reference sync fails loudly when the generated markers are missing", () =>
 		assert.match(failure.stderr, /missing the <!-- forge:skills-list start -->/);
 	});
 });
+
+// Every skill in `workflow-categories.json` writes its run directories under the
+// vault's workflow root, which means the directory it creates is inside the
+// vault and would otherwise be counted, classified, filed and embedded as notes.
+// `resolveWorkflowRoot` marks the category folder, but only the web-research and
+// vault-compose extensions go through it -- every other skill mkdirs its own run
+// directory, so the marker has to be written there.
+//
+// Discovered from the map rather than listed, for the reason `pythonSuites`
+// gives above: a hand-maintained list drifts in the direction where a new skill
+// is added, the marker is forgotten, and nothing says so.
+const CATEGORY_SKILLS = Object.keys(
+	JSON.parse(readFileSync(join(repositoryRoot, "forge", "lib", "workflow-categories.json"), "utf8")).categories,
+);
+
+test("every skill that writes into the vault's workflow root marks its run directory", () => {
+	const unmarked = [];
+	for (const skill of CATEGORY_SKILLS) {
+		const directory = join(skillsRoot, skill, "scripts");
+		if (!existsSync(directory)) continue;
+		const sources = readdirSync(directory)
+			.filter((name) => name.endsWith(".py") || name.endsWith(".mjs"))
+			.map((name) => readFileSync(join(directory, name), "utf8"));
+		// Either spelling of the one shared helper. A skill whose runs live in a
+		// dot-directory is already skipped by the tree walks, and says so here.
+		const marks = sources.some(
+			(source) =>
+				source.includes("ensure_workspace_marker") ||
+				source.includes("ensureWorkspaceMarker") ||
+				/STATE_DIR = "\./.test(source),
+		);
+		if (!marks) unmarked.push(skill);
+	}
+	assert.deepEqual(
+		unmarked,
+		[],
+		`these skills create run directories under the vault workflow root without marking them: ${unmarked.join(", ")}`,
+	);
+});
+
+test("a real run directory carries the marker, so the organizer skips its tree", () => {
+	withWorkspace((workspace) => {
+		const sources = join(workspace, "sources");
+		mkdirSync(sources, { recursive: true });
+		writeFileSync(join(sources, "facts.md"), "# Facts\n\nOne fact, recorded.\n");
+		const runDirectory = join(workspace, "Reports", "run");
+		run(python, [
+			script("report-output", "report-output.py"),
+			"init",
+			sources,
+			"--output",
+			runDirectory,
+			"--detail",
+			"brief",
+		]);
+		const marker = join(runDirectory, ".forge-workspace");
+		assert.ok(existsSync(marker), `${marker} was not written`);
+		// Byte-identical to the Python and JavaScript constants, because a vault
+		// ends up holding markers written by both.
+		assert.match(readFileSync(marker, "utf8"), /^pi-forge workspace\./);
+	});
+});

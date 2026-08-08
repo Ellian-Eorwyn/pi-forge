@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
+from vault_schema import ensure_workspace_marker  # noqa: E402
 
 import citation_naming
 import citation_parse
@@ -218,7 +219,9 @@ def command_parse(args):
         "contactEmail": args.contact_email,
     }
 
-    output.mkdir(parents=True, exist_ok=True)
+    # An unmarked run under the vault's workflow root is counted, classified,
+    # filed and embedded as notes; the run marks itself the moment it exists.
+    ensure_workspace_marker(output)
     state = run_state.create_run_state(
         workflow=WORKFLOW,
         command="parse",

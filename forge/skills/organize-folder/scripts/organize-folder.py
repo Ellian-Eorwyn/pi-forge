@@ -19,6 +19,7 @@ from pathlib import Path
 # Shared forge embeddings client lives at forge/lib; this script is at
 # forge/skills/organize-folder/scripts/organize-folder.py.
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
+from vault_schema import ensure_workspace_marker  # noqa: E402
 import forge_embeddings
 
 
@@ -487,6 +488,12 @@ def require_new_directory(raw_path):
     if path.exists():
         fail(f"output already exists: {path}")
     path.mkdir(parents=True)
+    # Inside a vault this lands under the workflow root, and the category folder
+    # holding it was created by the mkdir above rather than by
+    # ``resolveWorkflowRoot`` -- only the web-research and vault-compose
+    # extensions go through that. An unmarked run is counted, classified, filed
+    # and embedded as notes, so the run marks itself the moment it exists.
+    ensure_workspace_marker(path)
     return path
 
 
