@@ -132,18 +132,23 @@ test("the prefill hook is gone", () => {
 
 test("each phase injects its own system prompt", async () => {
 	const h = harness();
-	const before = h.events.get("before_agent_start");
+	// The harness stores handlers as `(...args: unknown[]) => unknown`, so the
+	// injected prompt needs its shape naming here to be read at all. `?? ""` keeps
+	// a handler that returned nothing failing the match rather than throwing.
+	const before = h.events.get("before_agent_start") as
+		| (() => Promise<{ message: { content: string } } | undefined>)
+		| undefined;
 	assert.ok(before);
 
 	await h.run("plan");
-	assert.match((await before()).message.content, /PLAN PHASE/);
+	assert.match((await before())?.message.content ?? "", /PLAN PHASE/);
 	await h.run("execute");
-	const exec = (await before()).message.content;
+	const exec = (await before())?.message.content ?? "";
 	assert.match(exec, /EXECUTE PHASE/);
 	assert.doesNotMatch(exec, /--think-prefill/, "the prefill workaround is no longer prescribed");
 	assert.match(exec, /WAIT for an explicit/);
 	await h.run("verify");
-	assert.match((await before()).message.content, /VERIFY PHASE/);
+	assert.match((await before())?.message.content ?? "", /VERIFY PHASE/);
 
 	await h.run("workflow", "off");
 	assert.equal(await before(), undefined, "no prompt when off");
@@ -163,10 +168,17 @@ test("read-only phases block mutating bash but allow reads", async () => {
 	})) as { block?: boolean };
 	assert.equal(applyBlocked.block, true);
 	assert.equal(await toolCall({ toolName: "bash", input: { command: "grep -r type ." } }), undefined);
-	assert.equal(await toolCall({ toolName: "bash", input: { command: "python3 vault-organizer.py doctor --vault ." } }), undefined);
+	assert.equal(
+		await toolCall({ toolName: "bash", input: { command: "python3 vault-organizer.py doctor --vault ." } }),
+		undefined,
+	);
 
 	await h.run("execute");
-	assert.equal(await toolCall({ toolName: "bash", input: { command: "rm -rf notes" } }), undefined, "execute allows it");
+	assert.equal(
+		await toolCall({ toolName: "bash", input: { command: "rm -rf notes" } }),
+		undefined,
+		"execute allows it",
+	);
 });
 
 test("read-only phases block mutating obsidian subcommands and allow queries", async () => {
@@ -244,7 +256,11 @@ test("phase persists and restores on session_start", async () => {
 test("a session that crashed mid-execute does not strand the user on the non-thinking model", async () => {
 	const h = harness();
 	// Phase moved on, but the crash left the session model behind.
-	h.entries.push({ type: "custom", customType: "vault-workflow", data: { phase: "verify", previousModel: { provider: "forge-local", id: "code" } } });
+	h.entries.push({
+		type: "custom",
+		customType: "vault-workflow",
+		data: { phase: "verify", previousModel: { provider: "forge-local", id: "code" } },
+	});
 	h.ctx.model = { provider: "forge-chat-local", id: "chat" };
 	const sessionStart = h.events.get("session_start");
 	assert.ok(sessionStart);

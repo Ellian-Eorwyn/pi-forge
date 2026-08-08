@@ -19,10 +19,10 @@
  * few known paths. Outside a vault this extension does nothing at all.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { type Dirent, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, delimiter, dirname, join, relative, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { WORKSPACE_MARKER, WORKSPACE_MARKER_CONTENT, ensureWorkspaceMarker } from "../lib/vault-workspace.mjs";
+import { ensureWorkspaceMarker, WORKSPACE_MARKER, WORKSPACE_MARKER_CONTENT } from "../lib/vault-workspace.mjs";
 
 const CONTEXT_CUSTOM_TYPE = "vault-context";
 const DEFAULT_SCHEMA_RELATIVE = join("99 Meta", "99.02 Schemas", "0.00 Vault Schema.md");
@@ -152,11 +152,7 @@ function inspectObsidianCli(root: string): ObsidianCli | undefined {
 	const ambiguous = name !== undefined && [...names.values()].filter((value) => value === name).length > 1;
 	const app = readJsonFile(join(root, ".obsidian", "app.json"));
 	const linkUpdates =
-		app === undefined || !("alwaysUpdateLinks" in app)
-			? "unset"
-			: app.alwaysUpdateLinks === true
-				? "always"
-				: "off";
+		app === undefined || !("alwaysUpdateLinks" in app) ? "unset" : app.alwaysUpdateLinks === true ? "always" : "off";
 	return {
 		binary,
 		vaultName: ambiguous ? undefined : name,
@@ -186,7 +182,7 @@ function countNotes(root: string): { count: number; truncated: boolean } {
 	const queue = [root];
 	while (queue.length > 0) {
 		const directory = queue.pop() as string;
-		let entries: ReturnType<typeof readdirSync>;
+		let entries: Dirent[];
 		try {
 			entries = readdirSync(directory, { withFileTypes: true });
 		} catch {
@@ -218,7 +214,7 @@ function findConfigNote(root: string, canonicalRelative: string): string | undef
 	const queue: { directory: string; depth: number }[] = [{ directory: root, depth: 0 }];
 	while (queue.length > 0) {
 		const { directory, depth } = queue.shift() as { directory: string; depth: number };
-		let entries: ReturnType<typeof readdirSync>;
+		let entries: Dirent[];
 		try {
 			entries = readdirSync(directory, { withFileTypes: true });
 		} catch {
@@ -320,7 +316,9 @@ function workflowCategories(): Record<string, string> {
 	try {
 		const parsed = JSON.parse(readFileSync(CATEGORY_MAP_URL, "utf8")) as { categories?: unknown };
 		categoryCache =
-			parsed.categories && typeof parsed.categories === "object" ? (parsed.categories as Record<string, string>) : {};
+			parsed.categories && typeof parsed.categories === "object"
+				? (parsed.categories as Record<string, string>)
+				: {};
 	} catch {
 		// A missing or malformed map is not fatal; every skill falls back to forge-output/.
 		categoryCache = {};
@@ -334,7 +332,9 @@ function pad2(value: number): string {
 
 /** One `| \`value\` | \`number\` | \`Label\` | …` row from a schema registry table. */
 function registryRow(text: string, value: string): { number: number; label: string } | undefined {
-	const match = new RegExp(`^\\|\\s*\`${value}\`\\s*\\|\\s*\`(\\d{1,2})\`\\s*\\|\\s*\`([^\`|]+)\`\\s*\\|`, "m").exec(text);
+	const match = new RegExp(`^\\|\\s*\`${value}\`\\s*\\|\\s*\`(\\d{1,2})\`\\s*\\|\\s*\`([^\`|]+)\`\\s*\\|`, "m").exec(
+		text,
+	);
 	if (!match) return undefined;
 	const number = Number.parseInt(match[1] as string, 10);
 	const label = (match[2] as string).trim();
@@ -372,7 +372,7 @@ function workflowsFolderFromSchema(root: string, schemaNote: string | undefined)
 
 /** Fallback for a vault with no readable schema: an existing `NN.MM Workflows` folder. */
 function workflowsFolderOnDisk(root: string): string | undefined {
-	let entries: ReturnType<typeof readdirSync>;
+	let entries: Dirent[];
 	try {
 		entries = readdirSync(root, { withFileTypes: true });
 	} catch {
@@ -381,7 +381,7 @@ function workflowsFolderOnDisk(root: string): string | undefined {
 	for (const entry of entries) {
 		if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
 		if (entry.name.startsWith(".") || SKIPPED_DIRECTORIES.has(entry.name)) continue;
-		let children: ReturnType<typeof readdirSync>;
+		let children: Dirent[];
 		try {
 			children = readdirSync(join(root, entry.name), { withFileTypes: true });
 		} catch {
@@ -407,7 +407,7 @@ function findWorkflowsFolder(root: string, schemaNote: string | undefined): stri
  * a folder the owner made on purpose, so this reports rather than repairs.
  */
 function unmarkedWorkflowFolders(workflowRoot: string): string[] {
-	let entries: ReturnType<typeof readdirSync>;
+	let entries: Dirent[];
 	try {
 		entries = readdirSync(workflowRoot, { withFileTypes: true });
 	} catch {
@@ -505,10 +505,7 @@ export function vaultContextMessage(vault: VaultInfo): string {
 
 	if (vault.owner) {
 		const who = vault.owner.pronouns ? `${vault.owner.name} (${vault.owner.pronouns})` : vault.owner.name;
-		lines.push(
-			"",
-			`You are working with ${who}. Address them by name; do not call them "the user" or "the owner".`,
-		);
+		lines.push("", `You are working with ${who}. Address them by name; do not call them "the user" or "the owner".`);
 	}
 
 	lines.push(
@@ -520,13 +517,17 @@ export function vaultContextMessage(vault: VaultInfo): string {
 	if (vault.schemaNote) {
 		lines.push(`- Schema note (sole source of truth for folders and frontmatter): ${vault.schemaNote}`);
 	} else {
-		lines.push("- Schema note: NOT FOUND. vault-organizer cannot file notes until one exists; say so before attempting it.");
+		lines.push(
+			"- Schema note: NOT FOUND. vault-organizer cannot file notes until one exists; say so before attempting it.",
+		);
 	}
 	// The schema says how a note is *filed*; this says how its body is *arranged*.
 	// A model that has never been told the second one exists writes notes that
 	// pass every check and still do not look like the vault's own.
 	if (vault.formatNote) {
-		lines.push(`- Note format (block order and the callout registry — read before writing or editing a note's body): ${vault.formatNote}`);
+		lines.push(
+			`- Note format (block order and the callout registry — read before writing or editing a note's body): ${vault.formatNote}`,
+		);
 	}
 
 	lines.push(
@@ -538,7 +539,9 @@ export function vaultContextMessage(vault: VaultInfo): string {
 		lines.push("- No `wiki` domain in the schema, so vault-connections `wiki` will fail closed until one is added.");
 	}
 	if (vault.schemaNote && !vault.organizerState) {
-		lines.push("- vault-organizer has never run here, so notes are not yet guaranteed to match the schema. Dry-run before proposing any apply.");
+		lines.push(
+			"- vault-organizer has never run here, so notes are not yet guaranteed to match the schema. Dry-run before proposing any apply.",
+		);
 	}
 	lines.push(...obsidianCliLines(vault.obsidianCli));
 
@@ -656,7 +659,10 @@ export default function vaultContextExtension(pi: ExtensionAPI): void {
 			scan(ctx);
 			updateStatus(ctx);
 			if (!vault) {
-				ctx.ui.notify(`No Obsidian vault found at or above ${ctx.cwd} (looking for a .obsidian directory).`, "info");
+				ctx.ui.notify(
+					`No Obsidian vault found at or above ${ctx.cwd} (looking for a .obsidian directory).`,
+					"info",
+				);
 				return;
 			}
 			injected = false;

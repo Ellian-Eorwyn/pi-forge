@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -125,10 +125,13 @@ export function buildAdvancedArgs(advanced: AdvancedParams | undefined): string[
 		if (value === undefined || value === null) continue;
 		const option = ADVANCED_FLAGS[key];
 		if (!option) {
-			throw new Error(`Unknown advanced option "${key}". Known options: ${Object.keys(ADVANCED_FLAGS).sort().join(", ")}`);
+			throw new Error(
+				`Unknown advanced option "${key}". Known options: ${Object.keys(ADVANCED_FLAGS).sort().join(", ")}`,
+			);
 		}
 		if (option.boolean) {
-			if (typeof value !== "boolean") throw new Error(`Advanced option "${key}" takes a boolean, received ${typeof value}.`);
+			if (typeof value !== "boolean")
+				throw new Error(`Advanced option "${key}" takes a boolean, received ${typeof value}.`);
 			if (value) args.push(option.flag);
 			continue;
 		}
@@ -166,10 +169,14 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 		description:
 			"Run a quick web search and return ranked result metadata. The query is routed to the sources that can answer it -- encyclopedias and philosophy references, the Buddhist canon, book catalogues, news, technical Q&A -- falling back to SearXNG for open-ended questions. Categories, engines, and time range are auto-selected when omitted.",
 		promptSnippet: "Quick routed web search",
-		promptGuidelines: ["Reach for the forge web tools directly for quick lookups; load the web-research skill only for full research runs."],
+		promptGuidelines: [
+			"Reach for the forge web tools directly for quick lookups; load the web-research skill only for full research runs.",
+		],
 		parameters: Type.Object({
 			query: Type.String({ description: "Search query." }),
-			output: Type.Optional(Type.String({ description: "Optional new output directory. Defaults under forge-output/web-research." })),
+			output: Type.Optional(
+				Type.String({ description: "Optional new output directory. Defaults under forge-output/web-research." }),
+			),
 			limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum ranked results to return." })),
 			providers: Type.Optional(
 				Type.Array(Type.String(), {
@@ -181,7 +188,9 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 			categories: Type.Optional(Type.String({ description: "Comma-separated SearXNG categories." })),
 			engines: Type.Optional(Type.String({ description: "Comma-separated SearXNG engines." })),
 			language: Type.Optional(Type.String({ description: "SearXNG language code." })),
-			safesearch: Type.Optional(Type.Integer({ minimum: 0, maximum: 2, description: "SearXNG safesearch setting." })),
+			safesearch: Type.Optional(
+				Type.Integer({ minimum: 0, maximum: 2, description: "SearXNG safesearch setting." }),
+			),
 			timeRange: Type.Optional(Type.String({ description: "SearXNG time range: day, week, month, or year." })),
 			pageNo: Type.Optional(Type.Integer({ minimum: 1, description: "SearXNG page number." })),
 		}),
@@ -213,8 +222,12 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 		promptSnippet: "Read specific URLs as text",
 		parameters: Type.Object({
 			urls: Type.Array(Type.String(), { minItems: 1, description: "URLs to read." }),
-			output: Type.Optional(Type.String({ description: "Optional new output directory. Defaults under forge-output/web-research." })),
-			mode: Type.Optional(Type.String({ description: "Acquisition preset: fast, standard, or deep. Defaults to standard." })),
+			output: Type.Optional(
+				Type.String({ description: "Optional new output directory. Defaults under forge-output/web-research." }),
+			),
+			mode: Type.Optional(
+				Type.String({ description: "Acquisition preset: fast, standard, or deep. Defaults to standard." }),
+			),
 			render: Type.Optional(Type.Boolean({ description: "Use rendered Playwright extraction. Defaults to true." })),
 			noBrowser: Type.Optional(Type.Boolean({ description: "Disable browser fallback for this run." })),
 			advanced: Type.Optional(Type.Object({}, { additionalProperties: true, description: ADVANCED_DESCRIPTION })),
@@ -247,10 +260,18 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 		promptSnippet: "Multi-query research with provenance artifacts",
 		parameters: Type.Object({
 			question: Type.Optional(Type.String({ description: "Research question or synthesis objective." })),
-			queries: Type.Optional(Type.Array(Type.String(), { description: "Seed queries. If omitted, question is used as the seed query." })),
-			output: Type.String({ description: "New output directory. The CLI refuses to overwrite existing directories." }),
-			mode: Type.Optional(Type.String({ description: "Acquisition preset: fast, standard, or deep. Defaults to deep." })),
-			maxIterations: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum search/read/refine iterations." })),
+			queries: Type.Optional(
+				Type.Array(Type.String(), { description: "Seed queries. If omitted, question is used as the seed query." }),
+			),
+			output: Type.String({
+				description: "New output directory. The CLI refuses to overwrite existing directories.",
+			}),
+			mode: Type.Optional(
+				Type.String({ description: "Acquisition preset: fast, standard, or deep. Defaults to deep." }),
+			),
+			maxIterations: Type.Optional(
+				Type.Integer({ minimum: 1, description: "Maximum search/read/refine iterations." }),
+			),
 			limit: Type.Optional(Type.Integer({ minimum: 1, description: "Search results per query." })),
 			readCount: Type.Optional(Type.Integer({ minimum: 1, description: "Results to read per query." })),
 			maxSources: Type.Optional(Type.Integer({ minimum: 1, description: "Whole-run cap on unique sources read." })),
@@ -280,8 +301,12 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 		promptSnippet: "Find structured data and API endpoints on a page",
 		parameters: Type.Object({
 			url: Type.String({ description: "URL to inspect." }),
-			output: Type.Optional(Type.String({ description: "Optional new output directory. Defaults under forge-output/web-research." })),
-			mode: Type.Optional(Type.String({ description: "Acquisition preset: fast, standard, or deep. Defaults to standard." })),
+			output: Type.Optional(
+				Type.String({ description: "Optional new output directory. Defaults under forge-output/web-research." }),
+			),
+			mode: Type.Optional(
+				Type.String({ description: "Acquisition preset: fast, standard, or deep. Defaults to standard." }),
+			),
 			render: Type.Optional(Type.Boolean({ description: "Use Playwright network observation when available." })),
 			advanced: Type.Optional(Type.Object({}, { additionalProperties: true, description: ADVANCED_DESCRIPTION })),
 		}),
@@ -306,8 +331,16 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 		promptSnippet: "Resolve a name to one source's entries",
 		parameters: Type.Object({
 			subject: Type.String({ description: "The name of the thing, without framing words." }),
-			provider: Type.String({ description: "Provider id: sep, iep, wikipedia, wiktionary, inpho, suttacentral, openlibrary, and the rest of the search registry." }),
-			limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum candidates. Ignored by a source that publishes a whole index." })),
+			provider: Type.String({
+				description:
+					"Provider id: sep, iep, wikipedia, wiktionary, inpho, suttacentral, openlibrary, and the rest of the search registry.",
+			}),
+			limit: Type.Optional(
+				Type.Integer({
+					minimum: 1,
+					description: "Maximum candidates. Ignored by a source that publishes a whole index.",
+				}),
+			),
 		}),
 		executionMode: "sequential",
 		async execute(_toolCallId, params, signal) {
@@ -329,11 +362,21 @@ export default function webResearchExtension(pi: ExtensionAPI) {
 		promptSnippet: "Academic literature search with RIS export",
 		parameters: Type.Object({
 			query: Type.String({ description: "Academic search query." }),
-			output: Type.String({ description: "New output directory. The CLI refuses to overwrite existing directories." }),
+			output: Type.String({
+				description: "New output directory. The CLI refuses to overwrite existing directories.",
+			}),
 			limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum results per provider." })),
-			providers: Type.Optional(Type.Array(Type.String(), { description: "Optional provider list, e.g. crossref, semantic-scholar, pubmed, arxiv." })),
-			contactEmail: Type.Optional(Type.String({ description: "Contact email for polite API use and Unpaywall when configured." })),
-			timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Provider request timeout in milliseconds." })),
+			providers: Type.Optional(
+				Type.Array(Type.String(), {
+					description: "Optional provider list, e.g. crossref, semantic-scholar, pubmed, arxiv.",
+				}),
+			),
+			contactEmail: Type.Optional(
+				Type.String({ description: "Contact email for polite API use and Unpaywall when configured." }),
+			),
+			timeoutMs: Type.Optional(
+				Type.Integer({ minimum: 1, description: "Provider request timeout in milliseconds." }),
+			),
 		}),
 		executionMode: "sequential",
 		async execute(_toolCallId, params, signal, onUpdate) {
@@ -416,7 +459,12 @@ function buildAcademicResearchArgs(input: AcademicWebResearchParams): string[] {
 	return args;
 }
 
-function readResearchReport(output: string): { query: unknown; params: unknown; results: unknown[]; readings: unknown[] } {
+function readResearchReport(output: string): {
+	query: unknown;
+	params: unknown;
+	results: unknown[];
+	readings: unknown[];
+} {
 	return JSON.parse(readFileSync(join(output, "research_report.json"), "utf8")) as {
 		query: unknown;
 		params: unknown;
@@ -454,9 +502,14 @@ function safeStem(value: string): string {
  * Holding that until the process exits is what makes eleven working minutes
  * indistinguishable from a hang.
  */
+// `signal` is optional because the tool `execute` callback's is: the host may
+// invoke a tool with no signal at all. Requiring one here type-checked only
+// because nothing type-checked this file, and every call site passed the
+// callback's value straight through -- so a signal-less invocation would have
+// thrown on `addEventListener` before the research run ever started.
 function runNode(
 	args: string[],
-	signal: AbortSignal,
+	signal: AbortSignal | undefined,
 	onProgress?: (line: string) => void,
 ): Promise<{ stdout: string; stderr: string }> {
 	return new Promise((resolveRun, rejectRun) => {
@@ -479,13 +532,13 @@ function runNode(
 			for (const line of lines) if (line.trim()) onProgress(line.trim());
 		});
 		const abort = () => child.kill();
-		signal.addEventListener("abort", abort, { once: true });
+		signal?.addEventListener("abort", abort, { once: true });
 		child.once("error", (error) => {
-			signal.removeEventListener("abort", abort);
+			signal?.removeEventListener("abort", abort);
 			rejectRun(error);
 		});
 		child.once("exit", (code) => {
-			signal.removeEventListener("abort", abort);
+			signal?.removeEventListener("abort", abort);
 			if (code === 0) resolveRun({ stdout, stderr });
 			else rejectRun(new Error(formatRunFailure(args, code, stdout, stderr)));
 		});

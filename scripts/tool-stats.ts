@@ -5,15 +5,49 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { openBrowser } from "../packages/coding-agent/src/utils/open-browser.ts";
 
-interface TextContent { type: "text"; text: string }
-interface ImageContent { type: "image"; data: string; mimeType?: string }
-interface ToolCallContent { type: "toolCall"; id: string; name: string; arguments?: Record<string, unknown> }
+interface TextContent {
+	type: "text";
+	text: string;
+}
+interface ImageContent {
+	type: "image";
+	data: string;
+	mimeType?: string;
+}
+interface ToolCallContent {
+	type: "toolCall";
+	id: string;
+	name: string;
+	arguments?: Record<string, unknown>;
+}
 type Content = TextContent | ImageContent | ToolCallContent | { type: string; [key: string]: unknown };
-interface Message { role?: string; content?: string | Content[]; toolCallId?: string; toolName?: string; details?: unknown }
-interface Entry { type?: string; message?: Message }
-interface ToolStats { calls: number; results: number; estimatedTokens: number; samples: number[]; errors: number }
-interface BashCommandStats { calls: number; estimatedTokens: number; samples: number[] }
-interface ToolCallInfo { toolName: string; bashCommand?: string }
+interface Message {
+	role?: string;
+	content?: string | Content[];
+	toolCallId?: string;
+	toolName?: string;
+	details?: unknown;
+}
+interface Entry {
+	type?: string;
+	message?: Message;
+}
+interface ToolStats {
+	calls: number;
+	results: number;
+	estimatedTokens: number;
+	samples: number[];
+	errors: number;
+}
+interface BashCommandStats {
+	calls: number;
+	estimatedTokens: number;
+	samples: number[];
+}
+interface ToolCallInfo {
+	toolName: string;
+	bashCommand?: string;
+}
 
 const BUCKETS = [0, 50, 100, 250, 500, 1000, 2000, 4000, 8000, 16000, 32000, Number.POSITIVE_INFINITY];
 
@@ -67,11 +101,13 @@ function estimateTokenCount(text: string): number {
 function contentText(content: Message["content"]): string {
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
-	return content.map((block) => {
-		if (block.type === "text" && "text" in block && typeof block.text === "string") return block.text;
-		if (block.type === "image" && "data" in block && typeof block.data === "string") return block.data;
-		return JSON.stringify(block);
-	}).join("\n");
+	return content
+		.map((block) => {
+			if (block.type === "text" && "text" in block && typeof block.text === "string") return block.text;
+			if (block.type === "image" && "data" in block && typeof block.data === "string") return block.data;
+			return JSON.stringify(block);
+		})
+		.join("\n");
 }
 
 function getBashCommand(args: Record<string, unknown> | undefined): string | undefined {
@@ -117,16 +153,29 @@ for (const file of files) {
 	for (const line of readFileSync(file, "utf8").split("\n")) {
 		if (!line.trim()) continue;
 		let entry: Entry;
-		try { entry = JSON.parse(line) as Entry; } catch { parseErrors++; continue; }
+		try {
+			entry = JSON.parse(line) as Entry;
+		} catch {
+			parseErrors++;
+			continue;
+		}
 		if (entry.type !== "message") continue;
 		const message = entry.message;
 		if (!message) continue;
 		if (message.role === "assistant" && Array.isArray(message.content)) {
 			for (const block of message.content) {
+				// `id` and `arguments` need the same narrowing `name` already gets: the
+				// content blocks come from a union, so on anything but a `ToolCall` they
+				// are `unknown` rather than the string and record used below.
 				if (block.type !== "toolCall" || !("name" in block) || typeof block.name !== "string") continue;
+				if (!("id" in block) || typeof block.id !== "string") continue;
 				const stats = getStats(tools, block.name, createToolStats);
 				stats.calls++;
-				const bashCommand = block.name === "bash" ? getBashCommand(block.arguments) : undefined;
+				const rawArguments = "arguments" in block ? block.arguments : undefined;
+				const bashCommand =
+					block.name === "bash" && rawArguments && typeof rawArguments === "object"
+						? getBashCommand(rawArguments as Record<string, unknown>)
+						: undefined;
 				callsById.set(block.id, { toolName: block.name, bashCommand });
 				if (bashCommand) getStats(bashCommands, commandKey(bashCommand), createBashStats).calls++;
 			}
@@ -148,9 +197,32 @@ for (const file of files) {
 	}
 }
 
-const toolRows = [...tools.entries()].map(([name, s]) => ({ name, ...s, avg: s.results ? s.estimatedTokens / s.results : 0, histogram: bucketCounts(s.samples) })).sort((a, b) => b.estimatedTokens - a.estimatedTokens);
-const bashRows = [...bashCommands.entries()].map(([name, s]) => ({ name, ...s, avg: s.samples.length ? s.estimatedTokens / s.samples.length : 0, histogram: bucketCounts(s.samples) })).sort((a, b) => b.estimatedTokens - a.estimatedTokens).slice(0, 50);
-const data = { generatedAt: new Date().toISOString(), sessionsDir, files: files.length, parseErrors, bucketLabels: bucketLabels(), tools: toolRows, bashCommands: bashRows };
+const toolRows = [...tools.entries()]
+	.map(([name, s]) => ({
+		name,
+		...s,
+		avg: s.results ? s.estimatedTokens / s.results : 0,
+		histogram: bucketCounts(s.samples),
+	}))
+	.sort((a, b) => b.estimatedTokens - a.estimatedTokens);
+const bashRows = [...bashCommands.entries()]
+	.map(([name, s]) => ({
+		name,
+		...s,
+		avg: s.samples.length ? s.estimatedTokens / s.samples.length : 0,
+		histogram: bucketCounts(s.samples),
+	}))
+	.sort((a, b) => b.estimatedTokens - a.estimatedTokens)
+	.slice(0, 50);
+const data = {
+	generatedAt: new Date().toISOString(),
+	sessionsDir,
+	files: files.length,
+	parseErrors,
+	bucketLabels: bucketLabels(),
+	tools: toolRows,
+	bashCommands: bashRows,
+};
 
 const html = `<!doctype html>
 <html>

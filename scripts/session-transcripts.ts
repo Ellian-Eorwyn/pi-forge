@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * Extracts session transcripts for a given cwd, splits into context-sized files,
  * optionally spawns subagents to analyze patterns.
@@ -9,13 +10,13 @@
  *   cwd            Working directory to extract sessions for (defaults to current)
  */
 
-import { readFileSync, readdirSync, writeFileSync, existsSync, mkdirSync } from "fs";
-import { spawn } from "child_process";
 import { createInterface } from "node:readline";
+import chalk from "chalk";
+import { spawn } from "child_process";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join, resolve } from "path";
 import { parseSessionEntries, type SessionMessageEntry } from "../packages/coding-agent/src/core/session-manager.ts";
-import chalk from "chalk";
 
 const MAX_CHARS_PER_FILE = 100_000; // ~20k tokens, leaving room for prompt + analysis + output
 
@@ -42,10 +43,14 @@ function parseSession(filePath: string): string[] {
 	for (const entry of entries) {
 		if (entry.type !== "message") continue;
 		const msgEntry = entry as SessionMessageEntry;
-		const { role, content } = msgEntry.message;
+		// `AgentMessage` is a union and custom message types need not carry
+		// `content`, so it is read behind an `in` check rather than destructured.
+		const message = msgEntry.message;
+		const role = message.role;
 
 		if (role !== "user" && role !== "assistant") continue;
 
+		const content = "content" in message ? message.content : "";
 		const text = extractTextContent(content as string | Array<{ type: string; text?: string }>);
 		if (!text.trim()) continue;
 

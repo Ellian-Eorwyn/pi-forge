@@ -2,6 +2,12 @@
 	"extends": "./tsconfig.base.json",
 	"compilerOptions": {
 		"noEmit": true,
+		// forge/ ships its shared libraries as plain .mjs and its extensions import
+		// them directly. Without this every such import is an implicit `any`, which
+		// is the opposite of what putting forge under the typechecker is for.
+		// `checkJs` stays off: the .mjs files are not annotated, and inferring their
+		// types for the callers is the whole of what is needed here.
+		"allowJs": true,
 		"paths": {
 			"*": ["./*"],
 			"@earendil-works/pi-ai": ["./packages/ai/src/index.ts"],
@@ -21,6 +27,15 @@
 			"@earendil-works/pi-agent-old/*": ["./packages/agent-old/src/*"]
 		}
 	},
-	"include": ["packages/*/src/**/*", "packages/*/test/**/*", "packages/coding-agent/examples/**/*"],
+	"include": [
+		"packages/*/src/**/*",
+		"packages/*/test/**/*",
+		"packages/coding-agent/examples/**/*",
+		"forge/extensions/**/*",
+		"forge/lib/**/*",
+		"forge/bin/**/*",
+		"forge/scripts/**/*",
+		"scripts/**/*"
+	],
 	"exclude": ["**/dist/**", "packages/coding-agent/examples/extensions/gondolin/**"]
 }

@@ -35,7 +35,14 @@ import { Type } from "typebox";
 import { WORKSPACE_MARKER } from "../lib/vault-workspace.mjs";
 import { inspectVault, resolveWorkflowRoot } from "./vault-context.ts";
 
-const SKILL_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "skills", "vault-compose", "scripts", "vault-compose.py");
+const SKILL_SCRIPT = join(
+	dirname(fileURLToPath(import.meta.url)),
+	"..",
+	"skills",
+	"vault-compose",
+	"scripts",
+	"vault-compose.py",
+);
 /** Bound on one excerpt, so a pasted book cannot become a "source". */
 const MAX_UNIT_CHARS = 60000;
 
@@ -78,7 +85,9 @@ function extractText(content: unknown): string {
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
 	return content
-		.map((block) => (block && typeof block === "object" && "text" in block ? String((block as { text?: string }).text ?? "") : ""))
+		.map((block) =>
+			block && typeof block === "object" && "text" in block ? String((block as { text?: string }).text ?? "") : "",
+		)
 		.filter(Boolean)
 		.join("\n");
 }
@@ -140,7 +149,9 @@ function insideWorkspace(vaultRoot: string, target: string): boolean {
  */
 function nextStep(parsed: unknown): string {
 	const data = (parsed as { data?: { run_directory?: unknown; proposals?: unknown[] } } | undefined)?.data;
-	const proposals = Array.isArray(data?.proposals) ? (data.proposals as { id?: unknown; needs_review?: unknown }[]) : [];
+	const proposals = Array.isArray(data?.proposals)
+		? (data.proposals as { id?: unknown; needs_review?: unknown }[])
+		: [];
 	if (proposals.length === 0) return "Nothing was proposed. Relay the warnings; do not retry with different options.";
 	const held = proposals.filter((entry) => entry.needs_review).map((entry) => String(entry.id));
 	const ready = proposals.filter((entry) => !entry.needs_review).map((entry) => String(entry.id));
@@ -176,8 +187,15 @@ export default function vaultComposeExtension(pi: ExtensionAPI) {
 		if (event.toolName !== "write" && event.toolName !== "edit") return undefined;
 		const vault = inspectVault(ctx.cwd);
 		if (!vault) return undefined;
-		const raw = (event.args as { file_path?: string; path?: string } | undefined) ?? {};
-		const target = raw.file_path ?? raw.path;
+		// The event carries the tool's arguments under `input`, and both `write` and
+		// `edit` name the file `path`. This read was `event.args.file_path`, which is
+		// neither field nor property: it resolved to undefined on every call, so the
+		// guard returned early and never blocked a single write. Two things hid it --
+		// the file was outside the typechecker, and the test built its own
+		// `{ toolName, args }` event, so it was asserting against a shape the runtime
+		// does not send.
+		const requested: unknown = event.input?.path;
+		const target = typeof requested === "string" && requested.length > 0 ? requested : undefined;
 		if (!target) return undefined;
 		const absolute = resolve(ctx.cwd, target);
 		if (!isInside(vault.root, absolute)) return undefined;
@@ -228,7 +246,8 @@ export default function vaultComposeExtension(pi: ExtensionAPI) {
 
 			if (input.kind === "chat") {
 				const wanted = new Set(input.entryIds ?? []);
-				if (wanted.size === 0) throw new Error("kind 'chat' needs entryIds; the harness copies the text, you do not supply it.");
+				if (wanted.size === 0)
+					throw new Error("kind 'chat' needs entryIds; the harness copies the text, you do not supply it.");
 				const collected: string[] = [];
 				const found: string[] = [];
 				for (const entry of ctx.sessionManager.getEntries()) {
@@ -294,7 +313,9 @@ export default function vaultComposeExtension(pi: ExtensionAPI) {
 			request: Type.String({ description: "What the user asked for, in their words." }),
 			noteType: Type.Optional(Type.String({ description: "The schema `type` for the note. Defaults to note." })),
 			titleHint: Type.Optional(Type.String({ description: "A title the user already suggested." })),
-			date: Type.Optional(Type.String({ description: "The date the note is about, YYYY-MM-DD. Defaults to today." })),
+			date: Type.Optional(
+				Type.String({ description: "The date the note is about, YYYY-MM-DD. Defaults to today." }),
+			),
 			maxNotes: Type.Optional(Type.Integer({ minimum: 1, description: "Ceiling on how many notes to propose." })),
 			sourceIds: Type.Optional(
 				Type.Array(Type.String(), { description: "Which collected sources to use. Defaults to all of them." }),
@@ -309,7 +330,9 @@ export default function vaultComposeExtension(pi: ExtensionAPI) {
 				throw new Error("no sources collected. Call forge_vault_capture_source first, once per source.");
 			}
 			const wanted = new Set(input.sourceIds ?? []);
-			const chosen = pending.filter((_unit, index) => wanted.size === 0 || wanted.has(`s-${String(index + 1).padStart(4, "0")}`));
+			const chosen = pending.filter(
+				(_unit, index) => wanted.size === 0 || wanted.has(`s-${String(index + 1).padStart(4, "0")}`),
+			);
 			if (chosen.length === 0) throw new Error(`no collected source matched: ${[...wanted].join(", ")}`);
 
 			const runRoot = resolveWorkflowRoot(ctx.cwd, "vault-compose");
@@ -409,7 +432,8 @@ export default function vaultComposeExtension(pi: ExtensionAPI) {
 				return;
 			}
 			const lines = pending.map(
-				(unit, index) => `s-${String(index + 1).padStart(4, "0")}  ${unit.kind.padEnd(11)} ${unit.label} (${unit.text.length} chars)`,
+				(unit, index) =>
+					`s-${String(index + 1).padStart(4, "0")}  ${unit.kind.padEnd(11)} ${unit.label} (${unit.text.length} chars)`,
 			);
 			ctx.ui?.notify?.([`${pending.length} source(s) collected:`, ...lines].join("\n"));
 		},

@@ -45,7 +45,8 @@ const CONTEXT_CUSTOM_TYPE = "vault-workflow-context";
 
 // Read-only phases still expose bash (for doctor/status/grep). Block the obvious
 // mutation vectors so "thinking out loud" cannot change the vault.
-const DESTRUCTIVE_BASH = /(^|\s|\|)(rm|rmdir|mv|dd|truncate|tee)\s|--apply\b|\s>>?\s|\bgit\s+(commit|push|mv|rm)\b|\bsed\s+-i\b|\bmkdir\b/;
+const DESTRUCTIVE_BASH =
+	/(^|\s|\|)(rm|rmdir|mv|dd|truncate|tee)\s|--apply\b|\s>>?\s|\bgit\s+(commit|push|mv|rm)\b|\bsed\s+-i\b|\bmkdir\b/;
 
 // The Obsidian CLI needs its own gate: none of its mutating subcommands contain a
 // token the regex above catches ("rename" is not "rm", "move" is not "mv"), and it
@@ -59,15 +60,59 @@ const DESTRUCTIVE_BASH = /(^|\s|\|)(rm|rmdir|mv|dd|truncate|tee)\s|--apply\b|\s>
 // a file or tab are left out too — planning never needs them, and `daily` creates
 // today's note as a side effect of opening it.
 const OBSIDIAN_READONLY = new Set([
-	"aliases", "backlinks", "base:query", "base:views", "bases", "bookmarks",
-	"commands", "daily:path", "daily:read", "deadends", "diff", "file", "files",
-	"folder", "folders", "help", "history", "history:list", "history:read",
-	"hotkey", "hotkeys", "links", "orphans", "outline", "plugin", "plugins",
-	"plugins:enabled", "properties", "property:read", "random:read", "read",
-	"recents", "search", "search:context", "snippets", "snippets:enabled",
-	"sync:deleted", "sync:history", "sync:read", "sync:status", "tabs", "tag",
-	"tags", "tasks", "template:read", "templates", "themes", "unresolved",
-	"vault", "vaults", "version", "wordcount", "workspace",
+	"aliases",
+	"backlinks",
+	"base:query",
+	"base:views",
+	"bases",
+	"bookmarks",
+	"commands",
+	"daily:path",
+	"daily:read",
+	"deadends",
+	"diff",
+	"file",
+	"files",
+	"folder",
+	"folders",
+	"help",
+	"history",
+	"history:list",
+	"history:read",
+	"hotkey",
+	"hotkeys",
+	"links",
+	"orphans",
+	"outline",
+	"plugin",
+	"plugins",
+	"plugins:enabled",
+	"properties",
+	"property:read",
+	"random:read",
+	"read",
+	"recents",
+	"search",
+	"search:context",
+	"snippets",
+	"snippets:enabled",
+	"sync:deleted",
+	"sync:history",
+	"sync:read",
+	"sync:status",
+	"tabs",
+	"tag",
+	"tags",
+	"tasks",
+	"template:read",
+	"templates",
+	"themes",
+	"unresolved",
+	"vault",
+	"vaults",
+	"version",
+	"wordcount",
+	"workspace",
 ]);
 
 const SHELL_SEPARATORS = new Set([";", "|", "&", "\n", "(", ")"]);
@@ -129,7 +174,10 @@ function obsidianSubcommands(command: string): string[] {
 	let commandPosition = true;
 	for (let index = 0; index < tokens.length; index += 1) {
 		const token = tokens[index];
-		const wasCommandPosition = commandPosition;
+		// Annotated because the assignment below reads this variable to compute the
+		// value this variable is copied from: without it the inference is circular
+		// and both land on `any`.
+		const wasCommandPosition: boolean = commandPosition;
 		commandPosition =
 			SHELL_SEPARATORS.has(token) ||
 			(wasCommandPosition && (COMMAND_WRAPPERS.has(token) || /^[A-Za-z_]\w*=/.test(token)));
@@ -350,7 +398,9 @@ export default function vaultWorkflowExtension(pi: ExtensionAPI): void {
 		const messages = (event as { messages?: unknown }).messages;
 		if (!Array.isArray(messages)) return undefined;
 		return {
-			messages: messages.filter((message) => (message as { customType?: string }).customType !== CONTEXT_CUSTOM_TYPE),
+			messages: messages.filter(
+				(message) => (message as { customType?: string }).customType !== CONTEXT_CUSTOM_TYPE,
+			),
 		};
 	});
 
@@ -359,7 +409,10 @@ export default function vaultWorkflowExtension(pi: ExtensionAPI): void {
 		try {
 			const entries = ctx.sessionManager.getEntries();
 			const last = entries
-				.filter((entry: { type: string; customType?: string }) => entry.type === "custom" && entry.customType === "vault-workflow")
+				.filter(
+					(entry: { type: string; customType?: string }) =>
+						entry.type === "custom" && entry.customType === "vault-workflow",
+				)
 				.pop() as { data?: { phase?: Phase; previousModel?: ModelReference } } | undefined;
 			const restored = last?.data?.phase;
 			if (restored === "plan" || restored === "execute" || restored === "verify" || restored === "off") {

@@ -94,8 +94,12 @@ function harness(cwd: string, entries: unknown[] = []) {
 			assert.ok(tool, "forge_vault_compose is registered");
 			return (await tool.execute("call-2", params, undefined, undefined, ctx)).details;
 		},
-		async toolCall(toolName: string, args: unknown) {
-			return (await events.get("tool_call")?.({ toolName, args } as never, ctx as never)) as
+		// `input` is the field the runtime actually sends, and `write`/`edit` both
+		// name the file `path`. This helper used to invent `{ toolName, args }`,
+		// which meant the write-guard test passed against an event shape no host
+		// produces while the guard itself read undefined and blocked nothing.
+		async toolCall(toolName: string, input: Record<string, unknown>) {
+			return (await events.get("tool_call")?.({ toolName, input } as never, ctx as never)) as
 				| { block?: boolean; reason?: string }
 				| undefined;
 		},
@@ -164,10 +168,7 @@ test("a chat source without entry ids is refused", async () => {
 	const root = makeVault();
 	try {
 		const app = harness(root, [messageEntry("e1", "user", "Something said.")]);
-		await assert.rejects(
-			() => app.capture({ kind: "chat", label: "this conversation" }),
-			/needs entryIds/,
-		);
+		await assert.rejects(() => app.capture({ kind: "chat", label: "this conversation" }), /needs entryIds/);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -177,7 +178,10 @@ test("an entry id that matches nothing is refused rather than silently empty", a
 	const root = makeVault();
 	try {
 		const app = harness(root, [messageEntry("e1", "user", "Something said.")]);
-		await assert.rejects(() => app.capture({ kind: "chat", label: "chat", entryIds: ["e99"] }), /no message entries matched/);
+		await assert.rejects(
+			() => app.capture({ kind: "chat", label: "chat", entryIds: ["e99"] }),
+			/no message entries matched/,
+		);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -239,11 +243,11 @@ test("writing a note into the vault by hand is blocked and names the way through
 	const root = makeVault();
 	try {
 		const app = harness(root);
-		const blocked = await app.toolCall("write", { file_path: join(root, "00 Inbox", "Mine.md") });
+		const blocked = await app.toolCall("write", { path: join(root, "00 Inbox", "Mine.md") });
 		assert.equal(blocked?.block, true);
 		assert.match(String(blocked?.reason), /forge_vault_compose/);
 
-		const edited = await app.toolCall("edit", { file_path: join(root, "04 Technology", "Gasket.md") });
+		const edited = await app.toolCall("edit", { path: join(root, "04 Technology", "Gasket.md") });
 		assert.equal(edited?.block, true);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
@@ -255,7 +259,7 @@ test("a run artifact under a workspace marker is not a note and is allowed", asy
 	try {
 		const app = harness(root);
 		const allowed = await app.toolCall("write", {
-			file_path: join(root, "99 Meta", "99.06 Workflows", "Composed Notes", "run", "run-spec.json"),
+			path: join(root, "99 Meta", "99.06 Workflows", "Composed Notes", "run", "run-spec.json"),
 		});
 		assert.equal(allowed, undefined);
 	} finally {
@@ -268,9 +272,9 @@ test("writing outside the vault is left alone", async () => {
 	const outside = mkdtempSync(join(tmpdir(), "outside-"));
 	try {
 		const app = harness(root);
-		assert.equal(await app.toolCall("write", { file_path: join(outside, "notes.md") }), undefined);
+		assert.equal(await app.toolCall("write", { path: join(outside, "notes.md") }), undefined);
 		// And a tool that is not write/edit is never the guard's business.
-		assert.equal(await app.toolCall("read", { file_path: join(root, "00 Inbox", "Mine.md") }), undefined);
+		assert.equal(await app.toolCall("read", { path: join(root, "00 Inbox", "Mine.md") }), undefined);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 		rmSync(outside, { recursive: true, force: true });

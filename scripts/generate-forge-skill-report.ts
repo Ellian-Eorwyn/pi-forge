@@ -73,19 +73,25 @@ function standardDiagnostics(skill: Skill): string[] {
 	const diagnostics: string[] = [];
 	const directoryName = basename(skill.baseDir);
 	if (skill.name !== directoryName) {
-		diagnostics.push(`${repositoryPath(skill.filePath)}: skill name "${skill.name}" must match directory "${directoryName}"`);
+		diagnostics.push(
+			`${repositoryPath(skill.filePath)}: skill name "${skill.name}" must match directory "${directoryName}"`,
+		);
 	}
 	if (skill.name.length < 1 || skill.name.length > maxSkillNameLength) {
 		diagnostics.push(`${repositoryPath(skill.filePath)}: skill name must be 1-${maxSkillNameLength} characters`);
 	}
 	if (!skillNamePattern.test(skill.name)) {
-		diagnostics.push(`${repositoryPath(skill.filePath)}: skill name must use lowercase letters, numbers, and single hyphens`);
+		diagnostics.push(
+			`${repositoryPath(skill.filePath)}: skill name must use lowercase letters, numbers, and single hyphens`,
+		);
 	}
 	if (skill.description.trim().length === 0) {
 		diagnostics.push(`${repositoryPath(skill.filePath)}: skill description is required`);
 	}
 	if (skill.description.length > maxDescriptionLength) {
-		diagnostics.push(`${repositoryPath(skill.filePath)}: skill description must be at most ${maxDescriptionLength} characters`);
+		diagnostics.push(
+			`${repositoryPath(skill.filePath)}: skill description must be at most ${maxDescriptionLength} characters`,
+		);
 	}
 	if (skill.description.length > descriptionBudget) {
 		diagnostics.push(
@@ -147,7 +153,8 @@ const entries = skills.map((skill) => {
 	};
 });
 const visibleEntries = entries.filter((entry) => entry.modelVisible);
-const sharedCharacters = launchPromptCharacters - visibleEntries.reduce((sum, entry) => sum + entry.launchCharacters, 0);
+const sharedCharacters =
+	launchPromptCharacters - visibleEntries.reduce((sum, entry) => sum + entry.launchCharacters, 0);
 const sharedTokens = Math.ceil(sharedCharacters / 4);
 const allFilesTokens = entries.reduce((sum, entry) => sum + entry.fileTokens, 0);
 
@@ -164,7 +171,11 @@ interface MeasuredTool {
  * receives. This is the half of launch context the report used to disclaim as
  * harness-owned — which is exactly why an oversized schema could grow unnoticed.
  */
-async function measureTools(): Promise<{ tools: MeasuredTool[]; snippets: Record<string, string>; guidelines: string[] }> {
+async function measureTools(): Promise<{
+	tools: MeasuredTool[];
+	snippets: Record<string, string>;
+	guidelines: string[];
+}> {
 	const snippets: Record<string, string> = {};
 	const guidelines: string[] = [];
 	const tools: MeasuredTool[] = [];
@@ -175,7 +186,8 @@ async function measureTools(): Promise<{ tools: MeasuredTool[]; snippets: Record
 		definition: { description?: string; parameters?: unknown; promptSnippet?: string; promptGuidelines?: string[] },
 	): void => {
 		const schema = JSON.stringify({ name, description: definition.description, input_schema: definition.parameters });
-		const properties = (definition.parameters as { properties?: Record<string, unknown> } | undefined)?.properties ?? {};
+		const properties =
+			(definition.parameters as { properties?: Record<string, unknown> } | undefined)?.properties ?? {};
 		let promptCharacters = 0;
 		if (definition.promptSnippet) {
 			snippets[name] = definition.promptSnippet;
@@ -223,7 +235,11 @@ async function measureTools(): Promise<{ tools: MeasuredTool[]; snippets: Record
 	return { tools, snippets, guidelines };
 }
 
-const { tools: measuredTools, snippets: toolSnippets, promptGuidelines } = await measureTools();
+// `measureTools` returns this as `guidelines`. Destructuring it as
+// `promptGuidelines` bound undefined, so every guideline the forge extensions
+// declare was dropped before `buildSystemPrompt` saw it and the reported startup
+// cost was short by exactly that much.
+const { tools: measuredTools, snippets: toolSnippets, guidelines: promptGuidelines } = await measureTools();
 const toolSchemaTokens = measuredTools.reduce((sum, tool) => sum + tool.schemaTokens, 0);
 
 // The harness skeleton: intro, the tools list, the guidelines, the pi documentation
