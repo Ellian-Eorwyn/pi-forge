@@ -54,3 +54,7 @@ forge/evals/expectations/.private/
 # it in — the real protection is that it is not here in the first place.
 forge/evals/eval-sources/
 forge/evals/sources/
+
+# Skill run directories. Seven skills write their runs here by documented
+# convention, so working in this repo leaves untracked output behind.
+forge-output/
