@@ -51,6 +51,7 @@ from vault_schema import (
     RESERVED_WINDOWS_NAMES,
     UserError,
     compiled_schema_for,
+    domain_folder,
     link_basename,
     normalize_body_for_hash,
     note_title,
@@ -138,6 +139,11 @@ IMPORT_ARTIFACT_ROLES = {
     "deep_research_report.md": "Deep Research Report",
 }
 DIRECTORY_KINDS = ("person", "organization")
+# The conventional domain for person and organization notes. The schema routes
+# by domain and subdomain and carries no type-to-route table, so this is looked
+# up rather than derived, and a vault that files them elsewhere gets a report
+# line with no folder name instead of a wrong one.
+DIRECTORY_DOMAIN = "directory"
 
 THINK_PREFILL = "<think>\n\n</think>\n\n"
 THINK_BLOCK_RE = forge_llm.THINK_BLOCK_RE
@@ -231,6 +237,12 @@ def cache_dir(vault):
 
 def decisions_path(vault):
     return state_root(vault) / "decisions.jsonl"
+
+
+def directory_destination(schema):
+    """`" for 09 Directory"` when this vault has that domain, else `""`."""
+    domain = schema.get("domains", {}).get(DIRECTORY_DOMAIN)
+    return f" for {domain_folder(domain)}" if domain else ""
 
 
 def unique_run_directory(vault):
@@ -2706,7 +2718,7 @@ def command_wiki(args):
         "wiki layer",
         extra=[
             (
-                "People and organizations for 08 Directory, not created here",
+                f"People and organizations{directory_destination(schema)}, not created here",
                 directory_candidates,
                 lambda row: f"- **{row['title']}** ({row['kind']}) — {row['mentions']} mentions",
             ),

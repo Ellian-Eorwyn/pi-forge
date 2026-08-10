@@ -318,6 +318,46 @@ class CompileTests(unittest.TestCase):
         self.assertEqual(lexicon["terms"], [])
         self.assertIn("Alexi Miller", {entry["name"] for entry in lexicon["speakers"]})
 
+    def test_a_schema_with_no_people_route_finds_them_by_type(self):
+        # A vault that files person notes anywhere else -- Loom after the work
+        # split moved its whole directory domain out -- must still get a roster.
+        schema = {"domains": {"personal": {"value": "personal", "number": "1", "label": "Personal"}}, "subdomains": {}}
+        self.assertIsNone(vl.people_folder(schema))
+        lexicon, _hash = vl.compiled_lexicon_for(self.vault, vl.resolve_lexicon_path(self.vault), schema=schema)
+        by_name = {entry["name"]: entry for entry in lexicon["speakers"]}
+        self.assertEqual(by_name["Kathy Kuntz"]["role"], "Director")
+        self.assertEqual(by_name["Alexi Miller"]["appears"], "sometimes")
+
+    def test_the_scan_reads_the_type_not_the_folder(self):
+        elsewhere = self.vault / "01 Personal" / "1.10 People"
+        elsewhere.mkdir(parents=True)
+        (elsewhere / "Gillian Eorwyn.md").write_text(
+            "---\ntype: person\ndomain: personal\nsubdomain: people\n---\n## Gillian Eorwyn\n\n**Director of Communications**\n",
+            encoding="utf-8",
+        )
+        (elsewhere / "Naot shoes.md").write_text(
+            "---\ntype: note\ndomain: personal\n---\n## Naot shoes\n\n**Not a person**\n",
+            encoding="utf-8",
+        )
+        (self.vault / "00 Inbox").mkdir(parents=True, exist_ok=True)
+        (self.vault / "00 Inbox" / "Unfiled Person.md").write_text(
+            "---\ntype: person\nstatus: raw\n---\n## Unfiled Person\n\n**Analyst**\n",
+            encoding="utf-8",
+        )
+        names = {person["name"] for person in vl._people_by_scan(self.vault)}
+        self.assertIn("Gillian Eorwyn", names)
+        self.assertIn("Alexi Miller", names)
+        self.assertNotIn("Naot shoes", names)
+        self.assertNotIn("Unfiled Person", names)
+
+    def test_the_scan_skips_workflow_run_backups(self):
+        run = self.vault / "99 Meta" / "99.06 Workflows" / "Transcript Cleanups"
+        (run / "backup").mkdir(parents=True)
+        (run / vl.WORKSPACE_MARKER).write_text("", encoding="utf-8")
+        (run / "backup" / "Alexi Miller.md").write_text(PERSON_NOTE, encoding="utf-8")
+        names = [person["name"] for person in vl._people_by_scan(self.vault)]
+        self.assertEqual(names.count("Alexi Miller"), 1)
+
     def test_digest_counts_each_tier(self):
         lexicon, _hash = vl.compiled_lexicon_for(self.vault, vl.resolve_lexicon_path(self.vault), schema=SCHEMA_STUB)
         digest = vl.lexicon_digest(lexicon)

@@ -174,6 +174,22 @@ class OwnerTests(unittest.TestCase):
             self.assertEqual(profile["cards"], [])
             self.assertEqual(profile["owner"]["name"], "Ellie")
 
+    def test_an_owner_record_with_no_card_section_is_not_a_complaint(self):
+        """A work vault's register on purpose: the name that addresses its owner
+        and none of the personal cards. Nothing is broken, so nothing warns."""
+        register = NAMED_REGISTER.split(f"## {vp.CARDS_SECTION}")[0]
+        self.assertNotIn(vp.CARDS_SECTION, register)
+        with tempfile.TemporaryDirectory() as root:
+            vault = build_vault(root, register=register)
+            profile, _hash, warnings = vp.compiled_profile_for(vault, vault / vp.DEFAULT_PROFILE)
+            self.assertEqual(profile["owner"]["name"], "Ellie")
+            self.assertEqual(profile["cards"], [])
+            self.assertEqual(warnings, [])
+
+    def test_a_register_with_neither_section_is_still_malformed(self):
+        with self.assertRaises(UserError):
+            vp.parse_profile_note("# Personal Context\n\nNeither section is here.\n")
+
     def test_a_broken_card_table_costs_the_cards_and_keeps_the_name(self):
         """The card table is a contract; the owner record is not part of it."""
         register = NAMED_REGISTER.replace("| Card | Tier | Scope | Applies | Triggers | Notes |", "| Card |")

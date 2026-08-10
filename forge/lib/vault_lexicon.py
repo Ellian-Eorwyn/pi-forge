@@ -24,6 +24,7 @@ from pathlib import Path
 from vault_schema import (
     INBOX_DIR,
     PROTECTED_DIRS,
+    WORKSPACE_MARKER,
     UserError,
     compile_destination,
     link_basename,
@@ -52,9 +53,14 @@ DEFAULT_APPEARS = APPEARS_SOMETIMES
 TERM_CATEGORIES = ("name", "acronym", "term")
 DEFAULT_CATEGORY = "term"
 
-# Where person notes live, asked of the schema rather than hardcoded.
+# The conventional route for person notes, and only a convention: the schema
+# routes by domain and subdomain, and which of those holds people is a prose
+# decision rule the parser never sees. A vault declaring this route gets the
+# cheap answer; one that files people anywhere else is found by scanning for
+# the note type instead, which is what actually makes a note a person note.
 PEOPLE_DOMAIN = "directory"
 PEOPLE_SUBDOMAIN = "contacts"
+PERSON_TYPE = "person"
 
 # Calibrated against the 44 real mistranscriptions in the transcription
 # dictionary. Requiring the first folded letter to match keeps every one of
@@ -371,7 +377,7 @@ def parse_lexicon_note(text):
 # --------------------------------------------------------------------------
 
 def people_folder(schema):
-    """The folder the schema routes person notes to, or ``None``."""
+    """The conventional people folder, or ``None`` when this schema has no such route."""
     if not schema:
         return None
     try:
@@ -411,7 +417,7 @@ def _role_summary(body, metadata):
     return summary[:MAX_ROLE_CHARS].strip()
 
 
-def _read_person(path):
+def _read_person(path, require_type=False):
     try:
         data = split_frontmatter(path.read_bytes())
     except (OSError, UnicodeDecodeError, UserError):
@@ -422,21 +428,56 @@ def _read_person(path):
         metadata = {}
     if not isinstance(metadata, dict):
         metadata = {}
+    if require_type and metadata.get("type") != PERSON_TYPE:
+        return None
     return {"name": path.stem, "role": _role_summary(data.get("body") or "", metadata)}
 
 
+def _people_by_scan(vault):
+    """Person notes found by their own `type`, for a vault with no people route.
+
+    Slower than reading one folder, so it is the fallback rather than the rule --
+    but it is the only answer that survives a vault reorganising its domains,
+    and an empty roster is worse than a slow one. A silent `[]` here means the
+    transcript pipeline stops naming voices it has always named.
+    """
+    vault = Path(vault).resolve()
+    workspace_roots = {marker.parent.resolve() for marker in vault.rglob(WORKSPACE_MARKER)}
+    people = []
+    for path in sorted(vault.rglob("*.md")):
+        resolved = path.resolve()
+        parts = resolved.relative_to(vault).parts
+        if any(part.startswith(".") or part in PROTECTED_DIRS for part in parts):
+            continue
+        if parts and parts[0] == INBOX_DIR:
+            continue
+        # A run directory holds backup copies of notes; a person note backed up
+        # there is the same person, and would join the roster twice.
+        if any(root in resolved.parents for root in workspace_roots):
+            continue
+        person = _read_person(resolved, require_type=True)
+        if person:
+            people.append(person)
+    return people
+
+
 def directory_people(vault, schema):
-    """Compile a one-line entry for every person note the schema routes.
+    """Compile a one-line entry for every person note in the vault.
 
     Reusing the notes means the roster carries current roles without anyone
-    maintaining a second copy of them.
+    maintaining a second copy of them. Where those notes live is asked of the
+    schema first and worked out from the notes themselves when the schema
+    declares no such route -- see `PEOPLE_DOMAIN`.
+
+    No schema at all is a different thing from a schema that files people
+    elsewhere: the caller has told us nothing, so we scan nothing.
     """
+    if not schema:
+        return []
     folder = people_folder(schema)
-    if folder is None:
-        return []
-    root = Path(vault) / folder
-    if not root.is_dir():
-        return []
+    root = Path(vault) / folder if folder else None
+    if root is None or not root.is_dir():
+        return _people_by_scan(vault)
     people = []
     for path in sorted(root.glob("*.md")):
         if path.name.startswith("."):

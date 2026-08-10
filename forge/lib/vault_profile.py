@@ -43,6 +43,7 @@ from vault_schema import (
     INBOX_DIR,
     PROTECTED_DIRS,
     UserError,
+    has_section,
     heading_index,
     link_basename,
     section_bounds,
@@ -280,10 +281,21 @@ def parse_profile_note(text):
     cannot be read is unusable. Row problems only skip their own row: losing
     every card because one cell has a typo is the wrong trade for an enrichment
     layer. The owner record never raises at all -- see :func:`parse_owner`.
+
+    A register that is nothing but an owner record is a real configuration
+    rather than a broken one: a work vault wants the name and pronouns that
+    address its owner and none of the personal cards, and refusing that would
+    make the privacy boundary unbuildable. So an absent card table is allowed
+    exactly when the owner record is there to make the register mean something.
+    A register with neither is still malformed, and a `## Cards` heading that is
+    present still has to parse.
     """
     lines = str(text).splitlines()
     owner, owner_warnings = parse_owner(lines)
-    rows = table_after(lines, CARDS_SECTION, ["Card", "Tier"])
+    if owner is not None and not has_section(lines, CARDS_SECTION):
+        rows = []
+    else:
+        rows = table_after(lines, CARDS_SECTION, ["Card", "Tier"])
     cards = []
     warnings = list(owner_warnings)
     seen = set()
