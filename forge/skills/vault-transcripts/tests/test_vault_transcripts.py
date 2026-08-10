@@ -190,19 +190,21 @@ def transcript(blocks, preamble="", trailing=""):
 
 # Long enough to clear the tiny-note threshold, so the default fixture exercises
 # the full treatment. TINY_BLOCKS covers the short path on purpose.
-SOLO_BLOCKS = [
-    block("Okay so I need to remember to order the replacement gasket for the espresso machine.", 0),
-    block("The old one is cracked around the rim and it leaks whenever I pull a double shot.", 6),
-    block("Also the grinder needs descaling, probably this weekend if I have time.", 14),
-    block("And I should measure the counter before buying anything else for that corner.", 22),
-    block("The other thing is the shelving unit in the pantry, which never got anchored properly.", 30),
-    block("I keep meaning to buy the right brackets but I always forget the stud spacing.", 38),
-    block("Probably worth photographing the wall before the hardware store trip this time.", 46),
-    block("Then there is the question of whether we replace the kettle or just descale it too.", 54),
-    block("Gillian thinks the kettle is fine, and honestly she is probably right about that.", 62),
-    block("Last thing, I should check whether the warranty on the machine covers the gasket.", 70),
-    block("If it does then none of this costs anything except the trip and the afternoon.", 78),
+SOLO_TEXTS = [
+    "Okay so I need to remember to order the replacement gasket for the espresso machine.",
+    "The old one is cracked around the rim and it leaks whenever I pull a double shot.",
+    "Also the grinder needs descaling, probably this weekend if I have time.",
+    "And I should measure the counter before buying anything else for that corner.",
+    "The other thing is the shelving unit in the pantry, which never got anchored properly.",
+    "I keep meaning to buy the right brackets but I always forget the stud spacing.",
+    "Probably worth photographing the wall before the hardware store trip this time.",
+    "Then there is the question of whether we replace the kettle or just descale it too.",
+    "Gillian thinks the kettle is fine, and honestly she is probably right about that.",
+    "Last thing, I should check whether the warranty on the machine covers the gasket.",
+    "If it does then none of this costs anything except the trip and the afternoon.",
 ]
+SOLO_SECONDS = [0, 6, 14, 22, 30, 38, 46, 54, 62, 70, 78]
+SOLO_BLOCKS = [block(text, seconds) for text, seconds in zip(SOLO_TEXTS, SOLO_SECONDS)]
 TINY_BLOCKS = [block("Remember to order the espresso machine gasket before the weekend.", 0)]
 DIALOGUE_BLOCKS = [
     block("How did the deployment window go last night?", 0, "Speaker 1"),
@@ -2901,6 +2903,143 @@ class DailyNoteBuildingTests(unittest.TestCase):
             vt.check_daily_note(self.fmt, self.sources, self.build(composition), composition, self.group["members"]),
             [],
         )
+
+
+class CleanupRepairTurnTests(unittest.TestCase):
+    """The corrective retry has to show the model the answer it is correcting."""
+
+    def calls_for(self, first_response):
+        seen = []
+
+        def fake_once(args, service, messages, source, speaker_map, drop_labels, tiny, task, glossary=()):
+            seen.append(messages)
+            if len(seen) == 1:
+                return first_response, "x", ["these words are not in the chunk: espresso, machine"]
+            return "The machine leaks.", "x", []
+
+        original = vt.clean_chunk_once
+        vt.clean_chunk_once = fake_once
+        try:
+            vt.clean_one_chunk(
+                SimpleNamespace(cache_prompt=True, request_timeout=60, routing={}),
+                {"name": "chat", "model": "chat", "url": "http://127.0.0.1:1/v1/chat/completions"},
+                {"chunk": "The machine leaks."},
+                "The machine leaks.",
+                {},
+                True,
+                False,
+            )
+        finally:
+            vt.clean_chunk_once = original
+        return seen
+
+    def test_the_rejected_answer_goes_back_as_the_assistant_turn(self):
+        seen = self.calls_for("The espresso machine leaks badly.")
+        self.assertEqual(len(seen), 2)
+        repair = seen[1]
+        assistants = [message for message in repair if message["role"] == "assistant"]
+        self.assertEqual(len(assistants), 1)
+        self.assertIn("The espresso machine leaks badly.", assistants[0]["content"])
+        # The correction itself still has to be the last thing the model reads.
+        self.assertEqual(repair[-1]["role"], "user")
+        self.assertIn("not in the chunk", repair[-1]["content"])
+
+    def test_an_empty_first_answer_adds_no_assistant_turn(self):
+        # There is nothing to correct, so inventing an empty assistant turn
+        # would only teach the model that an empty answer is a shape it may use.
+        seen = self.calls_for("")
+        self.assertEqual([message for message in seen[1] if message["role"] == "assistant"], [])
+
+
+class CleanupConcurrencyTests(PipelineTests):
+    """Files are independent; chunks inside a file are not."""
+
+    # Identical bodies would be collapsed as duplicates before cleanup ever ran,
+    # so each file has to say something of its own.
+    NAMES = ("20260724 131748-9788991C.md", "20260725 131748-9788991D.md", "20260726 131748-9788991E.md")
+
+    def write_distinct(self, count):
+        for offset, name in enumerate(self.NAMES[:count]):
+            blocks = [
+                block(f"{text} Note {offset} on that.", seconds)
+                for text, seconds in zip(SOLO_TEXTS, SOLO_SECONDS)
+            ]
+            self.write(name, transcript(blocks))
+
+    def test_jobs_cleans_several_files_and_keeps_each_one_whole(self):
+        self.write_distinct(3)
+        with StubServer() as server:
+            result = self.result_of(self.process(server.url, "--apply", "--jobs", "2"))
+        self.assertEqual(result["data"]["counts"]["processed"], 3)
+        self.assertEqual(result["data"]["counts"]["review_required"], 0)
+
+    def test_jobs_matches_serial_output(self):
+        self.write_distinct(3)
+        with StubServer() as server:
+            serial = self.result_of(self.process(server.url, "--apply"))
+        serial_notes = {path.name: path.read_text(encoding="utf-8") for path in (self.vault / "00 Inbox").glob("*.md")}
+
+        self.tearDown()
+        self.setUp()
+        self.write_distinct(3)
+        with StubServer() as server:
+            parallel = self.result_of(self.process(server.url, "--apply", "--jobs", "2"))
+        parallel_notes = {path.name: path.read_text(encoding="utf-8") for path in (self.vault / "00 Inbox").glob("*.md")}
+
+        self.assertEqual(serial["data"]["counts"], parallel["data"]["counts"])
+        self.assertEqual(serial_notes, parallel_notes)
+
+    def test_jobs_never_exceeds_the_files_it_has(self):
+        self.write_distinct(1)
+        with StubServer() as server:
+            result = self.result_of(self.process(server.url, "--apply", "--jobs", "8"))
+        self.assertEqual(result["data"]["counts"]["processed"], 1)
+
+
+class CleanupRetryFailedTests(PipelineTests):
+    """A recorded failure is inherited, so it needs a deliberate way out."""
+
+    def journal_rows(self, run_dir):
+        return [json.loads(line) for line in (run_dir / "cleaned.jsonl").read_text(encoding="utf-8").splitlines()]
+
+    def test_a_failed_chunk_is_inherited_on_a_plain_resume(self):
+        self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
+        # Both the first answer and its repair invent, so the chunk fails hard.
+        bad = {"cleaned": "The speaker described several unrelated household chores.", "chunk_summary": "x"}
+        with StubServer(scripted={"clean": [bad, bad]}) as server:
+            first = self.result_of(self.process(server.url))
+            run_dir = run_dir_of(first)
+            self.assertTrue(any(row.get("status") == "failed" for row in self.journal_rows(run_dir)))
+            server.reset()
+            self.result_of(
+                run_script(
+                    "process", "--vault", str(self.vault), "--base-url", server.url, "--model", "chat",
+                    "--run", str(run_dir), "--no-verify",
+                )
+            )
+            # The resume inherited the failure rather than asking again.
+            self.assertEqual(server.stage_requests("clean"), [])
+
+    def test_retry_failed_asks_again_and_can_succeed(self):
+        self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
+        bad = {"cleaned": "The speaker described several unrelated household chores.", "chunk_summary": "x"}
+        with StubServer(scripted={"clean": [bad, bad]}) as server:
+            first = self.result_of(self.process(server.url))
+            run_dir = run_dir_of(first)
+            self.assertTrue(any(row.get("status") == "failed" for row in self.journal_rows(run_dir)))
+            server.reset()
+            retried = self.result_of(
+                run_script(
+                    "process", "--vault", str(self.vault), "--base-url", server.url, "--model", "chat",
+                    "--run", str(run_dir), "--retry-failed", "--apply", "--no-verify",
+                )
+            )
+            self.assertTrue(server.stage_requests("clean"))
+        self.assertEqual(retried["data"]["counts"]["processed"], 1)
+        rows = self.journal_rows(run_dir)
+        # The failure stays on the record; a later ok row supersedes it.
+        self.assertTrue(any(row.get("status") == "failed" for row in rows))
+        self.assertEqual(rows[-1]["status"], "ok")
 
 
 if __name__ == "__main__":

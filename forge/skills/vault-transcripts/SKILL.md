@@ -202,6 +202,41 @@ fingerprinted into a run, so a resumed run refuses to change them.
 `--owner <name>` is only consulted by `--speaker-policy roles`, where it lets the
 recorder's own name through while other names stay generic.
 
+## How long a run takes, and the two knobs that matter
+
+Cleanup is generation-bound. The model emits roughly as much text as it reads, so
+a run costs about `output tokens / tokens per second` and nothing else — chunk
+size does not change the total. On a backend serving ~55 tokens/second, a
+34-file inbox is around an hour, and an 18,000-word recording is about five
+minutes on its own. That is the floor, not a symptom. Before treating a slow run
+as a defect, divide the words by the rate; if they match, the run is working.
+
+The one thing that changes the total is **which service a chunk is routed to**.
+Single-speaker cleanup goes to `think`, which was measured far more faithful on
+this stage (a 1.000 pass rate against 0.250 for the non-thinking profile) and
+costs about 7x the wall time for it: on one real run, 30.4s per multi-speaker
+chunk on `chat` against 219.8s per single-speaker chunk on `think`, because
+`think` spends roughly ten tokens reasoning for every token it answers with. Solo
+voice notes are therefore the slow ones by design. That trade is a routing
+decision, not a defect, and it belongs in `forge_routing` rather than here.
+
+Do not add a `max_tokens` ceiling to cleanup to bound this. It reads as an
+obvious win and is not: a ceiling sized for the visible answer truncates
+`think`'s reasoning into a hard failure, and the runaway it appears to prevent
+does not exist — failed chunks average *less* time than successful ones on the
+same service.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--jobs <n>` | `1` | Clean `n` files at once. Chunks inside a file stay serial — each is written against the tail of the last — so this only helps when several files are queued. The chat backend serves 2 slots, so `2` is the ceiling that helps, and it competes with interactive turns on the same server. |
+| `--retry-failed` | off | Re-attempt chunks a previous run recorded as failed. A plain resume inherits the failure so it does not pay for the same derail twice, which also means the file can never succeed until this flag is passed. |
+
+A chunk fails when the cleaned text carries content words the source does not,
+which is the fabrication gate doing its job — the model reached for a better word
+than the speaker's. The model gets one corrective retry with its own rejected
+answer in front of it. If that fails too, the file is held and the chunk is
+journalled; `--retry-failed` is how you ask again after changing something.
+
 ## Terms and speakers
 
 `99 Meta/99.02 Schemas/0.02 Speakers and Terms.md` holds two tables the owner

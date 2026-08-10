@@ -20,6 +20,7 @@ invariant is worth more than a model's opinion and costs nothing.
 """
 
 import argparse
+import concurrent.futures
 import datetime
 import json
 import os
@@ -29,6 +30,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 from collections import Counter
@@ -188,6 +190,15 @@ SUMMARY_TARGET_WORDS = 90
 # The point at which a summary has stopped being a summary, with enough slack
 # that a good one at the target length is never rejected.
 SUMMARY_MAX_WORDS = 120
+# Cleanup deliberately runs without a max_tokens ceiling. A ceiling looks
+# obviously right -- cleanup only removes, so a long answer must be a runaway --
+# and it is wrong twice over on this stack. Measured: the same chunk costs 730
+# completion tokens on `chat` and 7,425 on `think`, because `think` spends
+# ~29,000 characters reasoning before it answers, and a ceiling sized for the
+# visible answer truncates it into a hard failure. And the runaway it was meant
+# to catch does not exist: in a 34-file run the failed chunks averaged 187.9s
+# against 219.8s for successes on the same service. Slow chunks are the thinking
+# route being itself, not generations going off the rails.
 # Filler removal and sentence joining legitimately reshape a few words per
 # chunk; wholesale invention does not look like this.
 MAX_INVENTED_WORDS = 4
@@ -1765,7 +1776,17 @@ def clean_one_chunk(args, service, payload, source, speaker_map, drop_labels, ti
     # violation is what changes it. Under the spoken-to-written register the
     # violation is almost always the same one -- reaching for a better word than
     # the speaker's -- so when that is what failed, say so in those terms.
-    repair = messages + [
+    #
+    # The rejected answer goes back in as the assistant turn it was. Without it
+    # the model is asked to fix words it cannot see and can only regenerate the
+    # chunk blind, which is both a full second generation and a fresh roll of
+    # the same dice; with it the repair is an edit of text already in context.
+    prior_answer = (
+        [{"role": "assistant", "content": json.dumps({"cleaned": cleaned, "chunk_summary": summary}, ensure_ascii=False)}]
+        if isinstance(cleaned, str) and cleaned.strip()
+        else []
+    )
+    repair = messages + prior_answer + [
         {
             "role": "user",
             "content": f"That response was unusable: {problems[0]}. Return corrected JSON only. "
@@ -1867,7 +1888,17 @@ def clean_items(args, vault, items, class_records, run_dir, skip):
         total_chunks += len(chunks)
     done = 0
     durations = []
-    for item, record, parsed, speaker_map, drop_labels, tiny, chunks, corrections in prepared:
+    # Cleanup is generation-bound: the backend emits roughly as many tokens as
+    # the chunk contains, so wall time is token count over tokens per second and
+    # chunk size buys nothing. The one lever left is using more than one slot.
+    # Files are independent -- nothing crosses from one to the next -- while
+    # chunks inside a file chain through `previous_tail` and `headings`, so the
+    # split is per file and the chunk order inside each file is untouched.
+    progress_lock = threading.Lock()
+
+    def clean_one_file(prepared_entry):
+        item, record, parsed, speaker_map, drop_labels, tiny, chunks, corrections = prepared_entry
+        nonlocal done
         cleaned_chunks = []
         summaries = []
         headings = []
@@ -1875,7 +1906,8 @@ def clean_items(args, vault, items, class_records, run_dir, skip):
         previous_tail = ""
         failure = None
         for index, chunk in enumerate(chunks, start=1):
-            done += 1
+            with progress_lock:
+                done += 1
             key = (item["path"], item["sha256"], index)
             row = journal.get(key)
             if row is not None and row.get("status") == "ok":
@@ -1886,7 +1918,12 @@ def clean_items(args, vault, items, class_records, run_dir, skip):
                 proposals.extend(row.get("proposals") or [])
                 previous_tail = cleaned[-300:]
                 continue
-            if row is not None and row.get("status") == "failed":
+            # A recorded failure is inherited rather than retried, so a resume
+            # does not spend minutes reproducing a refusal it already has. That
+            # also makes it sticky: the file can never succeed until the row is
+            # retried deliberately, which is what `--retry-failed` is for. A
+            # later ok row supersedes this one, since the journal is last-wins.
+            if row is not None and row.get("status") == "failed" and not getattr(args, "retry_failed", False):
                 failure = row.get("error", "cleanup failed")
                 break
             started = time.time()
@@ -1918,56 +1955,63 @@ def clean_items(args, vault, items, class_records, run_dir, skip):
                 raise UserError(f"cleanup was preempted by interactive activity: {error}") from error
             except (forge_llm.ChatError, UserError, ValueError) as error:
                 failure = f"{type(error).__name__}: {error}"
-                run_state.append_jsonl_fsync(
-                    journal_path,
-                    {
-                        "path": item["path"],
-                        "sha256": item["sha256"],
-                        "chunk": index,
-                        "status": "failed",
-                        "error": failure,
-                        "seconds": round(time.time() - started, 3),
-                    },
-                )
-                warnings.append(f"{item['path']} chunk {index}: cleanup failed ({failure})")
-                progress(f"[clean {done}/{total_chunks}] {item['path']} chunk {index}/{len(chunks)} FAILED: {failure}")
+                with progress_lock:
+                    run_state.append_jsonl_fsync(
+                        journal_path,
+                        {
+                            "path": item["path"],
+                            "sha256": item["sha256"],
+                            "chunk": index,
+                            "status": "failed",
+                            "error": failure,
+                            "seconds": round(time.time() - started, 3),
+                        },
+                    )
+                    warnings.append(f"{item['path']} chunk {index}: cleanup failed ({failure})")
+                    progress(f"[clean {done}/{total_chunks}] {item['path']} chunk {index}/{len(chunks)} FAILED: {failure}")
                 break
             name = f"{sha256_text(item['path'])[:12]}-{index:04d}.md"
             (artifacts / name).write_text(cleaned, encoding="utf-8")
             elapsed = round(time.time() - started, 3)
             accepted = accepted_corrections(source, cleaned, payload.get("glossary", []))
             proposals.extend(accepted)
-            run_state.append_jsonl_fsync(
-                journal_path,
-                {
-                    "path": item["path"],
-                    "sha256": item["sha256"],
-                    "chunk": index,
-                    "chunks": len(chunks),
-                    "status": "ok",
-                    "artifact": name,
-                    "cleaned_sha256": sha256_text(cleaned),
-                    "chunk_summary": chunk_summary,
-                    "proposals": accepted,
-                    # Which model actually cleaned this chunk. The two cleanup
-                    # directions go to different services, so a run whose
-                    # meeting reads like a rewrite and whose memo reads like a
-                    # transcript is diagnosable from the journal rather than by
-                    # re-deriving the split months later.
-                    "routing": forge_routing.routing_record(
-                        forge_routing.service_for(cleanup_stage(speaker_map, drop_labels), args)
-                    ),
-                    "seconds": elapsed,
-                },
-            )
+            with progress_lock:
+                run_state.append_jsonl_fsync(
+                    journal_path,
+                    {
+                        "path": item["path"],
+                        "sha256": item["sha256"],
+                        "chunk": index,
+                        "chunks": len(chunks),
+                        "status": "ok",
+                        "artifact": name,
+                        "cleaned_sha256": sha256_text(cleaned),
+                        "chunk_summary": chunk_summary,
+                        "proposals": accepted,
+                        # Which model actually cleaned this chunk. The two cleanup
+                        # directions go to different services, so a run whose
+                        # meeting reads like a rewrite and whose memo reads like a
+                        # transcript is diagnosable from the journal rather than by
+                        # re-deriving the split months later.
+                        "routing": forge_routing.routing_record(
+                            forge_routing.service_for(cleanup_stage(speaker_map, drop_labels), args)
+                        ),
+                        "seconds": elapsed,
+                    },
+                )
+                durations.append(elapsed)
+                # Chunks now finish on `workers` fronts at once, so the mean
+                # duration has to be divided by that to mean anything.
+                remaining = (sum(durations) / len(durations)) * (total_chunks - done) / workers
+                eta = format_duration(remaining) if durations else "-"
+                progress(
+                    f"[clean {done}/{total_chunks}] {item['path']} chunk {index}/{len(chunks)} ({elapsed:.1f}s, eta {eta})"
+                )
             cleaned_chunks.append(cleaned)
             summaries.append(chunk_summary)
             headings.extend(heading_lines(cleaned))
             previous_tail = cleaned[-300:]
-            durations.append(elapsed)
-            eta = format_duration(sum(durations) / len(durations) * (total_chunks - done)) if durations else "-"
-            progress(f"[clean {done}/{total_chunks}] {item['path']} chunk {index}/{len(chunks)} ({elapsed:.1f}s, eta {eta})")
-        results[item["path"]] = {
+        return item["path"], {
             "cleaned": "\n\n".join(part.strip() for part in cleaned_chunks).strip() if not failure else None,
             "chunk_summaries": summaries,
             "chunks": len(chunks),
@@ -1978,6 +2022,18 @@ def clean_items(args, vault, items, class_records, run_dir, skip):
             "proposals": proposals,
             "error": failure,
         }
+
+    workers = max(1, min(int(getattr(args, "jobs", 1) or 1), len(prepared) or 1))
+    if workers == 1:
+        for entry in prepared:
+            path, result = clean_one_file(entry)
+            results[path] = result
+    else:
+        # A preemption inside a worker still has to stop the whole stage, so the
+        # UserError it raises is re-raised here rather than left in a future.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            for path, result in pool.map(clean_one_file, prepared):
+                results[path] = result
     return results, warnings
 
 
@@ -6109,6 +6165,21 @@ def parse_args(argv):
     parser.add_argument("--api-key")
     parser.add_argument("--request-timeout", type=float, default=600)
     parser.add_argument("--no-cache-prompt", action="store_true")
+    parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="re-attempt chunks a previous run recorded as failed instead of inheriting the failure",
+    )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help=(
+            "how many files to clean at once (default 1). Chunks within a file stay serial because each "
+            "one is written against the tail of the last. The chat backend serves 2 slots, so 2 is the "
+            "ceiling that helps, and it competes with interactive turns on the same server"
+        ),
+    )
     parser.add_argument("--no-verify", action="store_true", help="skip the thinking-model review")
     parser.add_argument("--think-url", help="thinking service used for verification (default: connectedServices.think)")
     parser.add_argument("--think-model")
