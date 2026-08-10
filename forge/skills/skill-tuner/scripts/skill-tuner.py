@@ -241,8 +241,13 @@ Rules:
   verification. Quote the timeline entry the seed points at instead, or use null.
 - "item_type" describes the friction, not the seed. A seed's kind is not an item_type:
   a compaction seed is context_loss, a repeated_user_text seed is usually
-  user_correction, and a stall seed is wasted_work when time was lost redoing or
+  user_correction, and a tool_stall seed is wasted_work when time was lost redoing or
   waiting on avoidable work, or backend_limit when the backend itself was slow.
+- An assistant_stall seed is never on its own a backend_limit or a finding of any
+  kind: the gap is the assistant generating that turn, not the session waiting on
+  anything. "The assistant was idle for N seconds" is not friction. Mine the message
+  for what it reports - a long assistant turn is usually the agent working through a
+  real problem - and file the item as whatever that problem is, or emit nothing.
 - Never invent events the chunk does not show; label inference as "inferred".
 - An empty items array is the right answer for an uneventful chunk.
 - At most 20 items; prefer the highest-severity ones.
@@ -849,12 +854,28 @@ def _scan_gaps(entries, seeds):
             else:
                 boundary = None
             if boundary:
+                # A gap before an assistant turn is that turn being generated.
+                # Reported as a bare "Ns gap" it reads as latency, and a model
+                # mining it dutifully writes "the assistant was idle for N
+                # seconds" as a backend_limit -- three such items in one live
+                # run, every one of them rejected by review. The pause is not
+                # the finding; what the message says usually is, because a long
+                # assistant turn is generally the agent narrating a problem it
+                # just hit. So the detail says so and points at the content.
+                if boundary == "assistant_stall":
+                    detail = (
+                        f"{gap}s assistant turn before line {entry['line']}: that is generation time, not "
+                        "waiting, and is not itself friction. Read what the message says - a long turn here "
+                        "usually means the agent was working through a problem worth naming."
+                    )
+                else:
+                    detail = f"{gap}s gap before line {entry['line']} ({kind})"
                 seeds.append(
                     {
                         "kind": boundary,
                         "lines": [previous[1], entry["line"]],
                         "tool": entry["meta"].get("tool"),
-                        "detail": f"{gap}s gap before line {entry['line']} ({kind})",
+                        "detail": detail,
                         "excerpt": truncate(entry_text(entry), SEED_EXCERPT_CHARS),
                         # A pause before a user turn is the human being away,
                         # not session friction; keep it as context only.

@@ -102,8 +102,13 @@ Rules:
   verification. Quote the timeline entry the seed points at instead, or use null.
 - "item_type" describes the friction, not the seed. A seed's kind is not an item_type:
   a compaction seed is context_loss, a repeated_user_text seed is usually
-  user_correction, and a stall seed is wasted_work when time was lost redoing or
+  user_correction, and a tool_stall seed is wasted_work when time was lost redoing or
   waiting on avoidable work, or backend_limit when the backend itself was slow.
+- An assistant_stall seed is never on its own a backend_limit or a finding of any
+  kind: the gap is the assistant generating that turn, not the session waiting on
+  anything. "The assistant was idle for N seconds" is not friction. Mine the message
+  for what it reports - a long assistant turn is usually the agent working through a
+  real problem - and file the item as whatever that problem is, or emit nothing.
 - Never invent events the chunk does not show; label inference as "inferred".
 - An empty items array is the right answer for an uneventful chunk.
 - At most 20 items; prefer the highest-severity ones.

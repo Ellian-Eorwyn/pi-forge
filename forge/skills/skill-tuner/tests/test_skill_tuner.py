@@ -447,6 +447,44 @@ class ScanTests(unittest.TestCase):
         self.assertTrue(idles)
         self.assertTrue(all(seed["informational"] for seed in idles))
 
+    def gap_seeds(self, kind, text):
+        def entry(line, entry_kind, timestamp, blocks):
+            return {
+                "line": line,
+                "kind": entry_kind,
+                "timestamp": timestamp,
+                "meta": {},
+                "blocks": blocks,
+            }
+
+        entries = [
+            entry(1, "tool_result", "2026-08-10T19:00:00.000Z", [{"type": "text", "text": "done"}]),
+            entry(2, kind, "2026-08-10T19:05:00.000Z", [{"type": "text", "text": text}]),
+        ]
+        seeds = []
+        skill_tuner._scan_gaps(entries, seeds)
+        return seeds
+
+    def test_an_assistant_gap_is_not_offered_as_latency(self):
+        # A bare "Ns gap" here gets mined as "the assistant was idle for N
+        # seconds" and filed as a backend_limit; review rejected three such
+        # items in one live run. The seed has to say the pause is generation
+        # and send the model to what the message actually reports.
+        message = "One chunk failed because the model added words not in the source."
+        seeds = self.gap_seeds("assistant", message)
+        self.assertEqual([seed["kind"] for seed in seeds], ["assistant_stall"])
+        self.assertIn("generation time", seeds[0]["detail"])
+        self.assertNotIn("gap before", seeds[0]["detail"])
+        # The content is what the item should be written from, so it must survive.
+        self.assertIn(message, seeds[0]["excerpt"])
+        self.assertFalse(seeds[0]["informational"])
+
+    def test_a_tool_gap_still_reads_as_waiting(self):
+        seeds = self.gap_seeds("tool_result", "still running")
+        self.assertEqual([seed["kind"] for seed in seeds], ["tool_stall"])
+        self.assertIn("gap before", seeds[0]["detail"])
+        self.assertNotIn("generation time", seeds[0]["detail"])
+
     def test_detects_retry_loop_with_error(self):
         loops = [seed for seed in self.seeds if seed["kind"] == "retry_loop"]
         self.assertEqual(len(loops), 1)
