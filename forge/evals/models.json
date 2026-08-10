@@ -105,19 +105,20 @@
       "notes": "35B total, ~3B active. Fingerprinted 2026-08-05: 35.51B params, Q6_K, 27.94 GiB. The entry previously described a Q4_K_M build estimated from the model's name; the weights actually loaded are Q6_K, which is the better comparison — chat-27b is also Q6_K, so the gap between them is architecture (35B-A3B sparse against 27B dense) with quantization held fixed. It is also 6.6 GiB larger than chat-27b rather than smaller. Occupies the same primary-backend slot as chat-27b — `chat-backend-moe` is a variant of the service behind :8004/:8008, not a separate port — so exactly one of this and chat-27b is servable at a time, and loading it takes think-27b down too. The stack reports 255998 context on one slot for this variant; contextTokens is held at 131072 so the long-context rungs measure the same prompt against both."
     },
     "chat-27b-q4": {
-      "label": "Qwen3.6-27B-UD-Q4_K_XL (chat, non-thinking)",
+      "label": "Qwen3.6-27B-Q4_K_M (chat, non-thinking)",
       "url": "http://llms:8004/v1",
       "model": "chat",
       "contextTokens": 131072,
       "chatTemplateKwargs": null,
       "tier": "bulk",
       "family": "qwen3.6-27b",
-      "sizeGiB": 16.68,
+      "sizeGiB": 15.92,
       "coResident": false,
       "fingerprintUrl": "http://llms:8010/v1",
       "expectParams": 27320697856,
-      "expectQuant": "Q4",
-      "notes": "The same weights as chat-27b at a smaller quant, so the gap between the two is the cost of quantization alone, with scale and reasoning held fixed. Shares the primary-backend slot with chat-27b and moe-35a3b. expectParams cannot separate it from chat-27b — a requant moves the count by less than the 10% tolerance, which is exactly what that tolerance is for. expectQuant is the discriminator that always works; expectModelPath is left unset because these weights have never been loaded here, so there is no measured path to assert. It is matched as a substring of the reported ftype so that the exact spelling (Q4_K_M, \"Q4_K - Medium\", Q4_K_XL) does not have to be guessed before the weights are ever loaded."
+      "expectQuant": "Q4_K - Medium",
+      "expectModelPath": "/mnt/LLMs/llamacpp/llm-stack-git/models/Qwen3.6-27B-Q4_K_M.gguf",
+      "notes": "The same weights as chat-27b at a smaller quant, so the gap between the two is the cost of quantization alone, with scale and reasoning held fixed. Shares the primary-backend slot with chat-27b and moe-35a3b. Fingerprinted 2026-08-08, when these weights were first loaded: 27.32B params, Q4_K - Medium, 15.92 GiB — 5.38 GiB less than chat-27b's Q6_K, which is the whole reason to consider it. The entry that predated the load guessed a UD-Q4_K_XL build at 16.68 GiB from the name; the file actually loaded is plain Qwen3.6-27B-Q4_K_M.gguf, and the label and size are now the measured ones. expectParams cannot separate it from chat-27b — a requant moves the count by less than the 10% tolerance, which is exactly what that tolerance is for — so expectQuant and expectModelPath are the discriminators, and both are now measured rather than guessed. Note that loading this takes :8008 with it: think-27b's Q6_K results, and the forge_routing rows resting on them, describe weights that are no longer loaded while this is up."
     },
     "moe-35a3b-think": {
       "label": "Qwen3.6-35B-A3B-UD-Q6_K (code, thinking, MoE)",
