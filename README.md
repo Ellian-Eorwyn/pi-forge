@@ -81,7 +81,7 @@ To maintain a clear architectural boundary, future work on this repository shoul
 
 ## Installation & Setup
 
-pi-forge currently supports macOS, Linux, and Windows with npm and Node.js 22.19 or newer. Skills that ship Python scripts run on the `python3` already on your PATH and need 3.9 or newer, which every supported platform satisfies out of the box; the transcription skill builds its own 3.11–3.13 virtualenv for its heavier dependencies. New installs do not clone this repository. The installer creates one managed home at `~/.pi-forge`:
+pi-forge currently supports macOS, Linux, and Windows with npm and Node.js 22.19 or newer. Skills that ship Python scripts run on the `python3` already on your PATH and need 3.9 or newer, which every supported platform satisfies out of the box. New installs do not clone this repository. The installer creates one managed home at `~/.pi-forge`:
 
 | Path | Purpose |
 |------|---------|

@@ -28,7 +28,7 @@ reconciles it.
 - `site-builder`: Build static websites from structured content folders.
 - `spreadsheet-analysis`: Analyze, clean, validate, and enrich tabular datasets.
 - `transcript-cleanup`: Clean raw transcripts into readable, structured documents.
-- `transcription`: Transcribe audio/video with per-chunk checkpoints, then correct and clean the transcript.
+- `transcription`: Transcribe audio/video on the llm-stack speech-to-text service, then correct and clean the transcript.
 - `vault-capture`: Turn an owner-authored typed or spoken braindump into schema-valid notes in `00 Inbox`, applying the vault's scoped voice policy, adding vault-first journal reflection, marking output `capture_type: generated`, and keeping the braindump verbatim; for transcription exports use `vault-transcripts` instead.
 - `vault-compose`: Compose a note from a typed set of sources the run is holding — research claims, existing vault notes, or excerpts of the conversation — assembled in the block order the vault's note-format note declares and written under its voice policy, with every name, link, and wikilink checked against the sources the block cites so a note whose sections are each plausible cannot be collectively a collage; the provenance block is written in code, no `domain` is guessed, and nothing reaches the vault until the user accepts a proposal id.
 - `vault-connections`: Search an Obsidian vault by meaning, propose note links for per-id approval, validate completed literature/meta-literature/deep-research runs, preserve imported report bodies, turn deep research into source-policy `Synthesis` notes with quotes and provenance (`--notes`), and create evidence-backed wiki notes from vault-owned templates.

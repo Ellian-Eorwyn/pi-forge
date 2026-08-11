@@ -32,6 +32,7 @@ recording type, conversion target, output root, cover path, or book metadata.
    before retrying.
 7. Never modify source files or interpret partial artifacts as complete.
 
-`dependency_not_ready` means transcription setup must be run explicitly outside
-the delegated request. Do not install the runtime or download the model through
-the MCP bridge.
+`dependency_not_ready` means the transcription service is not usable: it is
+unreachable, turned off, or the requested engine has no model on the host.
+`remediation` says which. That is resolved outside the delegated request — do not
+try to reconfigure or reach the service through the MCP bridge.

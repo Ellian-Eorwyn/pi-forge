@@ -111,6 +111,32 @@ export const DEFAULT_CONNECTED_SERVICES = Object.freeze({
 		url: "http://llms:8005/v1/embeddings",
 		model: "embed",
 	}),
+	// Speech to text. Not an inference service: no chat completion, no context
+	// window, and no slot to pin, so it carries none of that shape.
+	//
+	// Its weights are not resident. `/engines` reports `yield_mode: "asr"` and
+	// `idle_unload_seconds: 300` — the ASR model yields VRAM to the router that
+	// serves embed/ocr/rank/task, and unloads itself when idle. `resident: null`
+	// is therefore the normal reading rather than a fault, and the first call
+	// after a quiet period pays a ~25s model load before decoding begins. That
+	// is what the timeout is for: the decode itself runs at ~210x realtime, so a
+	// 70-minute recording is about 20 seconds of actual work.
+	transcription: Object.freeze({
+		enabled: true,
+		baseUrl: "http://llms:8014",
+		// Named rather than inherited. The service's own default was
+		// `faster-whisper` until 2026-08-09 and is `parakeet-v3` now, and the two
+		// normalize text differently — Whisper writes "July 21st, 1969" where
+		// Parakeet has written "July twenty first, nineteen sixty nine" on the
+		// same audio. Following the server's current preference would change how
+		// dates reach a note with nothing here recording that anything changed.
+		engine: "parakeet-v3",
+		// The service's TRANSCRIPT_API_TOKEN is empty today, so no header is sent.
+		// It is a supported setting there and may be turned on; carrying the field
+		// now costs nothing and saves an outage later.
+		token: "",
+		timeoutSeconds: 900,
+	}),
 	// Optional credentials for search and reference providers, keyed by provider
 	// id. Empty by default and it stays that way for anyone who never sets one:
 	// every provider in the no-key tier works without this block, and a provider
@@ -180,6 +206,10 @@ export function seedConnectedServicesSettings(settings) {
 		current.embeddings && typeof current.embeddings === "object" && !Array.isArray(current.embeddings)
 			? current.embeddings
 			: {};
+	const transcription =
+		current.transcription && typeof current.transcription === "object" && !Array.isArray(current.transcription)
+			? current.transcription
+			: {};
 	settings.connectedServices = {
 		...current,
 		searxng: {
@@ -201,6 +231,19 @@ export function seedConnectedServicesSettings(settings) {
 			enabled: embeddings.enabled ?? DEFAULT_CONNECTED_SERVICES.embeddings.enabled,
 			url: normalizeHttpBaseUrl(embeddings.url) ?? DEFAULT_CONNECTED_SERVICES.embeddings.url,
 			model: normalizeServiceName(embeddings.model) ?? DEFAULT_CONNECTED_SERVICES.embeddings.model,
+		},
+		transcription: {
+			enabled: transcription.enabled ?? DEFAULT_CONNECTED_SERVICES.transcription.enabled,
+			baseUrl: normalizeHttpBaseUrl(transcription.baseUrl) ?? DEFAULT_CONNECTED_SERVICES.transcription.baseUrl,
+			engine: normalizeServiceName(transcription.engine) ?? DEFAULT_CONNECTED_SERVICES.transcription.engine,
+			// Deliberately not `normalizeServiceName(...) ?? default`: the default
+			// is the empty string, and a token cleared on purpose must stay cleared
+			// rather than fall through to anything.
+			token: normalizeServiceName(transcription.token) ?? DEFAULT_CONNECTED_SERVICES.transcription.token,
+			timeoutSeconds: normalizePositiveInteger(
+				transcription.timeoutSeconds,
+				DEFAULT_CONNECTED_SERVICES.transcription.timeoutSeconds,
+			),
 		},
 		routing: normalizeRouting(current.routing),
 		apiKeys: normalizeApiKeys(current.apiKeys),
@@ -292,6 +335,10 @@ export function resolveConnectedServices(options = {}) {
 	const envTaskModel = normalizeServiceName(env.FORGE_TASK_MODEL);
 	const envEmbeddings = normalizeHttpBaseUrl(env.FORGE_EMBEDDINGS_URL);
 	const envEmbeddingsModel = normalizeServiceName(env.FORGE_EMBEDDINGS_MODEL);
+	const envTranscription = normalizeHttpBaseUrl(env.FORGE_TRANSCRIPTION_URL);
+	const envTranscriptionEngine = normalizeServiceName(env.FORGE_TRANSCRIPTION_ENGINE);
+	const envTranscriptionToken = normalizeServiceName(env.FORGE_TRANSCRIPTION_TOKEN);
+	const transcriptionEnvPresent = Object.hasOwn(env, "FORGE_TRANSCRIPTION_URL");
 	const searxngEnvPresent = Object.hasOwn(env, "FORGE_SEARXNG_URL");
 	const envStackState = normalizeHttpBaseUrl(env.FORGE_STACK_STATE_URL);
 	const playwrightEnvPresent = Object.hasOwn(env, "FORGE_PLAYWRIGHT_WS_ENDPOINT");
@@ -311,6 +358,8 @@ export function resolveConnectedServices(options = {}) {
 	const explicitTaskModel = normalizeServiceName(options.taskModel);
 	const explicitEmbeddings = normalizeHttpBaseUrl(options.embeddingsUrl);
 	const explicitEmbeddingsModel = normalizeServiceName(options.embeddingsModel);
+	const explicitTranscription = normalizeHttpBaseUrl(options.transcriptionUrl);
+	const explicitTranscriptionEngine = normalizeServiceName(options.transcriptionEngine);
 	const envChatContext = normalizePositiveInteger(parseInteger(env.FORGE_BASE_CHAT_CONTEXT_TOKENS), undefined);
 	const envThinkContext = normalizePositiveInteger(parseInteger(env.FORGE_THINK_CONTEXT_TOKENS), undefined);
 	const envChatTemplate = normalizeTemplateKwargs(env.FORGE_BASE_CHAT_TEMPLATE_KWARGS);
@@ -364,6 +413,17 @@ export function resolveConnectedServices(options = {}) {
 			enabled: explicitEmbeddings ? true : embeddingsEnvPresent ? Boolean(envEmbeddings) : seeded.embeddings.enabled,
 			url: explicitEmbeddings ?? envEmbeddings ?? seeded.embeddings.url,
 			model: explicitEmbeddingsModel ?? envEmbeddingsModel ?? seeded.embeddings.model,
+		},
+		transcription: {
+			enabled: explicitTranscription
+				? true
+				: transcriptionEnvPresent
+					? Boolean(envTranscription)
+					: seeded.transcription.enabled,
+			baseUrl: explicitTranscription ?? envTranscription ?? seeded.transcription.baseUrl,
+			engine: explicitTranscriptionEngine ?? envTranscriptionEngine ?? seeded.transcription.engine,
+			token: envTranscriptionToken ?? seeded.transcription.token,
+			timeoutSeconds: seeded.transcription.timeoutSeconds,
 		},
 		routing: { ...seeded.routing, ...(options.routing ?? {}) },
 		apiKeys: resolveApiKeys(seeded.apiKeys, env, options.apiKeys),

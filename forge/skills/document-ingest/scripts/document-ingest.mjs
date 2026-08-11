@@ -1101,6 +1101,68 @@ function extractZoomTranscriptJson(filePath) {
 	};
 }
 
+/**
+ * Transcribe the extracted audio with the `transcription` skill, or explain why
+ * not.
+ *
+ * Delegated rather than reimplemented: that skill owns the service client, the
+ * correction dictionary, and the run state, and a second copy of any of it here
+ * would drift. It transcribes `audio.mp3` rather than the original because mp3
+ * is one of the formats the service decodes for itself, so the file ffmpeg has
+ * already produced for review doubles as the upload.
+ *
+ * A failure here is never fatal. Ingesting a recording whose transcription host
+ * is down should still produce a document with the audio beside it, because the
+ * alternative is one unreachable service failing a whole batch.
+ */
+function transcribeMedia(audioPath, derivedDirectory, sourcePath) {
+	const script = join(import.meta.dirname, "..", "..", "transcription", "scripts", "transcription.py");
+	if (!existsSync(script)) return { markdown: null, reason: "the transcription skill is not installed alongside" };
+	const python = process.env.PI_FORGE_PYTHON ?? "python3";
+	const runDirectory = join(derivedDirectory, "transcription");
+	const doctor = run(python, [script, "doctor"]);
+	if (doctor.status !== 0) {
+		let reason = "the transcription service is not ready";
+		try {
+			const report = JSON.parse(doctor.stdout);
+			if (Array.isArray(report.remediation) && report.remediation.length) reason = report.remediation[0];
+		} catch {
+			// A doctor that could not even produce JSON is reported as the generic
+			// failure; its stderr is the operator's business, not this run's.
+		}
+		return { markdown: null, reason };
+	}
+	const result = run(python, [script, "transcribe", audioPath, "--output", runDirectory, "--type", "other"]);
+	const transcript = join(runDirectory, "corrected_transcript.md");
+	if (result.status !== 0 || !existsSync(transcript)) {
+		return {
+			markdown: null,
+			reason: `transcription failed: ${result.stderr?.trim().split(/\r?\n/).pop() || `exit status ${result.status}`}`,
+		};
+	}
+	let details = {};
+	try {
+		details = JSON.parse(result.stdout);
+	} catch {
+		// The transcript on disk is what matters; the summary is decoration.
+	}
+	// The transcript is titled after what was uploaded, which is always
+	// `audio.mp3` here. The document is the recording, not the extracted track,
+	// so the heading is restored to the recording's own name.
+	const titled = ensureFinalNewline(readFileSync(transcript, "utf8")).replace(
+		/^# .*(\r?\n)/,
+		`# ${basename(sourcePath, extname(sourcePath))}$1`,
+	);
+	return {
+		markdown: titled,
+		runDirectory,
+		engine: details.engine ?? null,
+		model: details.model ?? null,
+		durationSeconds: details.duration_seconds ?? null,
+		warnings: Array.isArray(details.warnings) ? details.warnings : [],
+	};
+}
+
 function extractMedia(filePath, documentDirectory, tools) {
 	if (!tools.ffmpeg.available) throw new Error("FFmpeg is required for media ingestion but was not found on PATH");
 	const derivedDirectory = join(documentDirectory, "derived");
@@ -1112,17 +1174,26 @@ function extractMedia(filePath, documentDirectory, tools) {
 			`FFmpeg extraction failed: ${result.stderr?.trim() || result.error?.message || `exit status ${result.status}`}`,
 		);
 	}
-	const markdown = `Media file extracted to derived/audio.mp3. Waiting for transcription.\\n`;
+	const transcription = transcribeMedia(audioPath, derivedDirectory, filePath);
+	// The reason is a whole sentence from doctor's remediation as often as it is
+	// a clause, so it supplies its own full stop rather than being given one.
+	const reason = (transcription.reason ?? "").replace(/\.$/, "");
+	const markdown =
+		transcription.markdown ??
+		`Media file extracted to derived/audio.mp3. It has not been transcribed: ${reason}.\n\nTranscribe it and supply the text with \`record-transcript\`.\n`;
+	const warnings = transcription.markdown
+		? transcription.warnings
+		: [`Audio was extracted but not transcribed: ${reason}.`];
 	return {
 		markdown,
-		method: "ffmpeg-audio-extraction",
+		method: transcription.markdown ? "llm-stack-transcription" : "ffmpeg-audio-extraction",
 		pageCount: null,
-		warnings: [],
+		warnings,
 		embedded: { title: null, author: null, date: null, source: null },
 		sourceMapEntries: [
 			{
 				markdownStartLine: 1,
-				markdownEndLine: 1,
+				markdownEndLine: Math.max(1, markdown.split("\n").length - 1),
 				sourceLocator: { type: "media", path: filePath },
 				method: "document-conversion",
 				confidence: "high",

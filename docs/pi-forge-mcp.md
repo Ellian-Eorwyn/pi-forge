@@ -37,8 +37,10 @@ calling harness according to its skill-discovery rules.
 ## Tools
 
 `forge_transcribe` requires `inputPath`, `outputRoot`, and `recordingType`.
-`projectDictionaryPath` is optional. It runs transcription `doctor` first;
-missing dependencies return `dependency_not_ready` without installing anything.
+`projectDictionaryPath` is optional. It runs transcription `doctor` first, which
+checks the llm-stack transcription service rather than a local runtime; an
+unreachable service, or a requested engine the host cannot load, returns
+`dependency_not_ready` with the reason in `remediation`.
 
 `forge_convert_files` requires `inputPaths`, `target`, and `outputRoot`. Optional
 fields are `sourceFormat`, `coverPath`, `title`, `author`, `language`, and

@@ -11,7 +11,7 @@
 	"tools": [
 		{
 			"name": "transcription",
-			"description": "Set up local transcription, transcribe media, and manage the correction dictionary.",
+			"description": "Check the transcription service, transcribe media, and manage the correction dictionary.",
 			"command": "python3 scripts/transcription.py",
 			"destructive": false
 		}

@@ -15,7 +15,7 @@
 | Managed instructions (`AGENTS.md` with its `<project_context>` wrapper) | 2232 |
 | Skills menu (metadata for all model-visible skills) | 4070 |
 | **Total launch context (always processed)** | **10712** |
-| Maximum if every `SKILL.md` body is also loaded at once | 79927 |
+| Maximum if every `SKILL.md` body is also loaded at once | 80353 |
 
 Of that total, the forge profile itself owns 6301 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
 
@@ -69,7 +69,7 @@ Sorted by launch cost. `Prompt lines` counts a tool's `promptSnippet` and `promp
 | [`skill-tuner`](forge/skills/skill-tuner/SKILL.md) | Mine session logs for pain points that improve skills | 143 | 1879 | 1997 | Model-visible |
 | [`spreadsheet-analysis`](forge/skills/spreadsheet-analysis/SKILL.md) | Analyze and enrich tabular datasets | 129 | 2233 | 2334 | Model-visible |
 | [`transcript-cleanup`](forge/skills/transcript-cleanup/SKILL.md) | Clean and structure raw transcripts | 144 | 1263 | 1380 | Model-visible |
-| [`transcription`](forge/skills/transcription/SKILL.md) | Transcribe audio or video, then correct and clean it | 141 | 1639 | 1754 | Model-visible |
+| [`transcription`](forge/skills/transcription/SKILL.md) | Transcribe audio or video, then correct and clean it | 141 | 2065 | 2180 | Model-visible |
 | [`vault-capture`](forge/skills/vault-capture/SKILL.md) | Turn a braindump into schema-valid notes in an Obsidian vault inbox - split unedited thinking... | 138 | 2583 | 2694 | Model-visible |
 | [`vault-compose`](forge/skills/vault-compose/SKILL.md) | Compose a vault note from material already in hand - a web-research run, existing notes, or t... | 144 | 1827 | 1938 | Model-visible |
 | [`vault-connections`](forge/skills/vault-connections/SKILL.md) | Search an Obsidian vault by meaning, propose links for per-id review, publish completed liter... | 151 | 2682 | 2807 | Model-visible |

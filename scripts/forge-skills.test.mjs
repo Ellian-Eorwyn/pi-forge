@@ -42,6 +42,12 @@ const environment = {
 	...process.env,
 	FORGE_BASE_CHAT_URL: "http://127.0.0.1:1/v1/chat/completions",
 	FORGE_SEARXNG_URL: "",
+	// Pointed at a closed port for the same reason as the chat URL above, and it
+	// matters more here: `document-ingest` transcribes extracted media, so
+	// without this every media test would upload to whatever transcription host
+	// the developer can reach and wait out its minutes-long timeout. Tests that
+	// want a transcription service stand up their own stub and override this.
+	FORGE_TRANSCRIPTION_URL: "http://127.0.0.1:1",
 	PYTHONDONTWRITEBYTECODE: "1",
 	// Endpoints and model names must never come from the settings of whoever runs
 	// the tests: a developer whose install has been migrated (or not) would other-
@@ -6779,45 +6785,42 @@ test("document ingest final output filenames support administrative naming and r
 	});
 });
 
-test("transcription pins model downloads to durable managed cache", () => {
+// The venvs and the model cache moved to the service, but the correction
+// dictionary is still local durable state under the same home, and a
+// `pi-forge-update` that relocated it would silently drop every correction the
+// user has accumulated.
+test("transcription keeps the correction dictionary in the durable managed home", () => {
 	withWorkspace((workspace) => {
 		const transcriptionHome = join(workspace, "transcription-home");
-		const probe = join(workspace, "transcription-cache-probe.py");
-		writeFileSync(
-			probe,
-			`import importlib.util
-import json
-import os
-import sys
-
-script_path = sys.argv[1]
-transcription_home = sys.argv[2]
-os.environ["PI_FORGE_TRANSCRIPTION_HOME"] = transcription_home
-spec = importlib.util.spec_from_file_location("transcription_skill", script_path)
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-env = module.model_cache_env()
-module.ensure_model_cache_env()
-keys = ["HF_HOME", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE", "HF_HUB_DISABLE_TELEMETRY"]
-print(json.dumps({
-    "transcription_home": str(module.transcription_home()),
-    "models_dir": str(module.models_dir()),
-    "hub_cache_dir": str(module.hub_cache_dir()),
-    "env": {key: env.get(key) for key in keys},
-    "process_env": {key: os.environ.get(key) for key in keys},
-}))
-`,
+		const dictionary = jsonOutput(
+			runWithEnvironment(
+				python,
+				[
+					script("transcription", "transcription.py"),
+					"dict",
+					"add",
+					"--correct",
+					"Kubernetes",
+					"--variant",
+					"cube are netties",
+				],
+				{ PI_FORGE_TRANSCRIPTION_HOME: transcriptionHome },
+			),
 		);
-		const report = jsonOutput(run(python, [probe, script("transcription", "transcription.py"), transcriptionHome]));
-		assert.equal(report.transcription_home, transcriptionHome);
-		assert.equal(report.models_dir, join(transcriptionHome, "models"));
-		assert.equal(report.hub_cache_dir, join(transcriptionHome, "models", "hub"));
-		assert.equal(report.env.HF_HOME, join(transcriptionHome, "models"));
-		assert.equal(report.env.HF_HUB_CACHE, join(transcriptionHome, "models", "hub"));
-		assert.equal(report.env.HUGGINGFACE_HUB_CACHE, join(transcriptionHome, "models", "hub"));
-		assert.equal(report.env.TRANSFORMERS_CACHE, join(transcriptionHome, "models", "hub"));
-		assert.equal(report.env.HF_HUB_DISABLE_TELEMETRY, "1");
-		assert.deepEqual(report.process_env, report.env);
+		assert.equal(dictionary.path, join(transcriptionHome, "dictionary.json"));
+		assert.equal(existsSync(join(transcriptionHome, "dictionary.json")), true);
+		const listed = jsonOutput(
+			runWithEnvironment(
+				python,
+				[script("transcription", "transcription.py"), "dict", "list", "--scope", "global"],
+				{ PI_FORGE_TRANSCRIPTION_HOME: transcriptionHome },
+			),
+		);
+		assert.equal(listed.global_dictionary, join(transcriptionHome, "dictionary.json"));
+		assert.deepEqual(
+			listed.entries.map((entry) => entry.correct),
+			["Kubernetes"],
+		);
 	});
 });
 
@@ -6895,44 +6898,261 @@ test("transcription assembles committed chunks deterministically and exposes ret
 	});
 });
 
-test("transcription doctor reports the managed model cache", () => {
+// The handoff into `vault-transcripts`, which reads what a voice app drops into
+// the vault inbox. Its load-bearing invariant is that a transcript round-trips
+// byte for byte, so an export that merely looks right is not enough.
+test("transcription exports a run in the shape vault-transcripts parses", () => {
 	withWorkspace((workspace) => {
-		const transcriptionHome = join(workspace, "transcription-home");
-		const fakeBin = join(workspace, "fake-bin");
-		const cacheMarker = join(
-			transcriptionHome,
-			"models",
-			"hub",
-			"models--mlx-community--parakeet-tdt-0.6b-v3",
-			"snapshots",
-			"cached-revision",
+		const runDirectory = join(workspace, "run");
+		const source = join(workspace, "memo.wav");
+		writeFileSync(source, "synthetic media\n");
+		mkdirSync(runDirectory, { recursive: true });
+		writeFileSync(
+			join(runDirectory, "raw_segments.json"),
+			`${JSON.stringify([
+				{ start: 0, end: 3.7, text: "First thing I wanted to say." },
+				{ start: 61.2, end: 64, text: "Second thing, a minute later." },
+				{ start: 3725.5, end: 3728, text: "And an hour after that." },
+			])}\n`,
 		);
-		mkdirSync(fakeBin);
-		mkdirSync(cacheMarker, { recursive: true });
-		writeFileSync(join(cacheMarker, "config.json"), "{}\n");
-		writeFileSync(join(cacheMarker, "model.safetensors"), "synthetic weights\n");
-		for (const command of ["ffmpeg", "ffprobe"]) {
-			writeFileSync(
-				join(fakeBin, command),
-				`#!/usr/bin/env bash
-if [[ "$1" == "-version" ]]; then echo "${command} fake"; exit 0; fi
-exit 1
-`,
+		initializeRunState(
+			runDirectory,
+			createRunState({
+				workflow: "transcription",
+				command: "transcribe",
+				input: { path: source, sha256: sha256(source) },
+				options: {},
+			}),
+		);
+		const state = loadRunState(runDirectory);
+		state.status = "complete";
+		writeFileSync(join(runDirectory, "run_state.json"), `${JSON.stringify(state, null, 2)}\n`);
+
+		const exported = jsonOutput(
+			run(python, [
+				script("transcription", "transcription.py"),
+				"export",
+				runDirectory,
+				"--recorded-at",
+				"2026-08-10T15:51:00",
+				"--speaker",
+				"Ellie",
+				"--no-dictionary",
+			]),
+		);
+		assert.equal(exported.block_count, 3);
+		// `YYYYMMDD HHMMSS-<id>.md` is the stamp vault-transcripts reads a date
+		// from, and the id is the source hash so a re-export is the same file
+		// rather than a second inbox note.
+		assert.match(exported.suggested_filename, /^20260810 155100-[0-9A-F]{8}\.md$/);
+		const body = readFileSync(join(runDirectory, "vault_transcript.md"), "utf8");
+		assert.match(body, /^\*\*Ellie\*\*\n\*00:00\*\nFirst thing I wanted to say\.\n/);
+		assert.match(body, /\*01:01\*\nSecond thing, a minute later\./);
+		// Past an hour the marker has to grow a field: that parser tells MM:SS
+		// from H:MM:SS by counting colons, so `62:05` would read as 62 minutes.
+		assert.match(body, /\*1:02:05\*\nAnd an hour after that\./);
+
+		const unattributed = jsonOutput(
+			run(python, [
+				script("transcription", "transcription.py"),
+				"export",
+				runDirectory,
+				"--output",
+				join(runDirectory, "plain.md"),
+				"--no-dictionary",
+			]),
+		);
+		// No diarization on any engine, so a speaker label would be an assertion
+		// nobody measured.
+		assert.doesNotMatch(readFileSync(join(runDirectory, "plain.md"), "utf8"), /\*\*/);
+		assert.match(unattributed.warnings.join("\n"), /no diarization/i);
+		assert.match(unattributed.warnings.join("\n"), /source file mtime/);
+
+		// An existing export is not silently replaced.
+		runWithEnvironment(
+			python,
+			[script("transcription", "transcription.py"), "export", runDirectory, "--no-dictionary"],
+			{},
+			1,
+		);
+	});
+});
+
+test("transcription doctor reads the service, and refuses an engine with no model", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		// `hf-asr` ships registered with an empty `model`, which is a different
+		// failure from a missing runtime: it answers `model_load_failed` at load
+		// time rather than `engine_unavailable` up front, so a run that trusted
+		// the engine list alone would spend an upload discovering it.
+		const server = createServer((request, response) => {
+			response.writeHead(200, { "Content-Type": "application/json" });
+			if (request.url === "/health") {
+				response.end(JSON.stringify({ ok: true, status: "ok", service: "transcript-backend" }));
+				return;
+			}
+			response.end(
+				JSON.stringify({
+					ok: true,
+					active_engine: "parakeet-v3",
+					device: "cuda",
+					resident: null,
+					idle_unload_seconds: 300,
+					router: { models: ["embed", "ocr", "rank", "task"], reachable: true, yield_mode: "asr" },
+					engines: [
+						{ id: "parakeet-v3", model: "preset:nvidia/parakeet-tdt-0.6b-v3", runtime: "nemo" },
+						{ id: "hf-asr", model: "", runtime: "hf" },
+					],
+				}),
 			);
-			chmodSync(join(fakeBin, command), 0o755);
+		});
+		await new Promise((ready) => server.listen(0, "127.0.0.1", ready));
+		const origin = `http://127.0.0.1:${server.address().port}`;
+		const transcriptionHome = join(workspace, "transcription-home");
+		try {
+			// Async throughout: `runWithEnvironment` is spawnSync, which blocks the
+			// event loop, and the stub above can never accept a connection while it
+			// does.
+			const doctor = jsonOutput(
+				await runAsyncWithEnvironment(python, [script("transcription", "transcription.py"), "doctor"], {
+					FORGE_TRANSCRIPTION_URL: origin,
+					PI_FORGE_TRANSCRIPTION_HOME: transcriptionHome,
+				}),
+			);
+			assert.equal(doctor.ready, true);
+			assert.equal(doctor.health, "ok");
+			assert.equal(doctor.service.engine, "parakeet-v3");
+			assert.equal(doctor.engine_available, true);
+			// Unloaded weights are the normal reading, not a fault: they yield the
+			// GPU to the router that serves embed/ocr/rank/task.
+			assert.equal(doctor.resident, null);
+			assert.equal(doctor.router.yield_mode, "asr");
+			assert.deepEqual(doctor.remediation, []);
+
+			const refused = jsonOutput(
+				await runAsyncWithEnvironment(
+					python,
+					[script("transcription", "transcription.py"), "doctor", "--engine", "hf-asr"],
+					{ FORGE_TRANSCRIPTION_URL: origin, PI_FORGE_TRANSCRIPTION_HOME: transcriptionHome },
+					1,
+				),
+			);
+			assert.equal(refused.ready, false);
+			assert.match(refused.engine_reason, /no model configured/);
+
+			const unreachable = jsonOutput(
+				await runAsyncWithEnvironment(
+					python,
+					[script("transcription", "transcription.py"), "doctor"],
+					{ FORGE_TRANSCRIPTION_URL: "http://127.0.0.1:1", PI_FORGE_TRANSCRIPTION_HOME: transcriptionHome },
+					1,
+				),
+			);
+			assert.equal(unreachable.ready, false);
+			assert.equal(unreachable.health, null);
+		} finally {
+			server.close();
 		}
-		const doctor = jsonOutput(
-			runWithEnvironment(
-				python,
-				[script("transcription", "transcription.py"), "doctor", "--backend", "mlx"],
-				{ PATH: `${fakeBin}:${process.env.PATH}`, PI_FORGE_TRANSCRIPTION_HOME: transcriptionHome },
-				1,
-			),
+	});
+});
+
+// Media ingestion used to stop at "Waiting for transcription" with nothing
+// waiting: the audio was extracted and no caller ever transcribed it.
+test("document ingest transcribes extracted media, and survives the service being down", async () => {
+	await withAsyncWorkspace(async (workspace) => {
+		const server = createServer((request, response) => {
+			response.writeHead(200, { "Content-Type": "application/json" });
+			if (request.url === "/health") {
+				response.end(JSON.stringify({ ok: true, status: "ok" }));
+				return;
+			}
+			if (request.url === "/engines") {
+				response.end(
+					JSON.stringify({
+						ok: true,
+						active_engine: "parakeet-v3",
+						engines: [{ id: "parakeet-v3", model: "preset:nvidia/parakeet-tdt-0.6b-v3" }],
+					}),
+				);
+				return;
+			}
+			request.resume();
+			request.on("end", () =>
+				response.end(
+					JSON.stringify({
+						ok: true,
+						text: "The recording said this.",
+						duration: 4,
+						segments: [{ start: 0, end: 4, text: "The recording said this." }],
+						engine: "parakeet-v3",
+						model: "preset:nvidia/parakeet-tdt-0.6b-v3",
+						device: "cuda",
+						capabilities: { word_timestamps: true },
+						timings: { load_ms: 0, decode_ms: 20 },
+					}),
+				),
+			);
+		});
+		await new Promise((ready) => server.listen(0, "127.0.0.1", ready));
+		const origin = `http://127.0.0.1:${server.address().port}`;
+		const sources = join(workspace, "media");
+		const fakeBin = join(workspace, "fake-bin");
+		mkdirSync(sources, { recursive: true });
+		mkdirSync(fakeBin);
+		writeFileSync(join(sources, "interview.m4a"), "synthetic media\n");
+		// ffmpeg writes whatever it was asked to write; the bytes never reach a
+		// real decoder because the service is a stub.
+		writeFileSync(
+			join(fakeBin, "ffmpeg"),
+			`#!/usr/bin/env bash
+if [[ "$1" == "-version" ]]; then echo "ffmpeg fake"; exit 0; fi
+printf 'synthetic audio' > "\${@: -1}"
+`,
 		);
-		assert.equal(doctor.model_cache, join(transcriptionHome, "models"));
-		assert.equal(doctor.model_cached, true);
-		assert.equal(doctor.backends.mlx.model_cached, true);
-		assert.doesNotMatch(doctor.remediation.join("\n"), /is not cached/);
+		writeFileSync(
+			join(fakeBin, "ffprobe"),
+			`#!/usr/bin/env bash
+if [[ "$1" == "-version" ]]; then echo "ffprobe fake"; exit 0; fi
+exit 0
+`,
+		);
+		for (const command of ["ffmpeg", "ffprobe"]) chmodSync(join(fakeBin, command), 0o755);
+		const path = `${fakeBin}:${process.env.PATH}`;
+		try {
+			const runDirectory = join(workspace, "ingest");
+			await runAsyncWithEnvironment(
+				"node",
+				[script("document-ingest", "document-ingest.mjs"), "prepare", sources, "--output", runDirectory],
+				{ PATH: path, FORGE_TRANSCRIPTION_URL: origin, PI_FORGE_TRANSCRIPTION_HOME: join(workspace, "home") },
+			);
+			const row = readManifestRows(runDirectory).rows[0];
+			assert.equal(row.extraction_method, "llm-stack-transcription");
+			const document = readFileSync(join(runDirectory, row.output_directory, "document.md"), "utf8");
+			assert.match(document, /The recording said this\./);
+			// Titled after the recording, not after the extracted track, which is
+			// always `audio.mp3`.
+			assert.match(document, /^# interview\n/);
+
+			// A transcription host that is down must not fail the ingest: the
+			// document keeps the audio and says plainly what did not happen.
+			const downRun = join(workspace, "ingest-down");
+			await runAsyncWithEnvironment(
+				"node",
+				[script("document-ingest", "document-ingest.mjs"), "prepare", sources, "--output", downRun],
+				{
+					PATH: path,
+					FORGE_TRANSCRIPTION_URL: "http://127.0.0.1:1",
+					PI_FORGE_TRANSCRIPTION_HOME: join(workspace, "home"),
+				},
+			);
+			const downRow = readManifestRows(downRun).rows[0];
+			assert.equal(downRow.extraction_method, "ffmpeg-audio-extraction");
+			const downDocument = readFileSync(join(downRun, downRow.output_directory, "document.md"), "utf8");
+			assert.match(downDocument, /It has not been transcribed/);
+			assert.doesNotMatch(downDocument, /\.\./, "the reason supplies its own full stop");
+			assert.equal(existsSync(join(downRun, downRow.output_directory, "derived", "audio.mp3")), true);
+		} finally {
+			server.close();
+		}
 	});
 });
 
