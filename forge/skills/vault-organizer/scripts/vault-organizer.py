@@ -22,6 +22,7 @@ import obsidian_cli
 import run_state
 import vault_dates
 import vault_format
+import vault_lexicon
 import vault_profile
 from vault_moves import PlainMover, backup_once, resolve_mover
 import vault_voice
@@ -3547,6 +3548,113 @@ def format_check(vault, warnings):
     }
 
 
+def voice_check(vault, warnings):
+    """Whether the vault's voice note resolves and parses.
+
+    A vault with no voice note is not a broken vault -- it is a vault that writes
+    in the default register, which is where every vault starts. That reports
+    `configured: false` and never fails. A note that exists and will not parse is
+    an error: every generating skill would silently fall back to the default
+    voice the owner believed they had replaced.
+    """
+    try:
+        voice_path = vault_voice.resolve_voice_path(vault)
+    except UserError as error:
+        return {"ok": False, "configured": True, "detail": str(error)}
+    if voice_path is None:
+        return {"ok": True, "configured": False, "detail": f"no voice note; default is {vault_voice.DEFAULT_VOICE}"}
+    try:
+        voice, voice_hash = vault_voice.compiled_voice_for(vault, voice_path)
+    except (UserError, OSError) as error:
+        warnings.append(f"voice note [error] {error}")
+        return {"ok": False, "configured": True, "path": str(voice_path), "detail": str(error)}
+    # A scope nobody recognizes is a rule that reaches nothing, which reads from
+    # the note as though it were in force.
+    for scope in voice["unknown_scopes"]:
+        warnings.append(f"voice note [warning] unknown scope '{scope}'; its rules apply to nothing")
+    return {
+        "ok": True,
+        "configured": True,
+        "path": str(voice_path),
+        "voice_hash": voice_hash,
+        "rules": {key: len(voice[key]) for key in ("global", "vocabulary", "formatting", "never")},
+        "types": len(voice["per_type"]),
+        "scopes": voice["recognized_scopes"],
+        "unknownScopes": voice["unknown_scopes"],
+    }
+
+
+def lexicon_check(vault, warnings):
+    """Whether the vault's shared term and speaker dictionary resolves and parses.
+
+    Same shape as the voice check, and for the same reason: a vault that has not
+    written one is not broken, and one that has written an unparseable one is.
+    """
+    try:
+        lexicon_path = vault_lexicon.resolve_lexicon_path(vault)
+    except UserError as error:
+        return {"ok": False, "configured": True, "detail": str(error)}
+    if lexicon_path is None:
+        return {
+            "ok": True,
+            "configured": False,
+            "detail": f"no lexicon note; default is {vault_lexicon.DEFAULT_LEXICON}",
+        }
+    try:
+        lexicon = vault_lexicon.parse_lexicon_note(lexicon_path.read_text(encoding="utf-8"))
+    except (UserError, OSError) as error:
+        warnings.append(f"lexicon note [error] {error}")
+        return {"ok": False, "configured": True, "path": str(lexicon_path), "detail": str(error)}
+    return {
+        "ok": True,
+        "configured": True,
+        "path": str(lexicon_path),
+        "terms": len(lexicon["terms"]),
+        "speakers": len(lexicon["speakers"]),
+    }
+
+
+def guide_check(vault, schema, schema_path, schema_hash, warnings):
+    """Whether the vault's generated orientation skill is installed and current.
+
+    Never fatal. A vault with no guide is a vault that has not run `guide` yet,
+    and a stale one still describes the vault it was generated from -- it is
+    wrong about the newest folders, not about the vault. Both are worth saying
+    out loud, though: the guide is what a session reads instead of exploring by
+    hand, so a vault that quietly has none pays for the same layout twice.
+    """
+    try:
+        rendered = vault_guide.build(vault, schema, schema_path, schema_hash)
+        current, stale = vault_guide.check(vault, rendered)
+    except (UserError, OSError) as error:
+        warnings.append(f"vault guide [warning] {error}")
+        return {"ok": True, "installed": False, "current": False, "detail": str(error)}
+    installed = vault_guide.guide_path(vault)
+    for reason in stale:
+        warnings.append(f"vault guide [warning] {reason}; rerun `guide --apply`")
+    return {
+        "ok": True,
+        "installed": installed.is_file(),
+        "current": current,
+        "path": str(installed),
+        "stale": stale,
+    }
+
+
+def skill_state_check(vault):
+    """Which vault skills have actually been run here, by the state they leave.
+
+    Informational only, and never part of `ok`: a skill that has never run in
+    this vault is a skill that has not been needed. It answers the question a
+    second vault raises -- whether it is as worked-in as the first -- which
+    nothing else reports.
+    """
+    present = sorted(
+        entry.name for entry in vault.iterdir() if entry.is_dir() and entry.name.startswith(".vault-")
+    )
+    return {"ok": True, "state": present}
+
+
 def doctor(args):
     vault = Path(args.vault).expanduser().resolve()
     checks = {}
@@ -3603,6 +3711,18 @@ def doctor(args):
     warnings.extend(getattr(args, "profile_warnings", []) or [])
     checks["format"] = format_check(vault, warnings)
     ok = ok and checks["format"]["ok"]
+    checks["voice"] = voice_check(vault, warnings)
+    ok = ok and checks["voice"]["ok"]
+    checks["lexicon"] = lexicon_check(vault, warnings)
+    ok = ok and checks["lexicon"]["ok"]
+    # The guide is compiled from the schema, so it can only be checked once the
+    # schema has parsed; a vault whose schema is broken has a bigger problem.
+    if schema_check["ok"]:
+        checks["guide"] = guide_check(vault, schema, schema_path, schema_hash, warnings)
+    else:
+        checks["guide"] = {"ok": True, "installed": False, "current": False, "detail": "schema did not parse"}
+    if checks["vault"]["ok"]:
+        checks["skills"] = skill_state_check(vault)
 
     cli_session = obsidian_cli.probe(vault)
     if schema_check["ok"]:

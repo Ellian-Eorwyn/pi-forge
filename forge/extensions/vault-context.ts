@@ -427,15 +427,31 @@ function unmarkedWorkflowFolders(workflowRoot: string): string[] {
  *
  * Inside a vault whose workflows folder resolves, that is a per-skill category
  * folder under it, marked so the organizer and the index leave the artifacts
- * alone. Everywhere else it is the unchanged `forge-output/<skill>/`.
+ * alone. Inside a vault where either the category or the workflows folder is
+ * missing, it is `forge-output/<skill>/` at the vault root — not at the working
+ * directory. Anchoring the fallback to the vault is what makes a run
+ * attributable once there is more than one vault: the same skill run from two
+ * vaults would otherwise pile both sets of artifacts into whichever directory
+ * the session happened to start in. It also matches what the Python side has
+ * always done (`run_directory` in vault-projects), which this disagreed with.
+ *
+ * Only outside a vault entirely is it the unchanged `<cwd>/forge-output/<skill>/`.
  */
 export function resolveWorkflowRoot(cwd: string, skill: string): string {
 	const category = workflowCategories()[skill];
-	const vaultRoot = category ? findVaultRoot(cwd) : undefined;
+	const vaultRoot = findVaultRoot(cwd);
 	const workflowsFolder = vaultRoot ? findWorkflowsFolder(vaultRoot, findSchemaNote(vaultRoot)) : undefined;
-	if (!vaultRoot || !workflowsFolder || !category) {
+	if (!vaultRoot) {
 		const fallback = join(cwd, "forge-output", skill);
 		mkdirSync(fallback, { recursive: true });
+		return fallback;
+	}
+	if (!workflowsFolder || !category) {
+		// Marked like the category folders are: these are run artifacts either way,
+		// and a vault that classified them would refile its own output.
+		const fallback = join(vaultRoot, "forge-output", skill);
+		mkdirSync(fallback, { recursive: true });
+		ensureWorkspaceMarker(fallback);
 		return fallback;
 	}
 	const directory = join(vaultRoot, workflowsFolder, category);

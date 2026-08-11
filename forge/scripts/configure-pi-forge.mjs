@@ -2,7 +2,7 @@
 
 import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import {
 	LEGACY_CHAT_SCHEDULING,
 	LEGACY_CHAT_SERVICE,
@@ -327,12 +327,60 @@ function vaultPath(forgeVault) {
 }
 
 /**
- * Where this install's vault is, as a block appended to the profile instructions.
+ * `forgeVault` as the list of vaults it declares, in declared order.
+ *
+ * The setting accepts one path, or a list of them, where a list entry may also
+ * be `{ path, use }` — `use` being the one line that says when that vault is the
+ * right one. More than one vault is the reason the shape widened: with a
+ * personal vault and a work vault there is no default, only a choice, and a
+ * choice the model can make needs a stated rule to make it from.
+ *
+ * An unusable entry is dropped with its own message rather than suppressing the
+ * whole declaration: with two vaults declared, one bad path should still leave
+ * the other findable. Two entries naming the same path collapse to the first,
+ * since rendering a vault twice reads as two different places to put things.
+ */
+function normalizeVaults(forgeVault) {
+	if (forgeVault === undefined) return [];
+	const entries = Array.isArray(forgeVault) ? forgeVault : [forgeVault];
+	const vaults = [];
+	const seen = new Set();
+	for (const entry of entries) {
+		const record = entry !== null && typeof entry === "object" && !Array.isArray(entry);
+		const root = vaultPath(record ? entry.path : entry);
+		if (!root) {
+			process.stderr.write(`forgeVault must be an absolute path; ignoring ${JSON.stringify(entry)}\n`);
+			continue;
+		}
+		// A path that is not there is worse than no path: it sends every "put this in
+		// my vault" request at a directory the write would silently create.
+		try {
+			if (!statSync(root).isDirectory()) throw new Error("not a directory");
+		} catch {
+			process.stderr.write(`forgeVault is not a directory; ignoring ${root}\n`);
+			continue;
+		}
+		if (seen.has(root)) continue;
+		seen.add(root);
+		const inbox = join(root, INBOX_DIR);
+		try {
+			statSync(inbox);
+		} catch {
+			process.stderr.write(`forgeVault has no ${INBOX_DIR} yet; it will be created on first use: ${inbox}\n`);
+		}
+		const use = record && typeof entry.use === "string" ? entry.use.trim() : "";
+		vaults.push({ root, inbox, name: basename(root), use });
+	}
+	return vaults;
+}
+
+/**
+ * Where this install's vaults are, as a block appended to the profile instructions.
  *
  * Inside a vault the `vault-context` extension injects the coordinates it
  * detects by walking up for `.obsidian/`. That walk is the whole mechanism, so a
  * session started anywhere else — a code checkout, a downloads folder — has no
- * way to know the vault exists, and asking is the only honest thing left. This
+ * way to know a vault exists, and asking is the only honest thing left. This
  * covers that case, and lives in `settings.json` for the same reason `forgeUser`
  * does: the installed `AGENTS.md` is rewritten from the packaged profile on
  * every install and every `pi-forge-update`, so a path added to it by hand would
@@ -341,45 +389,48 @@ function vaultPath(forgeVault) {
  * Obsidian's own vault registry is deliberately not consulted. It records every
  * vault ever opened, marks more than one of them `open`, and orders them by last
  * use — on a machine with a scratch vault and a real one, every available signal
- * points at the wrong vault. A declaration is the only reliable answer.
+ * points at the wrong vault. A declaration is the only reliable answer, and with
+ * two real vaults it is the only thing that can say which is which.
  *
  * An install that declares no `forgeVault` appends nothing, which is the path
  * every install took before this existed.
  */
 function vaultBlock(forgeVault) {
-	if (forgeVault === undefined) return "";
-	const root = vaultPath(forgeVault);
-	if (!root) {
-		process.stderr.write(`forgeVault must be an absolute path; ignoring ${JSON.stringify(forgeVault)}\n`);
-		return "";
+	const vaults = normalizeVaults(forgeVault);
+	if (vaults.length === 0) return "";
+	if (vaults.length === 1) {
+		const { root, inbox, use } = vaults[0];
+		return [
+			"",
+			"## Your Vault",
+			"",
+			`- Vault root: ${root}`,
+			`- Inbox: ${inbox}`,
+			...(use ? [`- Use for: ${use}`] : []),
+			"",
+			"Use those paths when a session outside the vault is asked to put something into",
+			"it, and when a vault skill needs `--vault`. Never ask where the vault is, and",
+			"never guess a different one. Inside an Obsidian vault, the vault detected there",
+			"wins over this one.",
+			"",
+		].join("\n");
 	}
-	// A path that is not there is worse than no path: it sends every "put this in
-	// my vault" request at a directory the write would silently create.
-	try {
-		if (!statSync(root).isDirectory()) throw new Error("not a directory");
-	} catch {
-		process.stderr.write(`forgeVault is not a directory; ignoring ${root}\n`);
-		return "";
+	const lines = ["", "## Your Vaults", ""];
+	for (const { root, inbox, name, use } of vaults) {
+		lines.push(`- **${name}** — ${root}`);
+		lines.push(`  - Inbox: ${inbox}`);
+		if (use) lines.push(`  - Use for: ${use}`);
 	}
-	const inbox = join(root, INBOX_DIR);
-	try {
-		statSync(inbox);
-	} catch {
-		process.stderr.write(`forgeVault has no ${INBOX_DIR} yet; it will be created on first use: ${inbox}\n`);
-	}
-	return [
+	lines.push(
 		"",
-		"## Your Vault",
+		'These are the only vaults there are. Choose between them by their "Use for"',
+		"lines when a session outside a vault is asked to put something into one, and",
+		"when a vault skill needs `--vault`. When a request fits none of them, ask which",
+		"vault rather than guessing, and never write to a vault path not listed here.",
+		"Inside an Obsidian vault, the vault detected there wins over all of these.",
 		"",
-		`- Vault root: ${root}`,
-		`- Inbox: ${inbox}`,
-		"",
-		"Use those paths when a session outside the vault is asked to put something into",
-		"it, and when a vault skill needs `--vault`. Never ask where the vault is, and",
-		"never guess a different one. Inside an Obsidian vault, the vault detected there",
-		"wins over this one.",
-		"",
-	].join("\n");
+	);
+	return lines.join("\n");
 }
 
 /**

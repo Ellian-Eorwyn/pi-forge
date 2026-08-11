@@ -1078,6 +1078,72 @@ class VaultOrganizerV2Tests(unittest.TestCase):
             self.assertTrue(checks["chat"]["ok"])
             self.assertTrue(checks["embeddings"]["ok"])
 
+    def test_doctor_reports_unadopted_conventions_without_failing(self):
+        # A vault with no voice note, no lexicon, and no generated guide is not a
+        # broken vault -- it is where every vault starts, and where a newly split
+        # second vault sits until each convention is written.
+        with StubServer([]) as server:
+            payload = self.run_ok(
+                "doctor", "--vault", str(self.vault), "--base-url", server.url, "--no-embeddings",
+            )
+        checks = payload["data"]["checks"]
+        self.assertEqual(payload["status"], "ok")
+        for name in ("voice", "lexicon"):
+            self.assertTrue(checks[name]["ok"], name)
+            self.assertFalse(checks[name]["configured"], name)
+            self.assertIn("default is", checks[name]["detail"])
+        self.assertTrue(checks["guide"]["ok"])
+        self.assertFalse(checks["guide"]["installed"])
+        self.assertIn("no guide installed", " ".join(checks["guide"]["stale"]))
+
+    def test_doctor_reads_the_conventions_a_vault_has_adopted(self):
+        self.write_note(
+            "99 Meta/0.01 Voice and Style.md",
+            "# Voice\n\n## Global voice\n\n- Say it plainly.\n- Cut the throat-clearing.\n",
+        )
+        self.write_note(
+            "99 Meta/0.02 Speakers and Terms.md",
+            "# Terms\n\n## Terms\n\n| Term | Variants |\n| --- | --- |\n| pi-forge | pi forge |\n",
+        )
+        self.run_ok("guide", "--vault", str(self.vault), "--apply")
+        with StubServer([]) as server:
+            payload = self.run_ok(
+                "doctor", "--vault", str(self.vault), "--base-url", server.url, "--no-embeddings",
+            )
+        checks = payload["data"]["checks"]
+        self.assertTrue(checks["voice"]["configured"])
+        self.assertEqual(checks["voice"]["rules"]["global"], 2)
+        self.assertTrue(checks["lexicon"]["configured"])
+        self.assertEqual(checks["lexicon"]["terms"], 1)
+        self.assertTrue(checks["guide"]["installed"])
+        self.assertTrue(checks["guide"]["current"])
+        self.assertEqual(checks["guide"]["stale"], [])
+
+    def test_doctor_warns_about_a_stale_guide_without_calling_the_vault_broken(self):
+        self.run_ok("guide", "--vault", str(self.vault), "--apply")
+        (self.vault / "01 Personal" / "1.99 Late Addition").mkdir(parents=True)
+        with StubServer([]) as server:
+            payload = self.run_ok(
+                "doctor", "--vault", str(self.vault), "--base-url", server.url, "--no-embeddings",
+            )
+        checks = payload["data"]["checks"]
+        # Still installed and still describing this vault, just behind it.
+        self.assertTrue(checks["guide"]["ok"])
+        self.assertTrue(checks["guide"]["installed"])
+        self.assertFalse(checks["guide"]["current"])
+        self.assertIn("folder tree changed", " ".join(payload["warnings"]))
+
+    def test_doctor_lists_the_skills_that_have_left_state_in_this_vault(self):
+        # The question a second vault raises: is it as worked-in as the first.
+        (self.vault / ".vault-connections").mkdir()
+        with StubServer([]) as server:
+            payload = self.run_ok(
+                "doctor", "--vault", str(self.vault), "--base-url", server.url, "--no-embeddings",
+            )
+        state = payload["data"]["checks"]["skills"]["state"]
+        self.assertIn(".vault-connections", state)
+        self.assertNotIn(".vault-wiki", state)
+
     def test_apply_resume_skips_completed_operations(self):
         self.write_note("00 Inbox/Move.md", "# Move\n\nBody to file.\n")
         with StubServer([ok_response()]) as server:

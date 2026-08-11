@@ -321,7 +321,10 @@ test("a forgeVault whose inbox does not exist yet is still declared", () => {
 });
 
 test("a forgeVault that is not a usable absolute directory is ignored rather than declared", () => {
-	for (const forgeVault of ["", "   ", "relative/vault", "~", join(tmpdir(), "pi-forge-absent-vault"), 7, ["/tmp"]]) {
+	// A list is a valid shape now, so an unusable value inside one is what has to
+	// be rejected here rather than the list itself.
+	const absent = join(tmpdir(), "pi-forge-absent-vault");
+	for (const forgeVault of ["", "   ", "relative/vault", "~", absent, 7, [], [absent, "relative/vault"], [{}]]) {
 		withAgentDirectory({ forgeVault }, (agentDirectory) => {
 			configure(agentDirectory);
 			assert.doesNotMatch(installedProfile(agentDirectory), /Your Vault/);
@@ -351,6 +354,68 @@ test("a forgeVault pointing at a file is ignored rather than declared", () => {
 		withAgentDirectory({ forgeVault: file }, (agentDirectory) => {
 			configure(agentDirectory);
 			assert.doesNotMatch(installedProfile(agentDirectory), /Your Vault/);
+		});
+	});
+});
+
+test("two declared vaults are both rendered, with the rule that tells them apart", () => {
+	withVault((personal) => {
+		withVault((work) => {
+			const forgeVault = [
+				{ path: work, use: "anything about the job" },
+				{ path: personal, use: "everything else" },
+			];
+			withAgentDirectory({ forgeVault }, (agentDirectory) => {
+				configure(agentDirectory);
+				const profile = installedProfile(agentDirectory);
+				assert.match(profile, /## Your Vaults/);
+				for (const root of [work, personal]) {
+					assert.ok(profile.includes(`**${basename(root)}** — ${root}`));
+					assert.ok(profile.includes(`- Inbox: ${join(root, "00 Inbox")}`));
+				}
+				assert.ok(profile.includes("- Use for: anything about the job"));
+				assert.ok(profile.includes("- Use for: everything else"));
+				// Declared order is the rendered order: it is the one thing the
+				// declaration can say about precedence.
+				assert.ok(profile.indexOf(work) < profile.indexOf(personal));
+				assert.match(profile, /ask which\nvault rather than guessing/);
+			});
+		});
+	});
+});
+
+test("a bad entry beside a good one leaves the good one declared", () => {
+	withVault((vault) => {
+		withAgentDirectory({ forgeVault: [join(tmpdir(), "pi-forge-absent-vault"), vault] }, (agentDirectory) => {
+			configure(agentDirectory);
+			const profile = installedProfile(agentDirectory);
+			// One survivor, so it renders as the single-vault block it now is.
+			assert.match(profile, /## Your Vault\n/);
+			assert.ok(profile.includes(`- Vault root: ${vault}`));
+		});
+	});
+});
+
+test("one vault declared twice is rendered once", () => {
+	withVault((vault) => {
+		withAgentDirectory({ forgeVault: [vault, { path: vault, use: "the same place" }] }, (agentDirectory) => {
+			configure(agentDirectory);
+			const profile = installedProfile(agentDirectory);
+			assert.match(profile, /## Your Vault\n/);
+			assert.equal(profile.split(vault).length - 1, 2); // root line and inbox line
+			assert.doesNotMatch(profile, /Use for: the same place/);
+		});
+	});
+});
+
+test("a lone vault with a use line keeps the singular block and states the rule", () => {
+	withVault((vault) => {
+		withAgentDirectory({ forgeVault: [{ path: vault, use: "notes of every kind" }] }, (agentDirectory) => {
+			configure(agentDirectory);
+			const profile = installedProfile(agentDirectory);
+			assert.match(profile, /## Your Vault\n/);
+			assert.doesNotMatch(profile, /## Your Vaults/);
+			assert.ok(profile.includes("- Use for: notes of every kind"));
 		});
 	});
 });

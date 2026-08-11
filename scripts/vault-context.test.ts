@@ -497,6 +497,56 @@ test("outside a vault, and for an unmapped skill inside one, the root stays forg
 	}
 });
 
+test("the forge-output fallback is anchored to the vault, not to the working directory", () => {
+	// The case the old code got wrong: run from a subfolder, the two paths differ,
+	// and a cwd-relative fallback scatters run artifacts through the note tree —
+	// and, with a second vault, makes them unattributable.
+	const root = makeVault({ schema: schemaWithMeta(), notes: ["01 Personal/A.md"] });
+	try {
+		const inside = join(root, "01 Personal");
+		// Unmapped skill: no category, so no workflows folder can apply.
+		assert.equal(resolveWorkflowRoot(inside, "vault-organizer"), join(root, "forge-output", "vault-organizer"));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+
+	const plainVault = makeVault({ notes: ["01 Personal/A.md"] });
+	try {
+		// Mapped skill, but no schema and no workflows folder to compile one from.
+		const inside = join(plainVault, "01 Personal");
+		assert.equal(resolveWorkflowRoot(inside, "web-research"), join(plainVault, "forge-output", "web-research"));
+	} finally {
+		rmSync(plainVault, { recursive: true, force: true });
+	}
+});
+
+test("the forge-output fallback inside a vault is marked as a workspace", () => {
+	const root = makeVault({ schema: schemaWithMeta(), notes: ["01 Personal/A.md"] });
+	try {
+		assert.equal(inspectVault(root)?.noteCount, 2); // the note plus the schema note
+		const fallback = resolveWorkflowRoot(join(root, "01 Personal"), "vault-organizer");
+		assert.ok(existsSync(join(fallback, ".forge-workspace")));
+		// Which is what keeps its artifacts out of the note count, as the category
+		// folders' marker does.
+		writeFileSync(join(fallback, "run.md"), "# Run\n");
+		assert.equal(inspectVault(root)?.noteCount, 2);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("outside a vault the fallback is still relative to the working directory", () => {
+	const plain = mkdtempSync(join(tmpdir(), "vault-context-plain-"));
+	try {
+		const nested = join(plain, "downloads");
+		mkdirSync(nested, { recursive: true });
+		assert.equal(resolveWorkflowRoot(nested, "web-research"), join(nested, "forge-output", "web-research"));
+		assert.ok(!existsSync(join(nested, "forge-output", "web-research", ".forge-workspace")));
+	} finally {
+		rmSync(plain, { recursive: true, force: true });
+	}
+});
+
 test("the injected message names the resolved workflow root, or says none resolved", () => {
 	const root = makeVault({ schema: schemaWithMeta(), notes: ["A.md"] });
 	try {
