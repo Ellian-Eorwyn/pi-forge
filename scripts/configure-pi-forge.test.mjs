@@ -47,20 +47,39 @@ function withAgentDirectory(existingSettings, body) {
 	}
 }
 
-test("profile configuration exposes code and non-thinking chat models", () => {
+test("profile configuration exposes the three direct-port local models with thinking on think/code", () => {
 	withAgentDirectory(undefined, (agentDirectory) => {
 		const settings = configure(agentDirectory);
-		assert.equal(settings.defaultProvider, "forge-local");
-		assert.equal(settings.defaultModel, "code");
+		// The temp-1 thinking profile is the interactive default.
+		assert.equal(settings.defaultProvider, "forge-local-think");
+		assert.equal(settings.defaultModel, "think");
 
 		const { providers } = JSON.parse(readFileSync(join(agentDirectory, "models.json"), "utf8"));
-		assert.equal(providers["forge-local"].baseUrl, "http://llms:8008/v1");
-		assert.equal(providers["forge-local"].models[0].id, "code");
-		assert.equal(providers["forge-chat-local"].baseUrl, "http://llms:8004/v1");
-		assert.equal(providers["forge-chat-local"].models[0].id, "chat");
-		assert.equal(providers["forge-chat-local"].models[0].reasoning, false);
-		assert.equal(providers["forge-chat-local"].compat.supportsReasoningEffort, false);
-		assert.equal("thinkingFormat" in providers["forge-chat-local"].compat, false);
+		// The pre-split names are migrated away, not left to accumulate.
+		assert.equal("forge-local" in providers, false);
+		assert.equal("forge-chat-local" in providers, false);
+		assert.equal("forge-task-local" in providers, false);
+
+		// think (:8003) and code (:8008) both reason via graded reasoning_effort.
+		for (const [name, port, id] of [
+			["forge-local-think", "8003", "think"],
+			["forge-local-code", "8008", "code"],
+		]) {
+			assert.equal(providers[name].baseUrl, `http://llms:${port}/v1`);
+			assert.equal(providers[name].models[0].id, id);
+			assert.equal(providers[name].models[0].reasoning, true);
+			assert.equal(providers[name].compat.supportsReasoningEffort, true);
+			assert.equal(providers[name].compat.thinkingFormat, "openai");
+			assert.equal(providers[name].models[0].thinkingLevelMap.medium, "medium");
+			assert.equal(providers[name].models[0].thinkingLevelMap.xhigh, "xhigh");
+		}
+
+		// chat (:8004) is the non-thinking fast path.
+		assert.equal(providers["forge-local-chat"].baseUrl, "http://llms:8004/v1");
+		assert.equal(providers["forge-local-chat"].models[0].id, "chat");
+		assert.equal(providers["forge-local-chat"].models[0].reasoning, false);
+		assert.equal(providers["forge-local-chat"].compat.supportsReasoningEffort, false);
+		assert.equal("thinkingFormat" in providers["forge-local-chat"].compat, false);
 	});
 });
 

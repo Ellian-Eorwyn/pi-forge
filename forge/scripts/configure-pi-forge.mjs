@@ -24,6 +24,25 @@ import { capacityForUrl, readSnapshot } from "../lib/stack-state.mjs";
 // wrong at once (both providers' contextWindow, the compaction reserve, and
 // both services' contextTokens) with nothing to catch it.
 const MAX_OUTPUT_TOKENS = 32768;
+// How the local thinking providers (:8003 think, :8008 code) carry graded
+// reasoning. "openai" sends the top-level `reasoning_effort` field and the model
+// answers into `reasoning_content` (verified against these ports with
+// `forge/evals/backend-check/check.py sweep`: steered levels reason, `none` is
+// silent), which is what lets `/think` set low/medium/xhigh. The previous seed
+// used "qwen" (toggles `enable_thinking` only, no graded levels) specifically so
+// the served model's `<think>` tags and the vault-workflow execute-phase prefill
+// stayed out of displayed output. If openai ever leaks raw `<think>` into the
+// rendered turn or makes that prefill visible, flip this ONE constant back to
+// "qwen" — the only cost is that `/think` degrades to on/off rather than graded.
+const LOCAL_THINKING_FORMAT = "openai";
+const LOCAL_THINKING_LEVEL_MAP = {
+	off: "none",
+	minimal: "low",
+	low: "low",
+	medium: "medium",
+	high: "xhigh",
+	xhigh: "xhigh",
+};
 const COMPACTION_TRIGGER_RATIO = 0.75;
 const CONTEXT_BUDGET_SOFT_RATIO = COMPACTION_TRIGGER_RATIO;
 const CONTEXT_BUDGET_VERBATIM_RECENT_TOKENS = 20000;
@@ -91,8 +110,8 @@ const retainedPackages = packages.filter((entry) => {
 const profileInstructions =
 	readFileSync(sourceAgentsPath, "utf8") + identityBlock(settings.forgeUser) + vaultBlock(settings.forgeVault);
 settings.packages = [profileDirectory, ...retainedPackages];
-settings.defaultProvider = "forge-local";
-settings.defaultModel = "code";
+settings.defaultProvider = "forge-local-think";
+settings.defaultModel = "think";
 // Forge is a knowledge-work profile, not a profile for developing pi itself. The
 // pointer block to pi's README/docs/examples costs ~300 tokens of launch context on
 // every session; the package path is still named in the system prompt on demand.
@@ -160,25 +179,33 @@ if (
 	throw new Error(`${modelsPath} providers must contain a JSON object`);
 }
 models.providers = models.providers ?? {};
-delete models.providers["forge-task-local"];
-models.providers["forge-local"] = {
-	baseUrl: "http://llms:8008/v1",
+// Migrate away the pre-split / pre-thinking provider names so an upgrade lands on
+// exactly the three below rather than accumulating stale entries.
+for (const stale of ["forge-task-local", "forge-local", "forge-chat-local"]) {
+	delete models.providers[stale];
+}
+// The three interactive local models, called directly rather than through the
+// :8010 proxy (which fronts these same ports). `think` (:8003, temp-1) is the
+// everyday default; `code` (:8008, stricter temp) is the alternate thinking
+// profile; `chat` (:8004) is the non-thinking fast path. :8003 and :8008 honour
+// graded reasoning_effort, so both carry reasoning + a thinkingLevelMap for /think.
+const localThinkingCompat = {
+	supportsDeveloperRole: false,
+	supportsReasoningEffort: true,
+	thinkingFormat: LOCAL_THINKING_FORMAT,
+	maxTokensField: "max_tokens",
+};
+models.providers["forge-local-think"] = {
+	baseUrl: "http://llms:8003/v1",
 	api: "openai-completions",
 	apiKey: "local",
-	compat: {
-		supportsDeveloperRole: false,
-		supportsReasoningEffort: false,
-		maxTokensField: "max_tokens",
-		// The served Qwen model emits <think>...</think> in its content; parse
-		// it as reasoning so raw think tags do not leak into displayed output
-		// (and the vault-workflow execute-phase prefill stays invisible).
-		thinkingFormat: "qwen",
-	},
+	compat: { ...localThinkingCompat },
 	models: [
 		{
-			id: "code",
-			name: "Code (Local)",
-			reasoning: false,
+			id: "think",
+			name: "Think (Local, thinking, temp-1)",
+			reasoning: true,
+			thinkingLevelMap: { ...LOCAL_THINKING_LEVEL_MAP },
 			input: ["text"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow,
@@ -186,7 +213,25 @@ models.providers["forge-local"] = {
 		},
 	],
 };
-models.providers["forge-chat-local"] = {
+models.providers["forge-local-code"] = {
+	baseUrl: "http://llms:8008/v1",
+	api: "openai-completions",
+	apiKey: "local",
+	compat: { ...localThinkingCompat },
+	models: [
+		{
+			id: "code",
+			name: "Code (Local, thinking, stricter temp)",
+			reasoning: true,
+			thinkingLevelMap: { ...LOCAL_THINKING_LEVEL_MAP },
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow,
+			maxTokens: MAX_OUTPUT_TOKENS,
+		},
+	],
+};
+models.providers["forge-local-chat"] = {
 	baseUrl: "http://llms:8004/v1",
 	api: "openai-completions",
 	apiKey: "local",
@@ -198,7 +243,7 @@ models.providers["forge-chat-local"] = {
 	models: [
 		{
 			id: "chat",
-			name: "Chat (Local, Non-Thinking)",
+			name: "Chat (Local, non-thinking)",
 			reasoning: false,
 			input: ["text"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
