@@ -307,6 +307,10 @@ class StubChatHandler(BaseHTTPRequestHandler):
             return "verify"
         if system.startswith("You read one voice recording"):
             return "classify"
+        # The repair prompt is a transcript editor too, so it must be told apart
+        # from ordinary cleanup before the generic editor match.
+        if system.startswith("You are a meticulous transcript editor fixing"):
+            return "repair"
         if system.startswith("You are a meticulous transcript editor"):
             return "clean"
         if system.startswith("You write the one-paragraph summary"):
@@ -338,6 +342,9 @@ class StubChatHandler(BaseHTTPRequestHandler):
             # Echoing the chunk is the most faithful cleanup possible, so the
             # deterministic gates pass and a test can measure everything else.
             return {"cleaned": user["chunk"], "chunk_summary": "A short stretch of the recording."}
+        if stage == "repair":
+            # Default repair changes nothing; a test scripts the actual restore.
+            return {"cleaned": user.get("currentCleaned", "")}
         if stage == "summarize":
             return {"summary": "The speaker works through a short list of practical repairs and next steps."}
         if stage in ("verify", "verify-fidelity"):
@@ -2063,6 +2070,13 @@ class FidelityProvisionalTests(unittest.TestCase):
             if payload["messages"][0]["content"].startswith("You are checking whether a cleaned-up transcript")
         ]
 
+    def repair_requests(self, chat):
+        return [
+            payload
+            for payload in chat.requests
+            if payload["messages"][0]["content"].startswith("You are a meticulous transcript editor fixing")
+        ]
+
     def test_a_fidelity_only_fail_becomes_provisional_and_finishes_when_the_judge_is_ok(self):
         source, cleanup = self.gutted_cleanup()
         self.write_source(source)
@@ -2081,31 +2095,66 @@ class FidelityProvisionalTests(unittest.TestCase):
         self.assertFalse(record["needs_review"])
         self.assertEqual(self.review_queue(run_dir_of(result)), [])
 
-    def test_a_fidelity_only_fail_holds_when_the_judge_flags(self):
+    def test_a_flagged_note_the_repair_cannot_fix_is_held(self):
+        # The judge flags, chat is asked to restore, and the second look still
+        # flags (the repair changed nothing here) — so it holds, carrying the
+        # judge's objection, not the floor's word-overlap score.
         source, cleanup = self.gutted_cleanup()
         self.write_source(source)
         objection = FlagFidelityHandler.FIDELITY_REASON
         with StubServer(scripted={"clean": [cleanup]}) as chat, \
                 StubServer(handler_cls=FlagFidelityHandler) as think:
             result = self.result_of(self.process(chat.url, think.url, "--apply"))
-        # Held, not finished: the recording keeps its original name and the review
-        # queue carries the judge's own words — not "52% of words survived".
         self.assertEqual(self.inbox(), [self.NAME])
         verification = result["data"]["verification"]
         self.assertEqual(verification["provisionalCleared"], 0)
+        self.assertEqual(verification["provisionalRepaired"], 0)
         self.assertEqual(verification["provisionalHeld"], 1)
+        # A repair was attempted on chat before the note was held.
+        self.assertEqual(len(self.repair_requests(chat)), 1)
         queued = self.review_queue(run_dir_of(result))
         self.assertEqual(len(queued), 1)
-        # The headline Ellie reads is the judge's objection, not the floor's score
-        # — the reason carries neither the rare-word nor the locator wording.
         self.assertIn("cleaned transcript may not be faithful", queued[0]["reason"])
         self.assertIn(objection, queued[0]["reason"])
         self.assertNotIn("distinctive source words survived", queued[0]["reason"])
         self.assertNotIn("could not be located in the cleaned text", queued[0]["reason"])
-        # The report's verification table and held-note reason both lead with it.
         report = (run_dir_of(result) / "report.md").read_text(encoding="utf-8")
-        self.assertIn(f"| {objection} |", report)
         self.assertIn(f"cleaned transcript may not be faithful: {objection}", report)
+
+    def test_a_flagged_note_is_repaired_on_chat_and_finishes_when_the_second_look_passes(self):
+        # The judge flags a real loss; chat restores it (a fuller cleanup drawn
+        # from the source); the second, independent look passes; the note finishes
+        # as fidelity-repaired rather than landing in review.
+        source, cleanup = self.gutted_cleanup()
+        self.write_source(source)
+        note_id = f"00 Inbox/{self.NAME}"
+        blocks = vt.parse_transcript(source)["blocks"]
+        # The restored cleanup is a larger verbatim subset of the source, so it is
+        # grounded (no invented words) and structurally clean.
+        restored = " ".join(entry["text"] for entry in blocks[:8])
+        think_script = {
+            "verify-fidelity": [
+                {"verdicts": [{"id": note_id, "verdict": "flag", "reason": "the pantry shelving point is gone"}]},
+                {"verdicts": [{"id": note_id, "verdict": "ok"}]},
+            ],
+        }
+        chat_script = {"clean": [cleanup], "repair": [{"cleaned": restored}]}
+        with StubServer(scripted=chat_script) as chat, \
+                StubServer(handler_cls=SecondStubChatHandler, scripted=think_script) as think:
+            result = self.result_of(self.process(chat.url, think.url, "--apply"))
+        # Finished: the processed pair is in the inbox, not the review queue.
+        self.assertCountEqual(self.inbox(), [self.DESTINATION, f"{self.DESTINATION[:-3]} - Transcript.md"])
+        verification = result["data"]["verification"]
+        self.assertEqual(verification["provisionalRepaired"], 1)
+        self.assertEqual(verification["provisionalHeld"], 0)
+        self.assertEqual(len(self.repair_requests(chat)), 1)
+        record = self.record_for(run_dir_of(result))
+        self.assertEqual(record["action"], "process")
+        self.assertEqual(record["verified"], "fidelity-repaired")
+        self.assertFalse(record["needs_review"])
+        # The applied note carries the restored body, not the gutted one.
+        applied = (self.vault / "00 Inbox" / self.DESTINATION).read_text(encoding="utf-8")
+        self.assertIn("shelving unit in the pantry", applied)
 
     def test_a_non_fidelity_fault_holds_immediately_and_never_reaches_the_judge(self):
         # The deferral is only for the fidelity floors. A note that fails a
@@ -2155,20 +2204,26 @@ class FidelityProvisionalTests(unittest.TestCase):
         for payload in note_level:
             self.assertNotEqual(payload.get("reasoning_effort"), "medium")
 
-    def test_the_provisional_review_covers_every_utterance_not_a_sample(self):
+    def test_the_judge_sees_the_whole_note_not_windowed_utterances(self):
+        # The provisional review is whole-note: one item carrying the full source
+        # and the full cleaned body, so content that only moved reads as present.
+        # This is what the per-utterance window could not do.
         source, cleanup = self.gutted_cleanup()
         self.write_source(source)
-        usable = len([b for b in vt.parse_transcript(source)["blocks"] if len(vt.content_words(b["text"])) >= vt.FIDELITY_MIN_WORDS])
         with StubServer(scripted={"clean": [cleanup]}) as chat, \
                 StubServer(handler_cls=SecondStubChatHandler) as think:
             self.result_of(self.process(chat.url, think.url))
-        sent = set()
-        for payload in self.fidelity_requests(think):
-            for item in json.loads(payload["messages"][1]["content"])["items"]:
-                sent.add(item["id"])
-        # Full coverage: every usable utterance, not the four-sample spot check.
-        self.assertEqual(len(sent), usable)
-        self.assertGreater(len(sent), vt.FIDELITY_SAMPLES)
+        fidelity = self.fidelity_requests(think)
+        self.assertEqual(len(fidelity), 1, "one whole-note judge call, not a packet of utterances")
+        items = json.loads(fidelity[0]["messages"][1]["content"])["items"]
+        self.assertEqual(len(items), 1)
+        item = items[0]
+        self.assertEqual(item["id"], f"00 Inbox/{self.NAME}")
+        # The whole source and the whole cleaned body, not a 160-word window.
+        self.assertIn("rawTranscript", item)
+        self.assertIn("cleanedNote", item)
+        self.assertIn("shelving unit in the pantry", item["rawTranscript"])
+        self.assertNotIn("#s", item["id"])
 
     def test_no_verify_holds_a_fidelity_fail_since_there_is_no_judge(self):
         # With --no-verify there is no meaning-judge to defer to, so the floor must

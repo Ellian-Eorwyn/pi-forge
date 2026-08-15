@@ -269,8 +269,9 @@ FIDELITY_SAMPLE_RATE = 3
 # note held by them alone is not a verdict — it is a reason to think harder. Such
 # a note is marked provisional and sent to the thinking meaning-judge, which is
 # the authority the principle names: no information lost, not every word kept.
-# The judge sees every usable utterance of a provisional note rather than the
-# spot-check sample, and runs at `medium` — enough for a yes/no meaning call,
+# The judge reads the whole cleaned note against the whole source (so content that
+# only moved reads as present) and can hand a real loss to `chat` to restore; both
+# the judgment and the re-check run at `medium` — enough for a yes/no meaning call,
 # where `xhigh` (the note-redo budget) buys nothing on this task.
 FIDELITY_REVIEW_EFFORT = "medium"
 WORD_RE = re.compile(r"[a-z][a-z-]{2,}")
@@ -2784,16 +2785,10 @@ def best_containment(block_text, cleaned_words):
 
 def fidelity_samples(path, blocks, count=FIDELITY_SAMPLES):
     """Sample source utterances to spot-check, seeded by path so a resumed run
-    checks the same ones.
-
-    ``count=None`` returns every usable utterance in order — full coverage, for a
-    provisional note the meaning-judge must see whole rather than spot-check.
-    """
+    checks the same ones."""
     usable = [block for block in blocks if len(content_words(block["text"])) >= FIDELITY_MIN_WORDS]
     if not usable:
         return []
-    if count is None:
-        return sorted(usable, key=lambda block: block["seconds"])
     rng = random.Random(sha256_text(path))
     chosen = rng.sample(usable, min(count, len(usable)))
     return sorted(chosen, key=lambda block: block["seconds"])
@@ -4001,6 +3996,55 @@ These are never errors:
 - small talk or a fragment whose substance is present in the passage."""
 
 
+VERIFY_FIDELITY_NOTE_SYSTEM = """You are checking whether a cleaned-up transcript still says everything the recording said.
+
+For each item you get the full raw transcript of one recording and the full
+cleaned version made from it. The cleaning is allowed — and meant — to remove
+filler and false starts, and to reorder and regroup the material: a point that
+MOVED is not a point that was LOST. Read the whole cleaned version before you
+decide, because a point may appear anywhere in it, not where it stood in the raw.
+
+The raw is speech-to-text of one person talking, full of restarts, repetition,
+and transcription errors that are not English. Reading it as written prose will
+make you flag good work.
+
+Approve the item when every substantive point, fact, figure, name, and
+distinction the speaker made is present somewhere in the cleaned version, in
+their meaning.
+
+Flag the item only when the cleaned version drops a point the speaker made,
+misstates what they meant — including turning a question or a condition into a
+flat statement, or a hedge into a certainty — or attributes something to the
+wrong person. When you flag, your reason must name each dropped or altered point
+specifically and quote the raw transcript, so that exactly those points can be
+put back and nothing else is disturbed.
+
+These are never grounds to flag:
+- removing filler, stutters, false starts, and repetition,
+- rewording, re-punctuating, or joining fragments into sentences,
+- condensing a roundabout phrasing into the plain statement it was reaching for,
+  in the speaker's own words,
+- resolving a garbled or ungrammatical fragment into the reading it plainly had,
+- a missing word that does not change the meaning,
+- reordering or regrouping where the substance is still somewhere in the note."""
+
+
+REPAIR_CLEANUP_SYSTEM = """You are a meticulous transcript editor fixing one specific problem in an already-cleaned transcript.
+
+A reviewer compared the cleaned version against the raw recording and found that
+something the speaker said was dropped or changed. You are given the raw
+transcript, the current cleaned version, and the reviewer's note of what is
+missing or wrong.
+
+Return the full cleaned version with the reviewer's point restored or corrected —
+and nothing else touched. Draw the restored wording only from what the raw
+transcript actually says, in the speaker's own voice. Keep every other part of
+the current cleaned version exactly as it is. Do not add anything the speaker did
+not say, and do not state anything more certainly than they did.
+
+Return exactly one JSON object and nothing else: {"cleaned": "<the full corrected cleaned version>"}"""
+
+
 def verify_note_payload(vault, record, item):
     raw = ""
     try:
@@ -4051,16 +4095,13 @@ def fidelity_producers(fidelity_items, run_dir):
     }
 
 
-def fidelity_payloads(vault, record, run_dir, lexicon=None, count=FIDELITY_SAMPLES):
+def fidelity_payloads(vault, record, run_dir, lexicon=None):
     """One packet item per sampled utterance, paired with the cleaned window it
     should appear in. Long files are sampled rather than re-read whole.
 
     Samples are corrected the same way the cleaned copy was. Comparing a
     corrected passage against the mistranscription it came from would read every
     successful correction as the cleanup drifting from the source.
-
-    ``count=None`` covers every usable utterance, for a provisional note whose
-    deferral to the meaning-judge is only sound if the judge sees the whole note.
     """
     entries = (lexicon or {}).get("terms", [])
     try:
@@ -4075,7 +4116,7 @@ def fidelity_payloads(vault, record, run_dir, lexicon=None, count=FIDELITY_SAMPL
     parsed = parse_transcript(raw)
     words = content_words(cleaned)
     items = []
-    for position, block in enumerate(fidelity_samples(record["source"], parsed["blocks"], count), start=1):
+    for position, block in enumerate(fidelity_samples(record["source"], parsed["blocks"]), start=1):
         utterance = vault_lexicon.apply_corrections(block["text"], entries)[0] if entries else block["text"]
         score, at = best_containment(utterance, words)
         window = " ".join(words[max(0, at - 40) : at + 120])
@@ -4118,7 +4159,294 @@ def hold_provisional_unjudged(candidates, warnings, why):
     return held
 
 
-def verify_records(args, vault, items_by_path, records, run_dir):
+# The whole cleaned note plus its whole source go to the meaning-judge in one
+# call. That is what lets it see content that *moved* when the note was regrouped
+# — the failure the per-utterance window could not — but it caps how much can be
+# reviewed at once. A note over this size is held rather than sent: reviewing only
+# part of it and approving the whole would be the silent pass the gate exists to
+# stop. ~120k characters is ~30k tokens, well under the slot context with room for
+# the reasoning and the restored output.
+WHOLE_NOTE_REVIEW_MAX_CHARS = 120_000
+
+
+def whole_note_fidelity_payload(vault, record, run_dir, args):
+    """One judge item for a provisional note: its whole source and whole cleaned
+    body, so the meaning-judge sees everything at once. ``None`` when the note
+    cannot be assembled into a payload (no artifact, unreadable source, or too
+    large to review whole), which the caller turns into a hold."""
+    try:
+        cleaned_note = (run_dir / "assembled" / record["artifact"]).read_text(encoding="utf-8")
+    except (OSError, KeyError, TypeError):
+        return None
+    cleaned = strip_callout_lines(cleaned_note.split("\n# Transcript\n", 1)[0]).strip()
+    try:
+        raw = transcript_source(split_frontmatter((vault / record["source"]).read_bytes())["body"], vault)
+    except OSError:
+        return None
+    parsed = parse_transcript(raw)
+    # Corrected the same way the cleanup saw it, so a successful term correction
+    # does not read to the judge as the cleanup drifting from the source.
+    source = corrected_source_text(parsed, args, record.get("proposals") or [])
+    if len(source) + len(cleaned) > WHOLE_NOTE_REVIEW_MAX_CHARS:
+        return None
+    return {"id": record["source"], "rawTranscript": source, "cleanedNote": cleaned}
+
+
+def note_producers(sources, run_dir):
+    """Which service cleaned each note, keyed by source path, for the judge's
+    independence check. A note the thinking service both cleaned and now judges
+    is not independently reviewed; a flag from it still acts, an ``ok`` does not
+    read as approval."""
+    by_path = {}
+    rows, _warnings = run_state.read_jsonl_recover_tail(run_dir / "cleaned.jsonl", repair=True)
+    for row in rows:
+        routing = row.get("routing")
+        if row.get("path") and isinstance(routing, dict) and routing.get("url"):
+            by_path[row["path"]] = {"url": routing["url"], "model": routing.get("model")}
+    return {source: by_path[source] for source in sources if source in by_path}
+
+
+def judge_notes_whole(think, items, journal_path, produced_by, timeout, reasoning_effort):
+    """Run the whole-note meaning-judge, one note per call (each note is large, so
+    batching buys nothing and one-per-call keeps a resume clean)."""
+    if not items:
+        return {}
+    return forge_verify.verify_packets(
+        think,
+        VERIFY_FIDELITY_NOTE_SYSTEM,
+        items,
+        journal_path=journal_path,
+        packet_size=1,
+        background=True,
+        timeout=timeout,
+        progress=progress,
+        produced_by=produced_by,
+        reasoning_effort=reasoning_effort,
+    )
+
+
+def repair_cleaned_note(args, service, record, source_text, current_cleaned, objection):
+    """Ask the cleanup tier to restore exactly what the judge said was lost.
+
+    The repair is produced on ``chat`` and re-checked on ``think`` (the caller),
+    so the second verdict is the ordinary producer≠verifier split rather than the
+    judge blessing its own edit. Returns the revised cleaned body, or ``None`` if
+    the model gave nothing usable."""
+    messages = [
+        {"role": "system", "content": REPAIR_CLEANUP_SYSTEM},
+        {
+            "role": "user",
+            "content": json.dumps(
+                {"rawTranscript": source_text, "currentCleaned": current_cleaned, "missing": objection},
+                ensure_ascii=False,
+            ),
+        },
+    ]
+    try:
+        value, _record = forge_llm.call_json_with_retry(
+            service,
+            messages,
+            temperature=0,
+            cache_prompt=args.cache_prompt,
+            response_format={"type": "json_object"},
+            background=True,
+            timeout=args.request_timeout,
+            api_key=args.api_key,
+            task="repair-cleanup",
+        )
+    except forge_llm.ChatError:  # includes ContextBudgetError
+        return None
+    revised = value.get("cleaned") if isinstance(value, dict) else None
+    if not isinstance(revised, str) or not revised.strip():
+        return None
+    return revised.strip()
+
+
+def rebuild_note_with_cleaned(vault, schema, record, item, revised_cleaned, args, run_dir):
+    """Rebuild a note's artifact with a repaired cleaned body, gated the way a
+    cleanup is: structure must hold and nothing may be fabricated past the ceiling.
+    The fidelity *floors* are not gated here — the thinking judge re-validates
+    those. Returns ``[]`` on success (artifact and hashes updated on the record),
+    or a list of problems, in which case nothing is written and the repair is
+    treated as failed."""
+    raw_body = transcript_source(split_frontmatter((vault / record["source"]).read_bytes())["body"], vault)
+    parsed = parse_transcript(raw_body)
+    metadata = frontmatter_metadata(schema, record["recording_type"], record.get("date"))
+    raw_stem = raw_note_stem(Path(record["destination"]).name) if record.get("raw_artifact") else None
+    note_text, head = build_note(
+        schema, metadata, record["summary"], args.summary_style, parsed["preamble"],
+        revised_cleaned, raw_body, reflection=record.get("reflection"), raw_stem=raw_stem,
+    )
+    raw_text = (
+        build_raw_note(
+            schema, raw_metadata(schema, record["recording_type"], Path(record["destination"]).stem, record.get("date")), raw_body
+        )
+        if raw_stem
+        else None
+    )
+    structural, _fidelity, measurements = check_note(
+        {**item, "raw_body": raw_body}, revised_cleaned, record["summary"], note_text, head, parsed, args,
+        record.get("proposals") or [], raw_text=raw_text, raw_stem=raw_stem,
+        summarized=is_summarized(record["recording_type"]),
+    )
+    source_text = corrected_source_text(parsed, args, record.get("proposals") or [])
+    allowed = [value for value in (record.get("speaker_map") or {}).values() if value]
+    allowed += [row.get("correct") for row in (record.get("proposals") or []) if row.get("correct")]
+    problems = list(structural)
+    invented = invented_over_ceiling(source_text, revised_cleaned, allowed)
+    if invented:
+        problems.append(f"{INVENTED_PROBLEM_PREFIX}: {', '.join(invented[:8])}")
+    if problems:
+        return problems
+    (run_dir / "assembled" / record["artifact"]).write_text(note_text, encoding="utf-8")
+    record["final_hash"] = sha256_text(note_text)
+    record["measurements"] = measurements
+    if raw_text is not None:
+        (run_dir / "assembled" / record["raw_artifact"]).write_text(raw_text, encoding="utf-8")
+        record["raw_final_hash"] = sha256_text(raw_text)
+    return []
+
+
+def hold_provisional(record, warnings, reason, verify_reason=None):
+    """Send one provisional note to human review, consuming its marker."""
+    record.pop("fidelity_provisional", None)
+    record["verified"] = "needs-review"
+    record["needs_review"] = True
+    record["review_reason"] = reason
+    if verify_reason:
+        record["verify_reason"] = verify_reason  # the objection row in the report
+    record["status"] = "review"
+    record["action"] = "none"
+    record["destination"] = None
+    warnings.append(f"{record['source']}: {reason}")
+
+
+def judge_and_repair_provisional(args, vault, schema, think, provisional_records, items_by_path, clean_results, run_dir, warnings):
+    """The meaning-judge, and the fix-and-re-verify loop the floor defers to.
+
+    For each provisional note the thinking model reviews the *whole* cleaned note
+    against the *whole* source (so content that only moved reads as present, not
+    lost). A clean verdict finishes the note. A flag does not end it: the judge's
+    objection is handed to the cleanup tier (`chat`), which restores exactly what
+    was named — grounded in the source, gated for fabrication — and the thinking
+    model validates the rebuilt note a second time. Because `chat` produced the
+    fix and `think` checks it, that second verdict is a real independent approval,
+    not the judge blessing its own edit. Clean on the second look → finish
+    (``fidelity-repaired``); still flagged, or nothing usable came back → hold with
+    the objection. One repair round, then a human. Returns
+    ``(cleared, repaired, held)``.
+    """
+    if not provisional_records:
+        return 0, 0, 0
+    chat = chat_service(args)
+    items = []
+    for record in provisional_records:
+        payload = whole_note_fidelity_payload(vault, record, run_dir, args)
+        if payload is None:
+            hold_provisional(record, warnings, "held by the fidelity floor: too long or unreadable to review whole")
+            continue
+        items.append(payload)
+    held = sum(1 for record in provisional_records if record["needs_review"])
+    if not items:
+        return 0, 0, held
+
+    try:
+        verdicts = judge_notes_whole(
+            think, items, run_dir / "verified-fidelity-provisional.jsonl",
+            note_producers([item["id"] for item in items], run_dir), args.request_timeout, FIDELITY_REVIEW_EFFORT,
+        )
+    except forge_verify.VerificationError as error:
+        for record in provisional_records:
+            if record.get("fidelity_provisional"):
+                hold_provisional(record, warnings, f"held by the fidelity floor: the meaning review failed ({error})")
+                held += 1
+        return 0, 0, held
+    independence = forge_verify.independence_warning(verdicts)
+    if independence:
+        warnings.append(f"fidelity check: {independence}")
+
+    payload_by_source = {item["id"]: item for item in items}
+    cleared = 0
+    to_revalidate = []
+    for record in provisional_records:
+        if record["needs_review"]:
+            continue  # already held (too large to review)
+        verdict = verdicts.get(record["source"])
+        if verdict is None:
+            hold_provisional(record, warnings, "held by the fidelity floor: the meaning-judge returned no verdict")
+            held += 1
+            continue
+        if verdict["verdict"] == forge_verify.VERDICT_OK:
+            record.pop("fidelity_provisional", None)
+            if not record.get("verified"):
+                record["verified"] = "fidelity-cleared"
+            cleared += 1
+            continue
+        # Flagged: hand the objection to chat and try to restore what was lost.
+        objection = verdict["reason"]
+        payload = payload_by_source[record["source"]]
+        revised = repair_cleaned_note(args, chat, record, payload["rawTranscript"], payload["cleanedNote"], objection)
+        held_reason = f"cleaned transcript may not be faithful: {objection}"
+        if revised is None:
+            hold_provisional(record, warnings, held_reason, verify_reason=objection)
+            held += 1
+            continue
+        problems = rebuild_note_with_cleaned(
+            vault, schema, record, items_by_path[record["source"]], revised, args, run_dir
+        )
+        if problems:
+            hold_provisional(record, warnings, held_reason, verify_reason=objection)
+            held += 1
+            continue
+        # The repaired body is now the canonical cleaned text, so a note whose
+        # title was also escalated is reassembled from the fix, not the original.
+        if record["source"] in clean_results:
+            clean_results[record["source"]]["cleaned"] = revised
+        new_payload = whole_note_fidelity_payload(vault, record, run_dir, args)
+        if new_payload is None:
+            hold_provisional(record, warnings, held_reason, verify_reason=objection)
+            held += 1
+            continue
+        to_revalidate.append((record, new_payload, objection))
+
+    if to_revalidate:
+        chat_producer = forge_routing.routing_record(chat)
+        try:
+            revalidated = judge_notes_whole(
+                think, [payload for _record, payload, _objection in to_revalidate],
+                run_dir / "verified-fidelity-repaired.jsonl",
+                {record["source"]: chat_producer for record, _payload, _objection in to_revalidate},
+                args.request_timeout, FIDELITY_REVIEW_EFFORT,
+            )
+        except forge_verify.VerificationError as error:
+            for record, _payload, objection in to_revalidate:
+                hold_provisional(
+                    record, warnings,
+                    f"cleaned transcript may not be faithful: {objection}", verify_reason=objection,
+                )
+                held += 1
+            warnings.append(f"fidelity repair: re-validation failed ({error})")
+            return cleared, 0, held
+        repaired = 0
+        for record, _payload, objection in to_revalidate:
+            verdict = revalidated.get(record["source"])
+            if verdict and verdict["verdict"] == forge_verify.VERDICT_OK:
+                record.pop("fidelity_provisional", None)
+                # An escalated title keeps that headline; the body was still mended.
+                if not record.get("verified") or record["verified"] == "needs-review":
+                    record["verified"] = "fidelity-repaired"
+                repaired += 1
+            else:
+                reason = (verdict or {}).get("reason") or "the repair did not restore the missing content"
+                hold_provisional(
+                    record, warnings, f"cleaned transcript may not be faithful: {reason}", verify_reason=reason
+                )
+                held += 1
+        return cleared, repaired, held
+    return cleared, 0, held
+
+
+def verify_records(args, vault, schema, clean_results, items_by_path, records, run_dir):
     """Have the thinking model review the batch, and redo what it flags.
 
     Bulk work runs without reasoning because it is usually right; this is what
@@ -4130,11 +4458,13 @@ def verify_records(args, vault, items_by_path, records, run_dir):
     rather than a from-scratch redo.
 
     A *provisional* note — one the deterministic fidelity floor flagged but that
-    is otherwise sound — is not a candidate for the redo. It reaches the fidelity
-    meaning-judge with every usable utterance (not the spot-check sample) at
-    ``FIDELITY_REVIEW_EFFORT`` (`medium`), and that verdict, not the word-overlap
-    floor, decides it: clean → finish, flagged → hold with the judge's objection.
-    If the judge cannot run, the floor holds it after all (never a silent finish).
+    is otherwise sound — is not a candidate for the redo. It goes to
+    ``judge_and_repair_provisional``: the thinking model reviews the whole note
+    against the whole source at ``FIDELITY_REVIEW_EFFORT`` (`medium`), and that
+    verdict, not the word-overlap floor, decides it — clean → finish, flagged →
+    `chat` restores what was named and `think` re-validates (repaired → finish,
+    still-lost → hold with the objection). If the judge cannot run, the floor holds
+    it after all (never a silent finish).
     """
     warnings = []
     candidates = [record for record in records if record["action"] == "process" and not record["needs_review"]]
@@ -4150,36 +4480,31 @@ def verify_records(args, vault, items_by_path, records, run_dir):
 
     by_path = {record["source"]: record for record in candidates}
     note_items = [verify_note_payload(vault, record, items_by_path[record["source"]]) for record in candidates]
-    provisional_paths = {record["source"] for record in candidates if record.get("fidelity_provisional")}
+    provisional_records = [
+        record for record in candidates
+        if record.get("fidelity_provisional") and not is_summarized(record["recording_type"])
+    ]
+    provisional_paths = {record["source"] for record in provisional_records}
     fidelity_items = []
-    provisional_items = []
     for position, record in enumerate(candidates):
         # A meeting is minutes, not verbatim cleanup, so its utterances are not
         # meant to appear in the note; the utterance-locator review does not apply.
-        # The note-level review above still checks its summary and speaker names.
-        if is_summarized(record["recording_type"]):
+        # A provisional note goes to the whole-note judge below, not this spot check.
+        if is_summarized(record["recording_type"]) or record["source"] in provisional_paths:
             continue
-        if record["source"] in provisional_paths:
-            # The floor already flagged this note, so the deferral is only honest
-            # if the judge sees the whole thing — every usable utterance, not a
-            # four-sample spot check that could miss the very passage in question.
-            provisional_items.extend(
-                fidelity_payloads(vault, record, run_dir, getattr(args, "compiled_lexicon", None), count=None)
-            )
         # Every chunked file, plus a sample of the single-chunk ones: a file the
         # model read in one pass has already passed the deterministic locator.
-        elif record.get("chunks", 1) > 1 or position % FIDELITY_SAMPLE_RATE == 0:
+        if record.get("chunks", 1) > 1 or position % FIDELITY_SAMPLE_RATE == 0:
             fidelity_items.extend(
                 fidelity_payloads(vault, record, run_dir, getattr(args, "compiled_lexicon", None))
             )
 
     journal = run_dir / "verified.jsonl"
     fidelity_journal = run_dir / "verified-fidelity.jsonl"
-    provisional_journal = run_dir / "verified-fidelity-provisional.jsonl"
     log(
         args,
         f"verifying {len(note_items)} notes, {len(fidelity_items)} spot-check utterances, and "
-        f"{len(provisional_items)} provisional utterances on {think['url']}",
+        f"{len(provisional_records)} provisional notes on {think['url']}",
     )
     try:
         verdicts = forge_verify.verify_packets(
@@ -4210,32 +4535,12 @@ def verify_records(args, vault, items_by_path, records, run_dir):
             if fidelity_items
             else {}
         )
-        # The provisional review is the meaning-judge the floor defers to: full
-        # coverage, at `medium` — deep enough for a yes/no meaning call, where the
-        # `xhigh` note-redo budget buys nothing. Kept a separate pass (own journal)
-        # so the spot-check above is untouched and the two never share an effort.
-        provisional_verdicts = (
-            forge_verify.verify_packets(
-                think,
-                VERIFY_FIDELITY_SYSTEM,
-                provisional_items,
-                journal_path=provisional_journal,
-                background=True,
-                timeout=args.request_timeout,
-                progress=progress,
-                produced_by=fidelity_producers(provisional_items, run_dir),
-                reasoning_effort=FIDELITY_REVIEW_EFFORT,
-            )
-            if provisional_items
-            else {}
-        )
     except forge_verify.VerificationError as error:
         # An unreachable reviewer must not read as approval.
         warnings.append(f"verification skipped: {error}")
         summary["skipped"] = str(error)
         summary["provisionalHeld"] = hold_provisional_unjudged(candidates, warnings, "the review failed")
         return summary, warnings
-    fidelity_verdicts = {**fidelity_verdicts, **provisional_verdicts}
 
     # A clean verdict from the model that produced the item is not evidence, and
     # the report must not let it read as one.
@@ -4349,6 +4654,10 @@ def verify_records(args, vault, items_by_path, records, run_dir):
             record["destination"] = None
             warnings.append(f"{path}: {record['review_reason']}")
 
+    # The spot check runs on notes that already passed the floor, so a flag here is
+    # a genuine surprise: cleanup fidelity is not something a title rewrite fixes,
+    # so the note keeps its name and body and a human looks at it. (Provisional
+    # notes are not in this set — they go to the whole-note judge and repair below.)
     for identifier, verdict in fidelity_verdicts.items():
         if verdict["verdict"] != forge_verify.VERDICT_FLAG:
             continue
@@ -4356,12 +4665,6 @@ def verify_records(args, vault, items_by_path, records, run_dir):
         record = by_path.get(path)
         if record is None or record["needs_review"]:
             continue
-        # Cleanup fidelity is not something a title rewrite can fix, so the note
-        # keeps its original name and body and a human looks at it. For a
-        # provisional note this is the floor's suspicion confirmed by the judge:
-        # the marker is consumed and the hold carries the judge's own words, which
-        # tell Ellie what was lost — far more use than "52% of words survived".
-        record.pop("fidelity_provisional", None)
         record["verified"] = "needs-review"
         record["needs_review"] = True
         record["review_reason"] = f"cleaned transcript may not be faithful: {verdict['reason']}"
@@ -4371,37 +4674,11 @@ def verify_records(args, vault, items_by_path, records, run_dir):
         record["destination"] = None
         warnings.append(f"{path}: {record['review_reason']}")
 
-    # Provisional notes the judge did not flag are cleared: the meaning-judge saw
-    # every usable utterance and found nothing lost, so the note finishes and the
-    # word-overlap floor that flagged it is overruled. A note whose utterances the
-    # judge never actually saw (none locatable) is held instead — deferring to a
-    # judge that did not run would be the silent finish the floor exists to stop.
-    judged_provisional = {item["id"].split("#s", 1)[0] for item in provisional_items}
-    provisional_cleared = 0
-    for record in candidates:
-        flags = record.get("fidelity_provisional")
-        if not flags:
-            continue
-        record.pop("fidelity_provisional", None)
-        if record["needs_review"]:
-            continue  # already held (a failed escalation, say)
-        if record["source"] not in judged_provisional:
-            record["status"] = "review"
-            record["needs_review"] = True
-            record["review_reason"] = "; ".join(flags)
-            record["action"] = "none"
-            record["destination"] = None
-            record["warnings"] = list(record.get("warnings") or []) + flags
-            warnings.append(
-                f"{record['source']}: held by the fidelity floor (no utterance was locatable to judge): "
-                + record["review_reason"]
-            )
-            continue
-        provisional_cleared += 1
-        # A note escalated on its title keeps that outcome; only an otherwise
-        # unverified note is stamped as cleared by the meaning-judge.
-        if not record.get("verified"):
-            record["verified"] = "fidelity-cleared"
+    # The floor deferred these to the meaning-judge; it (and a repair round on
+    # chat) decides them now.
+    provisional_cleared, provisional_repaired, provisional_held = judge_and_repair_provisional(
+        args, vault, schema, think, provisional_records, items_by_path, clean_results, run_dir, warnings
+    )
 
     for path, verdict in verdicts.items():
         if verdict["verdict"] == forge_verify.VERDICT_OK and path in by_path and not by_path[path].get("verified"):
@@ -4411,12 +4688,9 @@ def verify_records(args, vault, items_by_path, records, run_dir):
     summary["fidelityFlagged"] = sum(
         1 for verdict in fidelity_verdicts.values() if verdict["verdict"] == forge_verify.VERDICT_FLAG
     )
-    # Every provisional note ends either cleared or held; the held count is just
-    # the ones still carrying needs_review once every verdict has been applied.
     summary["provisionalCleared"] = provisional_cleared
-    summary["provisionalHeld"] = sum(
-        1 for record in candidates if record["source"] in provisional_paths and record["needs_review"]
-    )
+    summary["provisionalRepaired"] = provisional_repaired
+    summary["provisionalHeld"] = provisional_held
     return summary, warnings
 
 
@@ -4905,16 +5179,17 @@ def verification_report(verification, records):
             f"- Utterances spot-checked against the cleaned text: {verification['fidelityChecked']}"
             f" ({verification.get('fidelityFlagged', 0)} flagged)"
         )
-    if verification.get("provisionalCleared") or verification.get("provisionalHeld"):
+    cleared = verification.get("provisionalCleared", 0)
+    repaired = verification.get("provisionalRepaired", 0)
+    provisional_held = verification.get("provisionalHeld", 0)
+    if cleared or repaired or provisional_held:
         # These are notes the deterministic fidelity floor flagged and then
         # deferred to the meaning-judge. Reporting the outcome, not the floor's
         # word-overlap score, is the whole point of the deferral; each held note's
         # own row below carries the judge's objection.
-        cleared = verification.get("provisionalCleared", 0)
-        provisional_held = verification.get("provisionalHeld", 0)
         lines.append(
-            f"- Deterministic fidelity floor deferred to the meaning-judge: {cleared + provisional_held}"
-            f" ({cleared} cleared and finished, {provisional_held} held)"
+            f"- Deterministic fidelity floor deferred to the meaning-judge: {cleared + repaired + provisional_held}"
+            f" ({cleared} cleared, {repaired} repaired on chat and re-verified, {provisional_held} held)"
         )
     lines.append("")
     flagged = [record for record in records if record.get("verify_reason")]
@@ -5803,7 +6078,9 @@ def process(args):
         items_by_path = {item["path"]: item for item in items}
         verification = None
         if args.verify:
-            verification, stage_warnings = verify_records(args, vault, items_by_path, records, run_dir)
+            verification, stage_warnings = verify_records(
+                args, vault, schema, clean_results, items_by_path, records, run_dir
+            )
             warnings.extend(stage_warnings)
             warnings.extend(
                 reassemble_escalated(args, vault, schema, items_by_path, clean_results, records, run_dir)
@@ -6234,7 +6511,9 @@ def reprocess_notes(args):
         items_by_path = {item["path"]: item for item in selected}
         verification = None
         if args.verify:
-            verification, stage_warnings = verify_records(args, vault, items_by_path, records, run_dir)
+            verification, stage_warnings = verify_records(
+                args, vault, schema, clean_results, items_by_path, records, run_dir
+            )
             warnings.extend(stage_warnings)
         phase(
             run_dir,

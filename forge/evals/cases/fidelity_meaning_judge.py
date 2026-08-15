@@ -3,10 +3,14 @@
 
 `vault-transcripts` no longer holds a note just because a word-overlap floor —
 length ratio, rare-word retention, the utterance locator — fired. A note that
-trips those alone is *provisional*: it is written and sent to the thinking
-meaning-judge (`VERIFY_FIDELITY_SYSTEM`), whose verdict, not the floor's score,
-decides it. The judge is the whole safety of that change, so this measures it
-directly.
+trips those alone is *provisional*: its meaning is judged by the thinking model,
+whose verdict, not the floor's score, decides it. This measures that yes/no
+meaning judgment directly, at the utterance grain (`VERIFY_FIDELITY_SYSTEM`, the
+spot check that still runs on notes that passed the floor). The provisional path
+itself judges the *whole* note (`VERIFY_FIDELITY_NOTE_SYSTEM`) and can hand a real
+loss to `chat` to repair, but it rests on the same premise this case pins down —
+that `medium` reasoning suffices for a meaning yes/no — so the two stand or fall
+together here; a dedicated whole-note case is a reasonable follow-up.
 
 The set is seeded, the way `verifier_seeded` is. Twelve utterance/passage pairs:
 seven where meaning was preserved through exactly the cleanup the floor punishes —

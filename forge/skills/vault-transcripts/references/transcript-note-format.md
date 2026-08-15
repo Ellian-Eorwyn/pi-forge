@@ -391,20 +391,31 @@ without losing anything a reader would miss:
 | Sampled utterance containment | Passages that vanished, located by sliding window rather than by re-reading the whole file. |
 
 A note whose *only* failures are fidelity ones is not held. It is written and
-marked **provisional**, then sent to the thinking meaning-judge with every usable
-utterance — not the four-sample spot check — at `medium` reasoning. The judge's
-verdict decides it: meaning preserved → it finishes; a point dropped, misstated,
-or misattributed → it holds, carrying the judge's own objection instead of "52% of
-distinctive words survived". This is the principle the whole skill rests on made
-uniform: no information lost, not every word kept. The one exception is a run with
-no judge to defer to (`--no-verify`, or an unreachable thinking service): there the
-floor holds the note as before, because an unjudged note must never read as
-approved. A meeting, being minutes rather than verbatim cleanup, is exempt from the
-fidelity floors entirely.
+marked **provisional**, then judged for meaning by the thinking model, which reads
+the *whole* cleaned note against the *whole* source at `medium` reasoning — so a
+point that only *moved* when the note was regrouped reads as present, which the
+per-passage window could not tell. The verdict decides it:
+
+- meaning preserved → it finishes;
+- a point dropped, misstated, or misattributed → the judge names exactly what was
+  lost, and that objection is handed to the cleanup tier (`chat`), which restores
+  it from the source (gated for fabrication like any cleanup). The thinking model
+  then validates the rebuilt note a second time. Because `chat` produced the fix
+  and `think` checks it, that second verdict is a real independent approval, not
+  the judge signing off on its own edit. Restored → it finishes (`fidelity-repaired`);
+  still lost, or nothing usable came back → it holds, carrying the objection instead
+  of "52% of distinctive words survived". One repair round, then a human.
+
+This is the principle the whole skill rests on made uniform: no information lost,
+not every word kept. The one exception is a run with no judge to defer to
+(`--no-verify`, or an unreachable thinking service): there the floor holds the note
+as before, because an unjudged note must never read as approved. A meeting, being
+minutes rather than verbatim cleanup, is exempt from the fidelity floors entirely.
 
 After the structural checks pass, the thinking model reviews every note's type,
 title, summary, and speaker naming against excerpts of the raw transcript, plus a
-sample of utterances checked against the cleaned text (and every utterance of a
-provisional note). It can flag, and a flag is either redone with reasoning or
-handed to a human — it never silently drops a result, and an unreachable reviewer
-is reported as "not verified" rather than treated as approval.
+sample of utterances checked against the cleaned text (and, for a provisional note,
+the whole-note meaning review above). It can flag, and a flag is either redone with
+reasoning, repaired on `chat` and re-verified, or handed to a human — it never
+silently drops a result, and an unreachable reviewer is reported as "not verified"
+rather than treated as approval.
