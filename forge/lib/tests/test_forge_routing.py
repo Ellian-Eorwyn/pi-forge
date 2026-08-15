@@ -35,7 +35,6 @@ class StageResolutionTests(unittest.TestCase):
 
     def test_the_table_routes_the_stages_the_report_cleared(self):
         for stage, expected in (
-            ("clean-transcript-chunk-multi", "task"),
             ("connection-judgment", "task"),
         ):
             self.assertEqual(forge_routing.service_name_for(stage, routing={}), expected, stage)
@@ -58,13 +57,16 @@ class StageResolutionTests(unittest.TestCase):
         self.assertEqual(forge_routing.service_name_for("classify-note", routing={}), "chat")
         self.assertIn("classify-note", forge_routing.STAGES_HELD_ON_CHAT)
 
-    def test_the_two_cleanup_directions_disagree_on_purpose(self):
-        # The finding this whole module exists for: the same stage wants
-        # different models depending on how many people are speaking. Multi-speaker
-        # cleanup runs on the small tier; single-speaker cleanup runs on the
-        # non-thinking bulk tier (the default), each for its own measured reason.
-        self.assertEqual(forge_routing.service_name_for("clean-transcript-chunk-multi", routing={}), "task")
-        self.assertEqual(forge_routing.service_name_for("clean-transcript-chunk-single", routing={}), "chat")
+    def test_both_cleanup_directions_run_on_the_bulk_tier_now(self):
+        # The speaker-count split this module was first built around has collapsed:
+        # multi-speaker cleanup once ran on the small tier and single-speaker on
+        # think, but the 27B bulk tier is capable enough now (2026-08-14) that both
+        # clean on `chat`, with the thinking verify pass as the escalation net. Both
+        # are recorded in STAGES_HELD_ON_CHAT so the file shows this was measured,
+        # not merely left un-routed.
+        for stage in ("clean-transcript-chunk-multi", "clean-transcript-chunk-single"):
+            self.assertEqual(forge_routing.service_name_for(stage, routing={}), "chat", stage)
+            self.assertIn(stage, forge_routing.STAGES_HELD_ON_CHAT)
 
     def test_a_settings_override_beats_the_table(self):
         name = forge_routing.service_name_for("connection-judgment", routing={"connection-judgment": "think"})

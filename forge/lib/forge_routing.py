@@ -4,9 +4,9 @@
 A skill used to bind one service per *command*: ``parse_args`` resolved ``chat``
 and every stage in the run shared it. The measurements in ``forge/evals`` are
 per *stage*, and several of them point opposite directions inside a single
-command — ``vault-transcripts`` wants the small model for cleaning a four-speaker
-meeting and the thinking model for cleaning a single-speaker memo, and those are
-two calls in the same run.
+command — ``vault-organizer`` classifies a note on the bulk tier and then
+verifies that classification on the thinking one, and those are two calls in the
+same run.
 
 So routing is keyed on the stage label skills already pass to ``forge_llm.call``
 as ``task=``. That label was being journaled and otherwise ignored; here it
@@ -33,17 +33,6 @@ import forge_llm
 # routing decision without its evidence is one nobody can revisit.
 STAGE_SERVICES = {
     # --- to the small tier -------------------------------------------------
-    # Faithful cleanup of diarized speech. 7/8 against the baseline's 1/8 with
-    # no silent failures; 0.12 invented words per item, 0.99 rare-word
-    # retention, 0.97 word ratio — it barely touches the text, which is what
-    # this stage is for. The thinking model scores 0/8 here: it rewrites and
-    # compresses four-speaker material, dropping a quarter of it.
-    #
-    # Only reached for multi-speaker material; `clean_one_chunk` routes per
-    # chunk, and the single-speaker case runs on the non-thinking bulk tier now
-    # (see `clean-transcript-chunk-single` in STAGES_HELD_ON_CHAT).
-    "clean-transcript-chunk-multi": "task",
-    "clean-transcript-chunk-multi-repair": "task",
     # Yes/no pair judgment. 16/16 against 14/16, no false negatives, and 3.4x
     # faster in absolute terms (0.52s against 1.75s per pair). The shape the
     # small model is good at: the answer is a decision about the input, not
@@ -74,6 +63,19 @@ STAGES_HELD_ON_CHAT = {
         "prizes meaning over exact wording, so this is the trade she wants."
     ),
     "clean-transcript-chunk-single-repair": "the corrective retry of single-speaker cleanup, and it goes where that goes",
+    "clean-transcript-chunk-multi": (
+        "diarized cleanup measured better on the small `task` tier (7/8 against 1/8, 0.12 invented "
+        "words, 0.99 rare-word retention) — but that baseline was an earlier `chat` build, and the "
+        "27B bulk tier is capable enough now (Ellie's call, 2026-08-14) that the margin no longer "
+        "pays for the small tier's cost. `task` is a separate backend behind the MAX=1 model router "
+        "shared with embed/ocr/rank, so a run that also embeds pays a model swap per alternation, and "
+        "it ships `enabled: False` — so the table pointing here only ever resolved to `chat` as a "
+        "silent fallback anyway. Holding it on `chat` by design retires the 'ran as a fallback, not "
+        "the measured choice' warning, and the thinking verify pass escalates a genuinely-unfaithful "
+        "note at `xhigh`, the same backstop single-speaker cleanup relies on. Re-measure "
+        "`transcript-cleanup-meeting` on the current bulk build to put a fresh number on it."
+    ),
+    "clean-transcript-chunk-multi-repair": "the corrective retry of multi-speaker cleanup, and it goes where that goes",
     "split-braindump": (
         "was on `think` (7/8 against a non-thinking 4/8) — but that gate failed a correct-count "
         "split for an unpopulated `covers` field the production skill (`validate_split`) treats as "
@@ -133,8 +135,6 @@ CAPABILITIES_MEASURED = {
 # measurement. A stage with no case here is one nothing has measured — which is
 # why it is not in STAGE_SERVICES either.
 STAGE_EVAL_CASES = {
-    "clean-transcript-chunk-multi": "transcript-cleanup-meeting",
-    "clean-transcript-chunk-multi-repair": "transcript-cleanup-meeting",
     "connection-judgment": "connection-judgment",
     "classify-note": "classify-notes",
 }
