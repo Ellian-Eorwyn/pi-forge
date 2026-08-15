@@ -940,6 +940,9 @@ def base_record(item):
         "source_hash": item["sha256"],
         "body_hash": item["body_hash"],
         "classification_source": "none",
+        # The classifications.json key this note was classified under, so a later
+        # verify pass can persist an escalated answer back under the same key.
+        "cache_key": None,
         "metadata": {},
         "frontmatter_changed": False,
         "move_required": False,
@@ -1001,13 +1004,14 @@ def classify_items(args, vault, schema, schema_hash, items, losers, run_dir):
                 frontmatter = split_frontmatter(data)
                 body = frontmatter["body"]
                 title = note_title(path, body)
-                classification, record_warnings, classification_source, _ = classify_note(
+                classification, record_warnings, classification_source, classification_key = classify_note(
                     args, schema, title, rel, frontmatter["frontmatter_text"], body, schema_hash, cache, cache_path,
                     path,
                 )
                 record = base_record(item)
                 record["source_hash"] = source_hash
                 record["classification_source"] = classification_source
+                record["cache_key"] = classification_key
                 record["metadata"] = classification["metadata"]
                 record["needs_review"] = classification.get("needs_review", False)
                 record["review_reason"] = classification.get("review_reason")
@@ -1169,16 +1173,29 @@ def verify_classifications(args, vault, schema, records, run_dir):
         carry_forward_provenance(
             validated, frontmatter["frontmatter_text"], schema, by_path[rel].setdefault("warnings", []), path
         )
-        return validated
+        # The raw model response rides along so the escalated answer can be cached
+        # under the initial key -- stored the same shape a first-pass classification
+        # caches, so the cache read path validates and carries provenance identically.
+        return {"validated": validated, "response": response}
 
     escalations = forge_verify.escalate(flagged, redo, journal_path=journal, progress=progress)
+    # Persist the verified answer back to the classification cache under the key the
+    # initial pass used, so a later --no-verify rebuild reproduces this plan and a
+    # re-run reuses the escalation instead of paying for the whole pass again. Saved
+    # per item next to the journal append, so an interrupted run keeps what it did.
+    # Loaded lazily: nothing to write when nothing was flagged.
+    cache = cache_path = None
     for rel, outcome in escalations.items():
         if outcome.get("resumed"):
-            continue  # recorded when it was first escalated
+            continue  # recorded, and cached, when it was first escalated
         record = by_path[rel]
         record["verify_reason"] = next(reason for item, reason in flagged if item["id"] == rel)
+        key = record.get("cache_key")
+        if cache is None:
+            cache, cache_path = load_cache(vault)
+        verified_response = None
         if outcome["ok"]:
-            validated = outcome["value"]
+            validated = outcome["value"]["validated"]
             record["metadata"] = validated["metadata"]
             record["classification_source"] = "model-think"
             record["verified"] = "escalated"
@@ -1192,6 +1209,9 @@ def verify_classifications(args, vault, schema, records, run_dir):
                 filed_name = filing_name(record, (vault / rel).name, record.setdefault("warnings", []))
                 record["destination"] = (destination_dir / filed_name).as_posix()
                 record["move_required"] = record["destination"] != rel
+            # The raw escalated response, stored the same shape a first-pass
+            # classification caches so the read path validates it identically.
+            verified_response = outcome["value"]["response"]
         else:
             # Could not be redone, so a human decides rather than shipping a
             # filing the reviewer already objected to.
@@ -1201,6 +1221,15 @@ def verify_classifications(args, vault, schema, records, run_dir):
             record["status"] = "review"
             record["destination"] = None
             warnings.append(f"{rel}: {record['review_reason']}")
+            # Flip the cached answer to needs-review too, or a --no-verify rebuild
+            # reads the stale confident entry and ships the very filing the reviewer
+            # objected to. Keyed by content, so editing the note clears it.
+            stale = cache.get(key) if key else None
+            if stale is not None:
+                verified_response = {**stale["response"], "needs_review": True, "review_reason": record["review_reason"]}
+        if key and verified_response is not None:
+            cache[key] = {"response": verified_response, "stored_at": time.time()}
+            save_cache(cache_path, cache)
         run_state.append_jsonl_fsync(run_dir / "classified.jsonl", record)
     for rel, entry in verdicts.items():
         if entry["verdict"] == forge_verify.VERDICT_OK and rel in by_path:
@@ -1518,6 +1547,8 @@ def plan_for_json(records):
     for record in records:
         item = dict(record)
         item.pop("revised_text", None)
+        # Internal cache bookkeeping, not part of the filing decision the plan records.
+        item.pop("cache_key", None)
         cleaned.append(item)
     return cleaned
 

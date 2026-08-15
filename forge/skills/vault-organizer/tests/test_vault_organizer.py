@@ -810,6 +810,52 @@ class VaultOrganizerV2Tests(unittest.TestCase):
         self.assertTrue(record["needs_review"])
         self.assertIn("re-classification failed", record["review_reason"])
 
+    def test_an_escalated_classification_is_cached_and_survives_no_verify(self):
+        # Regression: the verify pass used to write the escalated answer only to the
+        # run journal, never back to classifications.json. A later --no-verify rebuild
+        # then read the stale pre-escalation entry and silently reverted the note.
+        self.write_note("00 Inbox/Misfiled.md", "# Misfiled\n\nBody.\n")
+        corrected = ok_response(metadata={**ok_response()["metadata"], "subdomain": "software-development"})
+        escalated_destination = "04 Technology/4.02 Software Development/Misfiled.md"
+        VerdictHandler.flags = {"00 Inbox/Misfiled.md": "filed under the wrong subdomain"}
+        # One chat endpoint for both runs: the base URL is part of the cache key, so a
+        # fresh port would miss the warm cache and re-classify from scratch.
+        with StubServer([ok_response()]) as chat, StubServer([corrected], handler_cls=VerdictHandler) as think:
+            common = ("inbox", "--vault", str(self.vault), "--base-url", chat.url, "--no-embeddings")
+            verified = self.run_ok(*common, "--think-url", think.url)
+            self.assertEqual(
+                self.record_for(verified, "00 Inbox/Misfiled.md")["destination"], escalated_destination
+            )
+            chat_calls, think_calls = len(chat.requests), len(think.requests)
+
+            # A fast rebuild off the warm cache, verification disabled.
+            rebuilt = self.run_ok(*common, "--no-verify")
+        record = self.record_for(rebuilt, "00 Inbox/Misfiled.md")
+        self.assertEqual(record["destination"], escalated_destination, "escalated destination must survive")
+        self.assertEqual(record["classification_source"], "cache", "served from cache, not re-classified")
+        # (b) the escalation is reused, not recomputed: neither model is called again.
+        self.assertEqual(len(chat.requests), chat_calls)
+        self.assertEqual(len(think.requests), think_calls)
+
+    def test_a_failed_escalation_keeps_the_note_in_review_on_no_verify(self):
+        # The reviewer objected and no valid replacement was produced, so the note is
+        # for a human. The cache must reflect that; otherwise a --no-verify rebuild reads
+        # the stale confident entry and files the objected-to destination anyway.
+        self.write_note("00 Inbox/Rejected.md", "# Rejected\n\nBody.\n")
+        unusable = ok_response(metadata={"type": "note", "domain": "not-a-real-domain"})
+        VerdictHandler.flags = {"00 Inbox/Rejected.md": "wrong domain"}
+        with StubServer([ok_response()]) as chat, StubServer([unusable, unusable], handler_cls=VerdictHandler) as think:
+            common = ("inbox", "--vault", str(self.vault), "--base-url", chat.url, "--no-embeddings")
+            verified = self.run_ok(*common, "--think-url", think.url)
+            self.assertTrue(self.record_for(verified, "00 Inbox/Rejected.md")["needs_review"])
+            chat_calls = len(chat.requests)
+
+            rebuilt = self.run_ok(*common, "--no-verify")
+        record = self.record_for(rebuilt, "00 Inbox/Rejected.md")
+        self.assertTrue(record["needs_review"], "the review flag must survive a cache rebuild")
+        self.assertEqual(record["classification_source"], "cache")
+        self.assertEqual(len(chat.requests), chat_calls, "no re-classification on the warm cache")
+
     def test_an_unreachable_verifier_does_not_read_as_approval(self):
         self.write_note("00 Inbox/Unverified.md", "# Unverified\n\nBody.\n")
         with StubServer([ok_response()]) as chat:
