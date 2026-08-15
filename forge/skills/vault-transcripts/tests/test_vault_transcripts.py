@@ -3400,5 +3400,29 @@ class SoloLabelStripTests(unittest.TestCase):
         self.assertFalse(any("speaker label" in problem for problem in problems), problems)
 
 
+class UnusableInputTests(unittest.TestCase):
+    def test_impossible_speaking_rate_is_flagged(self):
+        reason = vt.unusable_input_reason({"words": 6000, "duration_seconds": 57, "timestamps_ordered": True})
+        self.assertIsNotNone(reason)
+        self.assertIn("words per second", reason)
+
+    def test_normal_and_fast_speech_pass(self):
+        self.assertIsNone(vt.unusable_input_reason({"words": 900, "duration_seconds": 360, "timestamps_ordered": True}))
+        self.assertIsNone(vt.unusable_input_reason({"words": 300, "duration_seconds": 60, "timestamps_ordered": True}))
+
+    def test_out_of_order_timestamps_are_not_judged(self):
+        # A repeated/scrambled timeline (e.g. a test fixture, or app quirk) has no
+        # trustworthy duration, so the rate is not judged rather than misfiring.
+        self.assertIsNone(vt.unusable_input_reason({"words": 6000, "duration_seconds": 40, "timestamps_ordered": False}))
+
+    def test_no_rate_to_judge_passes(self):
+        self.assertIsNone(vt.unusable_input_reason({"words": 500, "duration_seconds": 0, "timestamps_ordered": True}))
+        self.assertIsNone(vt.unusable_input_reason(None))
+
+    def test_short_memo_is_not_flagged(self):
+        # Brevity alone is not corruption; only an impossible rate is.
+        self.assertIsNone(vt.unusable_input_reason({"words": 6, "duration_seconds": 3, "timestamps_ordered": True}))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

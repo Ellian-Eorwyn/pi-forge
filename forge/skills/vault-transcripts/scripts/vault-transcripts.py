@@ -254,6 +254,11 @@ RARE_WORD_RETENTION = 0.70
 CLEANED_RATIO_MIN = 0.4
 CLEANED_RATIO_MAX = 1.1
 TINY_RATIO_MIN = 0.3
+# Real speech tops out around five or six words a second. A transcript claiming
+# far more than that against its own clip length is corrupt speech-to-text, not a
+# recording any cleanup can rescue — it belongs in the re-record list, not the
+# review lane a person is meant to act on.
+MAX_WORDS_PER_SECOND = 6.0
 FIDELITY_SAMPLES = 4
 FIDELITY_MIN_CONTAINMENT = 0.5
 FIDELITY_MIN_WORDS = 4
@@ -703,10 +708,14 @@ def transcript_stats(parsed):
     blocks = parsed["blocks"]
     labels = Counter(block["speaker"] for block in blocks if block["speaker"])
     words = sum(len(block["text"].split()) for block in blocks)
+    seconds = [block["seconds"] for block in blocks]
     return {
         "blocks": len(blocks),
         "words": words,
-        "duration_seconds": max((block["seconds"] for block in blocks), default=0),
+        "duration_seconds": max(seconds, default=0),
+        # A real recording's timestamps only move forward; if they don't, the span
+        # is not a duration and the words-per-second rate cannot be trusted.
+        "timestamps_ordered": all(earlier <= later for earlier, later in zip(seconds, seconds[1:])),
         "speaker_labels": dict(labels),
         "has_preamble": bool(parsed["preamble"].strip()),
         "has_trailing": bool(parsed["trailing"].strip()),
@@ -786,6 +795,26 @@ def is_transcript(split, parsed):
 # --------------------------------------------------------------------------
 # Scan and dedupe
 # --------------------------------------------------------------------------
+
+
+def unusable_input_reason(stats):
+    """A deterministic reason the recording is unusable input, or ``None``.
+
+    Corrupt transcription shows up as an impossible speaking rate — thousands of
+    words against a minute of audio — which no cleanup can repair. A recording with
+    no timestamps has no rate to judge and is left alone.
+    """
+    if not isinstance(stats, dict) or not stats.get("timestamps_ordered"):
+        # No trustworthy duration to judge the rate against.
+        return None
+    words = stats.get("words") or 0
+    duration = stats.get("duration_seconds") or 0
+    if duration and words and words / duration > MAX_WORDS_PER_SECOND:
+        return (
+            f"{words} words against a {int(duration)}s recording is "
+            f"{words / duration:.0f} words per second — the transcription is corrupt, not speech"
+        )
+    return None
 
 
 def scan_inbox(vault, limit=None):
@@ -1455,6 +1484,13 @@ def classify_items(args, vault, items, run_dir, skip):
             }
         except InterruptedError as error:
             raise UserError(f"classification was preempted by interactive activity: {error}") from error
+        unusable = unusable_input_reason(item.get("stats"))
+        if unusable:
+            # Corrupt input can't be cleaned; hold it, but mark it so the report
+            # files it as re-record rather than as something to review and fix.
+            record["needs_review"] = True
+            record["unusable_reason"] = unusable
+            record["review_reason"] = record.get("review_reason") or unusable
         record["seconds"] = round(time.time() - started, 3)
         records[item["path"]] = record
         run_state.append_jsonl_fsync(journal_path, record)
@@ -3075,7 +3111,15 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
             records.append(review_record(item, "no classification record"))
             continue
         if record["needs_review"] or record["source"] == "failed":
-            records.append(review_record(item, record["review_reason"] or "classification asked for review"))
+            unusable = record.get("unusable_reason")
+            held = review_record(
+                item,
+                unusable or record["review_reason"] or "classification asked for review",
+                status="unusable" if unusable else "review",
+            )
+            if unusable:
+                held["unusable_reason"] = unusable
+            records.append(held)
             continue
         if cleaned_result is None or cleaned_result.get("error") or not cleaned_result.get("cleaned"):
             reason = (cleaned_result or {}).get("error") or "cleanup produced nothing"
@@ -4796,7 +4840,11 @@ def write_plan(run_dir, records, counts, dedupe, dry_run, vault, schema_hash, op
         },
     )
     processed = [record for record in records if record["action"] == "process"]
-    review = [record for record in records if record["needs_review"] or record["status"] == "failed"]
+    held_all = [record for record in records if record["needs_review"] or record["status"] == "failed"]
+    unusable_records = [
+        record for record in held_all if record.get("status") == "unusable" or record.get("unusable_reason")
+    ]
+    review = [record for record in held_all if record not in unusable_records]
     report = [
         "# Vault Transcripts Report",
         "",
@@ -4854,6 +4902,22 @@ def write_plan(run_dir, records, counts, dedupe, dry_run, vault, schema_hash, op
         report.extend(["- None", ""])
     report.extend(["## Renames", ""])
     append_listing(report, processed, lambda record: f"- `{record['source']}` → `{record['destination']}`")
+    if unusable_records:
+        report.extend(
+            [
+                "",
+                "## Unusable — Needs Re-recording",
+                "",
+                "The transcription itself is corrupt, so cleanup cannot recover these. "
+                "Re-record or re-transcribe rather than reviewing them.",
+                "",
+            ]
+        )
+        append_listing(
+            report,
+            unusable_records,
+            lambda record: f"- `{record['source']}`: {record.get('unusable_reason') or record['review_reason']}",
+        )
     report.extend(["", "## Held For Review", "", "These notes were not renamed or rewritten.", ""])
     append_listing(
         report,
