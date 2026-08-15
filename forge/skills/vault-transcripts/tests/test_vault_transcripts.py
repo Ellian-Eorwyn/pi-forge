@@ -3379,5 +3379,26 @@ class ApplyCommandDiscoveryTests(unittest.TestCase):
                 del os.environ[vt.APPLY_COMMAND_ID_ENV]
 
 
+class SoloLabelStripTests(unittest.TestCase):
+    def test_standalone_labels_are_stripped(self):
+        text = "**Speaker 1**\nI meditated on death.\n**Speaker 1**\nAnd impermanence."
+        self.assertEqual(vt.strip_solo_labels(text), "I meditated on death.\nAnd impermanence.")
+
+    def test_label_with_colon_is_stripped(self):
+        self.assertEqual(vt.strip_solo_labels("**Ellie:**\nfoo"), "foo")
+
+    def test_inline_label_and_emphasis_are_kept(self):
+        self.assertEqual(vt.strip_solo_labels("**Note:** the plan."), "**Note:** the plan.")
+        self.assertEqual(vt.strip_solo_labels("This is **very** important."), "This is **very** important.")
+
+    def test_check_chunk_not_held_for_labels_after_strip(self):
+        # A solo recording whose cleanup carried standalone labels: after the strip
+        # the deterministic gate no longer flags a speaker label, so it is not held.
+        raw = "**Speaker 1**\nI meditated on death and impermanence today."
+        cleaned = vt.strip_solo_labels(raw)
+        problems = vt.check_chunk(cleaned, raw, {}, True, False)
+        self.assertFalse(any("speaker label" in problem for problem in problems), problems)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

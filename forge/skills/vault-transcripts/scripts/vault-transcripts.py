@@ -1778,6 +1778,26 @@ def invented_over_ceiling(source, cleaned, allowed):
     return invented if len(invented) > ceiling else []
 
 
+# A line that is nothing but a bold span (optionally with a colon) is the
+# transcription app's speaker marker. On a single-speaker recording it is
+# spurious — it carries no words of its own — so it is dropped rather than held.
+# An inline label (``**Name:** words``) is left alone: removing it safely would
+# mean knowing where the label ends and the speech begins, which this cannot.
+SOLO_LABEL_LINE_RE = re.compile(r"^\s*\*\*[^*\n]{1,60}\*\*\s*:?\s*$")
+
+
+def strip_solo_labels(text):
+    """Remove standalone speaker-label lines from a single-speaker chunk.
+
+    The solo determination is already re-checked with the roster withheld
+    (`classify_without_roster`), so a bold marker here is the app's, not a real
+    second voice, and dropping the line loses nothing.
+    """
+    if not isinstance(text, str) or "**" not in text:
+        return text
+    return "\n".join(line for line in text.split("\n") if not SOLO_LABEL_LINE_RE.match(line))
+
+
 def check_chunk(cleaned, source, speaker_map, drop_labels, tiny, glossary=()):
     """Deterministic gate on one cleaned chunk. Returns a list of problems."""
     problems = []
@@ -1820,6 +1840,10 @@ def clean_chunk_once(args, service, messages, source, speaker_map, drop_labels, 
         task=task,
     )
     cleaned = value.get("cleaned") if isinstance(value, dict) else None
+    if drop_labels:
+        # Clear the app's spurious solo markers before the gate rather than failing
+        # the chunk and holding the note for a human over them.
+        cleaned = strip_solo_labels(cleaned)
     problems = check_chunk(cleaned, source, speaker_map, drop_labels, tiny, glossary)
     # The full invented-words list is only needed when that is what failed; every
     # other problem is structural and carries its whole message already.
