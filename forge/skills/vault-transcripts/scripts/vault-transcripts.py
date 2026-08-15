@@ -45,12 +45,13 @@ import run_state
 import vault_compose
 import vault_format
 import vault_lexicon
-from vault_moves import PlainMover, resolve_mover
+from vault_moves import PlainMover, backup_once, resolve_mover
 import vault_profile
 import vault_reflection
 import vault_review
 import vault_voice
 from vault_schema import (
+    FRONTMATTER_KEY_RE,
     INBOX_DIR,
     PROTECTED_DIRS,
     RESERVED_WINDOWS_NAMES,
@@ -70,7 +71,9 @@ from vault_schema import (
     sha256_bytes,
     sha256_text,
     split_frontmatter,
+    strip_yaml_scalar,
     wikilink_target,
+    yaml_quote,
 )
 
 WORKFLOW = "vault-transcripts"
@@ -2862,6 +2865,51 @@ def build_raw_note(schema, metadata, raw_body):
     return serialize_frontmatter(metadata, schema) + "\n" + raw_body
 
 
+def parent_basename_bytes(data):
+    """Reduce a recording note's ``parent`` link to a bare basename wikilink.
+
+    Returns ``(new_bytes, old_target, basename)`` with only the ``parent:`` line
+    rewritten to ``[[<basename>]]`` -- every other byte preserved -- or ``None``
+    when the link is already a basename, there is no ``parent`` to touch, or the
+    frontmatter is unreadable.
+
+    The recording's ``parent`` is a uniquely-named processed note, so a basename
+    link resolves it wherever the note is later filed. A directory-qualified
+    target -- what Obsidian's link-safe move leaves behind when it rewrites the
+    link while the processed note is momentarily ambiguous with its staged review
+    copy -- points at that transient location and goes stale the moment the note
+    moves on. Normalizing back to the basename is what survives filing.
+    """
+    had_bom = data.startswith(b"\xef\xbb\xbf")
+    payload = data[3:] if had_bom else data
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].rstrip("\r\n") != "---":
+        return None
+    closing = next((index for index in range(1, len(lines)) if lines[index].rstrip("\r\n") == "---"), None)
+    if closing is None:
+        return None
+    for index in range(1, closing):
+        match = FRONTMATTER_KEY_RE.match(lines[index].rstrip("\r\n"))
+        if not match or match.group(1) != "parent":
+            continue
+        target = wikilink_target(strip_yaml_scalar(match.group(2).strip()))
+        if not target:
+            return None  # not a wikilink this pass understands; leave it be
+        basename = link_basename(target)
+        if not basename or basename == target:
+            return None  # already a bare basename
+        stripped = lines[index].rstrip("\r\n")
+        ending = lines[index][len(stripped):] or "\n"
+        lines[index] = f"parent: {yaml_quote('[[' + basename + ']]')}{ending}"
+        out = "".join(lines).encode("utf-8")
+        return (b"\xef\xbb\xbf" + out if had_bom else out), target, basename
+    return None
+
+
 TRANSCRIPT_MARKER = "\n\n# Transcript\n\n"
 
 
@@ -5411,13 +5459,13 @@ def apply_quarantine(vault, run_dir, record):
     return backup
 
 
-def write_atomic(path, text):
-    """Write ``text`` to ``path`` through a temporary file in the same directory."""
+def write_atomic_bytes(path, data):
+    """Write ``data`` to ``path`` through a temporary file in the same directory."""
     path.parent.mkdir(parents=True, exist_ok=True)
     handle_id, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     try:
-        with os.fdopen(handle_id, "w", encoding="utf-8") as handle:
-            handle.write(text)
+        with os.fdopen(handle_id, "wb") as handle:
+            handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_name, path)
@@ -5427,6 +5475,11 @@ def write_atomic(path, text):
         except OSError:
             pass
         raise
+
+
+def write_atomic(path, text):
+    """Write ``text`` to ``path`` through a temporary file in the same directory."""
+    write_atomic_bytes(path, text.encode("utf-8"))
 
 
 def apply_process(vault, run_dir, record):
@@ -5566,6 +5619,50 @@ def apply_records(vault, run_dir, records, counts, mover=None):
             counts["apply_failed"] += 1
             record["warnings"].append(f"rename failed: {error}")
             journal("process_move", record, "error", error=str(error))
+
+
+def normalize_recording_parents(vault, run_dir, records):
+    """Put each recording note's ``parent`` back to a bare basename wikilink.
+
+    Runs after every rename in the apply has completed and the link-safe move has
+    done its link rewriting. A rename performed while the processed note is
+    momentarily ambiguous with its staged review copy leaves the recording note's
+    ``parent`` directory-qualified (``[[00 Inbox/_Pending Review/X]]``); that path
+    goes stale the instant the staging is cleared, and the organizer then objects
+    that the note's parent points somewhere it is not. This pass strips the
+    qualification the CLI added so the link is the basename the pipeline wrote.
+
+    Each note is backed up before it is touched and the change is journaled. A
+    ``parent`` that is already a basename is left exactly as it is, so the pass is
+    idempotent and a no-op on a plain-rename run.
+    """
+    warnings = []
+    journal_path = run_dir / "parent-normalize.jsonl"
+    for record in records:
+        if record.get("action") != "process" or record.get("apply_failed"):
+            continue
+        raw_destination = record.get("raw_destination")
+        if not raw_destination:
+            continue
+        path = vault / raw_destination
+        if not path.is_file():
+            continue
+        try:
+            data = path.read_bytes()
+            result = parent_basename_bytes(data)
+            if result is None:
+                continue
+            rewritten, old_target, basename = result
+            backup_once(run_dir, raw_destination, path)
+            write_atomic_bytes(path, rewritten)
+        except OSError as error:
+            warnings.append(f"{raw_destination}: could not normalize the recording note's parent link ({error})")
+            continue
+        run_state.append_jsonl_fsync(
+            journal_path,
+            {"at": run_state.utc_now(), "note": raw_destination, "from": old_target, "to": basename},
+        )
+    return warnings
 
 
 # --------------------------------------------------------------------------
@@ -6108,6 +6205,7 @@ def process(args):
                 warnings.append(f"renames use a plain rename: {mover_reason}")
             apply_records(vault, run_dir, records, counts, mover=mover)
             warnings.extend(mover.warnings)
+            warnings.extend(normalize_recording_parents(vault, run_dir, records))
             if from_review:
                 # Only retire the review surface when something actually went in.
                 # If nothing was approved (or every approval re-held), leave the

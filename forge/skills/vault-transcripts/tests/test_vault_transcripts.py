@@ -3677,6 +3677,39 @@ class InboxReviewTests(PipelineTests):
         self.assertIn("20260724 131748-9788991C.md", self.inbox())
         self.assertNotIn(f"{self.NAME}.md", self.inbox())
 
+    def test_from_review_recording_note_keeps_a_basename_parent(self):
+        # The link-safe rename fires while the processed note is still ambiguous
+        # with its staged review copy, so the CLI path-qualifies the recording
+        # note's parent link to [[00 Inbox/_Pending Review/X]] -- a path that goes
+        # stale the moment finish_review clears the staging. The post-apply
+        # normalization pass puts it back to the bare basename the pipeline wrote,
+        # so the filed recording note survives and the organizer has nothing to
+        # object to. SHIM_PATHQUALIFY makes the shim reproduce that qualification.
+        self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
+        env = ShimEnvironment(vault_path=self.vault, vault_name="vault")
+        self.addCleanup(env.cleanup)
+        env.set_env(SHIM_PATHQUALIFY="00 Inbox/_Pending Review")
+        with StubServer() as server:
+            self.result_of(self.process(server.url, "--no-verify"))
+            result = self.result_of(self.process(server.url, "--from-review", "--no-verify"))
+        raw = (self.vault / "00 Inbox" / f"{self.NAME} - Transcript.md").read_text(encoding="utf-8")
+        self.assertIn(f'parent: "[[{self.NAME}]]"', raw)
+        self.assertNotIn("_Pending Review", raw)
+        # The recording itself is preserved byte for byte below its frontmatter.
+        self.assertTrue(raw.endswith(transcript(SOLO_BLOCKS)))
+        # The pass backed the note up before rewriting and journaled the change,
+        # so the CLI really did qualify the link and this is not a vacuous pass.
+        run_dir = Path(result["data"]["run_directory"])
+        journal = [
+            json.loads(line)
+            for line in (run_dir / "parent-normalize.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(len(journal), 1)
+        self.assertEqual(journal[0]["to"], self.NAME)
+        self.assertIn("_Pending Review", journal[0]["from"])
+        backup = run_dir / "backup" / "00 Inbox" / f"{self.NAME} - Transcript.md"
+        self.assertIn("_Pending Review", backup.read_text(encoding="utf-8"))
+
 
 class ApplyCommandDiscoveryTests(unittest.TestCase):
     """The review note finds the shell-commands apply command by its text."""
@@ -3759,6 +3792,64 @@ class UnusableInputTests(unittest.TestCase):
     def test_short_memo_is_not_flagged(self):
         # Brevity alone is not corruption; only an impossible rate is.
         self.assertIsNone(vt.unusable_input_reason({"words": 6, "duration_seconds": 3, "timestamps_ordered": True}))
+
+
+class ParentBasenameTests(unittest.TestCase):
+    """A recording note's `parent` is kept a bare basename wikilink, whatever the
+    link-safe move leaves behind."""
+
+    QUALIFIED = (
+        "---\n"
+        "type: source\n"
+        "status: complete\n"
+        'parent: "[[00 Inbox/_Pending Review/2026-07-24 - Memo - Espresso Machine Repairs]]"\n'
+        "source_kind: transcript\n"
+        "capture_type: voice\n"
+        "---\n"
+        "\n"
+        "The recording, verbatim.\n"
+    )
+
+    def test_a_directory_qualified_parent_is_reduced_to_the_basename(self):
+        result = vt.parent_basename_bytes(self.QUALIFIED.encode("utf-8"))
+        self.assertIsNotNone(result)
+        rewritten, old_target, basename = result
+        self.assertEqual(basename, "2026-07-24 - Memo - Espresso Machine Repairs")
+        self.assertEqual(old_target, "00 Inbox/_Pending Review/2026-07-24 - Memo - Espresso Machine Repairs")
+        text = rewritten.decode("utf-8")
+        self.assertIn('parent: "[[2026-07-24 - Memo - Espresso Machine Repairs]]"\n', text)
+        self.assertNotIn("_Pending Review", text)
+        # Only the parent line changed; putting the old target back reproduces the
+        # input byte for byte, so nothing else in the note was touched.
+        self.assertEqual(
+            text.replace(
+                '"[[2026-07-24 - Memo - Espresso Machine Repairs]]"',
+                '"[[00 Inbox/_Pending Review/2026-07-24 - Memo - Espresso Machine Repairs]]"',
+            ),
+            self.QUALIFIED,
+        )
+
+    def test_a_basename_parent_is_left_untouched(self):
+        note = self.QUALIFIED.replace("00 Inbox/_Pending Review/", "")
+        self.assertIsNone(vt.parent_basename_bytes(note.encode("utf-8")))
+
+    def test_a_note_without_a_parent_is_left_untouched(self):
+        note = "---\ntype: source\nstatus: complete\n---\n\nThe recording.\n"
+        self.assertIsNone(vt.parent_basename_bytes(note.encode("utf-8")))
+
+    def test_a_note_without_frontmatter_is_left_untouched(self):
+        self.assertIsNone(vt.parent_basename_bytes(b"No frontmatter here.\n"))
+
+    def test_a_qualified_target_with_a_md_suffix_reduces_to_the_basename(self):
+        # link_basename keeps only the final path component and drops a `.md`
+        # suffix, so either shape a rewriter might leave still lands on the basename.
+        note = self.QUALIFIED.replace(
+            "_Pending Review/2026-07-24 - Memo - Espresso Machine Repairs]]",
+            "_Pending Review/2026-07-24 - Memo - Espresso Machine Repairs.md]]",
+        )
+        rewritten, _old, basename = vt.parent_basename_bytes(note.encode("utf-8"))
+        self.assertEqual(basename, "2026-07-24 - Memo - Espresso Machine Repairs")
+        self.assertIn('parent: "[[2026-07-24 - Memo - Espresso Machine Repairs]]"', rewritten.decode("utf-8"))
 
 
 if __name__ == "__main__":

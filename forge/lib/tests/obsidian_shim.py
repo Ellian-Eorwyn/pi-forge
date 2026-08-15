@@ -118,6 +118,21 @@ if command in ("move", "rename"):
             updated = updated.replace("The prose line.", "The prose line, mangled.")
         if updated != text:
             note.write_text(updated)
+    qualify = os.environ.get("SHIM_PATHQUALIFY")
+    if qualify:
+        # Real Obsidian rewrites a bare [[X]] wikilink to a directory-qualified
+        # target when the destination basename is ambiguous in the vault -- e.g. a
+        # staged review copy of the same note still sits in _Pending Review/ during
+        # a from-review apply. The qualified path goes stale once that copy is
+        # cleared. Opt-in like SHIM_MANGLE: only a test that wants this corruption
+        # asks for it, so the plain shim keeps resolving links by basename.
+        new_stem = destination.stem
+        qualified = "[[%s/%s]]" % (qualify.strip("/"), new_stem)
+        for note in notes():
+            text = note.read_text()
+            updated = text.replace("[[%s]]" % new_stem, qualified)
+            if updated != text:
+                note.write_text(updated)
     label = "Renamed" if command == "rename" else "Moved"
     print("%s: %s -> %s" % (label, params["path"], destination.relative_to(vault)))
     sys.exit(0)
@@ -184,6 +199,7 @@ class ShimEnvironment:
             "FORGE_OBSIDIAN_CLI": None,
             "SHIM_MANGLE": None,
             "SHIM_REFUSE_MOVE": None,
+            "SHIM_PATHQUALIFY": None,
         })
 
     def _apply(self, values):
