@@ -21,9 +21,8 @@ export const STAGE_SERVICES = Object.freeze({
 	"clean-transcript-chunk-multi": "task",
 	"clean-transcript-chunk-multi-repair": "task",
 	"connection-judgment": "task",
-	"clean-transcript-chunk-single": "think",
-	"clean-transcript-chunk-single-repair": "think",
-	"split-braindump": "think",
+	// Single-speaker cleanup and braindump-split both moved to the non-thinking
+	// bulk tier; see STAGES_HELD_ON_CHAT in forge_routing.py for the evidence.
 });
 
 /**
@@ -34,6 +33,12 @@ export const STAGE_SERVICES = Object.freeze({
  * names parse, validate, and do nothing.
  */
 export const STAGES_HELD_ON_CHAT = Object.freeze({
+	"clean-transcript-chunk-single":
+		"was on think (8/8 vs 2/8) while the gate scored verbatim voice; under the meaning-first gate the non-thinking bulk tier clears it 8/8 (q38-none), and the thinking verify pass escalates a genuinely-unfaithful note at xhigh. See forge_routing.py for the full evidence.",
+	"clean-transcript-chunk-single-repair":
+		"the corrective retry of single-speaker cleanup, and it goes where that goes",
+	"split-braindump":
+		"was on think (7/8 vs 4/8) under a gate stricter than the skill; with the gate aligned to validate_split, non-thinking scores 7/8 and xhigh swings 6-8/8 — within noise, so the tie rule takes the faster bulk tier. See forge_routing.py.",
 	"classify-note":
 		"better on think in isolation (5/8 vs 3/8), but vault-organizer verifies and escalates on think already, so routing classification there leaves one profile reviewing its own work; run the classify-* variants first",
 	"summarize-transcript": "thinking ties on gates (8/8) and carries 2 silent failures; the small model 3",

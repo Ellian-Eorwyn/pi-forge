@@ -121,6 +121,7 @@ import { ScopedModelsSelectorComponent } from "./components/scoped-models-select
 import { SessionSelectorComponent } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
+import { ThinkingSelectorComponent } from "./components/thinking-selector.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
@@ -2544,6 +2545,11 @@ export class InteractiveMode {
 				await this.handleModelCommand(searchTerm);
 				return;
 			}
+			if (text === "/think") {
+				this.editor.setText("");
+				this.showThinkingSelector();
+				return;
+			}
 			if (text === "/export" || text.startsWith("/export ")) {
 				await this.handleExportCommand(text);
 				this.editor.setText("");
@@ -4272,6 +4278,32 @@ export class InteractiveMode {
 					this.ui.requestRender();
 				},
 				initialSearchInput,
+			);
+			return { component: selector, focus: selector };
+		});
+	}
+
+	private showThinkingSelector(): void {
+		if (!this.session.supportsThinking()) {
+			this.showStatus("Current model does not support thinking");
+			return;
+		}
+		const available = this.session.getAvailableThinkingLevels();
+		this.showSelector((done) => {
+			const selector = new ThinkingSelectorComponent(
+				this.session.thinkingLevel,
+				available,
+				(level) => {
+					this.session.setThinkingLevel(level);
+					this.footer.invalidate();
+					this.updateEditorBorderColor();
+					done();
+					this.showStatus(`Thinking level: ${level}`);
+				},
+				() => {
+					done();
+					this.ui.requestRender();
+				},
 			);
 			return { component: selector, focus: selector };
 		});

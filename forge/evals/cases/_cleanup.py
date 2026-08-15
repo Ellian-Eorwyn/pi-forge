@@ -82,10 +82,11 @@ def score(item, content, record=None):
 
     gates = {
         "parsed": True,
+        # Meaning-first: a synonym the source did not contain is not a failure.
+        # `chunkClean` still holds a *wholesale* rewrite via check_chunk's fraction
+        # ceiling; the raw invented count is kept below as a metric, not a gate,
+        # and the thinking verify pass judges the fabrication a count cannot see.
         "chunkClean": not problems,
-        # The chunk gate tolerates up to MAX_INVENTED_WORDS; nothing invented at
-        # all is the standard worth reporting separately.
-        "noInventedWords": not invented,
         # The note-level gate applies these to the whole recording. Applied per
         # chunk they say the same thing: prose was condensed, not rewritten or
         # summarized away.

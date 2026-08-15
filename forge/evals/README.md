@@ -435,6 +435,48 @@ Run `doctor` before spending a run on a new entry, and check the first case's
 The suite deliberately ignores `connectedServices`: results that depend on local
 settings are not comparable between runs or between machines.
 
+## Comparing reasoning-effort levels (Qwen 3.8+)
+
+The 3.8 build exposes a graded thinking control through `reasoning_effort`, a
+top-level request field with four values: `xhigh`, `medium`, `low`, and `none`.
+An entry carries it as `reasoningEffort` and `forge_llm` forwards it verbatim, so
+a thinking level is just another model entry — the same way `chat-27b` and
+`think-27b` are one set of weights shaped two ways. Four arms ship in
+`models.json`, all on `:8008` (the `code` persona) so model, weights, temperature
+and memory are held constant and only the effort moves:
+
+| id | effort | note |
+| --- | --- | --- |
+| `q38-none` | `none` | thinking off (`reasoning_content` empty); the honest no-think arm |
+| `q38-low` | `low` | brief steered reasoning |
+| `q38-medium` | `medium` | the **unsteered** baseline — no steering sentence, so not a midpoint |
+| `q38-xhigh` | `xhigh` | heaviest steering; OpenAI `high`/`max` map here |
+
+Three rules from the request contract shape how you run them:
+
+- **Verify effort lands first.** A template that does not read `reasoning_effort`
+  discards it silently. Run `backend-check/check.py sweep` and require a `PASS`
+  before trusting a single number.
+- **Batch by level.** The steering sentence sits at the top of the system
+  message, so switching levels busts the prompt cache. Run one full pass per arm
+  (a loop over the four), never interleaved, or timings measure cache misses.
+- **`medium` is not a midpoint.** Expect it to sit off any effort-vs-quality line
+  rather than between its neighbours.
+
+```bash
+python3 forge/evals/backend-check/check.py sweep          # PASS before anything
+for arm in q38-none q38-low q38-medium q38-xhigh; do
+  python3 forge/evals/run.py run --model "$arm" --suite standard --stabilize 3
+done
+python3 forge/evals/run.py report --models chat-27b,q38-none,q38-low,q38-medium,q38-xhigh
+```
+
+The `chat-27b` column is the 3.6 baseline, read from its stored results — it
+cannot be re-run while the 3.8 weights are loaded (its `expectModelPath` now
+correctly refuses the mismatch). `think-27b` is the 3.6 thinking baseline, also
+on disk. The `reasoningEffort` of each arm rides in the result's
+`requested_settings`, so a run is self-describing about which level produced it.
+
 ## Known divergence
 
 `forge/skills/project-extraction/scripts/project-extraction.py` re-implements

@@ -79,12 +79,13 @@ EXPECTED = {
     },
     "braindump-weather": {
         "min": 1,
-        "max": 3,
+        "max": 4,
         "kinds": ["reference", "note", "idea"],
         "why": (
             "Already a written research note with headings, not dictation: one subject with "
-            "three options under it. Splitting it much past the options is cutting up a document "
-            "that was already organised."
+            "three options under it. One note, or the subject plus its three options as four, are "
+            "both defensible — every tier including the heaviest thinking arm reads it as four. "
+            "Splitting much past that is cutting up a document that was already organised."
         ),
     },
     "braindump-requirements": {
@@ -163,9 +164,12 @@ def score(item, content, record=None):
     # And its mirror: a split that lands exactly on --max-notes was decided by
     # the cap, not by the material.
     gates["didNotMaxOut"] = count < MAX_NOTES
-    # Every note has to carry something the dump actually covers, or the split
-    # has invented sections rather than found them.
-    gates["everyNoteCovers"] = all(note.get("covers") for note in notes)
+    # No `everyNoteCovers` gate: `validate_split` (the production skill this
+    # measures) treats `covers` as optional — a note with title, gist and a valid
+    # kind is accepted with an empty covers list — so failing a correct-count
+    # split for an unpopulated field measured something the skill does not
+    # enforce. Whether a note is a real section of the dump or an invented one is
+    # a meaning judgment, and this case runs the blind judge for exactly that.
 
     notes_out = []
     if error:

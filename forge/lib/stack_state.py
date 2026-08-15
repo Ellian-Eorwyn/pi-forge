@@ -43,7 +43,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-DEFAULT_STACK_STATE_URL = "http://llms:8078"
+# The live stack manager on this deployment answers on :8077 (both /api/config
+# and the /api/v1 state contract read below); :8078 was stale and left every
+# path-based identity check silently unchecked. Override with FORGE_STACK_STATE_URL.
+DEFAULT_STACK_STATE_URL = "http://llms:8077"
 API_PREFIX = "/api/v1"
 # This client is written against the 1.x contract. A major bump may rename or
 # restructure anything read below, and a wrong reading is worse than no reading:

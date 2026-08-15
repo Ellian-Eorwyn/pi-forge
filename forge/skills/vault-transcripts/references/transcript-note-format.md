@@ -92,6 +92,12 @@ Rules the script enforces, not suggestions:
   an unregistered callout renders as stock blue with a pencil icon. The registry
   is not injected into the cleanup prompt; `render_callout` in
   `forge/lib/vault_reflection.py` applies the syntax after the checks pass.
+- When a note is applied through the inbox review with invented words **waived**,
+  a collapsed `> [!provenance]-` callout is added just above `# Transcript`,
+  naming the words let through and that the owner approved them. `provenance` is
+  already a registered callout, so this needs no schema change. It records a
+  human's decision, not the cleanup's, and is added at apply time — after the
+  gate is recomputed on the reviewed bytes — never by the cleanup prompt.
 - Whichever note holds the recording holds all of it, byte for byte, including
   its handwritten preamble and any trailing text. The cleanup is a convenience;
   the transcription is the record.
@@ -149,9 +155,10 @@ These outrank every style rule below.
 
 ```text
 - The register is spoken-to-written: what the speaker would have written had they
-  typed this instead of saying it. Reshape the delivery, never the content.
-- Edit with a delete key, not a thesaurus: every content word in the output must
-  be one the speaker said.
+  typed this instead of saying it. Turn spoken delivery into clear, readable prose.
+- Meaning comes first, not the exact words: you may rephrase and smooth for
+  readability, but every claim, point, name, number, and shade of the speaker's
+  meaning and intent must survive unchanged, in their own voice and register.
 - Do not summarize. Output the full cleaned transcript.
 ```
 
@@ -160,20 +167,19 @@ These outrank every style rule below.
   "obviously", "honestly" — along with false starts, restarted sentences,
   repeated phrases, and self-echoes that carry no meaning.
 - Condense a circumlocution into the plain statement it was reaching for, but
-  only when the meaning is unambiguous and only in the speaker's own words. The
-  calibration example: *"I would also like it to have, essentially, if it fails
-  to categorize a note, there should be like a maybe in the system"* becomes
-  *"I would also like a 'failed categorization' folder for notes it can't
-  confidently categorize."* Two possible readings means keep the longer wording.
-- Condensing means dropping words, never swapping them. A word the speaker used
-  is not replaced with a synonym the editor prefers — not "focus" for what they
-  called paying attention to, not "desire" for "want". Every content word in the
-  output should be one they said. This is what keeps the result sounding like
-  them, and it is also what the added-words check measures.
+  only when the meaning is unambiguous. The calibration example: *"I would also
+  like it to have, essentially, if it fails to categorize a note, there should be
+  like a maybe in the system"* becomes *"I would also like a 'failed
+  categorization' folder for notes it can't confidently categorize."* Two possible
+  readings means keep the one that loses no meaning.
+- Rephrasing is fine; inventing is not. The added-words check is a coarse backstop
+  against a wholesale rewrite, not a ban on synonyms — the thinking verify pass
+  reads for the fabrication a word count cannot tell from a paraphrase.
 - Keep hedges that qualify a claim. "I think", "maybe", and "I don't know" mean
   something when they mark how sure the speaker is; the same words as pure
   delivery are filler.
-- Never add facts, names, dates, conclusions, or certainty absent from the source.
+- Never add facts, names, dates, conclusions, or numbers absent from the source,
+  and never state something more certainly than the speaker did.
 - Never drop substance, and never delete a whole utterance or exchange. Small
   talk survives, in its short readable form.
 - Fixing transcription punctuation and casing is part of the job.
@@ -183,10 +189,11 @@ These outrank every style rule below.
 - Tables only when the speaker is genuinely listing tabular data — never as
   decoration.
 
-**Therapy is the exception** and keeps the older, stricter contract: pure filler
-and false starts come out, nothing is condensed, and hesitation and repetition
-that carries weight stays. What a session is *for* is partly in how something was
-said, and that is not delivery to be reshaped.
+**Therapy is the exception** and keeps the older, stricter contract — the
+speaker's exact words. Pure filler and false starts come out, but nothing is
+condensed or swapped for a synonym, and hesitation and repetition that carries
+weight stays. What a session is *for* is partly in how something was said, and
+that is not delivery to be reshaped.
 
 ## Part B — style by recording type
 
@@ -196,7 +203,7 @@ said, and that is not delivery to be reshaped.
 | `journal` | Chronological first-person paragraphs in the writer's own register. Voice, emotion, and meaningful self-correction preserved; the filler and false starts a written entry would never have contained removed. |
 | `conversation` | Dialogue as `**Name:** what they said` paragraphs, one per turn, each turn in readable written form. |
 | `therapy` | As `conversation`, at the highest fidelity of all. Hesitation and repetition that carries weight is kept. No clinical language, interpretation, or diagnosis that was not spoken. |
-| `meeting` | `##` heading per topic. Closing `## Decisions` and `## Action Items` bullets **only** when the recording contains explicit decisions or assignments; `Unassigned` and `Not stated` rather than an inferred owner or deadline. |
+| `meeting` | **Concise minutes, not a transcript** — the exception to the verbatim contract. Brief prose under `##` topic headings, paraphrased and compressed, attributing points to who made them where it matters; not turn-by-turn dialogue. Closing `## Decisions` and `## Action Items` bullets **only** when the recording contains explicit decisions or assignments; `Unassigned` and `Not stated` rather than an inferred owner or deadline. The verbatim recording is preserved and linked as its own source note. |
 | `lecture` | `##` and `###` headings following the material, the lecturer's own examples kept, audience questions as dialogue. |
 | `other` | Treat as `memo` if one voice, `conversation` if several. |
 
@@ -207,9 +214,9 @@ and readability, but may not condense the material into study notes: every
 substantive claim, example, qualification, and disagreement survives.
 
 Owner-authored mode is valid only for a single-speaker memo or journal.
-Conversation, therapy, and meeting recordings retain their speaker-aware
-contracts and never imitate the owner's prose. Unknown material receives no
-voice rules and stays reviewable.
+Conversation and therapy recordings retain their speaker-aware contracts and a
+meeting becomes minutes; none imitate the owner's prose. Unknown material
+receives no voice rules and stays reviewable.
 
 For an owner journal, written text receives mechanical correction only. Spoken
 text receives the spoken-to-written edit: filler, false starts, accidental

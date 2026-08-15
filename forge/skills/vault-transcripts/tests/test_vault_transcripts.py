@@ -519,6 +519,15 @@ class ParsingTests(unittest.TestCase):
             vt.parse_filename("20260616 092230.md"),
             {"date": "2026-06-16", "time_hhmm": "0922", "time_hhmmss": "09:22:30", "recording_id": None},
         )
+        # The dashed-date, dotted-time export shape (the common one on this inbox):
+        # its recording date must be read, not fall back to today.
+        self.assertEqual(
+            vt.parse_filename("2025-08-08 13.07.21 Ellian.md"),
+            {"date": "2025-08-08", "time_hhmm": "1307", "time_hhmmss": "13:07:21", "recording_id": None},
+        )
+        # A processed date-type-topic note is not an export stamp: the ` - ` after
+        # the date is not a time, so it must not be read as a recording date.
+        self.assertIsNone(vt.parse_filename("2026-08-11 - Meeting - Waste Heat Recovery.md")["date"])
         for undated in ("New Recording 41.md", "VPP Insiders #1: Intro to VPPs.md", "IMG_1836.md"):
             self.assertIsNone(vt.parse_filename(undated)["date"], undated)
 
@@ -1033,6 +1042,38 @@ class NoteBuildingTests(unittest.TestCase):
         problems, _measurements = self.check(body, cleaned, summary="One paragraph.\n\nAnd another.")
         self.assertIn("summary is more than one paragraph", problems)
 
+    def test_a_meeting_summary_skips_the_verbatim_gate(self):
+        # A minutes-style cleanup at a third the length with distinctive words
+        # dropped: held as verbatim cleanup, but correct as meeting minutes. Only
+        # the verbatim checks (ratio, retention, utterance-locator) are dropped;
+        # the structural checks still run.
+        body = transcript(SOLO_BLOCKS * 4)
+        minutes = "## Repairs\n\nThe team discussed the espresso machine and agreed to order a gasket."
+        held, _ = self.check(body, minutes)
+        self.assertTrue(any("outside" in problem or "survived" in problem for problem in held), held)
+        parsed = vt.parse_transcript(body)
+        item = {"path": "00 Inbox/x.md", "raw_body": body, "stats": vt.transcript_stats(parsed)}
+        note, head = vt.build_note(
+            self.schema, vt.frontmatter_metadata(self.schema, "meeting"),
+            "A summary.", "callout", parsed["preamble"], minutes, body,
+        )
+        passed, _ = vt.check_note(item, minutes, "A summary.", note, head, parsed, self.args, summarized=True)
+        self.assertEqual(passed, [])
+
+    def test_a_meeting_summary_still_fails_a_structural_check(self):
+        # Summarize-mode drops the verbatim checks, not the structural ones: a
+        # broken transcript-preservation is still caught.
+        body = transcript(SOLO_BLOCKS)
+        parsed = vt.parse_transcript(body)
+        item = {"path": "00 Inbox/x.md", "raw_body": body, "stats": vt.transcript_stats(parsed)}
+        note, head = vt.build_note(
+            self.schema, vt.frontmatter_metadata(self.schema, "meeting"),
+            "A summary.", "callout", parsed["preamble"], "Some minutes.", body,
+        )
+        tampered = note[:-5] + "xxxxx"  # corrupt the preserved transcript tail
+        problems, _ = vt.check_note(item, "Some minutes.", "A summary.", tampered, head, parsed, self.args, summarized=True)
+        self.assertTrue(any("byte-identical" in problem for problem in problems), problems)
+
     def test_a_lost_preamble_is_caught(self):
         body = transcript(SOLO_BLOCKS, preamble="Notes to self\n\n1. buy gasket\n\n")
         parsed = vt.parse_transcript(body)
@@ -1160,7 +1201,13 @@ class PipelineTests(unittest.TestCase):
         return json.loads(completed.stdout)
 
     def inbox(self):
-        return sorted(path.name for path in (self.vault / "00 Inbox").glob("*.md"))
+        # The inbox-review control note is a tool artifact, not a recording note,
+        # so it is excluded here the same way the scan excludes it.
+        return sorted(
+            path.name
+            for path in (self.vault / "00 Inbox").glob("*.md")
+            if path.name != vt.vault_review.REVIEW_NOTE_NAME
+        )
 
     def assertProcessed(self, *names):
         """The inbox holds exactly these notes and a recording note for each.
@@ -2914,8 +2961,8 @@ class CleanupRepairTurnTests(unittest.TestCase):
         def fake_once(args, service, messages, source, speaker_map, drop_labels, tiny, task, glossary=()):
             seen.append(messages)
             if len(seen) == 1:
-                return first_response, "x", ["these words are not in the chunk: espresso, machine"]
-            return "The machine leaks.", "x", []
+                return first_response, "x", ["these words are not in the chunk: espresso, machine"], ["espresso", "machine"]
+            return "The machine leaks.", "x", [], []
 
         original = vt.clean_chunk_once
         vt.clean_chunk_once = fake_once
@@ -3004,9 +3051,10 @@ class CleanupRetryFailedTests(PipelineTests):
 
     def test_a_failed_chunk_is_inherited_on_a_plain_resume(self):
         self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
-        # Both the first answer and its repair invent, so the chunk fails hard.
-        bad = {"cleaned": "The speaker described several unrelated household chores.", "chunk_summary": "x"}
-        with StubServer(scripted={"clean": [bad, bad]}) as server:
+        # Empty cleaned text is a structural failure that survives the corrective
+        # retry, so the chunk is recorded as failed and the file stays failed.
+        empty = {"cleaned": "", "chunk_summary": "x"}
+        with StubServer(scripted={"clean": [empty, empty]}) as server:
             first = self.result_of(self.process(server.url))
             run_dir = run_dir_of(first)
             self.assertTrue(any(row.get("status") == "failed" for row in self.journal_rows(run_dir)))
@@ -3017,17 +3065,19 @@ class CleanupRetryFailedTests(PipelineTests):
                     "--run", str(run_dir), "--no-verify",
                 )
             )
-            # The resume inherited the failure rather than asking again.
+            # The resume inherited the failed chunk rather than asking again.
             self.assertEqual(server.stage_requests("clean"), [])
 
     def test_retry_failed_asks_again_and_can_succeed(self):
         self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
-        bad = {"cleaned": "The speaker described several unrelated household chores.", "chunk_summary": "x"}
-        with StubServer(scripted={"clean": [bad, bad]}) as server:
+        empty = {"cleaned": "", "chunk_summary": "x"}
+        with StubServer(scripted={"clean": [empty, empty]}) as server:
             first = self.result_of(self.process(server.url))
             run_dir = run_dir_of(first)
             self.assertTrue(any(row.get("status") == "failed" for row in self.journal_rows(run_dir)))
             server.reset()
+            # The scripted queue is spent, so the re-attempt gets the faithful
+            # default echo and clears.
             retried = self.result_of(
                 run_script(
                     "process", "--vault", str(self.vault), "--base-url", server.url, "--model", "chat",
@@ -3037,9 +3087,296 @@ class CleanupRetryFailedTests(PipelineTests):
             self.assertTrue(server.stage_requests("clean"))
         self.assertEqual(retried["data"]["counts"]["processed"], 1)
         rows = self.journal_rows(run_dir)
-        # The failure stays on the record; a later ok row supersedes it.
+        # The failed row stays on the record; a later ok row supersedes it.
         self.assertTrue(any(row.get("status") == "failed" for row in rows))
         self.assertEqual(rows[-1]["status"], "ok")
+
+
+class ReviewNoteRenderParseTests(unittest.TestCase):
+    """The reusable render/parse contract in vault_review."""
+
+    def test_ticks_round_trip_through_hand_edits(self):
+        vr = vt.vault_review
+        to_process = [
+            vr.ReviewItem(name="A Note", summary="About things.", facts="memo · 2m"),
+            vr.ReviewItem(name="Another Note", summary="More things.", facts="memo · 1m"),
+        ]
+        note = vr.render_review_note(
+            generated_at="2026-08-12 10:00 UTC",
+            run_directory=".vault-transcripts/runs/R1",
+            to_process=to_process,
+            decisions=[vr.ReviewItem(name="dup", source="dup.md", reason="duplicate")],
+            apply_uri=vr.apply_uri("Loom", "cmd-1"),
+            apply_command="python3 x.py process --apply --from-review",
+        )
+        # Passed notes are ticked by default.
+        self.assertIn("- [x] [[A Note]]", note)
+        self.assertIn("- [x] [[Another Note]]", note)
+        self.assertIn("obsidian://shell-commands?vault=Loom&execute=cmd-1", note)
+
+        parsed = vr.parse_review_note(note)
+        self.assertEqual(parsed.run_directory, ".vault-transcripts/runs/R1")
+        self.assertEqual(parsed.approved, {"A Note", "Another Note"})
+        # The reviewer unticks one; a sub-bullet and reordering do not confuse the
+        # parser.
+        edited = note.replace("- [x] [[Another Note]]", "- [ ] [[Another Note]]\n    - skip this one")
+        self.assertEqual(vr.parse_review_note(edited).approved, {"A Note"})
+
+    def test_no_command_id_drops_the_link_but_keeps_the_command(self):
+        vr = vt.vault_review
+        note = vr.render_review_note(
+            generated_at="t",
+            run_directory="r",
+            to_process=[],
+            decisions=[],
+            apply_uri=vr.apply_uri("Loom", None),
+            apply_command="python3 x.py --from-review",
+        )
+        self.assertNotIn("obsidian://", note)
+        self.assertIn("python3 x.py --from-review", note)
+
+
+class CleanOneChunkRetryTests(unittest.TestCase):
+    """clean_one_chunk retries an invented-words failure once, then commits."""
+
+    def run_chunk(self, first_invented=True, summarized=False):
+        seen = []
+
+        def fake_once(args, service, messages, source, speaker_map, drop_labels, tiny, task, glossary=()):
+            seen.append(task)
+            if first_invented and len(seen) == 1:
+                return "The barista mentioned unrelated hypothetical scenarios.", "x", \
+                    ["these words are not in the chunk: barista, mentioned"], ["barista", "mentioned", "scenarios"]
+            return "The machine leaks.", "x", [], []
+
+        original = vt.clean_chunk_once
+        vt.clean_chunk_once = fake_once
+        try:
+            args = SimpleNamespace(cache_prompt=True, request_timeout=60, routing={})
+            cleaned, _summary = vt.clean_one_chunk(
+                args, {"name": "chat", "model": "chat", "url": "http://127.0.0.1:1/v1/chat/completions"},
+                {"chunk": "x"}, "x", {}, True, False, summarized=summarized,
+            )
+            return cleaned, seen
+        finally:
+            vt.clean_chunk_once = original
+
+    def test_an_invented_failure_is_retried_once_and_the_clean_retry_wins(self):
+        cleaned, seen = self.run_chunk()
+        self.assertEqual(len(seen), 2)  # one corrective retry
+        self.assertEqual(cleaned, "The machine leaks.")
+
+    def test_summarized_chunk_ignores_invented_words(self):
+        # Minutes paraphrase by design, so the invented-words check does not
+        # apply: no retry, the best-effort minutes pass straight through.
+        seen = []
+
+        def fake_once(args, service, messages, source, speaker_map, drop_labels, tiny, task, glossary=()):
+            seen.append(task)
+            return "The team agreed to order a gasket.", "x", \
+                ["these words are not in the chunk: team, agreed"], ["team", "agreed"]
+
+        original = vt.clean_chunk_once
+        vt.clean_chunk_once = fake_once
+        try:
+            args = SimpleNamespace(cache_prompt=True, request_timeout=60, routing={})
+            cleaned, _summary = vt.clean_one_chunk(
+                args, {"name": "chat", "model": "chat", "url": "http://127.0.0.1:1/v1/chat/completions"},
+                {"chunk": "x"}, "x", {}, False, False, summarized=True,
+            )
+        finally:
+            vt.clean_chunk_once = original
+        self.assertEqual(len(seen), 1)  # no retry
+        self.assertIn("gasket", cleaned)
+
+
+class InboxReviewTests(PipelineTests):
+    """Staging, the control note, and the from-review apply end to end."""
+
+    NAME = "2026-07-24 - Memo - Espresso Machine Repairs"
+
+    def review_path(self):
+        return self.vault / "00 Inbox" / vt.vault_review.REVIEW_NOTE_NAME
+
+    def pending_dir(self):
+        return self.vault / "00 Inbox" / vt.vault_review.PENDING_DIRNAME
+
+    def set_tick(self, name, checked):
+        path = self.review_path()
+        text = path.read_text(encoding="utf-8")
+        old = f"- [{'x' if not checked else ' '}] [[{name}]]"
+        new = f"- [{'x' if checked else ' '}] [[{name}]]"
+        path.write_text(text.replace(old, new), encoding="utf-8")
+
+    def test_dry_run_writes_the_control_note_and_stages_proposals(self):
+        self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
+        before = self.inbox()
+        with StubServer() as server:
+            self.result_of(self.process(server.url, "--no-verify"))
+        # The recordings themselves are untouched by a dry run.
+        self.assertEqual(self.inbox(), before)
+        review = self.review_path().read_text(encoding="utf-8")
+        self.assertIn(f"- [x] [[{self.NAME}]]", review)  # passed, ticked by default
+        self.assertTrue((self.pending_dir() / f"{self.NAME}.md").is_file())
+        self.assertIn(self.NAME, vt.vault_review.parse_review_note(review).approved)
+
+    def test_from_review_applies_a_ticked_note_and_resets_the_surface(self):
+        self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
+        with StubServer() as server:
+            self.result_of(self.process(server.url, "--no-verify"))
+            self.result_of(self.process(server.url, "--from-review", "--no-verify"))
+        self.assertProcessed(f"{self.NAME}.md")
+        self.assertIn("Nothing is waiting", self.review_path().read_text(encoding="utf-8"))
+        self.assertFalse(any(self.pending_dir().glob("*.md")) if self.pending_dir().exists() else False)
+
+    def test_from_review_skips_an_unticked_note(self):
+        self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
+        with StubServer() as server:
+            self.result_of(self.process(server.url, "--no-verify"))
+            self.set_tick(self.NAME, checked=False)
+            self.result_of(self.process(server.url, "--from-review", "--no-verify"))
+        # Nothing applied: the original recording is still there, no processed note.
+        self.assertIn("20260724 131748-9788991C.md", self.inbox())
+        self.assertNotIn(f"{self.NAME}.md", self.inbox())
+
+    def test_a_meeting_is_summarized_and_staged_not_held(self):
+        # A multi-speaker meeting whose cleanup compresses to short minutes: this
+        # would trip the verbatim gate (ratio/retention), but summarize-mode skips
+        # it, so the note is staged for approval rather than held.
+        self.write("20260724 131748-9788991C.md", transcript(DIALOGUE_BLOCKS * 3))
+        meeting = {
+            "recording_type": "meeting",
+            "material_role": "personal-exchange",
+            "title": "Deployment Window Review",
+            "speakers": {
+                "Speaker 1": {"who": "unknown", "kind": "unknown", "confidence": "low", "source": "transcript"},
+                "Speaker 2": {"who": "unknown", "kind": "unknown", "confidence": "low", "source": "transcript"},
+            },
+            "effective_speakers": 2,
+            "spoken_date": None,
+            "evidence": None,
+            "needs_review": False,
+            "review_reason": None,
+        }
+        minutes = {
+            "cleaned": "## Deployment\n\nThe migration finished around midnight with no rollback; the dashboards recovered, though the nightly aggregation ran twice.",
+            "chunk_summary": "x",
+        }
+        with StubServer(scripted={"classify": [meeting], "clean": [minutes, minutes, minutes]}) as server:
+            result = self.result_of(self.process(server.url, "--no-verify"))
+        self.assertGreaterEqual(result["data"]["counts"]["processed"], 1)
+        self.assertEqual(result["data"]["counts"]["review_required"], 0)
+        name = "2026-07-24 - Meeting - Deployment Window Review"
+        self.assertTrue((self.pending_dir() / f"{name}.md").is_file())
+
+    MEETING_CLASSIFY = {
+        "recording_type": "meeting",
+        "material_role": "personal-exchange",
+        "title": "Deployment Window Review",
+        "speakers": {
+            "Speaker 1": {"who": "unknown", "kind": "unknown", "confidence": "low", "source": "transcript"},
+            "Speaker 2": {"who": "unknown", "kind": "unknown", "confidence": "low", "source": "transcript"},
+        },
+        "effective_speakers": 2,
+        "spoken_date": None,
+        "evidence": None,
+        "needs_review": False,
+        "review_reason": None,
+    }
+
+    def test_from_review_applies_a_meeting(self):
+        # Regression: a meeting is minutes, so the apply-time gate recompute must
+        # NOT re-hold it for "invented words" — paraphrase is the point. Before the
+        # fix this reconciled the meeting back to review and applied nothing.
+        self.write("20260724 131748-9788991C.md", transcript(DIALOGUE_BLOCKS * 3))
+        minutes = {"cleaned": "## Deployment\n\nThe migration finished with no rollback; the dashboards recovered.", "chunk_summary": "x"}
+        with StubServer(scripted={"classify": [self.MEETING_CLASSIFY], "clean": [minutes, minutes, minutes]}) as server:
+            self.result_of(self.process(server.url, "--no-verify"))
+            result = self.result_of(self.process(server.url, "--from-review", "--no-verify"))
+        self.assertEqual(result["data"]["counts"]["applied"], 1)
+        self.assertProcessed("2026-07-24 - Meeting - Deployment Window Review.md")
+
+    def test_from_review_with_nothing_ticked_keeps_the_review(self):
+        # Regression: if nothing is applied (all unticked), the review note and
+        # staging must be preserved, not silently reset — otherwise a failed apply
+        # looks "done" while nothing went in.
+        self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
+        with StubServer() as server:
+            self.result_of(self.process(server.url, "--no-verify"))
+            self.set_tick(self.NAME, checked=False)
+            result = self.result_of(self.process(server.url, "--from-review", "--no-verify"))
+        self.assertEqual(result["data"]["counts"]["applied"], 0)
+        self.assertNotIn("Nothing is waiting", self.review_path().read_text(encoding="utf-8"))
+        self.assertTrue((self.pending_dir() / f"{self.NAME}.md").is_file())
+
+    def test_scan_excludes_the_review_surface(self):
+        self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
+        with StubServer() as server:
+            self.result_of(self.process(server.url, "--no-verify"))
+        # A later run must not treat the control note or the staged proposals as
+        # inbox input, or it would file the note and grow a twin of every proposal.
+        paths = [item["path"] for item in vt.scan_inbox(self.vault)]
+        self.assertNotIn(f"00 Inbox/{vt.vault_review.REVIEW_NOTE_NAME}", paths)
+        self.assertFalse(any(vt.vault_review.PENDING_DIRNAME in path for path in paths))
+
+    def test_an_edit_that_fabricates_beyond_the_ceiling_is_held_at_apply(self):
+        # The apply step recomputes the meaning-first gate on the reviewed bytes.
+        # A light paraphrase edit applies; a wholesale fabrication does not.
+        self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
+        with StubServer() as server:  # faithful default cleanup, stages normally
+            self.result_of(self.process(server.url, "--no-verify"))
+            staged = self.pending_dir() / f"{self.NAME}.md"
+            # Sixty distinct words the recording never contained, dropped in above
+            # the transcript — far past the fraction ceiling paraphrase is given.
+            fabricated = " ".join(f"zz{chr(97 + i // 20)}{chr(97 + i % 20)}" for i in range(60))
+            staged.write_text(
+                staged.read_text(encoding="utf-8").replace("# Transcript", fabricated + "\n\n# Transcript", 1),
+                encoding="utf-8",
+            )
+            self.set_tick(self.NAME, checked=True)
+            self.result_of(self.process(server.url, "--from-review", "--no-verify"))
+        # The fabrication cleared the ceiling, so the note was not applied and the
+        # recording is still in the inbox.
+        self.assertIn("20260724 131748-9788991C.md", self.inbox())
+        self.assertNotIn(f"{self.NAME}.md", self.inbox())
+
+
+class ApplyCommandDiscoveryTests(unittest.TestCase):
+    """The review note finds the shell-commands apply command by its text."""
+
+    def write_data(self, root, payload):
+        path = Path(root).joinpath(*vt.SHELLCOMMANDS_DATA)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_finds_the_from_review_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_data(tmp, {"shell_commands": [
+                {"id": "other", "platform_specific_commands": {"default": "echo hi"}},
+                {"id": "apply-1", "platform_specific_commands": {
+                    "default": "python3 x/vault-transcripts.py process --vault v --apply --from-review"}},
+            ]})
+            self.assertEqual(vt.discover_apply_command_id(Path(tmp)), "apply-1")
+
+    def test_handles_the_dict_form(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_data(tmp, {"shell_commands": {
+                "z9": {"id": "z9", "shell_command": "run vault-transcripts ... --from-review"}}})
+            self.assertEqual(vt.discover_apply_command_id(Path(tmp)), "z9")
+
+    def test_no_plugin_config_is_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(vt.discover_apply_command_id(Path(tmp)))
+
+    def test_env_var_overrides_discovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_data(tmp, {"shell_commands": [
+                {"id": "disk", "platform_specific_commands": {"default": "vault-transcripts --from-review"}}]})
+            os.environ[vt.APPLY_COMMAND_ID_ENV] = "envid"
+            try:
+                self.assertEqual(vt.resolve_apply_command_id(Path(tmp)), "envid")
+            finally:
+                del os.environ[vt.APPLY_COMMAND_ID_ENV]
 
 
 if __name__ == "__main__":

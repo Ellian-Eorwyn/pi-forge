@@ -46,6 +46,7 @@ export const DEFAULT_CONNECTED_SERVICES = Object.freeze({
 		model: "chat",
 		contextTokens: SLOT_CONTEXT_TOKENS,
 		chatTemplateKwargs: null,
+		reasoningEffort: null,
 		scheduling: Object.freeze({
 			enabled: true,
 			interactiveSlot: 0,
@@ -67,6 +68,7 @@ export const DEFAULT_CONNECTED_SERVICES = Object.freeze({
 		model: "code",
 		contextTokens: SLOT_CONTEXT_TOKENS,
 		chatTemplateKwargs: null,
+		reasoningEffort: null,
 		scheduling: Object.freeze({
 			enabled: true,
 			interactiveSlot: 0,
@@ -97,6 +99,7 @@ export const DEFAULT_CONNECTED_SERVICES = Object.freeze({
 		// Without this the backend answers into `reasoning_content` and returns
 		// empty `content`. `reasoning_budget: 0` and `/no_think` do nothing.
 		chatTemplateKwargs: Object.freeze({ enable_thinking: false }),
+		reasoningEffort: null,
 		scheduling: Object.freeze({
 			enabled: true,
 			interactiveSlot: 0,
@@ -307,6 +310,7 @@ function seedInferenceService(current, defaults) {
 		model: normalizeServiceName(current.model) ?? defaults.model,
 		contextTokens: normalizePositiveInteger(current.contextTokens, defaults.contextTokens),
 		chatTemplateKwargs: normalizeTemplateKwargs(current.chatTemplateKwargs) ?? defaults.chatTemplateKwargs,
+		reasoningEffort: normalizeServiceName(current.reasoningEffort) ?? defaults.reasoningEffort,
 		scheduling: {
 			enabled: scheduling.enabled ?? defaults.scheduling.enabled,
 			interactiveSlot: normalizeNonnegativeInteger(scheduling.interactiveSlot, defaults.scheduling.interactiveSlot),
@@ -372,6 +376,12 @@ export function resolveConnectedServices(options = {}) {
 	const explicitThinkTemplate = normalizeTemplateKwargs(options.thinkTemplateKwargs);
 	const explicitTaskContext = normalizePositiveInteger(parseInteger(options.taskContextTokens), undefined);
 	const explicitTaskTemplate = normalizeTemplateKwargs(options.taskTemplateKwargs);
+	const envChatEffort = normalizeServiceName(env.FORGE_BASE_CHAT_REASONING_EFFORT);
+	const envThinkEffort = normalizeServiceName(env.FORGE_THINK_REASONING_EFFORT);
+	const envTaskEffort = normalizeServiceName(env.FORGE_TASK_REASONING_EFFORT);
+	const explicitChatEffort = normalizeServiceName(options.chatReasoningEffort);
+	const explicitThinkEffort = normalizeServiceName(options.thinkReasoningEffort);
+	const explicitTaskEffort = normalizeServiceName(options.taskReasoningEffort);
 	return {
 		searxng: {
 			enabled: explicitSearxng ? true : searxngEnvPresent ? Boolean(envSearxng) : seeded.searxng.enabled,
@@ -391,6 +401,7 @@ export function resolveConnectedServices(options = {}) {
 			model: explicitChatModel ?? envChatModel ?? seeded.chat.model,
 			contextTokens: explicitChatContext ?? envChatContext ?? seeded.chat.contextTokens,
 			chatTemplateKwargs: explicitChatTemplate ?? envChatTemplate ?? seeded.chat.chatTemplateKwargs,
+			reasoningEffort: explicitChatEffort ?? envChatEffort ?? seeded.chat.reasoningEffort,
 			scheduling: seeded.chat.scheduling,
 		},
 		think: {
@@ -399,6 +410,7 @@ export function resolveConnectedServices(options = {}) {
 			model: explicitThinkModel ?? envThinkModel ?? seeded.think.model,
 			contextTokens: explicitThinkContext ?? envThinkContext ?? seeded.think.contextTokens,
 			chatTemplateKwargs: explicitThinkTemplate ?? envThinkTemplate ?? seeded.think.chatTemplateKwargs,
+			reasoningEffort: explicitThinkEffort ?? envThinkEffort ?? seeded.think.reasoningEffort,
 			scheduling: seeded.think.scheduling,
 		},
 		task: {
@@ -407,6 +419,7 @@ export function resolveConnectedServices(options = {}) {
 			model: explicitTaskModel ?? envTaskModel ?? seeded.task.model,
 			contextTokens: explicitTaskContext ?? envTaskContext ?? seeded.task.contextTokens,
 			chatTemplateKwargs: explicitTaskTemplate ?? envTaskTemplate ?? seeded.task.chatTemplateKwargs,
+			reasoningEffort: explicitTaskEffort ?? envTaskEffort ?? seeded.task.reasoningEffort,
 			scheduling: seeded.task.scheduling,
 		},
 		embeddings: {

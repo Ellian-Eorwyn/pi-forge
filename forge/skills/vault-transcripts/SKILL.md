@@ -49,27 +49,84 @@ conversations.
 
    Use `--limit 5` for a first trial on an inbox this skill has not seen. One
    stderr line per unit with an ETA; stdout stays a single JSON result.
-4. Read `report.md` and tell the user:
-   - proposed renames, old name to new name, with each recording's type and length
-   - the summaries, so they can judge whether the model understood the recordings
-   - notes held for review and why (each keeps its original name and body)
-   - exact duplicates queued for the recoverable quarantine
-   - pairs that share a recording id but differ in content — these need the
-     user's decision and this skill will not touch them
-   - the Verification section: how many notes the thinking model reviewed, what
-     it flagged, what was redone, what it left for them
-   - the run directory
-5. Get explicit approval, then apply, resuming the same run so nothing is
-   recomputed:
+4. A dry run also writes an **Inbox Review** note at the top of `00 Inbox`
+   (`! Inbox Review.md`) and stages each proposed note into
+   `00 Inbox/_Pending Review/`. This is the review surface the user works in
+   (see "Reviewing and approving in the vault" below). Read `report.md` and tell
+   the user what it holds — proposed renames, summaries, notes held for invented
+   words and which words, duplicate pairs, the Verification section, the run
+   directory — and point them at the review note to open the proposals, tick what
+   to keep, and apply.
+5. Get explicit approval, then apply. The user's own click on the review note's
+   apply link is approval; from the chat, apply the reviewed run:
 
    ```bash
-   python3 <skill-directory>/scripts/vault-transcripts.py process --vault <vault> --apply --run <run-directory>
+   python3 <skill-directory>/scripts/vault-transcripts.py process --vault <vault> --apply --from-review
    ```
 
-   "Process my voice notes and apply it" is approval. A vague "sort out my inbox"
-   is not.
+   `--from-review` reads the run and the approvals from the review note. To apply
+   a whole run unreviewed instead (every passing note, no waivers), resume it
+   directly with `--apply --run <run-directory>`. "Process my voice notes and
+   apply it" is approval; a vague "sort out my inbox" is not.
 6. Offer to run `vault-organizer inbox` next, which files the cleaned notes —
    both halves of each pair, the note and its recording.
+
+## Reviewing and approving in the vault
+
+A dry run leaves a control note the user reviews in Obsidian rather than reading a
+report back to them:
+
+- **`00 Inbox/! Inbox Review.md`** sorts to the top of the inbox and lists the run.
+  Notes that cleared every gate are under **To process**, ticked by default. Notes
+  the gate **held for invented words** are under **Held**, unticked, each showing
+  the exact words added. Structural holds and duplicate pairs are under **Needs a
+  decision**, for information.
+- **`00 Inbox/_Pending Review/`** holds each proposed note under its real name, so
+  the review note's `[[wikilinks]]` open them and the user can **edit them in
+  place**. Both folders are skipped by this skill's scan and by `vault-organizer`,
+  so they are never reprocessed or filed.
+
+The user opens a proposal, and then, per note:
+
+- **keep it** — leave it ticked (passed notes) or tick it (held notes);
+- **approve with a small change** — edit the staged note, then tick it;
+- **waive a few invented words** — tick a held note as-is; the applied note keeps
+  a collapsed `> [!provenance]-` stamp of exactly what was let through;
+- **reject** — untick it. It is not applied and its recording stays in the inbox
+  for a later run. To re-clean a held chunk with the thinking-model retry instead,
+  rerun the dry run with `--retry-failed`.
+
+Applying (`--from-review`) **recomputes the gate from the bytes on disk**, never a
+stored verdict — the same safety property as `vault-compose apply`. A waiver only
+ever green-lights the words the gate held for that note; a word an edit introduced
+is not covered and re-holds the note. On apply the staged folder is cleared and the
+control note resets to its empty state.
+
+### One-time setup for the apply link
+
+The review note's **Apply approved notes** link fires the Obsidian *Shell commands*
+plugin, which this skill cannot configure for the user. It is a one-time setup, and
+the skill then finds the command on its own — no id to copy:
+
+1. Obsidian → **Settings** → (Community plugins section, left column) → **Shell
+   commands** — this opens the plugin's own settings tab.
+2. Click **New shell command**. A command row appears; paste into its field:
+   `python3 <absolute skill-directory>/scripts/vault-transcripts.py process --vault "<vault>" --apply --from-review`
+   (It auto-saves. Optionally click the row's gear to set an **Alias** like
+   "Apply approved inbox notes".)
+3. That's it. On the next dry run the skill reads the plugin's config, finds the
+   command whose text runs `--from-review`, and embeds its `execute` URI in the
+   review note.
+
+No id or environment variable is needed; `VAULT_TRANSCRIPTS_APPLY_COMMAND_ID` still
+overrides the lookup if you want to set it explicitly. Until a matching command
+exists, the review note prints the exact terminal command instead of the link, and
+`doctor` reports the link is off. The plugin is desktop-only.
+
+To run it without a clickable link at all, enable the command in the Obsidian
+command palette from its Shell-commands settings and trigger it with `Cmd/Ctrl-P`
+(or a hotkey) — the review note is still where you tick and edit; only the trigger
+differs.
 
 ## A day of short memos as one log
 
@@ -229,13 +286,20 @@ same service.
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--jobs <n>` | `1` | Clean `n` files at once. Chunks inside a file stay serial — each is written against the tail of the last — so this only helps when several files are queued. The chat backend serves 2 slots, so `2` is the ceiling that helps, and it competes with interactive turns on the same server. |
-| `--retry-failed` | off | Re-attempt chunks a previous run recorded as failed. A plain resume inherits the failure so it does not pay for the same derail twice, which also means the file can never succeed until this flag is passed. |
+| `--retry-failed` | off | Re-attempt chunks a previous run recorded as failed or held. A plain resume inherits them so it does not pay for the same derail twice, which also means the file can never change until this flag is passed. |
+| `--auto-retry` | off | On an invented-words failure, spend the corrective retry on the thinking model straight away instead of holding the chunk for review (the pre-review-lane behaviour). |
 
-A chunk fails when the cleaned text carries content words the source does not,
-which is the fabrication gate doing its job — the model reached for a better word
-than the speaker's. The model gets one corrective retry with its own rejected
-answer in front of it. If that fails too, the file is held and the chunk is
-journalled; `--retry-failed` is how you ask again after changing something.
+A chunk is **held** when the cleaned text carries more content words the source
+does not than the budget allows — the fabrication gate doing its job, the model
+having reached for a better word than the speaker's. By default `process` does
+**not** spend a corrective retry on it: that retry runs on the thinking model and
+costs ~90–220s on a solo note, and a few invented words are usually a
+mis-transcription fixed or a stutter smoothed. So the chunk keeps its best-effort
+text, the note assembles, and it waits in the review lane below for you to waive,
+edit, or reject. `--retry-failed` re-cleans a held chunk with the retry;
+`--auto-retry` restores the old spend-it-immediately behaviour. A *structural*
+defect (a kept timestamp, a stray heading, a speaker label on a solo note) is not
+waivable and still gets its automatic retry.
 
 ## Terms and speakers
 
@@ -282,6 +346,15 @@ note — either lands where the next run will find it.
   unambiguous circumlocutions come out, and the speaker's voice, meaning, and
   meaningful hedges stay. **Therapy is the exception** and keeps the older,
   stricter contract — nothing condensed, weighted hesitation preserved.
+- **A `meeting` is kept as concise minutes, not verbatim cleanup.** The recording
+  is preserved and linked as its own source note, so the minutes may paraphrase
+  and compress. Meetings are therefore exempt from the verbatim gate (added
+  words, length ratio, rare-word retention, utterance-locatable) and from the
+  verbatim fidelity review; only the structural checks and the note-level
+  thinking review (title, summary, speaker names, no fabrication) apply. Only
+  `meeting` summarizes — conversation and therapy stay verbatim, lecture keeps
+  structured full content. `--auto-retry` / the invented-words review lane below
+  concern the verbatim types; a meeting never lands in the held-for-invented lane.
 - Everything the pipeline generates is a callout, above the speaker's words: the
   summary open, reflections and connections collapsed. `references/loom-notes.css`
   styles them; without it notes still read correctly.

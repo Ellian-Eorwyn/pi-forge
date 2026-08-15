@@ -86,6 +86,7 @@ DEFAULT_SERVICES = {
         "model": "chat",
         "contextTokens": SLOT_CONTEXT_TOKENS,
         "chatTemplateKwargs": None,
+        "reasoningEffort": None,
         "scheduling": {
             "enabled": True,
             "interactiveSlot": 0,
@@ -101,6 +102,7 @@ DEFAULT_SERVICES = {
         "model": "code",
         "contextTokens": SLOT_CONTEXT_TOKENS,
         "chatTemplateKwargs": None,
+        "reasoningEffort": None,
         "scheduling": {
             "enabled": True,
             "interactiveSlot": 0,
@@ -133,6 +135,7 @@ DEFAULT_SERVICES = {
         # `content` without it. `reasoning_budget: 0` and a `/no_think` suffix
         # were both tried against the same server and neither did anything.
         "chatTemplateKwargs": {"enable_thinking": False},
+        "reasoningEffort": None,
         "scheduling": {
             "enabled": True,
             "interactiveSlot": 0,
@@ -163,6 +166,11 @@ SERVICE_TEMPLATE_KWARGS_ENVIRONMENT = {
     "chat": ("FORGE_BASE_CHAT_TEMPLATE_KWARGS",),
     "think": ("FORGE_THINK_TEMPLATE_KWARGS",),
     "task": ("FORGE_TASK_TEMPLATE_KWARGS",),
+}
+SERVICE_REASONING_EFFORT_ENVIRONMENT = {
+    "chat": ("FORGE_BASE_CHAT_REASONING_EFFORT",),
+    "think": ("FORGE_THINK_REASONING_EFFORT",),
+    "task": ("FORGE_TASK_REASONING_EFFORT",),
 }
 
 # A thinking backend that was asked not to think can still emit a stray block.
@@ -310,6 +318,18 @@ def _positive_int(value):
     return number if number > 0 else None
 
 
+def _reasoning_effort(value):
+    """A graded reasoning-effort string, or None. Kept as a bare string rather
+    than validated against a fixed set: the shaping proxy owns which levels it
+    understands (`none`/`low`/`medium`/`xhigh` here, `high`/`max` elsewhere), and
+    a value it does not recognise is its error to report, not this client's to
+    swallow. An empty string means unset, matching how the template kwargs read."""
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    return trimmed or None
+
+
 def _template_kwargs(value):
     """A ``chat_template_kwargs`` object, from a mapping or a JSON string."""
     if isinstance(value, dict):
@@ -358,6 +378,14 @@ def resolve_service(name, base_url=None, model=None, env=None, settings=None):
         or _template_kwargs(persisted.get("chatTemplateKwargs"))
         or defaults["chatTemplateKwargs"]
     )
+    environment_effort = next(
+        (environment[key] for key in SERVICE_REASONING_EFFORT_ENVIRONMENT[name] if environment.get(key)), None
+    )
+    resolved_effort = (
+        _reasoning_effort(environment_effort)
+        or _reasoning_effort(persisted.get("reasoningEffort"))
+        or defaults.get("reasoningEffort")
+    )
 
     persisted_scheduling = persisted.get("scheduling") if isinstance(persisted.get("scheduling"), dict) else {}
     scheduling = {**defaults["scheduling"]}
@@ -371,6 +399,7 @@ def resolve_service(name, base_url=None, model=None, env=None, settings=None):
         "model": resolved_model,
         "contextTokens": resolved_context,
         "chatTemplateKwargs": resolved_template,
+        "reasoningEffort": resolved_effort,
         "scheduling": scheduling,
     }
 
@@ -632,6 +661,7 @@ def call(
     api_key=None,
     task=None,
     env=None,
+    reasoning_effort=None,
 ):
     """Post one chat completion and return ``(content, record)``.
 
@@ -658,6 +688,16 @@ def call(
     template_kwargs = service.get("chatTemplateKwargs")
     if template_kwargs:
         request["chat_template_kwargs"] = template_kwargs
+    # Graded reasoning effort (Qwen 3.8+). Sent as the top-level OpenAI field,
+    # which the shaping proxy reads and normalises; it wins over any
+    # chat_template_kwargs.reasoning_effort. "none" turns thinking off for the
+    # request, "low"/"medium"/"xhigh" set depth. A per-call value wins over the
+    # service default, which is how escalation forces `xhigh` on one item without
+    # re-resolving the service. Only a template that reads it honours it — verify
+    # with backend-check before trusting a run.
+    effort = reasoning_effort if reasoning_effort is not None else service.get("reasoningEffort")
+    if effort:
+        request["reasoning_effort"] = effort
     use_slot = background and scheduling.get("enabled")
     if use_slot:
         request["id_slot"] = scheduling["backgroundSlot"]

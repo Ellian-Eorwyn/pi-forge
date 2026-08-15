@@ -1983,6 +1983,22 @@ def path_is_inside(parent, child):
 def selected_notes(vault, schema_path, mode, limit):
     vault = vault.resolve()
     schema_path = schema_path.resolve()
+    # The inbox-review lane's own surface is never filing input: the staged
+    # proposals under `_Pending Review/` are one run's output waiting for
+    # approval, and the control note is a tool artifact. vault_review owns the
+    # names; imported here (deferred, so this foundational module keeps no
+    # import-time dependency) so both the organizer and any whole-vault pass skip
+    # them the same way the transcripts scan does.
+    import vault_review
+
+    inbox_root = (vault / INBOX_DIR).resolve()
+
+    def is_review_artifact(path):
+        resolved = path.resolve()
+        if resolved.parent == inbox_root and resolved.name == vault_review.REVIEW_NOTE_NAME:
+            return True
+        return vault_review.PENDING_DIRNAME in resolved.relative_to(vault).parts
+
     if mode == "inbox":
         root = vault / INBOX_DIR
         if not root.is_dir():
@@ -1993,13 +2009,17 @@ def selected_notes(vault, schema_path, mode, limit):
             dirnames[:] = [
                 name
                 for name in sorted(dirnames)
-                if not (dirpath / name).is_symlink() and not is_workspace_dir(dirpath / name)
+                if not (dirpath / name).is_symlink()
+                and not is_workspace_dir(dirpath / name)
+                and (dirpath.resolve() != inbox_root or name != vault_review.PENDING_DIRNAME)
             ]
             for filename in sorted(filenames):
                 path = dirpath / filename
                 if path.is_symlink() or path.suffix.lower() != ".md":
                     continue
                 if path.resolve() == schema_path.resolve():
+                    continue
+                if is_review_artifact(path):
                     continue
                 candidates.append(path.resolve())
     else:
@@ -2013,6 +2033,8 @@ def selected_notes(vault, schema_path, mode, limit):
                     continue
                 if is_workspace_dir(child):
                     continue
+                if child.resolve().parent == inbox_root and name == vault_review.PENDING_DIRNAME:
+                    continue
                 kept.append(name)
             dirnames[:] = kept
             for filename in sorted(filenames):
@@ -2023,6 +2045,8 @@ def selected_notes(vault, schema_path, mode, limit):
                     continue
                 relative = path.resolve().relative_to(vault)
                 if any(part.startswith(".") for part in relative.parts):
+                    continue
+                if is_review_artifact(path):
                     continue
                 candidates.append(path.resolve())
     candidates = sorted(candidates, key=lambda item: item.relative_to(vault).as_posix())

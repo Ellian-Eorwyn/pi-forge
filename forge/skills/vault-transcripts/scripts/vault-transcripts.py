@@ -26,6 +26,7 @@ import json
 import os
 import random
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -47,6 +48,7 @@ import vault_lexicon
 from vault_moves import PlainMover, resolve_mover
 import vault_profile
 import vault_reflection
+import vault_review
 import vault_voice
 from vault_schema import (
     INBOX_DIR,
@@ -117,6 +119,21 @@ TYPE_TO_CAPTURE = {
     "lecture": "meeting",
     "other": "voice",
 }
+# Meetings are kept as concise minutes, not verbatim cleanup: the recording is
+# preserved and linked separately (its own source note), so the processed note
+# may paraphrase and compress. That exempts a meeting from the verbatim gate —
+# added words, length ratio, rare-word retention, utterance-locatable — because a
+# summary is meant to drop and rephrase, and from the verbatim fidelity review.
+# The note-level review still checks its title, summary, and speaker names for
+# fabrication. Only `meeting` is summarized; conversation and therapy stay
+# verbatim, and lecture keeps structured full content.
+SUMMARIZED_TYPES = frozenset({"meeting"})
+
+
+def is_summarized(recording_type):
+    return recording_type in SUMMARIZED_TYPES
+
+
 # Where a recording sits in the vault, for the personal-context gate. Only the
 # two types that are personal by definition assert a route; everything else
 # asserts nothing, which is what refuses every route-gated card in a work
@@ -142,7 +159,14 @@ SPEAKER_RE = re.compile(r"^\*\*(.+)\*\*$")
 GENERIC_SPEAKER_RE = re.compile(r"^speaker\s*\d+$", re.IGNORECASE)
 # Patterns A (date + time + hex), B (A with an export stamp appended), and C
 # (date + time). D ("New Recording 41") and E (media/human titles) carry no date.
-FILENAME_STAMP_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})[ _-](\d{2})(\d{2})(\d{2})(?:-([0-9A-Fa-f]{6,10}))?")
+# Two export shapes reach this inbox: the compact `20260724 131748-9788991C` and
+# the dashed-and-dotted `2025-08-08 13.07.21 Ellian`. The optional `-` in the date
+# and `.`/`:`/`_` in the time absorb both without a second pattern. A time
+# component is required, which is what keeps this from matching a processed
+# `2026-08-11 - Meeting - Topic` note (a ` - ` follows the date there, not a time).
+FILENAME_STAMP_RE = re.compile(
+    r"^(\d{4})-?(\d{2})-?(\d{2})[ _-](\d{2})[.:_]?(\d{2})[.:_]?(\d{2})(?:-([0-9A-Fa-f]{6,10}))?"
+)
 EXPORT_STAMP_RE = re.compile(r"\s*\d{4}-\d{2}-\d{2}\s+\d{2}[_:]\d{2}[_:]\d{2}\s*$")
 COPY_SUFFIX_RE = re.compile(r"\s*\((\d+)\)$")
 MEDIA_EXTENSION_RE = re.compile(r"\.(mov|m4v|mp4|m4a|mp3|wav|aac|webm)$", re.IGNORECASE)
@@ -199,12 +223,29 @@ SUMMARY_MAX_WORDS = 120
 # to catch does not exist: in a 34-file run the failed chunks averaged 187.9s
 # against 219.8s for successes on the same service. Slow chunks are the thinking
 # route being itself, not generations going off the rails.
-# Filler removal and sentence joining legitimately reshape a few words per
-# chunk; wholesale invention does not look like this.
+# Meaning-first cleanup may rephrase, so words the source did not contain are
+# expected, not a fault. The gate holds only a *wholesale* rewrite: the ceiling
+# is a share of the cleaned content (`INVENTED_WORD_FRACTION`), so a long chunk
+# tolerates the dozen synonyms real paraphrase produces, while `MAX_INVENTED_WORDS`
+# keeps a small floor so a short chunk that is mostly fabricated is still caught.
+# The thinking verify pass reads the rest for the fabrication a word count cannot
+# tell from a synonym.
 MAX_INVENTED_WORDS = 4
+INVENTED_WORD_FRACTION = 0.25
+# The one gate problem a human can waive: the cleaned text carried more content
+# words the source did not than the budget allows. Every other check_chunk
+# problem (kept a timestamp, emitted a heading, used a speaker label) is a
+# structural defect, not a judgement call, so it is never waivable and keeps its
+# automatic corrective retry.
+INVENTED_PROBLEM_PREFIX = "these words are not in the chunk"
 MIN_RARE_WORDS = 10
 RARE_WORD_MIN_SOURCE_WORDS = 400
-RARE_WORD_RETENTION = 0.85
+# Meaning-first cleanup rephrases, so a distinctive source word is often replaced
+# by a synonym rather than dropped — indistinguishable to a word-overlap check.
+# The floor is set below the retention faithful paraphrase produces on a long
+# transcript (measured 0.70-0.77 on real memos the judge rated faithful); a real
+# dropped thread falls much further, and the thinking verify pass is the backstop.
+RARE_WORD_RETENTION = 0.70
 # Spoken-to-written cleanup compresses: filler, false starts, and a circumlocution
 # rewritten as the sentence it was reaching for take a real fraction of the words
 # out. Measured against the calibration example, a filler-heavy passage lands near
@@ -756,10 +797,22 @@ def scan_inbox(vault, limit=None):
     paths = []
     for directory, dirnames, filenames in os.walk(root, followlinks=False):
         dirpath = Path(directory)
-        dirnames[:] = [name for name in sorted(dirnames) if not (dirpath / name).is_symlink() and not name.startswith(".")]
+        # The review lane's own surface is not inbox input: the staged proposals
+        # in `_Pending Review/` are this run's output waiting for approval, and the
+        # control note is a tool artifact. Reprocessing either would grow a twin of
+        # every note or file the control note itself.
+        dirnames[:] = [
+            name
+            for name in sorted(dirnames)
+            if not (dirpath / name).is_symlink()
+            and not name.startswith(".")
+            and name != vault_review.PENDING_DIRNAME
+        ]
         for filename in sorted(filenames):
             path = dirpath / filename
             if path.is_symlink() or path.suffix.lower() != ".md":
+                continue
+            if dirpath == root and filename == vault_review.REVIEW_NOTE_NAME:
                 continue
             paths.append(path)
     paths.sort(key=lambda path: relative_path(vault, path))
@@ -1422,36 +1475,40 @@ This is the machine copy of references/transcript-note-format.md. Both must say 
 Return exactly one JSON object and nothing else:
 {"cleaned": "<the cleaned chunk as Markdown>", "chunk_summary": "<at most two sentences on what this chunk covers>"}
 
-Fidelity rules, which outrank every style rule below:
+Fidelity rules, which outrank every style rule below. Two recording types are
+exceptions, each with its own fidelity in its style entry: a `meeting` is
+summarized into minutes (paraphrase and compress freely; its verbatim recording
+is kept and linked separately), and `therapy` stays near-verbatim (keep the
+speaker's exact words). For every other type:
 - The register is spoken-to-written: what the speaker would have written had they
-  typed this instead of saying it. Reshape the delivery, never the content. You
-  are editing with a delete key, not a thesaurus: every content word in your
-  answer must be one they said.
+  typed this instead of saying it. Turn spoken delivery into clear, readable
+  first-person prose. Meaning comes first, not the exact words — you may rephrase
+  and smooth for readability — but every claim, point, name, number, and shade of
+  the speaker's meaning and intent must survive unchanged. Keep their voice and
+  register; do not rewrite them into more generic or more formal prose than they
+  used.
 - Remove filler and verbal scaffolding: "like", "um", "you know", "kind of",
   "sort of", "I mean", "basically", "essentially", "literally", "actually",
   "obviously", "honestly", along with false starts, restarted sentences,
   repeated phrases, and self-echoes that carry no meaning.
 - Condense a circumlocution into the plain statement it was reaching for, but
-  only when the meaning is unambiguous and only using the speaker's own words.
-  "I would also like it to have, essentially, if it fails to categorize a note,
-  there should be like a maybe in the system" becomes "I would also like a
-  'failed categorization' folder for notes it can't confidently categorize."
-  When two readings are possible, keep the longer wording.
-- Condensing means dropping words, never swapping them. Do not replace a word
-  the speaker used with a synonym you prefer: not "focus" for what they called
-  paying attention to, not "desire" for "want", not "utilize" for "use". Every
-  content word in your output should be one they said. This is what keeps the
-  cleaned text sounding like them, and a chunk that reads better in someone
-  else's vocabulary has failed.
+  only when the meaning is unambiguous. "I would also like it to have,
+  essentially, if it fails to categorize a note, there should be like a maybe in
+  the system" becomes "I would also like a 'failed categorization' folder for
+  notes it can't confidently categorize." When two readings are possible, keep
+  the one that loses no meaning.
 - Preserve the speaker's intent, uncertainty, and nuance. A hedge that qualifies
   a claim is content and stays: "I think", "maybe", "I don't know" mean
   something when they mark how sure the speaker is. A hedge that is pure
   delivery is filler and goes.
-- Never add facts, names, dates, conclusions, or certainty that are not in the chunk.
+- Never add facts, names, dates, conclusions, or numbers that are not in the
+  chunk, and never state something more certainly than the speaker did.
+  Rephrasing what they said is fine; inventing what they did not say is not.
 - Never drop substance, and never delete a whole utterance or exchange. Every
   point made must survive; even small talk survives, in its short readable form.
 - Fix obvious transcription punctuation and casing.
-- Do not summarize inside "cleaned". The summary belongs in "chunk_summary".
+- Do not summarize inside "cleaned", except for a meeting, whose "cleaned" is its
+  minutes. For every other type the summary belongs in "chunk_summary".
 - Leave garbled or uncertain passages visible rather than repairing them by guessing.
 - Drop the timestamps. The original transcript is kept elsewhere in the note.
 - Headings must be "##" or deeper. Never emit a level-one "#" heading.
@@ -1466,14 +1523,20 @@ Style by "recordingType":
   false starts a written entry would never have contained.
 - conversation: dialogue as "**Name:** what they said" paragraphs, one per turn,
   each turn in readable written form.
-- therapy: dialogue as in conversation, with the highest fidelity of all. Remove
-  only pure filler and false starts, and never condense. Keep hesitation and
-  repetition that carries weight. Never add clinical language, interpretation,
-  or diagnosis that was not spoken.
-- meeting: "##" headings per topic. If, and only if, the chunk contains explicit
-  decisions or assignments, end with "## Decisions" and "## Action Items"
-  bullets drawn from what was actually said. Write "Unassigned" or "Not stated"
-  rather than inferring an owner or a deadline.
+- therapy: dialogue as in conversation, with the highest fidelity of all, and the
+  exception to the meaning-first license above — keep the speaker's exact words.
+  Remove only pure filler and false starts; never condense, and never swap a word
+  for a synonym. Keep hesitation and repetition that carries weight. Never add
+  clinical language, interpretation, or diagnosis that was not spoken.
+- meeting: concise minutes, not a transcript — this is the exception to the
+  fidelity rules above, so paraphrase and compress freely. Write what was
+  discussed, decided, and assigned as brief prose under "##" topic headings,
+  attributing points to the speaker who made them where it matters. Capture every
+  decision and action item; where the chunk contains explicit ones, end it with
+  "## Decisions" and "## Action Items" bullets, writing "Unassigned" or "Not
+  stated" rather than inferring an owner or a deadline. Do not invent facts,
+  names, numbers, or decisions that were not said. Do not reproduce the dialogue
+  turn by turn — the verbatim recording is kept and linked separately.
 - lecture: "##" and "###" headings following the material, with the lecturer's
   own examples kept. Audience questions as dialogue.
 - external source (when "structuredFullContent" is true): remove filler and
@@ -1683,6 +1746,38 @@ def heading_lines(markdown):
     return [line.strip() for line in str(markdown).splitlines() if line.strip().startswith("#")]
 
 
+def chunk_added_words(cleaned, source, speaker_map, drop_labels, glossary=()):
+    """The full, untruncated invented-words list the gate holds on.
+
+    ``check_chunk`` truncates the words into a readable message; the review lane
+    and the journal need the whole set so a human sees exactly what a waiver
+    would cover. Recomputed with the same allowance as the gate so the two agree.
+    """
+    if not isinstance(cleaned, str) or not cleaned.strip():
+        return []
+    allowed = [] if drop_labels else [value for value in (speaker_map or {}).values() if value]
+    allowed = allowed + [offer["term"] for offer in glossary]
+    return added_words(source, cleaned, allowed)
+
+
+def invented_over_ceiling(source, cleaned, allowed):
+    """The invented content words when they exceed the meaning-first ceiling, else [].
+
+    The chunk gate and the apply-time recheck must agree on what counts as
+    fabrication, so both decide it here. A share of the cleaned content
+    (``INVENTED_WORD_FRACTION``, floored at ``MAX_INVENTED_WORDS``) is the
+    paraphrase meaning-first cleanup allows; more than that is the note reaching
+    for words the speaker did not use. Returns the full invented list when over
+    the ceiling — the caller truncates it for the message — and [] otherwise.
+    """
+    if not isinstance(cleaned, str) or not cleaned.strip():
+        return []
+    invented = added_words(source, cleaned, allowed)
+    cleaned_content = len(content_words(strip_structure(cleaned)))
+    ceiling = max(MAX_INVENTED_WORDS, int(INVENTED_WORD_FRACTION * cleaned_content))
+    return invented if len(invented) > ceiling else []
+
+
 def check_chunk(cleaned, source, speaker_map, drop_labels, tiny, glossary=()):
     """Deterministic gate on one cleaned chunk. Returns a list of problems."""
     problems = []
@@ -1703,9 +1798,9 @@ def check_chunk(cleaned, source, speaker_map, drop_labels, tiny, glossary=()):
     # point of correcting it — so the terms actually offered for this chunk have
     # to be allowed, or every successful correction reads as fabrication.
     allowed = allowed + [offer["term"] for offer in glossary]
-    invented = added_words(source, cleaned, allowed)
-    if len(invented) > MAX_INVENTED_WORDS:
-        problems.append(f"these words are not in the chunk: {', '.join(invented[:8])}")
+    invented = invented_over_ceiling(source, cleaned, allowed)
+    if invented:
+        problems.append(f"{INVENTED_PROBLEM_PREFIX}: {', '.join(invented[:8])}")
     # Any line opening with a bold span is a speaker label in this format,
     # whether the label is on its own line or inline as "**Name:** said this".
     if drop_labels and re.search(r"^\*\*[^*]{1,60}\*\*", cleaned, re.MULTILINE):
@@ -1726,10 +1821,17 @@ def clean_chunk_once(args, service, messages, source, speaker_map, drop_labels, 
     )
     cleaned = value.get("cleaned") if isinstance(value, dict) else None
     problems = check_chunk(cleaned, source, speaker_map, drop_labels, tiny, glossary)
+    # The full invented-words list is only needed when that is what failed; every
+    # other problem is structural and carries its whole message already.
+    invented = (
+        chunk_added_words(cleaned, source, speaker_map, drop_labels, glossary)
+        if any(problem.startswith(INVENTED_PROBLEM_PREFIX) for problem in problems)
+        else []
+    )
     chunk_summary = value.get("chunk_summary") if isinstance(value, dict) else ""
     if not isinstance(chunk_summary, str):
         chunk_summary = ""
-    return cleaned, chunk_summary.strip(), problems
+    return cleaned, chunk_summary.strip(), problems, invented
 
 
 def cleanup_stage(speaker_map, drop_labels):
@@ -1751,9 +1853,20 @@ def cleanup_stage(speaker_map, drop_labels):
     return "clean-transcript-chunk-single" if single else "clean-transcript-chunk-multi"
 
 
-def clean_one_chunk(args, service, payload, source, speaker_map, drop_labels, tiny, system=CLEANUP_SYSTEM):
-    """One chunk, with a single corrective retry that shows the model its own
-    violation. Raises UserError when the retry fails too.
+def clean_one_chunk(args, service, payload, source, speaker_map, drop_labels, tiny, system=CLEANUP_SYSTEM, summarized=False):
+    """One chunk. Returns ``(cleaned, summary)``.
+
+    Meaning-first cleanup does not hold a chunk for a human to waive. A chunk that
+    clears the gate is returned as-is; one that fails only the invented-words
+    ceiling gets the single corrective retry, and if that does not clear it the
+    best-effort text is returned anyway — the note-level thinking verify pass reads
+    it for meaning and flags it for review if it is actually unfaithful, which is
+    where a wholesale rewrite is caught. A *structural* failure that survives the
+    retry still raises UserError.
+
+    ``summarized`` marks a chunk of a meeting, whose "cleaned" is minutes rather
+    than verbatim cleanup: the invented-words check does not apply (minutes
+    paraphrase by design), so it is dropped, leaving only the structural checks.
 
     Pass ``service=None`` to use the per-chunk route, which is what ordinary
     cleanup wants: the model that cleans a meeting well is not the one that
@@ -1767,9 +1880,14 @@ def clean_one_chunk(args, service, payload, source, speaker_map, drop_labels, ti
     glossary = payload.get("glossary", ())
     stage = cleanup_stage(speaker_map, drop_labels)
     service = service or forge_routing.service_for(stage, args)
-    cleaned, summary, problems = clean_chunk_once(
+    cleaned, summary, problems, invented = clean_chunk_once(
         args, service, messages, source, speaker_map, drop_labels, tiny, stage, glossary
     )
+    if summarized:
+        # Minutes paraphrase and compress on purpose, so added words are expected;
+        # only the structural checks (no timestamp, no level-one heading) apply.
+        problems = [problem for problem in problems if not problem.startswith(INVENTED_PROBLEM_PREFIX)]
+        invented = []
     if not problems:
         return cleaned, summary
     # A retry that only says "unusable" gets the same answer back; naming the
@@ -1791,20 +1909,27 @@ def clean_one_chunk(args, service, payload, source, speaker_map, drop_labels, ti
             "role": "user",
             "content": f"That response was unusable: {problems[0]}. Return corrected JSON only. "
             + (
-                "Those words are yours, not the speaker's. Put their wording back: condense by "
-                "dropping words, never by replacing one with a word you prefer. Every content "
-                "word in your answer must be one they said."
-                if problems[0].startswith("these words are not in the chunk")
-                else "Stay inside the speaker's own words and their own voice. Clean and condense "
-                "how they said it; do not restate, describe, or explain what they said, and do "
-                "not drop any point they made."
+                "You rewrote too much of this into your own words. Stay closer to what the "
+                "speaker actually said: keep their points, names, and numbers, add nothing that "
+                "was not in the chunk, and do not state anything more certainly than they did."
+                if problems[0].startswith(INVENTED_PROBLEM_PREFIX)
+                else "Clean and condense how they said it in their own voice; do not restate, "
+                "describe, or explain what they said, and do not drop any point they made."
             ),
         }
     ]
-    cleaned, summary, retry_problems = clean_chunk_once(
+    cleaned, summary, retry_problems, retry_invented = clean_chunk_once(
         args, service, repair, source, speaker_map, drop_labels, tiny, f"{stage}-repair", glossary
     )
-    if retry_problems:
+    if not retry_problems:
+        return cleaned, summary
+    # The retry did not clear it. A structural defect (a kept timestamp, a level-one
+    # heading, a speaker label on a solo note) is a hard failure as before. If what
+    # remains is only invented words, commit the best-effort text: the note-level
+    # thinking verify pass judges its meaning and escalates a genuine rewrite, which
+    # is a better use of the reasoning budget than dropping the file or holding it.
+    retry_structural = [problem for problem in retry_problems if not problem.startswith(INVENTED_PROBLEM_PREFIX)]
+    if retry_structural or not (isinstance(cleaned, str) and cleaned.strip()):
         raise UserError(retry_problems[0])
     return cleaned, summary
 
@@ -1950,6 +2075,7 @@ def clean_items(args, vault, items, class_records, run_dir, skip):
                     drop_labels,
                     tiny,
                     system=cleanup_system(getattr(args, "compiled_voice", None), voice_context_for(record)),
+                    summarized=is_summarized(record["recording_type"]),
                 )
             except InterruptedError as error:
                 raise UserError(f"cleanup was preempted by interactive activity: {error}") from error
@@ -1975,30 +2101,29 @@ def clean_items(args, vault, items, class_records, run_dir, skip):
             elapsed = round(time.time() - started, 3)
             accepted = accepted_corrections(source, cleaned, payload.get("glossary", []))
             proposals.extend(accepted)
+            routing = forge_routing.routing_record(
+                # Which model actually cleaned this chunk. The two cleanup
+                # directions go to different services, so a run whose meeting
+                # reads like a rewrite and whose memo reads like a transcript is
+                # diagnosable from the journal rather than by re-deriving the
+                # split months later.
+                forge_routing.service_for(cleanup_stage(speaker_map, drop_labels), args)
+            )
+            entry = {
+                "path": item["path"],
+                "sha256": item["sha256"],
+                "chunk": index,
+                "chunks": len(chunks),
+                "status": "ok",
+                "artifact": name,
+                "cleaned_sha256": sha256_text(cleaned),
+                "chunk_summary": chunk_summary,
+                "proposals": accepted,
+                "routing": routing,
+                "seconds": elapsed,
+            }
             with progress_lock:
-                run_state.append_jsonl_fsync(
-                    journal_path,
-                    {
-                        "path": item["path"],
-                        "sha256": item["sha256"],
-                        "chunk": index,
-                        "chunks": len(chunks),
-                        "status": "ok",
-                        "artifact": name,
-                        "cleaned_sha256": sha256_text(cleaned),
-                        "chunk_summary": chunk_summary,
-                        "proposals": accepted,
-                        # Which model actually cleaned this chunk. The two cleanup
-                        # directions go to different services, so a run whose
-                        # meeting reads like a rewrite and whose memo reads like a
-                        # transcript is diagnosable from the journal rather than by
-                        # re-deriving the split months later.
-                        "routing": forge_routing.routing_record(
-                            forge_routing.service_for(cleanup_stage(speaker_map, drop_labels), args)
-                        ),
-                        "seconds": elapsed,
-                    },
-                )
+                run_state.append_jsonl_fsync(journal_path, entry)
                 durations.append(elapsed)
                 # Chunks now finish on `workers` fronts at once, so the mean
                 # duration has to be divided by that to mean anything.
@@ -2754,11 +2879,20 @@ def corrected_source_text(parsed, args, proposals=()):
     return vault_lexicon.apply_corrections(text, entries)[0] if entries else text
 
 
-def check_note(item, cleaned, summary, note_text, head, parsed, args, proposals=(), raw_text=None, raw_stem=None, tail=None):
+def check_note(
+    item, cleaned, summary, note_text, head, parsed, args,
+    proposals=(), raw_text=None, raw_stem=None, tail=None, summarized=False,
+):
     """Every deterministic check that can fail a note, in one place.
 
     Returns (problems, measurements). A problem holds the note back: it keeps
     its name and its body, and lands in the review queue.
+
+    ``summarized`` marks a meeting, whose note is minutes rather than verbatim
+    cleanup. The verbatim checks — length ratio, rare-word retention, and
+    utterance-locatable sampling — do not apply to a summary and are skipped; the
+    structural checks (heading, transcript preservation, summary format) still
+    run, and the note-level thinking review is what judges the minutes' substance.
     """
     problems = []
     heads = [line for line in head.splitlines() if re.match(r"^#\s", line.strip())]
@@ -2787,10 +2921,13 @@ def check_note(item, cleaned, summary, note_text, head, parsed, args, proposals=
     cleaned_words = len(strip_structure(cleaned).split())
     ratio = cleaned_words / source_words if source_words else 1.0
     floor = TINY_RATIO_MIN if item["stats"]["words"] < args.tiny_words else CLEANED_RATIO_MIN
-    if source_words and not floor <= ratio <= CLEANED_RATIO_MAX:
+    # Minutes compress and drop wording by design, so the length-ratio,
+    # rare-word, and utterance-locatable checks would fail every one of them.
+    # They are the verbatim gate, and a summary is not verbatim.
+    if not summarized and source_words and not floor <= ratio <= CLEANED_RATIO_MAX:
         problems.append(f"cleaned length is {ratio:.2f}x the source, outside {floor}-{CLEANED_RATIO_MAX}")
     retention, missing = rare_word_retention(source_text, cleaned)
-    if retention < RARE_WORD_RETENTION:
+    if not summarized and retention < RARE_WORD_RETENTION:
         problems.append(
             f"only {retention:.0%} of distinctive source words survived cleanup (missing: {', '.join(missing[:8])})"
         )
@@ -2803,10 +2940,11 @@ def check_note(item, cleaned, summary, note_text, head, parsed, args, proposals=
         problems.append("handwritten preamble did not survive into the generated section")
     cleaned_word_list = content_words(cleaned)
     weak = []
-    for block in fidelity_samples(item["path"], parsed["blocks"]):
-        score, _at = best_containment(block["text"], cleaned_word_list)
-        if score < FIDELITY_MIN_CONTAINMENT:
-            weak.append({"seconds": block["seconds"], "score": round(score, 3), "text": block["text"][:200]})
+    if not summarized:
+        for block in fidelity_samples(item["path"], parsed["blocks"]):
+            score, _at = best_containment(block["text"], cleaned_word_list)
+            if score < FIDELITY_MIN_CONTAINMENT:
+                weak.append({"seconds": block["seconds"], "score": round(score, 3), "text": block["text"][:200]})
     if weak:
         problems.append(f"{len(weak)} sampled utterance(s) could not be located in the cleaned text")
     return problems, {
@@ -2972,6 +3110,7 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
                 cleaned_result.get("proposals") or [],
                 raw_text=raw_text,
                 raw_stem=raw_stem,
+                summarized=is_summarized(record["recording_type"]),
             )
         except (OSError, UnicodeDecodeError, UserError, ValueError) as error:
             message = f"{type(error).__name__}: {error}"
@@ -3074,15 +3213,27 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
 
 def scan_existing_names(vault):
     """Case-folded relative paths of everything already in the inbox, so a new
-    name never lands on an existing note."""
+    name never lands on an existing note.
+
+    The review lane's own surface is excluded: the staged proposals in
+    `_Pending Review/` carry the very names being assigned, so counting them as
+    taken would bump every destination to a `… 1` twin and break the match
+    between a record and its review-note checkbox at apply time.
+    """
     root = vault / INBOX_DIR
     names = set()
     if not root.is_dir():
         return names
     for directory, dirnames, filenames in os.walk(root, followlinks=False):
         dirpath = Path(directory)
-        dirnames[:] = [name for name in sorted(dirnames) if not name.startswith(".")]
+        dirnames[:] = [
+            name
+            for name in sorted(dirnames)
+            if not name.startswith(".") and name != vault_review.PENDING_DIRNAME
+        ]
         for filename in filenames:
+            if dirpath == root and filename == vault_review.REVIEW_NOTE_NAME:
+                continue
             names.add(relative_path(vault, dirpath / filename).casefold())
     return names
 
@@ -3830,12 +3981,19 @@ def fidelity_payloads(vault, record, run_dir, lexicon=None):
     return items
 
 
+ESCALATION_EFFORT = "xhigh"
+
+
 def verify_records(args, vault, items_by_path, records, run_dir):
     """Have the thinking model review the batch, and redo what it flags.
 
     Bulk work runs without reasoning because it is usually right; this is what
     makes "usually" safe. Full coverage costs a handful of batched calls, and the
-    reasoning budget goes to the items that turn out to need it.
+    reasoning budget goes to the items that turn out to need it — the redo below
+    runs at ``ESCALATION_EFFORT`` (`xhigh`), which is where that budget is spent:
+    medium clears the cleanup case only 4/8, xhigh 8/8. The batched review itself
+    runs at the thinking service's own default, since it is a yes/no judgment
+    rather than a from-scratch redo.
     """
     warnings = []
     candidates = [record for record in records if record["action"] == "process" and not record["needs_review"]]
@@ -3852,6 +4010,11 @@ def verify_records(args, vault, items_by_path, records, run_dir):
     note_items = [verify_note_payload(vault, record, items_by_path[record["source"]]) for record in candidates]
     fidelity_items = []
     for position, record in enumerate(candidates):
+        # A meeting is minutes, not verbatim cleanup, so its utterances are not
+        # meant to appear in the note; the utterance-locator review does not apply.
+        # The note-level review above still checks its summary and speaker names.
+        if is_summarized(record["recording_type"]):
+            continue
         # Every chunked file, plus a sample of the single-chunk ones: a file the
         # model read in one pass has already passed the deterministic locator.
         if record.get("chunks", 1) > 1 or position % FIDELITY_SAMPLE_RATE == 0:
@@ -3941,6 +4104,7 @@ def verify_records(args, vault, items_by_path, records, run_dir):
             timeout=args.request_timeout,
             api_key=args.api_key,
             task="reclassify-transcript",
+            reasoning_effort=ESCALATION_EFFORT,
         )
         classification, _warnings = validate_classification(value, item, parsed)
         if classification["needs_review"] or not classification["title"]:
@@ -3975,6 +4139,7 @@ def verify_records(args, vault, items_by_path, records, run_dir):
             timeout=args.request_timeout,
             api_key=args.api_key,
             task="resummarize-transcript",
+            reasoning_effort=ESCALATION_EFFORT,
         )
         new_summary = summary_value.get("summary") if isinstance(summary_value, dict) else None
         if record["summary"] is not None:
@@ -4109,6 +4274,7 @@ def reassemble_escalated(args, vault, schema, items_by_path, clean_results, reco
                 record.get("proposals") or [],
                 raw_text=raw_text,
                 raw_stem=raw_stem,
+                summarized=is_summarized(record["recording_type"]),
             )
             record["measurements"] = measurements
             record["checks"] = problems
@@ -4200,6 +4366,293 @@ def write_review_queue(run_dir, records):
                     + "\n"
                 )
     return path
+
+
+APPLY_COMMAND_ID_ENV = "VAULT_TRANSCRIPTS_APPLY_COMMAND_ID"
+SHELLCOMMANDS_DATA = (".obsidian", "plugins", "obsidian-shellcommands", "data.json")
+
+
+def discover_apply_command_id(vault):
+    """The shell-commands plugin command that runs this apply, found by its text.
+
+    So the one-click link needs no manual id: create the command in the plugin
+    and the review note finds it. Reads the plugin's own config read-only and
+    matches a command whose text runs this script with ``--from-review``. The
+    ``VAULT_TRANSCRIPTS_APPLY_COMMAND_ID`` env var overrides this when set.
+    """
+    data_path = vault.joinpath(*SHELLCOMMANDS_DATA)
+    try:
+        data = json.loads(data_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    commands = data.get("shell_commands")
+    if isinstance(commands, dict):
+        commands = list(commands.values())
+    if not isinstance(commands, list):
+        return None
+    for command in commands:
+        if not isinstance(command, dict) or not command.get("id"):
+            continue
+        texts = []
+        platform_specific = command.get("platform_specific_commands")
+        if isinstance(platform_specific, dict):
+            texts.extend(str(value) for value in platform_specific.values() if value)
+        if command.get("shell_command"):
+            texts.append(str(command["shell_command"]))
+        blob = " ".join(texts)
+        if "vault-transcripts" in blob and "--from-review" in blob:
+            return str(command["id"])
+    return None
+
+
+def resolve_apply_command_id(vault):
+    return os.environ.get(APPLY_COMMAND_ID_ENV) or discover_apply_command_id(vault)
+
+
+def review_facts(record):
+    """The compact one-line facts the review note shows under a proposal."""
+    stats = record.get("stats") or {}
+    facts = [record.get("recording_type") or "note"]
+    clock = format_clock(stats.get("duration_seconds"))
+    if clock:
+        facts.append(clock)
+    facts.append(f"{stats.get('words', 0)} words")
+    speakers = len(stats.get("speaker_labels") or {})
+    if speakers:
+        facts.append(f"{speakers} speaker{'s' if speakers != 1 else ''}")
+    return " · ".join(facts)
+
+
+def review_item(record):
+    name = Path(record["destination"]).stem if record.get("destination") else Path(record["source"]).stem
+    return vault_review.ReviewItem(
+        name=name,
+        source=Path(record["source"]).name,
+        summary=record.get("summary") or "",
+        facts=review_facts(record),
+        reason=record.get("review_reason") or "",
+    )
+
+
+def apply_command_line(vault):
+    script = Path(__file__).resolve()
+    return (
+        f"python3 {shlex.quote(str(script))} process "
+        f"--vault {shlex.quote(str(vault))} --apply --from-review"
+    )
+
+
+def stage_pending_note(pending, run_dir, record):
+    """Copy an assembled proposal into the visible staging folder under the name
+    it would take in the vault, so the review note can link to it and the reviewer
+    can open and edit it in place."""
+    source = run_dir / "assembled" / record["artifact"]
+    destination = pending / Path(record["destination"]).name
+    shutil.copyfile(source, destination)
+
+
+def stage_review_note(vault, run_dir, records, generated_at):
+    """Stage the run's proposals into `_Pending Review/` and write the control
+    note at the top of the inbox. Dry-run only. Returns any warnings.
+
+    A prior, unapplied review from a *different* run is moved into this run's
+    backup rather than mixed in, so the note on disk always describes one run.
+    """
+    warnings = []
+    inbox = vault / INBOX_DIR
+    pending = inbox / vault_review.PENDING_DIRNAME
+    review_path = inbox / vault_review.REVIEW_NOTE_NAME
+    run_rel = os.path.relpath(run_dir, vault)
+    if review_path.is_file():
+        prior = vault_review.parse_review_note(review_path.read_text(encoding="utf-8"))
+        if prior.run_directory and prior.run_directory != run_rel:
+            backup = run_dir / "backup" / "prior-review"
+            backup.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(review_path), str(backup / vault_review.REVIEW_NOTE_NAME))
+            if pending.is_dir():
+                shutil.move(str(pending), str(backup / vault_review.PENDING_DIRNAME))
+            warnings.append(
+                f"replaced an unapplied Inbox Review from {prior.run_directory}; its note and staged "
+                f"proposals were moved to {backup}"
+            )
+    pending.mkdir(parents=True, exist_ok=True)
+    # A proposal dropped since a previous staging of this run must not linger as a
+    # stale, still-linkable note. The staged files are copies; the run directory
+    # remains the record of what was proposed.
+    for stale in pending.glob("*.md"):
+        stale.unlink()
+    to_process, decisions = [], []
+    for record in records:
+        if record.get("already_applied"):
+            continue
+        item = review_item(record)
+        if record["action"] == "process" and record.get("artifact"):
+            stage_pending_note(pending, run_dir, record)
+            to_process.append(item)
+        elif record["needs_review"] or record["status"] == "failed":
+            decisions.append(item)
+    command_id = resolve_apply_command_id(vault)
+    note = vault_review.render_review_note(
+        generated_at=generated_at,
+        run_directory=run_rel,
+        to_process=to_process,
+        decisions=decisions,
+        apply_uri=vault_review.apply_uri(vault.name, command_id),
+        apply_command=apply_command_line(vault),
+        empty=not (to_process or decisions),
+    )
+    write_atomic(review_path, note)
+    return warnings
+
+
+def review_timestamp():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def resolve_run_from_review(vault):
+    """The run directory the standing review note points at.
+
+    `--from-review` carries no `--run`, because the shell-command URI that fires
+    it cannot pass one; the run is read from the note's frontmatter instead.
+    """
+    review_path = vault / INBOX_DIR / vault_review.REVIEW_NOTE_NAME
+    if not review_path.is_file():
+        raise UserError(f"--from-review needs {vault_review.REVIEW_NOTE_NAME} in the inbox; none is there")
+    decisions = vault_review.parse_review_note(review_path.read_text(encoding="utf-8"))
+    if not decisions.run_directory:
+        raise UserError(f"{vault_review.REVIEW_NOTE_NAME} has no run reference in its frontmatter")
+    run_dir = (vault / decisions.run_directory).resolve()
+    if not run_dir.is_dir():
+        raise UserError(f"the run {decisions.run_directory} the review note points at is gone; run a fresh dry run")
+    return str(run_dir)
+
+
+def extract_cleaned_prose(note_text, preamble=""):
+    """The model-written prose from an assembled note, for the invented-words
+    recompute: everything above `# Transcript`, minus the apparatus callouts and
+    the owner's own handwritten preamble."""
+    body = split_frontmatter(note_text.encode("utf-8"))["body"]
+    index = body.find("# Transcript")
+    if index != -1:
+        body = body[:index]
+    kept = [line for line in body.splitlines() if not line.strip().startswith((">", "#"))]
+    prose = "\n".join(kept).strip()
+    if preamble.strip():
+        prose = prose.replace(preamble.strip(), "").strip()
+    return prose
+
+
+def recheck_reviewed_note(vault, record, note_text, args):
+    """Recompute the gate over the bytes that will reach the vault.
+
+    Like `vault-compose apply`, the check is recomputed from the file on disk,
+    never read from a stored verdict — that recompute is the safety property. It
+    is the same meaning-first gate cleanup applied: paraphrase is fine, but
+    fabrication past the ceiling (``invented_over_ceiling``) or a broken raw
+    transcript holds the note for another look. Returns a list of problems.
+    """
+    data = (vault / record["source"]).read_bytes()
+    raw_body = transcript_source(split_frontmatter(data)["body"], vault)
+    parsed = parse_transcript(raw_body)
+    source_text = corrected_source_text(parsed, args, record.get("proposals") or [])
+    allowed = [value for value in (record.get("speaker_map") or {}).values() if value]
+    allowed += [row.get("correct") for row in (record.get("proposals") or []) if row.get("correct")]
+    cleaned = extract_cleaned_prose(note_text, parsed.get("preamble", ""))
+    problems = []
+    # A meeting is minutes, not verbatim cleanup, so the invented-words check does
+    # not apply to it — the same exemption cleanup and check_note make. Without
+    # this a reviewed meeting would re-hold on apply for paraphrasing, which is its
+    # whole job. The chunk gate's ceiling is what keeps ordinary paraphrase from
+    # re-holding either: only fabrication beyond it fails here.
+    if not is_summarized(record.get("recording_type")):
+        invented = invented_over_ceiling(source_text, cleaned, allowed)
+        if invented:
+            problems.append(f"{INVENTED_PROBLEM_PREFIX}: {', '.join(invented[:8])}")
+    # The verbatim recording must survive an edit untouched. This is the one
+    # invariant an edit is never allowed to break.
+    if record.get("raw_destination"):
+        raw_stem = Path(record["raw_destination"]).stem
+        if not note_text.endswith(f"# Transcript\n\n[[{raw_stem}]]\n"):
+            problems.append("the transcript link at the end of the note was changed")
+    elif not note_text.endswith(raw_body):
+        problems.append("the raw transcript section is no longer byte-identical to the recording")
+    return problems
+
+
+def apply_from_review(vault, run_dir, records, args):
+    """Reconcile the run's records with the reviewer's decisions before apply.
+
+    Ticked notes are applied from their staged (possibly edited) bytes after the
+    gate is recomputed; everything unticked is left where it is. Returns warnings.
+    """
+    warnings = []
+    review_path = vault / INBOX_DIR / vault_review.REVIEW_NOTE_NAME
+    decisions = vault_review.parse_review_note(review_path.read_text(encoding="utf-8"))
+    pending = vault / INBOX_DIR / vault_review.PENDING_DIRNAME
+    for record in records:
+        if record["action"] != "process" or not record.get("artifact") or not record.get("destination"):
+            continue
+        name = Path(record["destination"]).stem
+        if name not in decisions.approved:
+            # Left unticked: never applied, and re-surfaced as needing a decision
+            # so a plain apply cannot pick it up.
+            record["action"] = "none"
+            record["needs_review"] = True
+            if record["status"] == "ok":
+                record["status"] = "review"
+                record["review_reason"] = "left unticked in the review note"
+            continue
+        staged = pending / Path(record["destination"]).name
+        note_text = (
+            staged.read_text(encoding="utf-8")
+            if staged.is_file()
+            else (run_dir / "assembled" / record["artifact"]).read_text(encoding="utf-8")
+        )
+        problems = recheck_reviewed_note(vault, record, note_text, args)
+        if problems:
+            record["action"] = "none"
+            record["status"] = "review"
+            record["needs_review"] = True
+            record["review_reason"] = "; ".join(problems)
+            warnings.append(f"{record['destination']}: not applied — {problems[0]}")
+            continue
+        # The reconciled bytes become the assembled artifact so the existing apply
+        # path — which trusts the frozen hash — writes exactly what was reviewed.
+        (run_dir / "assembled" / record["artifact"]).write_text(note_text, encoding="utf-8")
+        record["final_hash"] = sha256_text(note_text)
+        record["action"] = "process"
+        record["status"] = "ok"
+        record["needs_review"] = False
+        record["review_reason"] = None
+    return warnings
+
+
+def finish_review(vault, run_dir):
+    """After a `--from-review` apply, clear the staged proposals and reset the
+    standing review note to its empty state. Nothing is deleted: the staged
+    copies are moved into the run's backup."""
+    inbox = vault / INBOX_DIR
+    pending = inbox / vault_review.PENDING_DIRNAME
+    review_path = inbox / vault_review.REVIEW_NOTE_NAME
+    if pending.is_dir():
+        backup = run_dir / "backup" / "applied-review"
+        backup.mkdir(parents=True, exist_ok=True)
+        for staged in pending.glob("*.md"):
+            shutil.move(str(staged), str(backup / staged.name))
+        try:
+            pending.rmdir()
+        except OSError:
+            pass
+    note = vault_review.render_review_note(
+        generated_at=review_timestamp(),
+        run_directory=os.path.relpath(run_dir, vault),
+        to_process=[],
+        decisions=[],
+        apply_uri=None,
+        apply_command=apply_command_line(vault),
+        empty=True,
+    )
+    write_atomic(review_path, note)
 
 
 def verification_report(verification, records):
@@ -4947,6 +5400,13 @@ def process(args):
     vault = Path(args.vault).expanduser().resolve()
     if not vault.is_dir():
         raise UserError(f"vault root does not exist: {vault}")
+    from_review = bool(getattr(args, "from_review", False))
+    if from_review:
+        # Applying a reviewed run: it is always an apply, and the run to resume is
+        # the one the standing review note names.
+        args.apply = True
+        if not args.run:
+            args.run = resolve_run_from_review(vault)
     resuming = bool(args.run)
     state = None
     if resuming:
@@ -5107,13 +5567,31 @@ def process(args):
         # take inbound links with them rather than leaving it to be found out.
         mover, mover_reason = resolve_mover(args.link_rewrite, vault)
         if args.apply:
+            if from_review:
+                warnings.extend(apply_from_review(vault, run_dir, records, args))
+                counts = recompute_counts(records, dedupe, items)
+                counts["applied"] = sum(
+                    1 for record in records if record.get("already_applied") and not record["needs_review"]
+                )
             if mover_reason:
                 warnings.append(f"renames use a plain rename: {mover_reason}")
             apply_records(vault, run_dir, records, counts, mover=mover)
             warnings.extend(mover.warnings)
+            if from_review:
+                # Only retire the review surface when something actually went in.
+                # If nothing was approved (or every approval re-held), leave the
+                # note and staging in place so the review is not silently lost.
+                if any(record["action"] == "process" for record in records):
+                    finish_review(vault, run_dir)
+                else:
+                    warnings.append(
+                        "nothing was applied from the review — the review note and staged proposals "
+                        "were left in place. Tick at least one note, or resolve the reasons shown."
+                    )
             final_phase = "complete"
         else:
             final_phase = "planned"
+            warnings.extend(stage_review_note(vault, run_dir, records, review_timestamp()))
         plan_path, report_path = write_plan(
             run_dir,
             records,
@@ -5327,6 +5805,7 @@ def assemble_reprocessed(args, vault, schema, items, class_records, clean_result
                 args,
                 cleaned_result.get("proposals") or [],
                 tail=item["tail"],
+                summarized=is_summarized(record.get("recording_type")),
             )
         except (OSError, UnicodeDecodeError, UserError, ValueError) as error:
             message = f"{type(error).__name__}: {error}"
@@ -6108,6 +6587,29 @@ def doctor(args):
         warnings.append("no thinking service is configured; verification would run on the bulk service")
     if not think_probe["reachable"]:
         warnings.append("thinking service is unreachable; runs would report that nothing was verified")
+
+    # The review lane: is the one-click apply link wired, and is a review pending?
+    command_id = resolve_apply_command_id(vault)
+    review_check = {
+        "ok": True,
+        "control_note": f"{INBOX_DIR}/{vault_review.REVIEW_NOTE_NAME}",
+        "apply_command_id": command_id,
+        "apply_command_source": (
+            "env" if os.environ.get(APPLY_COMMAND_ID_ENV) else "shell-commands plugin" if command_id else None
+        ),
+    }
+    if not command_id:
+        warnings.append(
+            "the one-click apply link is off: add a shell-commands command that runs this script with "
+            f"--from-review (the review note finds it automatically), or set {APPLY_COMMAND_ID_ENV}. "
+            "The review note still prints the terminal command."
+        )
+    review_path = vault / INBOX_DIR / vault_review.REVIEW_NOTE_NAME
+    if review_path.is_file():
+        pending = vault_review.parse_review_note(review_path.read_text(encoding="utf-8"))
+        review_check["pending_run"] = pending.run_directory
+        review_check["approved_in_note"] = len(pending.approved)
+    checks["review"] = review_check
     return structured("ok" if ok else "error", warnings=warnings, data={"checks": checks})
 
 
@@ -6168,7 +6670,15 @@ def parse_args(argv):
     parser.add_argument(
         "--retry-failed",
         action="store_true",
-        help="re-attempt chunks a previous run recorded as failed instead of inheriting the failure",
+        help="re-attempt chunks a previous run recorded as failed instead of inheriting them",
+    )
+    parser.add_argument(
+        "--from-review",
+        action="store_true",
+        help=(
+            "process: apply exactly what the inbox review note approves, reading the run from the "
+            "note; recomputes the meaning-first gate on the reviewed bytes before applying"
+        ),
     )
     parser.add_argument(
         "--jobs",

@@ -149,6 +149,7 @@ export function resolveService(name, options = {}) {
 		model: service.model,
 		contextTokens: service.contextTokens,
 		chatTemplateKwargs: service.chatTemplateKwargs,
+		reasoningEffort: service.reasoningEffort,
 		scheduling: service.scheduling,
 	};
 }
@@ -170,6 +171,7 @@ export function resolveThinkService(options = {}) {
 		model: chosen.model,
 		contextTokens: chosen.contextTokens,
 		chatTemplateKwargs: chosen.chatTemplateKwargs,
+		reasoningEffort: chosen.reasoningEffort,
 		scheduling: chosen.scheduling,
 		...(isFallback ? { fallback: "chat" } : {}),
 	};
@@ -190,6 +192,7 @@ export function resolveTaskService(options = {}) {
 		model: chosen.model,
 		contextTokens: chosen.contextTokens,
 		chatTemplateKwargs: chosen.chatTemplateKwargs,
+		reasoningEffort: chosen.reasoningEffort,
 		scheduling: chosen.scheduling,
 		...(isFallback ? { fallback: "chat" } : {}),
 	};
@@ -415,6 +418,7 @@ export async function call(service, messages, options = {}) {
 		timeoutMs = DEFAULT_TIMEOUT_MS,
 		task = null,
 		env = process.env,
+		reasoningEffort = null,
 	} = options;
 	const scheduling = service.scheduling ?? {};
 	const request = { model: service.model, messages, temperature, stream: false };
@@ -423,6 +427,11 @@ export async function call(service, messages, options = {}) {
 	if (cachePrompt) request.cache_prompt = true;
 	if (maxTokens) request.max_tokens = maxTokens;
 	if (service.chatTemplateKwargs) request.chat_template_kwargs = service.chatTemplateKwargs;
+	// Graded reasoning effort as the top-level OpenAI field. A per-call value wins
+	// over the service default, mirroring the Python client, so an escalation can
+	// force `xhigh` on one item without re-resolving the service.
+	const effort = reasoningEffort ?? service.reasoningEffort;
+	if (effort) request.reasoning_effort = effort;
 	let useSlot = background && Boolean(scheduling.enabled);
 	if (useSlot) request.id_slot = scheduling.backgroundSlot;
 	// Refuse a prompt that cannot fit before uploading it and taking a lease.

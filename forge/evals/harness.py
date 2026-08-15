@@ -168,6 +168,11 @@ def resolve_model(model_id):
     # Production sets no max_tokens at all on the think tier. The cap here is a
     # safety rail against a runaway repetition loop, not a claim about fidelity.
     service["outputHeadroom"] = int(entry.get("outputHeadroom") or 0)
+    # Graded reasoning effort forwarded verbatim to the endpoint (Qwen 3.8+):
+    # "none"/"low"/"medium"/"xhigh". This is request shaping, not identity, so
+    # several arms can name one endpoint and differ only here. It rides in the
+    # requested-settings block so a result records which effort produced it.
+    service["reasoningEffort"] = entry.get("reasoningEffort")
     # Optional identity assertion. Several entries can share one endpoint when a
     # router swaps the weights behind it, and nothing in a request says which is
     # loaded — so the entry states what it expects and `check_served` compares.
@@ -554,6 +559,7 @@ def requested_settings(service):
     return {
         "model": service["model"],
         "chatTemplateKwargs": service.get("chatTemplateKwargs"),
+        "reasoningEffort": service.get("reasoningEffort"),
         "contextTokens": service.get("contextTokens"),
         "outputHeadroom": service.get("outputHeadroom") or 0,
         "temperature": 0,

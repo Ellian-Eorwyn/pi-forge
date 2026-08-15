@@ -37,10 +37,18 @@ class StageResolutionTests(unittest.TestCase):
         for stage, expected in (
             ("clean-transcript-chunk-multi", "task"),
             ("connection-judgment", "task"),
-            ("clean-transcript-chunk-single", "think"),
-            ("split-braindump", "think"),
         ):
             self.assertEqual(forge_routing.service_name_for(stage, routing={}), expected, stage)
+
+    def test_cleanup_and_braindump_are_held_on_chat(self):
+        # Both moved off `think`: single-speaker cleanup clears the meaning-first
+        # gate on the non-thinking bulk tier (q38-none 8/8) with the verify pass as
+        # the escalation net, and braindump-split is within measurement noise of
+        # thinking once its eval gate is aligned to the skill, so the tie rule
+        # takes the faster tier.
+        for stage in ("clean-transcript-chunk-single", "split-braindump"):
+            self.assertEqual(forge_routing.service_name_for(stage, routing={}), "chat", stage)
+            self.assertIn(stage, forge_routing.STAGES_HELD_ON_CHAT)
 
     def test_classification_is_held_despite_clearing_its_case(self):
         # The one stage the report clears that the table deliberately does not
@@ -52,9 +60,11 @@ class StageResolutionTests(unittest.TestCase):
 
     def test_the_two_cleanup_directions_disagree_on_purpose(self):
         # The finding this whole module exists for: the same stage wants
-        # opposite models depending on how many people are speaking.
+        # different models depending on how many people are speaking. Multi-speaker
+        # cleanup runs on the small tier; single-speaker cleanup runs on the
+        # non-thinking bulk tier (the default), each for its own measured reason.
         self.assertEqual(forge_routing.service_name_for("clean-transcript-chunk-multi", routing={}), "task")
-        self.assertEqual(forge_routing.service_name_for("clean-transcript-chunk-single", routing={}), "think")
+        self.assertEqual(forge_routing.service_name_for("clean-transcript-chunk-single", routing={}), "chat")
 
     def test_a_settings_override_beats_the_table(self):
         name = forge_routing.service_name_for("connection-judgment", routing={"connection-judgment": "think"})
@@ -72,14 +82,17 @@ class StageResolutionTests(unittest.TestCase):
         self.assertEqual(name, "chat")
 
     def test_overrides_are_read_from_the_agent_directory(self):
+        # `split-braindump` runs on `chat` by default now, so overriding it to
+        # `think` is what proves the settings override is actually read.
         with tempfile.TemporaryDirectory() as directory:
             agent = Path(directory) / "agent"
             agent.mkdir()
             (agent / "settings.json").write_text(
-                json.dumps({"connectedServices": {"routing": {"split-braindump": "chat"}}}), encoding="utf-8"
+                json.dumps({"connectedServices": {"routing": {"split-braindump": "think"}}}), encoding="utf-8"
             )
             env = {"PI_FORGE_AGENT_DIR": str(agent)}
-            self.assertEqual(forge_routing.service_name_for("split-braindump", env=env), "chat")
+            self.assertEqual(forge_routing.service_name_for("split-braindump", routing={}), "chat")
+            self.assertEqual(forge_routing.service_name_for("split-braindump", env=env), "think")
 
 
 class FallbackTests(unittest.TestCase):
@@ -128,9 +141,15 @@ class PinnedEndpointTests(unittest.TestCase):
             **{"base_url": None, "model": None, "think_url": None, "think_model": None, **fields}
         )
 
+    # No stage is table-routed to `think` any more (all the thinking-tier stages
+    # moved to the bulk model), so these force a think route with a
+    # `connectedServices.routing` override — a real configuration a user can set,
+    # and the pin mechanism these tests cover applies to it exactly the same.
+    THINK_ROUTE = {"a-think-routed-stage": "think"}
+
     def test_one_named_endpoint_holds_every_stage(self):
         args = self.arguments(base_url="http://only:1/v1", base_url_provided=True)
-        service = forge_routing.service_for("split-braindump", args, env={}, settings={})
+        service = forge_routing.service_for("a-think-routed-stage", args, env={}, settings={}, routing=self.THINK_ROUTE)
         self.assertEqual(service["url"], "http://only:1/v1/chat/completions")
         self.assertEqual(service["routedTo"], "think")
         self.assertTrue(service["pinned"])
@@ -139,18 +158,18 @@ class PinnedEndpointTests(unittest.TestCase):
         args = self.arguments(
             base_url="http://bulk:1/v1", base_url_provided=True, think_url="http://thinker:2/v1"
         )
-        service = forge_routing.service_for("split-braindump", args, env={}, settings={})
+        service = forge_routing.service_for("a-think-routed-stage", args, env={}, settings={}, routing=self.THINK_ROUTE)
         self.assertEqual(service["url"], "http://thinker:2/v1/chat/completions")
         self.assertNotIn("pinned", service)
 
     def test_routing_applies_when_nothing_was_named(self):
         args = self.arguments()
-        service = forge_routing.service_for("split-braindump", args, env={}, settings={})
+        service = forge_routing.service_for("a-think-routed-stage", args, env={}, settings={}, routing=self.THINK_ROUTE)
         self.assertEqual(service["url"], "http://llms:8008/v1/chat/completions")
 
     def test_an_explicit_override_still_wins_over_the_pin(self):
         args = self.arguments(base_url="http://only:1/v1", base_url_provided=True)
-        service = forge_routing.service_for("split-braindump", args, override="think", env={}, settings={})
+        service = forge_routing.service_for("a-think-routed-stage", args, override="think", env={}, settings={})
         self.assertEqual(service["url"], "http://llms:8008/v1/chat/completions")
 
     def test_a_disabled_tier_still_degrades_toward_chat_with_arguments_present(self):

@@ -170,6 +170,23 @@ test("chat template kwargs are forwarded verbatim, and omitted when unset", asyn
 	}
 });
 
+test("reasoning effort is forwarded, a per-call value wins, and it is omitted when unset", async () => {
+	const stub = await startStub(() => ({ content: "{}" }));
+	try {
+		await call({ ...service(stub.url), reasoningEffort: "medium" }, [{ role: "user", content: "hi" }]);
+		assert.equal(stub.requests[0].reasoning_effort, "medium");
+		// A per-call value forces the level for one item, as escalation does.
+		await call({ ...service(stub.url), reasoningEffort: "medium" }, [{ role: "user", content: "hi" }], {
+			reasoningEffort: "xhigh",
+		});
+		assert.equal(stub.requests[1].reasoning_effort, "xhigh");
+		await call(service(stub.url), [{ role: "user", content: "hi" }]);
+		assert.ok(!("reasoning_effort" in stub.requests[2]));
+	} finally {
+		await stub.close();
+	}
+});
+
 test("the doctor names an endpoint that answers with no visible content", async () => {
 	// Measured against the task backend: with `--reasoning-format deepseek` the
 	// reply arrives in `reasoning_content` and `content` is empty, so every

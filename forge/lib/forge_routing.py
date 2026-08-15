@@ -40,7 +40,8 @@ STAGE_SERVICES = {
     # compresses four-speaker material, dropping a quarter of it.
     #
     # Only reached for multi-speaker material; `clean_one_chunk` routes per
-    # chunk, because the single-speaker case wants the opposite model.
+    # chunk, and the single-speaker case runs on the non-thinking bulk tier now
+    # (see `clean-transcript-chunk-single` in STAGES_HELD_ON_CHAT).
     "clean-transcript-chunk-multi": "task",
     "clean-transcript-chunk-multi-repair": "task",
     # Yes/no pair judgment. 16/16 against 14/16, no false negatives, and 3.4x
@@ -48,19 +49,6 @@ STAGE_SERVICES = {
     # small model is good at: the answer is a decision about the input, not
     # prose composed from it.
     "connection-judgment": "task",
-    # --- to the thinking tier ----------------------------------------------
-    # Single-speaker cleanup. 8/8 against 2/8, and invented words fall from
-    # 4.38 per item to 0.00. The small model is blocked here by a silent
-    # failure — output that passed every deterministic check and was still
-    # graded unfaithful — which is the one failure nothing downstream catches.
-    # +54s per chunk, and worth it.
-    "clean-transcript-chunk-single": "think",
-    "clean-transcript-chunk-single-repair": "think",
-    # How many notes a braindump is. 7/8 against 4/8, and the baseline carries a
-    # silent failure on `raw-asr-piforge` that the thinking model does not.
-    # Better on both instruments. +55s per braindump, on a stage that runs a
-    # handful of times a day.
-    "split-braindump": "think",
 }
 
 # Stages measured and deliberately left on `chat`, with the reason. Nothing
@@ -75,6 +63,27 @@ STAGE_SERVICES = {
 # override written against one of those names would have parsed, validated, and
 # done nothing, because `service_name_for` looks up the call site's string.
 STAGES_HELD_ON_CHAT = {
+    "clean-transcript-chunk-single": (
+        "was on `think` (8/8 against 2/8, invented words 4.38 → 0.00) while the cleanup gate scored "
+        "verbatim voice rather than meaning. Under the meaning-first gate the non-thinking bulk tier "
+        "clears it 8/8 on the 3.8 build (`q38-none`, measured 2026-08-14), and the blind judge rated "
+        "the non-thinking output faithfulness 4.75/5, coverage 5.0/5 with no material drops — the old "
+        "2/8 was synonym swaps counted as invented words, not lost meaning. So the bulk tier cleans "
+        "it and the thinking verify pass escalates a genuinely-unfaithful note at `xhigh` "
+        "(`verify_records`), which is the producer/verifier split `forge_verify` documents. Ellie "
+        "prizes meaning over exact wording, so this is the trade she wants."
+    ),
+    "clean-transcript-chunk-single-repair": "the corrective retry of single-speaker cleanup, and it goes where that goes",
+    "split-braindump": (
+        "was on `think` (7/8 against a non-thinking 4/8) — but that gate failed a correct-count "
+        "split for an unpopulated `covers` field the production skill (`validate_split`) treats as "
+        "optional, and capped `braindump-weather` at 3 where every tier including xhigh reads it as "
+        "four. With the gate aligned to the skill (2026-08-14), the honest non-thinking arm "
+        "(`q38-none`) scores 7/8 and the xhigh thinking arm swings 6/8–8/8 across runs: a wide-band "
+        "judgment task where the two tiers are within measurement noise. The tie rule takes the "
+        "faster tier, so it runs on the non-thinking bulk model like the rest of the pipeline, "
+        "saving ~55s per braindump. `covers`/`weather` fixes are in `evals/cases/braindump_split.py`."
+    ),
     "classify-note": (
         "the thinking profile is better on the stage in isolation — 5/8 against 3/8, no silent "
         "failures — but `vault-organizer` classifies, verifies and escalates in one pipeline, and "
@@ -126,10 +135,7 @@ CAPABILITIES_MEASURED = {
 STAGE_EVAL_CASES = {
     "clean-transcript-chunk-multi": "transcript-cleanup-meeting",
     "clean-transcript-chunk-multi-repair": "transcript-cleanup-meeting",
-    "clean-transcript-chunk-single": "transcript-cleanup-memo",
-    "clean-transcript-chunk-single-repair": "transcript-cleanup-memo",
     "connection-judgment": "connection-judgment",
-    "split-braindump": "braindump-split",
     "classify-note": "classify-notes",
 }
 

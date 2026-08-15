@@ -323,7 +323,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(resolved["token"], "from-settings")
 
     def test_the_default_is_the_deployment(self):
-        self.assertEqual(stack_state.resolve_stack_state(env={})["baseUrl"], "http://llms:8078")
+        self.assertEqual(stack_state.resolve_stack_state(env={})["baseUrl"], "http://llms:8077")
 
 
 if __name__ == "__main__":

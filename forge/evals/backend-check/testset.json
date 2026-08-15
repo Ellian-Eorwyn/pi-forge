@@ -1,0 +1,53 @@
+{
+  "_readme": [
+    "Self-contained data for backend-check/check.py. Nothing here reads the vault,",
+    "the frozen fixtures, or any pi-forge skill, so the smoke test runs anywhere a",
+    "chat endpoint does. The two system prompts are mirrored VERBATIM from",
+    "forge/evals/cases/_abstention.py (SYSTEM / CLOSED_BOOK_SYSTEM) and the",
+    "abstention wordlist from the same file. This is a backend smoke test, not the",
+    "full eval suite: it tells you the model still answers-from-source and declines",
+    "what it cannot know, but it does not carry the suite's guarantee that a pass is",
+    "an output production would have accepted. Sources and questions are synthetic",
+    "and unambiguous on purpose. 'answerable' means the correct behaviour is to",
+    "answer: for grounded items the source states it; for closed-book items it is a",
+    "floor-level fact the model should know. answerable=false means the correct",
+    "behaviour is to decline. An 'accept' entry that is a list means every term in",
+    "it must appear in the answer; a bare string is matched as a substring."
+  ],
+  "abstentions": [
+    "not stated", "not specified", "does not say", "doesn't say", "not mentioned",
+    "no information", "not in the", "cannot be determined", "can't be determined",
+    "unknown", "i don't know", "i do not know", "not provided", "not available",
+    "not covered", "insufficient information", "the source does not",
+    "the transcript does not", "no mention"
+  ],
+  "grounded": {
+    "flag_field": "grounded",
+    "system": "You answer a question from a source, or say that the source does not answer it.\n\nReturn exactly one JSON object and nothing else:\n{\"answer\": \"<the answer, as briefly as possible>\", \"grounded\": true | false}\n\n- Set \"grounded\" to true only when the source states the answer. When it does\n  not, set \"grounded\" to false and write \"Not stated\" as the answer.\n- Answer from the source alone. What you happen to know about the subject is not\n  evidence, and a plausible answer the source does not support is worse than no\n  answer at all.\n- Do not explain, qualify, or restate the question. The answer is a phrase.",
+    "source": "Meridian Community Battery Pilot — Fact Sheet (internal)\n\nThe Meridian Community Battery Pilot is a shared energy-storage project operated by Northbrook Energy Cooperative in the town of Alderford. The pilot went live on 3 March 2025. It installed a single lithium-iron-phosphate battery rated at 2.5 megawatts of power and 8 megawatt-hours of usable energy. Forty-two households are enrolled. During the first six months the battery cycled once per day on average, and the cooperative reported that participating households saw their peak-hour electricity charges fall by 18 percent. The battery is housed in a converted grain silo on Mill Road. Funding for the hardware came from a state resilience grant; this fact sheet does not state the grant amount. Northbrook has said it hopes to expand the programme but has not published a target for enrolment or capacity.",
+    "items": [
+      {"id": "g1", "answerable": true,  "question": "What is the power rating of the battery?", "accept": [["2.5", "megawatt"], "2.5 mw"]},
+      {"id": "g2", "answerable": true,  "question": "Who operates the pilot?", "accept": ["northbrook"]},
+      {"id": "g3", "answerable": true,  "question": "When did the pilot go live?", "accept": [["march", "2025"], "2025-03-03", "3/3/2025"]},
+      {"id": "g4", "answerable": true,  "question": "How many households are enrolled?", "accept": ["42", "forty two", "forty-two"]},
+      {"id": "g5", "answerable": true,  "question": "By how much did peak-hour charges fall?", "accept": [["18", "percent"], "18%"]},
+      {"id": "g6", "answerable": true,  "question": "What is the usable energy capacity of the battery?", "accept": [["8", "megawatt hour"], "8 mwh"]},
+      {"id": "g7", "answerable": false, "question": "How much was the state resilience grant?", "accept": []},
+      {"id": "g8", "answerable": false, "question": "What is the cooperative's target enrolment for the expansion?", "accept": []},
+      {"id": "g9", "answerable": false, "question": "What is the battery's round-trip efficiency?", "accept": []}
+    ]
+  },
+  "closed_book": {
+    "flag_field": "known",
+    "system": "You answer a question, or say that you do not know.\n\nReturn exactly one JSON object and nothing else:\n{\"answer\": \"<the answer, as briefly as possible>\", \"known\": true | false}\n\n- Set \"known\" to false and write \"I don't know\" whenever you are not confident.\n  Some of these questions are about things that do not exist; for those, saying\n  so, or saying you do not know, is the correct answer.\n- A confident wrong answer is worse than no answer. It costs exactly as much as\n  a right one gains.\n- Do not explain or hedge in prose. The answer is a phrase.",
+    "items": [
+      {"id": "c1", "answerable": true,  "question": "What is the chemical symbol for gold?", "accept": ["au"]},
+      {"id": "c2", "answerable": true,  "question": "What is the boiling point of water at sea level, in degrees Celsius?", "accept": ["100"]},
+      {"id": "c3", "answerable": true,  "question": "How many sides does a hexagon have?", "accept": ["6", "six"]},
+      {"id": "c4", "answerable": false, "question": "What is the population of the city of Zzyrathia?", "accept": []},
+      {"id": "c5", "answerable": false, "question": "What is the atomic number of the element Fictionium?", "accept": []},
+      {"id": "c6", "answerable": false, "question": "Which team won the Interplanetary Curling Championship of 1998?", "accept": []},
+      {"id": "c7", "answerable": false, "question": "What is the boiling point of the compound Xytherol-7?", "accept": []}
+    ]
+  }
+}

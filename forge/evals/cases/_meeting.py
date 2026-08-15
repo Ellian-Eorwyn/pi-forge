@@ -33,12 +33,18 @@ capture = harness.load_skill("vault-capture")
 # selective by definition. Carrying those across would leave a model obeying
 # instructions about fields it was never given, and its confusion would read as
 # a model failure when it was a prompt failure.
+# Narrowed 2026-08-14, when the skill made meetings exempt from the fidelity
+# rules ("paraphrase and compress freely"). A brief is minutes, so the three
+# word-level rules this used to borrow — delete-key-not-thesaurus,
+# condensing-drops-words, leave-garbled-visible — no longer belong on it: they
+# would hold a brief to a verbatim contract its own skill has dropped. What
+# survives is the pair a brief is actually scored on and that the skill's meeting
+# style still keeps: not fabricating, and not flattening the uncertainty that
+# separates a decision from a proposal ("Do not invent facts, names, numbers, or
+# decisions that were not said").
 _FIDELITY_RULES_USED = (
-    "delete key, not a thesaurus",
-    "Condensing means dropping words, never swapping them",
     "Preserve the speaker's intent, uncertainty, and nuance",
     "Never add facts, names, dates, conclusions",
-    "Leave garbled or uncertain passages visible",
 )
 
 # The abstention contract, and the single most load-bearing sentence here: it is
@@ -46,8 +52,14 @@ _FIDELITY_RULES_USED = (
 # `variants/meeting-brief-no-abstention.json` strips to prove the scorer can see
 # it go. Taken as one sentence out of the meeting style rule, because the rest
 # of that rule is Markdown formatting for an output shape this case does not use.
+# When meetings moved to minutes the verb shifted ("Write ..." became
+# "... writing ..."), so presence is checked on the enduring clause below while
+# the injected bullet keeps the imperative form.
 _ABSTENTION_RULE = (
     "Write \"Unassigned\" or \"Not stated\" rather than inferring an owner or a deadline."
+)
+_ABSTENTION_PRESENT = (
+    "\"Unassigned\" or \"Not stated\" rather than inferring an owner or a deadline"
 )
 
 
@@ -64,8 +76,11 @@ def _skill_rules():
     is a rule that can drift from the one production uses, and then the case
     measures a contract nothing enforces.
     """
+    # The header gained a trailing clause when meetings became exempt from these
+    # rules ("... below — except for a `meeting` ..."), so match on its opening
+    # words and let the bullet extraction below ignore the header prose.
     match = re.search(
-        r"^Fidelity rules, which outrank every style rule below:\n(.*?)\n\nStyle by",
+        r"^Fidelity rules, which outrank every style rule below\b(.*?)\n\nStyle by",
         transcripts.CLEANUP_SYSTEM,
         re.DOTALL | re.MULTILINE,
     )
@@ -81,7 +96,7 @@ def _skill_rules():
         (kept.append(found) if found else missing.append(phrase))
     # Compared with whitespace collapsed: the skill hard-wraps its prompt, so
     # this sentence spans two indented lines there and one here.
-    if _flat(_ABSTENTION_RULE) in _flat(transcripts.CLEANUP_SYSTEM):
+    if _flat(_ABSTENTION_PRESENT) in _flat(transcripts.CLEANUP_SYSTEM):
         kept.append(f"- {_ABSTENTION_RULE}")
     else:
         missing.append(_ABSTENTION_RULE)

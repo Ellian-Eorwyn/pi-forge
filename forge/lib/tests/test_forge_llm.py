@@ -164,6 +164,22 @@ class ResolutionTests(unittest.TestCase):
         from_environment = forge_llm.resolve_service("chat", env=environment, settings=settings)
         self.assertEqual(from_environment["chatTemplateKwargs"], {"enable_thinking": True})
 
+    def test_reasoning_effort_resolves_from_settings_and_environment(self):
+        self.assertIsNone(forge_llm.resolve_service("chat", env={}, settings={})["reasoningEffort"])
+
+        settings = {"think": {"reasoningEffort": "medium"}}
+        from_settings = forge_llm.resolve_service("think", env={}, settings=settings)
+        self.assertEqual(from_settings["reasoningEffort"], "medium")
+
+        environment = {"FORGE_THINK_REASONING_EFFORT": "xhigh"}
+        from_environment = forge_llm.resolve_service("think", env=environment, settings=settings)
+        self.assertEqual(from_environment["reasoningEffort"], "xhigh")
+
+    def test_a_blank_reasoning_effort_is_treated_as_unset(self):
+        for value in ("", "   ", 7, None):
+            resolved = forge_llm.resolve_service("chat", env={}, settings={"chat": {"reasoningEffort": value}})
+            self.assertIsNone(resolved["reasoningEffort"])
+
     def test_unusable_chat_template_kwargs_are_treated_as_unset(self):
         # Forwarding a malformed value would make the backend reject the whole
         # request rather than ignore one field.
@@ -328,6 +344,26 @@ class ResponseParsingTests(unittest.TestCase):
         with FakeChatServer(responses=['{"ok": true}']) as server:
             forge_llm.call_json(service(server.url), [{"role": "user", "content": "hi"}])
             self.assertNotIn("chat_template_kwargs", server.requests[0])
+
+    def test_reasoning_effort_is_forwarded_from_the_service(self):
+        with FakeChatServer(responses=['{"ok": true}']) as server:
+            configured = service(server.url)
+            configured["reasoningEffort"] = "medium"
+            forge_llm.call_json(configured, [{"role": "user", "content": "hi"}])
+            self.assertEqual(server.requests[0]["reasoning_effort"], "medium")
+
+    def test_a_per_call_reasoning_effort_wins_over_the_service(self):
+        # This is how escalation forces `xhigh` on one item without re-resolving.
+        with FakeChatServer(responses=['{"ok": true}']) as server:
+            configured = service(server.url)
+            configured["reasoningEffort"] = "medium"
+            forge_llm.call_json(configured, [{"role": "user", "content": "hi"}], reasoning_effort="xhigh")
+            self.assertEqual(server.requests[0]["reasoning_effort"], "xhigh")
+
+    def test_no_reasoning_effort_key_when_unset(self):
+        with FakeChatServer(responses=['{"ok": true}']) as server:
+            forge_llm.call_json(service(server.url), [{"role": "user", "content": "hi"}])
+            self.assertNotIn("reasoning_effort", server.requests[0])
 
     def test_a_smaller_service_ceiling_refuses_a_prompt_the_default_would_allow(self):
         with FakeChatServer(responses=['{"ok": true}']) as server:
