@@ -129,7 +129,12 @@ WORKFLOW = "vault-organizer"
 DEFAULT_MODEL = "chat"
 PROMPT_VERSION = "vault-organizer-v3"
 MAX_BODY_CHARS = 30000
-EMBED_MAX_CHARS = 2000
+# The embed backend pools each input in one ubatch (~512 tokens) and 500s on
+# anything wider rather than truncating; dense text (speaker-labelled transcripts)
+# reaches that near ~1300 chars, so keep the near-dupe input comfortably under it.
+# The opening of a note carries the duplicate signal, and near-dupe pairs are
+# confirmed by full-text line containment afterward, so a shorter slice is safe.
+EMBED_MAX_CHARS = 1000
 MIN_NEAR_DUPE_CHARS = 100
 NEAR_DUPE_AUTO = 0.97
 NEAR_DUPE_REVIEW = 0.90
