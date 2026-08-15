@@ -1,0 +1,100 @@
+{
+  "providers": {
+    "forge-local-think": {
+      "baseUrl": "http://llms:8003/v1",
+      "api": "openai-completions",
+      "apiKey": "local",
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": true,
+        "thinkingFormat": "openai",
+        "maxTokensField": "max_tokens"
+      },
+      "models": [
+        {
+          "id": "think",
+          "name": "Think (Local, thinking, temp-1) :8003",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": "none",
+            "minimal": "low",
+            "low": "low",
+            "medium": "medium",
+            "high": "xhigh",
+            "xhigh": "xhigh"
+          },
+          "input": ["text"],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 256000,
+          "maxTokens": 32768
+        }
+      ]
+    },
+    "forge-local-code": {
+      "baseUrl": "http://llms:8008/v1",
+      "api": "openai-completions",
+      "apiKey": "local",
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": true,
+        "thinkingFormat": "openai",
+        "maxTokensField": "max_tokens"
+      },
+      "models": [
+        {
+          "id": "code",
+          "name": "Code (Local, thinking, stricter temp) :8008",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": "none",
+            "minimal": "low",
+            "low": "low",
+            "medium": "medium",
+            "high": "xhigh",
+            "xhigh": "xhigh"
+          },
+          "input": ["text"],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 256000,
+          "maxTokens": 32768
+        }
+      ]
+    },
+    "forge-local-chat": {
+      "baseUrl": "http://llms:8004/v1",
+      "api": "openai-completions",
+      "apiKey": "local",
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false,
+        "maxTokensField": "max_tokens"
+      },
+      "models": [
+        {
+          "id": "chat",
+          "name": "Chat (Local, non-thinking) :8004",
+          "reasoning": false,
+          "input": ["text"],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 256000,
+          "maxTokens": 32768
+        }
+      ]
+    }
+  }
+}
