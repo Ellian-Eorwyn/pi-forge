@@ -363,15 +363,16 @@ can never answer for a cleanup that dropped it.
 ## What the checks enforce before a model ever reviews the result
 
 Deterministic, exact, and free, so the thinking model's budget goes to judgment
-instead of catching malformed output. Any failure holds the note back with its
-original name and body, and puts it in the run's review queue.
+instead of catching malformed output. They fall into two kinds, and a note that
+fails them is not treated the same way in each.
+
+**Structural** faults are contract violations the meaning-judge has no say over,
+so any one of them holds the note back with its original name and body and puts it
+in the review queue:
 
 | Check | Catches |
 | --- | --- |
 | Added words, on prose lines only | Invention. A word was either spoken or it was not; heading text is exempt because the editor authors structure. |
-| Rare-word retention | A dropped passage. Long infrequent words are content; filler is short and common. |
-| Cleaned/source length ratio, `0.4`–`1.1` (`0.3` floor under the tiny threshold) | A cleanup that summarized instead of cleaning, or padded. The floor allows for a register that legitimately compresses. |
-| Sampled utterance containment | Passages that vanished, located by sliding window rather than by re-reading the whole file. |
 | Exactly one `# ` heading, and it is `# Transcript` | A cleanup that wrote a document title. |
 | Raw section byte-identical to the source body | Any drift in the thing that must not drift. |
 | Preamble present in the generated section | Handwritten notes quietly eaten by the pipeline. |
@@ -379,9 +380,31 @@ original name and body, and puts it in the run's review queue.
 | Frontmatter keys and values against the schema note | Metadata the organizer would strip or reject. |
 | Title charset, length, reserved names, and medium-words | Filenames that break Obsidian links or say nothing. |
 
-After those pass, the thinking model reviews every note's type, title, summary,
-and speaker naming against excerpts of the raw transcript, plus a sample of
-utterances checked against the cleaned text. It can flag, and a flag is either
-redone with reasoning or handed to a human — it never silently drops a result,
-and an unreachable reviewer is reported as "not verified" rather than treated as
-approval.
+**Fidelity** floors are word-overlap proxies for lost content. They are not a
+verdict, because a source or lecture told to remove filler and regroup trips them
+without losing anything a reader would miss:
+
+| Check | Catches |
+| --- | --- |
+| Rare-word retention | A dropped passage. Long infrequent words are content; filler is short and common. |
+| Cleaned/source length ratio, `0.4`–`1.1` (`0.3` floor under the tiny threshold) | A cleanup that summarized instead of cleaning, or padded. The floor allows for a register that legitimately compresses. |
+| Sampled utterance containment | Passages that vanished, located by sliding window rather than by re-reading the whole file. |
+
+A note whose *only* failures are fidelity ones is not held. It is written and
+marked **provisional**, then sent to the thinking meaning-judge with every usable
+utterance — not the four-sample spot check — at `medium` reasoning. The judge's
+verdict decides it: meaning preserved → it finishes; a point dropped, misstated,
+or misattributed → it holds, carrying the judge's own objection instead of "52% of
+distinctive words survived". This is the principle the whole skill rests on made
+uniform: no information lost, not every word kept. The one exception is a run with
+no judge to defer to (`--no-verify`, or an unreachable thinking service): there the
+floor holds the note as before, because an unjudged note must never read as
+approved. A meeting, being minutes rather than verbatim cleanup, is exempt from the
+fidelity floors entirely.
+
+After the structural checks pass, the thinking model reviews every note's type,
+title, summary, and speaker naming against excerpts of the raw transcript, plus a
+sample of utterances checked against the cleaned text (and every utterance of a
+provisional note). It can flag, and a flag is either redone with reasoning or
+handed to a human — it never silently drops a result, and an unreachable reviewer
+is reported as "not verified" rather than treated as approval.

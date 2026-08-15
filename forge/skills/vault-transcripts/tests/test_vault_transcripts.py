@@ -298,6 +298,11 @@ class StubChatHandler(BaseHTTPRequestHandler):
 
     def stage_of(self, payload):
         system = payload["messages"][0]["content"]
+        # The fidelity meaning-judge and the note-level review both end in the
+        # verdict contract; split them by their opening so a test can script the
+        # provisional fidelity verdict without touching the note-level one.
+        if system.startswith("You are checking whether a cleaned-up transcript"):
+            return "verify-fidelity"
         if '{"verdicts"' in system or "verdicts" in system.split("\n\n")[-1]:
             return "verify"
         if system.startswith("You read one voice recording"):
@@ -335,7 +340,7 @@ class StubChatHandler(BaseHTTPRequestHandler):
             return {"cleaned": user["chunk"], "chunk_summary": "A short stretch of the recording."}
         if stage == "summarize":
             return {"summary": "The speaker works through a short list of practical repairs and next steps."}
-        if stage == "verify":
+        if stage in ("verify", "verify-fidelity"):
             return {"verdicts": [{"id": item["id"], "verdict": "ok"} for item in user["items"]]}
         return {}
 
@@ -369,6 +374,32 @@ class SecondStubChatHandler(StubChatHandler):
     responses = []
     requests = []
     scripted = {}
+
+
+class FlagFidelityHandler(SecondStubChatHandler):
+    """A thinking service whose fidelity meaning-judge flags every utterance.
+
+    The note-level review still runs on the base ``ok`` default. Flagging the
+    whole packet — rather than one scripted id — frees the test from knowing how
+    many utterances the provisional review sampled or how they were batched; a
+    verdict is still returned for every id, so no repair round-trip is provoked.
+    """
+
+    responses = []
+    requests = []
+    scripted = {}
+    FIDELITY_REASON = "the pantry shelving and the warranty discussion are gone entirely"
+
+    def default_for(self, stage, payload):
+        if stage == "verify-fidelity":
+            user = json.loads(payload["messages"][1]["content"])
+            return {
+                "verdicts": [
+                    {"id": item["id"], "verdict": "flag", "reason": self.FIDELITY_REASON}
+                    for item in user["items"]
+                ]
+            }
+        return super().default_for(stage, payload)
 
 
 class QuietServer(ThreadingHTTPServer):
@@ -414,7 +445,11 @@ class StubServer:
         counted = []
         for payload in self.handler_cls.requests:
             system = payload["messages"][0]["content"]
-            if stage == "verify" and "verdicts" in system:
+            if stage == "verify-fidelity" and system.startswith("You are checking whether a cleaned-up transcript"):
+                counted.append(payload)
+            elif stage == "verify" and "verdicts" in system and not system.startswith(
+                "You are checking whether a cleaned-up transcript"
+            ):
                 counted.append(payload)
             elif stage == "classify" and system.startswith("You read one voice recording"):
                 counted.append(payload)
@@ -994,7 +1029,11 @@ class NoteBuildingTests(unittest.TestCase):
         note, head = vt.build_note(
             self.schema, vt.frontmatter_metadata(self.schema, "memo"), summary, "callout", parsed["preamble"], cleaned, body
         )
-        return vt.check_note(item, cleaned, summary, note, head, parsed, self.args)
+        # `check_note` now splits its problems into structural vs fidelity; these
+        # tests predate that and care only about "did any check fail", so the
+        # helper recombines them into the flat list they were written against.
+        structural, fidelity, measurements = vt.check_note(item, cleaned, summary, note, head, parsed, self.args)
+        return structural + fidelity, measurements
 
     def test_faithful_cleanup_passes_every_check(self):
         body = transcript(SOLO_BLOCKS)
@@ -1057,8 +1096,8 @@ class NoteBuildingTests(unittest.TestCase):
             self.schema, vt.frontmatter_metadata(self.schema, "meeting"),
             "A summary.", "callout", parsed["preamble"], minutes, body,
         )
-        passed, _ = vt.check_note(item, minutes, "A summary.", note, head, parsed, self.args, summarized=True)
-        self.assertEqual(passed, [])
+        structural, fidelity, _ = vt.check_note(item, minutes, "A summary.", note, head, parsed, self.args, summarized=True)
+        self.assertEqual(structural + fidelity, [])
 
     def test_a_meeting_summary_still_fails_a_structural_check(self):
         # Summarize-mode drops the verbatim checks, not the structural ones: a
@@ -1071,8 +1110,11 @@ class NoteBuildingTests(unittest.TestCase):
             "A summary.", "callout", parsed["preamble"], "Some minutes.", body,
         )
         tampered = note[:-5] + "xxxxx"  # corrupt the preserved transcript tail
-        problems, _ = vt.check_note(item, "Some minutes.", "A summary.", tampered, head, parsed, self.args, summarized=True)
-        self.assertTrue(any("byte-identical" in problem for problem in problems), problems)
+        structural, fidelity, _ = vt.check_note(item, "Some minutes.", "A summary.", tampered, head, parsed, self.args, summarized=True)
+        # A broken transcript is a structural fault, not a fidelity proxy: it holds
+        # outright and is never deferred to the meaning-judge.
+        self.assertTrue(any("byte-identical" in problem for problem in structural), structural)
+        self.assertEqual(fidelity, [])
 
     def test_a_lost_preamble_is_caught(self):
         body = transcript(SOLO_BLOCKS, preamble="Notes to self\n\n1. buy gasket\n\n")
@@ -1082,8 +1124,32 @@ class NoteBuildingTests(unittest.TestCase):
         note, head = vt.build_note(
             self.schema, vt.frontmatter_metadata(self.schema, "memo"), "A summary.", "callout", "", cleaned, body
         )
-        problems, _measurements = vt.check_note(item, cleaned, "A summary.", note, head, parsed, self.args)
-        self.assertIn("handwritten preamble did not survive into the generated section", problems)
+        structural, fidelity, _measurements = vt.check_note(item, cleaned, "A summary.", note, head, parsed, self.args)
+        # A lost preamble is structural — the meaning-judge has no say over it.
+        self.assertIn("handwritten preamble did not survive into the generated section", structural)
+        self.assertNotIn(
+            "handwritten preamble did not survive into the generated section", fidelity
+        )
+
+    def test_check_note_splits_structural_from_fidelity(self):
+        # The split is what lets `assemble_items` hold on structure but defer the
+        # fidelity floors to the meaning-judge. A note that trips both at once —
+        # a stray heading and a gutted length — proves each lands in its own bucket
+        # so the structural fault holds the note whatever the judge later says.
+        body = transcript(SOLO_BLOCKS * 4)
+        parsed = vt.parse_transcript(body)
+        item = {"path": "00 Inbox/x.md", "raw_body": body, "stats": vt.transcript_stats(parsed)}
+        gutted = " ".join(entry["text"] for entry in parsed["blocks"][:2])
+        note, head = vt.build_note(
+            self.schema, vt.frontmatter_metadata(self.schema, "memo"), "A summary.", "callout", "", gutted, body
+        )
+        structural, fidelity, _ = vt.check_note(
+            item, gutted, "A summary.", note, "# Stray Heading\n\n" + head, parsed, self.args
+        )
+        self.assertTrue(any("level-one heading" in problem for problem in structural), structural)
+        self.assertFalse(any("level-one heading" in problem for problem in fidelity), fidelity)
+        self.assertTrue(any("outside" in problem for problem in fidelity), fidelity)
+        self.assertFalse(any("outside" in problem for problem in structural), structural)
 
 
 class VoiceBoundaryTests(unittest.TestCase):
@@ -1917,6 +1983,222 @@ class LexiconTests(unittest.TestCase):
 
 def run_dir_of(result):
     return Path(result["data"]["run_directory"])
+
+
+class FidelityProvisionalTests(unittest.TestCase):
+    """The deterministic fidelity floor defers to the thinking meaning-judge.
+
+    A note the word-overlap floor flags but that is otherwise sound is written
+    *provisionally* and sent to the judge; the judge's verdict — not the floor's
+    score — decides whether it finishes or holds. Its own harness (rather than a
+    `PipelineTests` subclass) keeps the 34 inherited pipeline tests from running a
+    fifth time. See `verify_records` and `assemble_items`.
+    """
+
+    NAME = "20260724 131748-9788991C.md"
+    DESTINATION = "2026-07-24 - Memo - Espresso Machine Repairs.md"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.vault = Path(self.tmp.name).resolve() / "vault"
+        (self.vault / "99 Meta" / "99.02 Schemas").mkdir(parents=True)
+        (self.vault / "00 Inbox").mkdir()
+        (self.vault / "99 Meta" / "99.02 Schemas" / "0.00 Vault Schema.md").write_text(SCHEMA, encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def gutted_cleanup(self):
+        """A rich solo memo whose scripted cleanup keeps only its first two
+        utterances.
+
+        Over 400 words with many distinctive terms, so the rare-word floor has
+        something to measure; keeping two of forty-four utterances trips the
+        length-ratio, rare-word, and utterance-locator floors at once while every
+        structural check still passes — exactly the provisional case. The kept
+        text is a verbatim subset, so no invented word makes cleanup fail first.
+        """
+        source = transcript(SOLO_BLOCKS * 4)
+        blocks = vt.parse_transcript(source)["blocks"]
+        self.assertGreater(len(source.split()), vt.RARE_WORD_MIN_SOURCE_WORDS)
+        # One chunk, so a single scripted cleanup response covers the whole file.
+        self.assertEqual(len(vt.chunk_blocks(blocks)), 1)
+        kept = " ".join(entry["text"] for entry in blocks[:2])
+        return source, {"cleaned": kept, "chunk_summary": "The opening of the memo."}
+
+    def write_source(self, source):
+        (self.vault / "00 Inbox" / self.NAME).write_text(source, encoding="utf-8")
+
+    def process(self, chat_url, think_url, *extra):
+        return run_script(
+            "process", "--vault", str(self.vault), "--base-url", chat_url, "--model", "chat",
+            "--think-url", think_url, "--think-model", "code", *extra,
+        )
+
+    def result_of(self, completed):
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        return json.loads(completed.stdout)
+
+    def inbox(self):
+        return sorted(
+            path.name
+            for path in (self.vault / "00 Inbox").glob("*.md")
+            if path.name != vt.vault_review.REVIEW_NOTE_NAME
+        )
+
+    def review_queue(self, run_dir):
+        path = run_dir / "review-queue.jsonl"
+        if not path.is_file() or not path.read_text(encoding="utf-8").strip():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def record_for(self, run_dir):
+        plan = json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
+        return next(record for record in plan["records"] if record["source"].endswith(self.NAME))
+
+    def fidelity_requests(self, think):
+        return [
+            payload
+            for payload in think.requests
+            if payload["messages"][0]["content"].startswith("You are checking whether a cleaned-up transcript")
+        ]
+
+    def test_a_fidelity_only_fail_becomes_provisional_and_finishes_when_the_judge_is_ok(self):
+        source, cleanup = self.gutted_cleanup()
+        self.write_source(source)
+        with StubServer(scripted={"clean": [cleanup]}) as chat, \
+                StubServer(handler_cls=SecondStubChatHandler) as think:
+            result = self.result_of(self.process(chat.url, think.url, "--apply"))
+        # The floor flagged it, the meaning-judge (default: all ok) cleared it, so
+        # it finished as an ordinary processed pair instead of landing in review.
+        self.assertCountEqual(self.inbox(), [self.DESTINATION, f"{self.DESTINATION[:-3]} - Transcript.md"])
+        verification = result["data"]["verification"]
+        self.assertEqual(verification["provisionalCleared"], 1)
+        self.assertEqual(verification["provisionalHeld"], 0)
+        record = self.record_for(run_dir_of(result))
+        self.assertEqual(record["action"], "process")
+        self.assertEqual(record["verified"], "fidelity-cleared")
+        self.assertFalse(record["needs_review"])
+        self.assertEqual(self.review_queue(run_dir_of(result)), [])
+
+    def test_a_fidelity_only_fail_holds_when_the_judge_flags(self):
+        source, cleanup = self.gutted_cleanup()
+        self.write_source(source)
+        objection = FlagFidelityHandler.FIDELITY_REASON
+        with StubServer(scripted={"clean": [cleanup]}) as chat, \
+                StubServer(handler_cls=FlagFidelityHandler) as think:
+            result = self.result_of(self.process(chat.url, think.url, "--apply"))
+        # Held, not finished: the recording keeps its original name and the review
+        # queue carries the judge's own words — not "52% of words survived".
+        self.assertEqual(self.inbox(), [self.NAME])
+        verification = result["data"]["verification"]
+        self.assertEqual(verification["provisionalCleared"], 0)
+        self.assertEqual(verification["provisionalHeld"], 1)
+        queued = self.review_queue(run_dir_of(result))
+        self.assertEqual(len(queued), 1)
+        # The headline Ellie reads is the judge's objection, not the floor's score
+        # — the reason carries neither the rare-word nor the locator wording.
+        self.assertIn("cleaned transcript may not be faithful", queued[0]["reason"])
+        self.assertIn(objection, queued[0]["reason"])
+        self.assertNotIn("distinctive source words survived", queued[0]["reason"])
+        self.assertNotIn("could not be located in the cleaned text", queued[0]["reason"])
+        # The report's verification table and held-note reason both lead with it.
+        report = (run_dir_of(result) / "report.md").read_text(encoding="utf-8")
+        self.assertIn(f"| {objection} |", report)
+        self.assertIn(f"cleaned transcript may not be faithful: {objection}", report)
+
+    def test_a_non_fidelity_fault_holds_immediately_and_never_reaches_the_judge(self):
+        # The deferral is only for the fidelity floors. A note that fails a
+        # non-fidelity gate — here a summary that stays two paragraphs through its
+        # one retry — is held before the fidelity check even runs, so it is never
+        # made provisional and the meaning-judge never sees it. (check_note's own
+        # structural branches are build-note invariants that cannot be reached with
+        # a valid note; the structural/fidelity split itself is unit-tested in
+        # NoteBuildingTests.) The cleanup is still lossy, to prove the immediate
+        # hold wins even when the fidelity floor would also have fired.
+        source, cleanup = self.gutted_cleanup()
+        self.write_source(source)
+        two_paragraphs = {"summary": "First paragraph of the summary.\n\nSecond paragraph of the summary."}
+        chat_script = {"clean": [cleanup], "summarize": [two_paragraphs, two_paragraphs]}
+        with StubServer(scripted=chat_script) as chat, \
+                StubServer(handler_cls=SecondStubChatHandler) as think:
+            result = self.result_of(self.process(chat.url, think.url, "--apply"))
+        self.assertEqual(self.inbox(), [self.NAME])
+        record = self.record_for(run_dir_of(result))
+        self.assertTrue(record["needs_review"])
+        self.assertIn("summary is more than one paragraph", record["review_reason"])
+        self.assertNotIn("fidelity_provisional", record)
+        verification = result["data"]["verification"]
+        # Held before the fidelity check, so it is not a verify candidate: the
+        # meaning-judge never ran and nothing was marked provisional.
+        self.assertEqual(verification.get("provisionalCleared", 0), 0)
+        self.assertEqual(self.fidelity_requests(think), [])
+
+    def test_the_meaning_judge_runs_at_medium(self):
+        source, cleanup = self.gutted_cleanup()
+        self.write_source(source)
+        with StubServer(scripted={"clean": [cleanup]}) as chat, \
+                StubServer(handler_cls=SecondStubChatHandler) as think:
+            self.result_of(self.process(chat.url, think.url))
+        fidelity = self.fidelity_requests(think)
+        self.assertTrue(fidelity, "the provisional note should have reached the fidelity judge")
+        # Ellie's call: medium is enough for a yes/no meaning judgment; xhigh (the
+        # note-redo budget) is not spent here.
+        for payload in fidelity:
+            self.assertEqual(payload.get("reasoning_effort"), "medium")
+        # The note-level review is a different pass and is not forced to medium.
+        note_level = [
+            payload for payload in think.requests
+            if payload["messages"][0]["content"].startswith("You are reviewing how voice recordings")
+        ]
+        self.assertTrue(note_level)
+        for payload in note_level:
+            self.assertNotEqual(payload.get("reasoning_effort"), "medium")
+
+    def test_the_provisional_review_covers_every_utterance_not_a_sample(self):
+        source, cleanup = self.gutted_cleanup()
+        self.write_source(source)
+        usable = len([b for b in vt.parse_transcript(source)["blocks"] if len(vt.content_words(b["text"])) >= vt.FIDELITY_MIN_WORDS])
+        with StubServer(scripted={"clean": [cleanup]}) as chat, \
+                StubServer(handler_cls=SecondStubChatHandler) as think:
+            self.result_of(self.process(chat.url, think.url))
+        sent = set()
+        for payload in self.fidelity_requests(think):
+            for item in json.loads(payload["messages"][1]["content"])["items"]:
+                sent.add(item["id"])
+        # Full coverage: every usable utterance, not the four-sample spot check.
+        self.assertEqual(len(sent), usable)
+        self.assertGreater(len(sent), vt.FIDELITY_SAMPLES)
+
+    def test_no_verify_holds_a_fidelity_fail_since_there_is_no_judge(self):
+        # With --no-verify there is no meaning-judge to defer to, so the floor must
+        # hold the note rather than let an unjudged note read as approved.
+        source, cleanup = self.gutted_cleanup()
+        self.write_source(source)
+        with StubServer(scripted={"clean": [cleanup]}) as chat:
+            completed = run_script(
+                "process", "--vault", str(self.vault), "--base-url", chat.url, "--model", "chat", "--no-verify"
+            )
+            result = self.result_of(completed)
+        record = self.record_for(run_dir_of(result))
+        self.assertTrue(record["needs_review"])
+        # The floor's own words, exactly as before the deferral existed.
+        self.assertIn("could not be located in the cleaned text", record["review_reason"])
+        self.assertNotIn("fidelity_provisional", record)
+
+    def test_an_unreachable_judge_holds_the_provisional_note(self):
+        # The note was written provisionally, but the judge could not be reached.
+        # An unreachable reviewer must never read as approval, so it is held.
+        source, cleanup = self.gutted_cleanup()
+        self.write_source(source)
+        with StubServer(scripted={"clean": [cleanup]}) as chat:
+            result = self.result_of(
+                self.process(chat.url, "http://127.0.0.1:1/v1/chat/completions")
+            )
+        self.assertEqual(self.inbox(), [self.NAME])
+        record = self.record_for(run_dir_of(result))
+        self.assertTrue(record["needs_review"])
+        self.assertIn("could not be located in the cleaned text", record["review_reason"])
 
 
 PROFILE_CARD = {

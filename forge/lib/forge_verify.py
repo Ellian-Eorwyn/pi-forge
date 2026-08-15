@@ -147,11 +147,16 @@ def verify_packets(
     timeout=forge_llm.DEFAULT_TIMEOUT,
     progress=None,
     produced_by=None,
+    reasoning_effort=None,
 ):
     """Review every item and return ``{id: {"verdict", "reason", "independent"}}``.
 
     Items already present in the journal are returned from it rather than
     re-reviewed, so an interrupted run resumes where it stopped.
+
+    ``reasoning_effort`` sets the review's reasoning depth; ``None`` leaves the
+    service at its own default. A caller that wants a yes/no judgment thought
+    through explicitly — the fidelity meaning-judge, say — passes ``"medium"``.
 
     ``produced_by`` is the service that made the items — one service for the
     batch, or ``{item id: service}`` when a stage routed per item. Where it
@@ -184,7 +189,7 @@ def verify_packets(
             {"role": "user", "content": json.dumps({"items": packet}, ensure_ascii=False)},
         ]
         try:
-            parsed = _verify_one(service, messages, expected, background, timeout)
+            parsed = _verify_one(service, messages, expected, background, timeout, reasoning_effort)
         except forge_llm.ChatError as error:
             raise VerificationError(str(error)) from error
         for identifier in expected:
@@ -222,12 +227,13 @@ def independence_warning(verdicts):
     )
 
 
-def _verify_one(service, messages, expected, background, timeout):
+def _verify_one(service, messages, expected, background, timeout, reasoning_effort=None):
     """One packet, with a single corrective retry that shows the model its own
     contract violation."""
     try:
         value, _record = forge_llm.call_json(
-            service, messages, background=background, timeout=timeout, task="verify", response_format={"type": "json_object"}
+            service, messages, background=background, timeout=timeout, task="verify",
+            response_format={"type": "json_object"}, reasoning_effort=reasoning_effort,
         )
         return _parse_verdicts(value, expected)
     except (VerificationError, forge_llm.ChatError) as error:
@@ -240,7 +246,8 @@ def _verify_one(service, messages, expected, background, timeout):
             },
         ]
         value, _record = forge_llm.call_json(
-            service, repair, background=background, timeout=timeout, task="verify-repair", response_format={"type": "json_object"}
+            service, repair, background=background, timeout=timeout, task="verify-repair",
+            response_format={"type": "json_object"}, reasoning_effort=reasoning_effort,
         )
         return _parse_verdicts(value, expected)
 

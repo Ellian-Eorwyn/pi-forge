@@ -263,6 +263,16 @@ FIDELITY_SAMPLES = 4
 FIDELITY_MIN_CONTAINMENT = 0.5
 FIDELITY_MIN_WORDS = 4
 FIDELITY_SAMPLE_RATE = 3
+# The deterministic fidelity floors (length ratio, rare-word retention, the
+# utterance locator) are word-overlap proxies. A source or lecture the prompt
+# told to remove filler and regroup trips them without losing any meaning, so a
+# note held by them alone is not a verdict — it is a reason to think harder. Such
+# a note is marked provisional and sent to the thinking meaning-judge, which is
+# the authority the principle names: no information lost, not every word kept.
+# The judge sees every usable utterance of a provisional note rather than the
+# spot-check sample, and runs at `medium` — enough for a yes/no meaning call,
+# where `xhigh` (the note-redo budget) buys nothing on this task.
+FIDELITY_REVIEW_EFFORT = "medium"
 WORD_RE = re.compile(r"[a-z][a-z-]{2,}")
 # Words a transcript editor inserts to turn fragments into sentences. They say
 # nothing about whether content was invented, so the added-words check ignores
@@ -2774,10 +2784,16 @@ def best_containment(block_text, cleaned_words):
 
 def fidelity_samples(path, blocks, count=FIDELITY_SAMPLES):
     """Sample source utterances to spot-check, seeded by path so a resumed run
-    checks the same ones."""
+    checks the same ones.
+
+    ``count=None`` returns every usable utterance in order — full coverage, for a
+    provisional note the meaning-judge must see whole rather than spot-check.
+    """
     usable = [block for block in blocks if len(content_words(block["text"])) >= FIDELITY_MIN_WORDS]
     if not usable:
         return []
+    if count is None:
+        return sorted(usable, key=lambda block: block["seconds"])
     rng = random.Random(sha256_text(path))
     chosen = rng.sample(usable, min(count, len(usable)))
     return sorted(chosen, key=lambda block: block["seconds"])
@@ -2945,19 +2961,28 @@ def check_note(
 ):
     """Every deterministic check that can fail a note, in one place.
 
-    Returns (problems, measurements). A problem holds the note back: it keeps
-    its name and its body, and lands in the review queue.
+    Returns ``(structural, fidelity, measurements)``. Both lists hold the note
+    back, but for different reasons and to different ends:
+
+    - *structural* problems are contract violations the meaning-judge has no say
+      over — a wrong heading, a transcript section that is not the source bytes,
+      a malformed summary, a dropped preamble. These hold the note immediately.
+    - *fidelity* problems are the three verbatim-gate proxies (length ratio,
+      rare-word retention, the utterance locator). They measure word overlap, not
+      meaning, so a legitimately restructured note trips them without losing
+      anything. A note held by these *alone* is marked provisional and deferred to
+      the thinking meaning-judge rather than held outright — see ``assemble_items``.
 
     ``summarized`` marks a meeting, whose note is minutes rather than verbatim
-    cleanup. The verbatim checks — length ratio, rare-word retention, and
-    utterance-locatable sampling — do not apply to a summary and are skipped; the
-    structural checks (heading, transcript preservation, summary format) still
-    run, and the note-level thinking review is what judges the minutes' substance.
+    cleanup. The verbatim (fidelity) checks do not apply to a summary and are
+    skipped, so ``fidelity`` is always empty for one; the structural checks still
+    run, and the note-level thinking review judges the minutes' substance.
     """
-    problems = []
+    structural = []
+    fidelity = []
     heads = [line for line in head.splitlines() if re.match(r"^#\s", line.strip())]
     if heads != ["# Transcript"]:
-        problems.append(f"generated section must contain exactly one level-one heading (found {heads})")
+        structural.append(f"generated section must contain exactly one level-one heading (found {heads})")
     # Whichever note ends up holding the recording holds all of it. The pair only
     # loses nothing if the processed note points at the recording and the
     # recording note is the source bytes with frontmatter in front. Reprocessing
@@ -2965,15 +2990,15 @@ def check_note(
     # was in -- so there the check is that the section came back untouched.
     if tail is not None:
         if not note_text.endswith(tail):
-            problems.append("the transcript section was not reattached unchanged")
+            structural.append("the transcript section was not reattached unchanged")
     elif raw_text is None:
         if not note_text.endswith(item["raw_body"]):
-            problems.append("raw transcript section is not byte-identical to the source body")
+            structural.append("raw transcript section is not byte-identical to the source body")
     else:
         if not raw_text.endswith(item["raw_body"]):
-            problems.append("raw transcript note is not byte-identical to the source body")
+            structural.append("raw transcript note is not byte-identical to the source body")
         if not note_text.endswith(f"# Transcript\n\n[[{raw_stem}]]\n"):
-            problems.append("transcript section must hold exactly one link to the raw transcript note")
+            structural.append("transcript section must hold exactly one link to the raw transcript note")
     source_text = corrected_source_text(parsed, args, proposals)
     source_words = len(source_text.split())
     # Prose only. A short dialogue carries one "**Name:**" per turn, and counting
@@ -2985,19 +3010,19 @@ def check_note(
     # rare-word, and utterance-locatable checks would fail every one of them.
     # They are the verbatim gate, and a summary is not verbatim.
     if not summarized and source_words and not floor <= ratio <= CLEANED_RATIO_MAX:
-        problems.append(f"cleaned length is {ratio:.2f}x the source, outside {floor}-{CLEANED_RATIO_MAX}")
+        fidelity.append(f"cleaned length is {ratio:.2f}x the source, outside {floor}-{CLEANED_RATIO_MAX}")
     retention, missing = rare_word_retention(source_text, cleaned)
     if not summarized and retention < RARE_WORD_RETENTION:
-        problems.append(
+        fidelity.append(
             f"only {retention:.0%} of distinctive source words survived cleanup (missing: {', '.join(missing[:8])})"
         )
     if summary:
         if "\n\n" in summary.strip():
-            problems.append("summary is more than one paragraph")
+            structural.append("summary is more than one paragraph")
         if len(summary.split()) > SUMMARY_MAX_WORDS:
-            problems.append(f"summary is {len(summary.split())} words, over the {SUMMARY_MAX_WORDS}-word limit")
+            structural.append(f"summary is {len(summary.split())} words, over the {SUMMARY_MAX_WORDS}-word limit")
     if parsed["preamble"].strip() and parsed["preamble"].strip() not in head:
-        problems.append("handwritten preamble did not survive into the generated section")
+        structural.append("handwritten preamble did not survive into the generated section")
     cleaned_word_list = content_words(cleaned)
     weak = []
     if not summarized:
@@ -3006,8 +3031,8 @@ def check_note(
             if score < FIDELITY_MIN_CONTAINMENT:
                 weak.append({"seconds": block["seconds"], "score": round(score, 3), "text": block["text"][:200]})
     if weak:
-        problems.append(f"{len(weak)} sampled utterance(s) could not be located in the cleaned text")
-    return problems, {
+        fidelity.append(f"{len(weak)} sampled utterance(s) could not be located in the cleaned text")
+    return structural, fidelity, {
         "cleaned_ratio": round(ratio, 3),
         "rare_word_retention": round(retention, 3),
         "weak_samples": weak,
@@ -3167,7 +3192,7 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
                 if raw_stem
                 else None
             )
-            problems, measurements = check_note(
+            structural, fidelity, measurements = check_note(
                 {**item, "raw_body": raw_body},
                 cleaned_result["cleaned"],
                 summary,
@@ -3216,7 +3241,7 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
         assembled["chunks"] = cleaned_result["chunks"]
         assembled["tiny"] = cleaned_result["tiny"]
         assembled["measurements"] = measurements
-        assembled["checks"] = problems
+        assembled["checks"] = structural + fidelity
         assembled["classification_source"] = record["source"]
         assembled["warnings"] = list(record.get("warnings") or [])
         if not date:
@@ -3225,13 +3250,26 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
             assembled["warnings"].append(
                 f"transcript says {record['spoken_date']} but the filename says {item['date']}; kept the filename date"
             )
-        if problems:
+        # A structural problem is a hard hold. Fidelity problems alone are not a
+        # verdict — they are a word-overlap proxy that a restructured note trips
+        # without losing meaning — so the note is written and marked provisional
+        # for the thinking meaning-judge (`verify_records`) to clear or hold. The
+        # one exception is `--no-verify`: with no judge to defer to, an unjudged
+        # note must never read as approved, so the floor holds it as before.
+        if structural or (fidelity and not args.verify):
+            held = structural + fidelity
             assembled["status"] = "review"
             assembled["needs_review"] = True
-            assembled["review_reason"] = "; ".join(problems)
-            assembled["warnings"].extend(problems)
+            assembled["review_reason"] = "; ".join(held)
+            assembled["warnings"].extend(held)
             records.append(assembled)
             continue
+        if fidelity:
+            assembled["fidelity_provisional"] = fidelity
+            assembled["warnings"].append(
+                "held only by the deterministic fidelity floor; deferred to the thinking meaning-judge: "
+                + "; ".join(fidelity)
+            )
         name = f"{sha256_text(rel)[:12]}.md"
         (artifacts / name).write_text(note_text, encoding="utf-8")
         assembled["artifact"] = name
@@ -4013,13 +4051,16 @@ def fidelity_producers(fidelity_items, run_dir):
     }
 
 
-def fidelity_payloads(vault, record, run_dir, lexicon=None):
+def fidelity_payloads(vault, record, run_dir, lexicon=None, count=FIDELITY_SAMPLES):
     """One packet item per sampled utterance, paired with the cleaned window it
     should appear in. Long files are sampled rather than re-read whole.
 
     Samples are corrected the same way the cleaned copy was. Comparing a
     corrected passage against the mistranscription it came from would read every
     successful correction as the cleanup drifting from the source.
+
+    ``count=None`` covers every usable utterance, for a provisional note whose
+    deferral to the meaning-judge is only sound if the judge sees the whole note.
     """
     entries = (lexicon or {}).get("terms", [])
     try:
@@ -4034,7 +4075,7 @@ def fidelity_payloads(vault, record, run_dir, lexicon=None):
     parsed = parse_transcript(raw)
     words = content_words(cleaned)
     items = []
-    for position, block in enumerate(fidelity_samples(record["source"], parsed["blocks"]), start=1):
+    for position, block in enumerate(fidelity_samples(record["source"], parsed["blocks"], count), start=1):
         utterance = vault_lexicon.apply_corrections(block["text"], entries)[0] if entries else block["text"]
         score, at = best_containment(utterance, words)
         window = " ".join(words[max(0, at - 40) : at + 120])
@@ -4052,6 +4093,31 @@ def fidelity_payloads(vault, record, run_dir, lexicon=None):
 ESCALATION_EFFORT = "xhigh"
 
 
+def hold_provisional_unjudged(candidates, warnings, why):
+    """Fall a provisional note back onto its deterministic hold.
+
+    A provisional note is written on the promise that the meaning-judge will look
+    at it. When the judge cannot run — no thinking service, or the review itself
+    failed — that promise is broken, and an unjudged note must never read as
+    approved. So the deterministic fidelity floor that flagged it holds after all,
+    which is exactly the pre-provisional behaviour.
+    """
+    held = 0
+    for record in candidates:
+        flags = record.pop("fidelity_provisional", None)
+        if not flags:
+            continue
+        record["status"] = "review"
+        record["needs_review"] = True
+        record["review_reason"] = "; ".join(flags)
+        record["action"] = "none"
+        record["destination"] = None
+        record["warnings"] = list(record.get("warnings") or []) + flags
+        warnings.append(f"{record['source']}: held by the fidelity floor ({why}): {record['review_reason']}")
+        held += 1
+    return held
+
+
 def verify_records(args, vault, items_by_path, records, run_dir):
     """Have the thinking model review the batch, and redo what it flags.
 
@@ -4062,6 +4128,13 @@ def verify_records(args, vault, items_by_path, records, run_dir):
     medium clears the cleanup case only 4/8, xhigh 8/8. The batched review itself
     runs at the thinking service's own default, since it is a yes/no judgment
     rather than a from-scratch redo.
+
+    A *provisional* note — one the deterministic fidelity floor flagged but that
+    is otherwise sound — is not a candidate for the redo. It reaches the fidelity
+    meaning-judge with every usable utterance (not the spot-check sample) at
+    ``FIDELITY_REVIEW_EFFORT`` (`medium`), and that verdict, not the word-overlap
+    floor, decides it: clean → finish, flagged → hold with the judge's objection.
+    If the judge cannot run, the floor holds it after all (never a silent finish).
     """
     warnings = []
     candidates = [record for record in records if record["action"] == "process" and not record["needs_review"]]
@@ -4072,27 +4145,42 @@ def verify_records(args, vault, items_by_path, records, run_dir):
     if not think["enabled"]:
         warnings.append("verification skipped: no thinking service is configured")
         summary["skipped"] = "disabled"
+        summary["provisionalHeld"] = hold_provisional_unjudged(candidates, warnings, "no thinking service")
         return summary, warnings
 
     by_path = {record["source"]: record for record in candidates}
     note_items = [verify_note_payload(vault, record, items_by_path[record["source"]]) for record in candidates]
+    provisional_paths = {record["source"] for record in candidates if record.get("fidelity_provisional")}
     fidelity_items = []
+    provisional_items = []
     for position, record in enumerate(candidates):
         # A meeting is minutes, not verbatim cleanup, so its utterances are not
         # meant to appear in the note; the utterance-locator review does not apply.
         # The note-level review above still checks its summary and speaker names.
         if is_summarized(record["recording_type"]):
             continue
+        if record["source"] in provisional_paths:
+            # The floor already flagged this note, so the deferral is only honest
+            # if the judge sees the whole thing — every usable utterance, not a
+            # four-sample spot check that could miss the very passage in question.
+            provisional_items.extend(
+                fidelity_payloads(vault, record, run_dir, getattr(args, "compiled_lexicon", None), count=None)
+            )
         # Every chunked file, plus a sample of the single-chunk ones: a file the
         # model read in one pass has already passed the deterministic locator.
-        if record.get("chunks", 1) > 1 or position % FIDELITY_SAMPLE_RATE == 0:
+        elif record.get("chunks", 1) > 1 or position % FIDELITY_SAMPLE_RATE == 0:
             fidelity_items.extend(
                 fidelity_payloads(vault, record, run_dir, getattr(args, "compiled_lexicon", None))
             )
 
     journal = run_dir / "verified.jsonl"
     fidelity_journal = run_dir / "verified-fidelity.jsonl"
-    log(args, f"verifying {len(note_items)} notes and {len(fidelity_items)} utterances on {think['url']}")
+    provisional_journal = run_dir / "verified-fidelity-provisional.jsonl"
+    log(
+        args,
+        f"verifying {len(note_items)} notes, {len(fidelity_items)} spot-check utterances, and "
+        f"{len(provisional_items)} provisional utterances on {think['url']}",
+    )
     try:
         verdicts = forge_verify.verify_packets(
             think,
@@ -4103,6 +4191,11 @@ def verify_records(args, vault, items_by_path, records, run_dir):
             timeout=args.request_timeout,
             progress=progress,
         )
+        # Fidelity compares cleaned text against the raw transcript, so it reviews
+        # the cleanup — and single-speaker cleanup is routed to the thinking
+        # service, the same one verifying here. Naming the producer per item is
+        # what lets those verdicts be recorded as non-independent instead of
+        # reading as a clean bill.
         fidelity_verdicts = (
             forge_verify.verify_packets(
                 think,
@@ -4112,21 +4205,37 @@ def verify_records(args, vault, items_by_path, records, run_dir):
                 background=True,
                 timeout=args.request_timeout,
                 progress=progress,
-                # Fidelity compares cleaned text against the raw transcript, so
-                # it reviews the cleanup — and single-speaker cleanup is routed
-                # to the thinking service, the same one verifying here. Naming
-                # the producer per item is what lets those verdicts be recorded
-                # as non-independent instead of reading as a clean bill.
                 produced_by=fidelity_producers(fidelity_items, run_dir),
             )
             if fidelity_items
+            else {}
+        )
+        # The provisional review is the meaning-judge the floor defers to: full
+        # coverage, at `medium` — deep enough for a yes/no meaning call, where the
+        # `xhigh` note-redo budget buys nothing. Kept a separate pass (own journal)
+        # so the spot-check above is untouched and the two never share an effort.
+        provisional_verdicts = (
+            forge_verify.verify_packets(
+                think,
+                VERIFY_FIDELITY_SYSTEM,
+                provisional_items,
+                journal_path=provisional_journal,
+                background=True,
+                timeout=args.request_timeout,
+                progress=progress,
+                produced_by=fidelity_producers(provisional_items, run_dir),
+                reasoning_effort=FIDELITY_REVIEW_EFFORT,
+            )
+            if provisional_items
             else {}
         )
     except forge_verify.VerificationError as error:
         # An unreachable reviewer must not read as approval.
         warnings.append(f"verification skipped: {error}")
         summary["skipped"] = str(error)
+        summary["provisionalHeld"] = hold_provisional_unjudged(candidates, warnings, "the review failed")
         return summary, warnings
+    fidelity_verdicts = {**fidelity_verdicts, **provisional_verdicts}
 
     # A clean verdict from the model that produced the item is not evidence, and
     # the report must not let it read as one.
@@ -4248,7 +4357,11 @@ def verify_records(args, vault, items_by_path, records, run_dir):
         if record is None or record["needs_review"]:
             continue
         # Cleanup fidelity is not something a title rewrite can fix, so the note
-        # keeps its original name and body and a human looks at it.
+        # keeps its original name and body and a human looks at it. For a
+        # provisional note this is the floor's suspicion confirmed by the judge:
+        # the marker is consumed and the hold carries the judge's own words, which
+        # tell Ellie what was lost — far more use than "52% of words survived".
+        record.pop("fidelity_provisional", None)
         record["verified"] = "needs-review"
         record["needs_review"] = True
         record["review_reason"] = f"cleaned transcript may not be faithful: {verdict['reason']}"
@@ -4258,6 +4371,38 @@ def verify_records(args, vault, items_by_path, records, run_dir):
         record["destination"] = None
         warnings.append(f"{path}: {record['review_reason']}")
 
+    # Provisional notes the judge did not flag are cleared: the meaning-judge saw
+    # every usable utterance and found nothing lost, so the note finishes and the
+    # word-overlap floor that flagged it is overruled. A note whose utterances the
+    # judge never actually saw (none locatable) is held instead — deferring to a
+    # judge that did not run would be the silent finish the floor exists to stop.
+    judged_provisional = {item["id"].split("#s", 1)[0] for item in provisional_items}
+    provisional_cleared = 0
+    for record in candidates:
+        flags = record.get("fidelity_provisional")
+        if not flags:
+            continue
+        record.pop("fidelity_provisional", None)
+        if record["needs_review"]:
+            continue  # already held (a failed escalation, say)
+        if record["source"] not in judged_provisional:
+            record["status"] = "review"
+            record["needs_review"] = True
+            record["review_reason"] = "; ".join(flags)
+            record["action"] = "none"
+            record["destination"] = None
+            record["warnings"] = list(record.get("warnings") or []) + flags
+            warnings.append(
+                f"{record['source']}: held by the fidelity floor (no utterance was locatable to judge): "
+                + record["review_reason"]
+            )
+            continue
+        provisional_cleared += 1
+        # A note escalated on its title keeps that outcome; only an otherwise
+        # unverified note is stamped as cleared by the meaning-judge.
+        if not record.get("verified"):
+            record["verified"] = "fidelity-cleared"
+
     for path, verdict in verdicts.items():
         if verdict["verdict"] == forge_verify.VERDICT_OK and path in by_path and not by_path[path].get("verified"):
             by_path[path]["verified"] = "ok"
@@ -4265,6 +4410,12 @@ def verify_records(args, vault, items_by_path, records, run_dir):
     summary["fidelityChecked"] = len(fidelity_verdicts)
     summary["fidelityFlagged"] = sum(
         1 for verdict in fidelity_verdicts.values() if verdict["verdict"] == forge_verify.VERDICT_FLAG
+    )
+    # Every provisional note ends either cleared or held; the held count is just
+    # the ones still carrying needs_review once every verdict has been applied.
+    summary["provisionalCleared"] = provisional_cleared
+    summary["provisionalHeld"] = sum(
+        1 for record in candidates if record["source"] in provisional_paths and record["needs_review"]
     )
     return summary, warnings
 
@@ -4331,7 +4482,7 @@ def reassemble_escalated(args, vault, schema, items_by_path, clean_results, reco
                 if raw_stem
                 else None
             )
-            problems, measurements = check_note(
+            structural, fidelity, measurements = check_note(
                 {**item, "raw_body": raw_body},
                 cleaned,
                 record["summary"],
@@ -4345,9 +4496,13 @@ def reassemble_escalated(args, vault, schema, items_by_path, clean_results, reco
                 summarized=is_summarized(record["recording_type"]),
             )
             record["measurements"] = measurements
-            record["checks"] = problems
-            if problems:
-                raise UserError("; ".join(problems))
+            record["checks"] = structural + fidelity
+            # Reassembly reuses the same cleaned text, so any fidelity finding here
+            # is the one the meaning-judge already cleared for this note — a title
+            # rewrite cannot change it. Only a new structural fault (a malformed
+            # replacement summary, say) is grounds to hold.
+            if structural:
+                raise UserError("; ".join(structural))
             (artifacts / record["artifact"]).write_text(note_text, encoding="utf-8")
             record["final_hash"] = sha256_text(note_text)
             record["destination"] = destination
@@ -4749,6 +4904,17 @@ def verification_report(verification, records):
         lines.append(
             f"- Utterances spot-checked against the cleaned text: {verification['fidelityChecked']}"
             f" ({verification.get('fidelityFlagged', 0)} flagged)"
+        )
+    if verification.get("provisionalCleared") or verification.get("provisionalHeld"):
+        # These are notes the deterministic fidelity floor flagged and then
+        # deferred to the meaning-judge. Reporting the outcome, not the floor's
+        # word-overlap score, is the whole point of the deferral; each held note's
+        # own row below carries the judge's objection.
+        cleared = verification.get("provisionalCleared", 0)
+        provisional_held = verification.get("provisionalHeld", 0)
+        lines.append(
+            f"- Deterministic fidelity floor deferred to the meaning-judge: {cleared + provisional_held}"
+            f" ({cleared} cleared and finished, {provisional_held} held)"
         )
     lines.append("")
     flagged = [record for record in records if record.get("verify_reason")]
@@ -5883,7 +6049,7 @@ def assemble_reprocessed(args, vault, schema, items, class_records, clean_result
             note_text = (
                 item["frontmatter_prefix"] + "\n" + head[: -len(TRANSCRIPT_MARKER)] + "\n\n" + item["tail"]
             )
-            problems, measurements = check_note(
+            structural, fidelity, measurements = check_note(
                 {**item, "raw_body": raw_body},
                 cleaned_result["cleaned"],
                 summary,
@@ -5895,6 +6061,11 @@ def assemble_reprocessed(args, vault, schema, items, class_records, clean_result
                 tail=item["tail"],
                 summarized=is_summarized(record.get("recording_type")),
             )
+            # Reprocessing an already-filed note has no thinking meaning-judge to
+            # defer to — its verify pass reviews nothing (these records are
+            # `reprocess`, not `process`, candidates) — so the fidelity floor is
+            # the only backstop here and every problem holds, as before.
+            problems = structural + fidelity
         except (OSError, UnicodeDecodeError, UserError, ValueError) as error:
             message = f"{type(error).__name__}: {error}"
             warnings.append(f"{rel}: reassembly failed ({message})")

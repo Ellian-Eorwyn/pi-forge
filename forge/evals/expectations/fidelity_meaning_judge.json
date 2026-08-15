@@ -1,0 +1,175 @@
+{
+  "readme": "Seeded answer key for the fidelity meaning-judge (VERIFY_FIDELITY_SYSTEM). Each item is one raw source utterance paired with the cleaned passage that best matches it, exactly the shape `vault-transcripts` sends its provisional notes. `defect: null` means meaning was preserved and the only correct verdict is `ok`; a defect string means a point was lost, misstated, or misattributed and the only correct verdict is `flag`. The faithful items are deliberately the kinds of cleanup the deterministic floor punishes — filler removed, a roundabout phrasing condensed, a distinctive word replaced by a synonym, a lecture regrouped — because this case exists to confirm the judge clears exactly those while still catching real loss. Eight packets of two, each pairing one faithful item with one loss, so a rubber-stamp fails every packet by missing the loss and a flag-everything judge fails every packet by holding the faithful one. `containment` is the deterministic word-overlap the floor would have seen: the faithful items sit low, which is the whole point. The premise under test is Ellie's — `medium` reasoning matches `xhigh` on this yes/no call — so run it under q38-medium and q38-xhigh and compare.",
+  "items": [
+    {
+      "id": "fmj-01",
+      "defect": null,
+      "why": "Filler, a false start, and a stutter removed; every point kept. The never-error at the top of the list.",
+      "item": {
+        "sourceUtterance": "so um the the thing is like I I basically need to remember to descale the the grinder this weekend you know",
+        "cleanedPassage": "I need to remember to descale the grinder this weekend.",
+        "containment": 0.62
+      }
+    },
+    {
+      "id": "fmj-02",
+      "defect": null,
+      "why": "A roundabout phrasing condensed into the plain statement it was reaching for, in the speaker's own words.",
+      "item": {
+        "sourceUtterance": "what I'm trying to say is that the way the whole thing sort of works out is that if the warranty covers it then really the only cost is the trip itself and the afternoon it takes",
+        "cleanedPassage": "If the warranty covers it, the only cost is the trip and the afternoon.",
+        "containment": 0.55
+      }
+    },
+    {
+      "id": "fmj-03",
+      "defect": null,
+      "why": "A garbled, ungrammatical ASR fragment resolved into the reading it plainly had, with the name spelled correctly.",
+      "item": {
+        "sourceUtterance": "the the santi santideva text the one on the on the way of the bodhisattva we we read the third chapter of it",
+        "cleanedPassage": "We read the third chapter of Śāntideva's text on the way of the bodhisattva.",
+        "containment": 0.58
+      }
+    },
+    {
+      "id": "fmj-04",
+      "defect": null,
+      "why": "A distinctive source word replaced by a synonym. Word overlap collapses; meaning is identical. This is the case the rare-word floor cannot tell from real loss and the judge must.",
+      "item": {
+        "sourceUtterance": "the main problem is that the aggregation job ran twice overnight and duplicated a bunch of the counters",
+        "cleanedPassage": "The nightly rollup process executed a second time and double-counted several of the tallies.",
+        "containment": 0.28
+      }
+    },
+    {
+      "id": "fmj-05",
+      "defect": null,
+      "why": "The trap: a lecture passage regrouped, its three points reordered but all present, in the speaker's words. A judge that pattern-matches on surface order flags it; a reader does not.",
+      "item": {
+        "sourceUtterance": "okay so first the two truths, conventional and ultimate, and then how emptiness is not nothingness, and and the last thing is that compassion follows from seeing that",
+        "cleanedPassage": "Compassion follows from seeing emptiness, which is not nothingness but the ultimate of the two truths standing beside the conventional.",
+        "containment": 0.44
+      }
+    },
+    {
+      "id": "fmj-06",
+      "defect": null,
+      "why": "One missing word that does not change the meaning.",
+      "item": {
+        "sourceUtterance": "I should probably measure the counter first before I go and buy anything else for that corner",
+        "cleanedPassage": "I should measure the counter before buying anything else for that corner.",
+        "containment": 0.74
+      }
+    },
+    {
+      "id": "fmj-07",
+      "defect": null,
+      "why": "Small talk whose substance is carried in the passage; the greeting is dropped and nothing is lost.",
+      "item": {
+        "sourceUtterance": "yeah hey good to see you again anyway the address I keep forgetting is 6062 Bernhard Avenue",
+        "cleanedPassage": "The address I keep forgetting is 6062 Bernhard Avenue.",
+        "containment": 0.6
+      }
+    },
+    {
+      "id": "fmj-08",
+      "defect": null,
+      "why": "Two fragments joined into one sentence and a repetition dropped; both clauses survive.",
+      "item": {
+        "sourceUtterance": "the portafilter. the portafilter needs a new gasket. and the group head, that needs a backflush too",
+        "cleanedPassage": "The portafilter needs a new gasket, and the group head needs a backflush too.",
+        "containment": 0.68
+      }
+    },
+    {
+      "id": "fmj-09",
+      "defect": "dropped-point",
+      "why": "The source makes two points — the shelving was never anchored, and the studs are 24 inches apart — and the cleaned passage keeps only the first. A dropped substantive point is loss.",
+      "item": {
+        "sourceUtterance": "the shelving unit in the pantry never got anchored properly and the the studs behind it are twenty four inches apart which is why the bracket I bought doesn't reach",
+        "cleanedPassage": "The shelving unit in the pantry was never anchored properly.",
+        "containment": 0.5
+      }
+    },
+    {
+      "id": "fmj-10",
+      "defect": "misstated-meaning",
+      "why": "The speaker says the kettle is fine and does not need replacing; the cleaned passage says the opposite. The meaning is inverted.",
+      "item": {
+        "sourceUtterance": "Gillian thinks the kettle is fine and honestly she's probably right so we don't need to replace it",
+        "cleanedPassage": "The kettle needs to be replaced.",
+        "containment": 0.35
+      }
+    },
+    {
+      "id": "fmj-11",
+      "defect": "wrong-attribution",
+      "why": "The doubt is the speaker's own; the passage attributes it to Gillian. Reassigning who said or thought something is loss.",
+      "item": {
+        "sourceUtterance": "I wasn't sure the migration would finish before midnight but Gillian was completely confident it would",
+        "cleanedPassage": "Gillian was not sure the migration would finish before midnight.",
+        "containment": 0.52
+      }
+    },
+    {
+      "id": "fmj-12",
+      "defect": "altered-number",
+      "why": "The source says the deployment window was three hours; the passage says two. A number the speaker gave, changed.",
+      "item": {
+        "sourceUtterance": "the deployment window was about three hours start to finish so we had plenty of time to roll back if we needed to",
+        "cleanedPassage": "The deployment window was about two hours start to finish.",
+        "containment": 0.66
+      }
+    },
+    {
+      "id": "fmj-13",
+      "defect": "dropped-negation",
+      "why": "The source says nobody had to roll anything back; the passage drops the negation and says they did. Reversed meaning.",
+      "item": {
+        "sourceUtterance": "the good news is nobody had to roll anything back which honestly surprised me",
+        "cleanedPassage": "They had to roll something back, which was a surprise.",
+        "containment": 0.45
+      }
+    },
+    {
+      "id": "fmj-14",
+      "defect": "dropped-condition",
+      "why": "The source makes the plan conditional on the part arriving; the passage states it unconditionally. Dropping the condition changes what was said.",
+      "item": {
+        "sourceUtterance": "so if the replacement gasket gets here by Friday then I'll do the whole repair over the weekend otherwise it waits",
+        "cleanedPassage": "I'll do the whole repair over the weekend.",
+        "containment": 0.5
+      }
+    },
+    {
+      "id": "fmj-15",
+      "defect": "overstated-certainty",
+      "why": "The speaker hedges — thinks, might; the passage reports it as settled fact. Turning a tentative thought into a firm claim misstates the meaning.",
+      "item": {
+        "sourceUtterance": "I think the descaling might fix the leak but I'm really not certain it's worth trying first though",
+        "cleanedPassage": "The descaling will fix the leak.",
+        "containment": 0.44
+      }
+    },
+    {
+      "id": "fmj-16",
+      "defect": "changed-subject",
+      "why": "The source is about the reporting dashboards; the passage swaps in the deployment. The thing being described is no longer the thing the speaker described.",
+      "item": {
+        "sourceUtterance": "the reporting dashboards came back up cleanly after the restart which was the part I was most worried about",
+        "cleanedPassage": "The deployment came back up cleanly after the restart, which was the part I was most worried about.",
+        "containment": 0.72
+      }
+    }
+  ],
+  "packets": {
+    "fmj-packet-1": ["fmj-01", "fmj-09"],
+    "fmj-packet-2": ["fmj-02", "fmj-10"],
+    "fmj-packet-3": ["fmj-03", "fmj-11"],
+    "fmj-packet-4": ["fmj-04", "fmj-12"],
+    "fmj-packet-5": ["fmj-05", "fmj-13"],
+    "fmj-packet-6": ["fmj-06", "fmj-14"],
+    "fmj-packet-7": ["fmj-07", "fmj-15"],
+    "fmj-packet-8": ["fmj-08", "fmj-16"]
+  }
+}
