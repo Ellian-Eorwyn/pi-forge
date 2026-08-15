@@ -76,13 +76,36 @@ def compact_schema_for_prompt(schema):
     }
 
 
+def other_vaults_prompt(other_vaults):
+    """Tell the classifier which sibling vaults exist and when to route to one."""
+    listed = "\n".join(f"- {name}: {entry['scope']}" for name, entry in sorted(other_vaults.items()))
+    return (
+        "Other vaults:\n"
+        "This vault has sibling vaults, each with its own scope below. A note that fits one "
+        "sibling vault's scope better than any domain in this vault's schema has a home and is "
+        "NOT ambiguous: set \"belongs_to\" to that vault's exact name, leave needs_review false, "
+        "and stop -- the note is moved there for its own processing, so its domain, subdomain, and "
+        "other metadata do not matter and may be left null. \"belongs_to\" is the only way to send "
+        "a note to a sibling vault: never set needs_review or name a sibling vault in review_reason "
+        "as a substitute for it. needs_review is only for a note that fits neither this vault nor "
+        "any sibling. Use only a name listed here, exactly as written; when the note belongs in "
+        "this vault, leave belongs_to null.\n"
+        + listed
+    )
+
+
 def system_prompt(schema, profile_prefix=""):
+    other_vaults = schema.get("other_vaults") or {}
     shape = {
         "metadata": {key: None for key in classifier_property_order(schema)},
         "needs_review": False,
         "review_reason": None,
         "suggestions": [],
     }
+    # Only offered when siblings are declared, so a vault with none never sees a
+    # key it cannot act on.
+    if other_vaults:
+        shape["belongs_to"] = None
     sections = [SYSTEM_INSTRUCTIONS]
     # Ahead of the schema, so the schema JSON keeps a stable offset in the
     # cached prefix whether or not a profile is configured.
@@ -93,6 +116,8 @@ def system_prompt(schema, profile_prefix=""):
         sections.append("Domain decision rules:\n" + "\n".join(f"- {rule}" for rule in schema["domain_rules"]))
     if schema.get("project_rules"):
         sections.append("Project assignment rules:\n" + "\n".join(f"- {rule}" for rule in schema["project_rules"]))
+    if other_vaults:
+        sections.append(other_vaults_prompt(other_vaults))
     sections.append("Required response shape:\n" + run_state.canonical_json(shape))
     return "\n\n".join(sections)
 
@@ -205,10 +230,32 @@ def validate_classification(response, schema):
     if not isinstance(response, dict):
         return None, [], ["response is not a JSON object"]
     required = {"metadata", "needs_review", "review_reason"}
-    allowed = required | {"suggestions"}
+    allowed = required | {"suggestions", "belongs_to"}
     actual = set(response)
     if not required.issubset(actual) or not actual.issubset(allowed):
-        errors.append(f"top-level keys must be {sorted(required)} plus optional suggestions")
+        errors.append(f"top-level keys must be {sorted(required)} plus optional suggestions and belongs_to")
+
+    # A note the classifier assigns to a declared sibling vault is leaving this
+    # one, so its local classification is irrelevant and is not validated: the
+    # organizer confirms the target inbox exists, then moves the note there. An
+    # undeclared name cannot be repaired from the schema the model was shown, so
+    # it degrades to needs_review below rather than routing anywhere.
+    other_vaults = schema.get("other_vaults") or {}
+    belongs_to = response.get("belongs_to")
+    if belongs_to is not None and not isinstance(belongs_to, str):
+        errors.append("belongs_to must be null or a string")
+        belongs_to = None
+    if isinstance(belongs_to, str):
+        belongs_to = belongs_to.strip()
+    if belongs_to and belongs_to in other_vaults and not errors:
+        return {
+            "metadata": {},
+            "needs_review": False,
+            "review_reason": None,
+            "belongs_to": belongs_to,
+            "suggestions": clean_suggestions(response.get("suggestions"), warnings),
+        }, warnings, errors
+
     metadata = response.get("metadata")
     if not isinstance(metadata, dict):
         errors.append("metadata must be an object")
@@ -284,10 +331,17 @@ def validate_classification(response, schema):
     review_reason = response.get("review_reason")
     if review_reason is not None and not isinstance(review_reason, str):
         errors.append("review_reason must be null or string")
+    # Reached only when belongs_to named a vault this schema does not declare (a
+    # resolved one returned early above): a human decides rather than the note
+    # being filed under whatever local domain the model also guessed.
+    if belongs_to and belongs_to not in other_vaults:
+        needs_review = True
+        review_reason = f"classified as belonging to '{belongs_to}', which is not a declared sibling vault"
     suggestions = clean_suggestions(response.get("suggestions"), warnings)
     return {
         "metadata": normalized,
         "needs_review": needs_review,
         "review_reason": review_reason,
+        "belongs_to": None,
         "suggestions": suggestions,
     }, warnings, errors

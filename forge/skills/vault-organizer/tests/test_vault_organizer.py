@@ -219,6 +219,22 @@ SOURCES_SCHEMA = SCHEMA.replace(
 )
 
 
+def with_other_vaults(
+    schema_text,
+    inbox,
+    name="Work",
+    scope="Professional employment and work-project content not tied to research.",
+):
+    """Return SCHEMA with an ``## Other vaults`` row declaring one sibling vault."""
+    section = (
+        "## Other vaults\n\n"
+        "| Name | Scope | Inbox path |\n"
+        "| --- | --- | --- |\n"
+        f"| `{name}` | {scope} | `{inbox}` |\n\n"
+    )
+    return schema_text.replace("## Dashboard rules", section + "## Dashboard rules")
+
+
 class StubChatHandler(BaseHTTPRequestHandler):
     responses = []
     requests = []
@@ -398,6 +414,22 @@ class VaultOrganizerTests(unittest.TestCase):
             {"type": "note", "status": "active", "domain": "technology", "subdomain": "obsidian"},
         )
         self.assertEqual(destination.as_posix(), "04 Technology/4.03 Obsidian")
+
+    def test_other_vaults_section_parses_into_the_schema(self):
+        schema = self.schema(with_other_vaults(SCHEMA, "/Users/x/Obsidian/Work/00 Inbox"))
+        self.assertIn("Work", schema["other_vaults"])
+        self.assertEqual(schema["other_vaults"]["Work"]["inbox"], "/Users/x/Obsidian/Work/00 Inbox")
+        self.assertIn("Professional", schema["other_vaults"]["Work"]["scope"])
+        self.assertTrue(vault_organizer.other_vaults_enabled(schema))
+
+    def test_other_vaults_absent_leaves_routing_off(self):
+        schema = self.schema()
+        self.assertEqual(schema["other_vaults"], {})
+        self.assertFalse(vault_organizer.other_vaults_enabled(schema))
+
+    def test_other_vaults_rejects_a_relative_inbox_path(self):
+        with self.assertRaises(vault_organizer.UserError):
+            self.schema(with_other_vaults(SCHEMA, "Work/00 Inbox"))
 
     def test_safe_title_is_idempotent_and_keeps_names_readable(self):
         # Brackets and pipes have readable equivalents; the rest are dropped.
@@ -2417,6 +2449,165 @@ class DateBackfillTests(unittest.TestCase):
         payload = json.loads(run_script("drift", "--vault", str(self.vault), "--archive", str(self.archive)).stdout)
         self.assertEqual(payload["status"], "error")
         self.assertIn("belong to dates mode", payload["errors"][0]["message"])
+
+
+class RoutingChatHandler(StubChatHandler):
+    """Answer each classification by the note's title, so a routing test need not
+    predict the order classify_items visits notes in."""
+
+    by_title = {}
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        self.__class__.requests.append(payload)
+        user = next(message for message in payload["messages"] if message["role"] == "user")
+        title = json.loads(user["content"]).get("title", "")
+        response = self.__class__.by_title.get(title, ok_response())
+        content = response if isinstance(response, str) else json.dumps(response)
+        body = json.dumps({"choices": [{"message": {"content": content}}]}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class CrossVaultRoutingTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        self.vault = self.root / "vault"
+        (self.vault / "99 Meta").mkdir(parents=True)
+        (self.vault / "00 Inbox").mkdir()
+        # A sibling vault's inbox, outside this vault entirely.
+        self.work_inbox = self.root / "Work" / "00 Inbox"
+        self.work_inbox.mkdir(parents=True)
+        self.set_schema(self.work_inbox)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def set_schema(self, inbox, base=None):
+        # SOURCES_SCHEMA defines the transcript source kind the pair tests rely on.
+        (self.vault / "99 Meta" / "0.00 Vault Schema.md").write_text(
+            with_other_vaults(SOURCES_SCHEMA if base is None else base, inbox), encoding="utf-8"
+        )
+
+    def write_note(self, relative, text):
+        path = self.vault / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def record_for(self, result, source):
+        plan = json.loads((Path(result["data"]["run_directory"]) / "plan.json").read_text(encoding="utf-8"))
+        return next(row for row in plan["records"] if row["source"] == source)
+
+    def route_run(self, by_title, *extra):
+        RoutingChatHandler.by_title = by_title
+        with StubServer([], handler_cls=RoutingChatHandler) as server:
+            result = run_script(
+                "inbox", "--vault", str(self.vault), "--base-url", server.url, "--no-embeddings", *extra
+            )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        return json.loads(result.stdout)
+
+    def test_belongs_to_plans_a_route_to_the_sibling_inbox(self):
+        self.write_note("00 Inbox/Waste Heat Meeting.md", "# Waste Heat Meeting\n\nQuarterly work-project sync.\n")
+        result = self.route_run({"Waste Heat Meeting": ok_response(belongs_to="Work")})
+        record = self.record_for(result, "00 Inbox/Waste Heat Meeting.md")
+        self.assertEqual(record["action"], "route_vault")
+        self.assertEqual(record["route_to"], "Work")
+        self.assertEqual(record["route_destination"], str(self.work_inbox / "Waste Heat Meeting.md"))
+        self.assertFalse(record["needs_review"])
+        self.assertEqual(result["data"]["counts"]["routed_to_vault"], 1)
+        self.assertEqual(result["data"]["counts"]["review_required"], 0)
+        # Dry run: the note is planned as a route but nothing has moved.
+        self.assertTrue((self.vault / "00 Inbox" / "Waste Heat Meeting.md").exists())
+        self.assertFalse((self.work_inbox / "Waste Heat Meeting.md").exists())
+
+    def test_apply_moves_a_routed_note_into_the_sibling_inbox(self):
+        self.write_note("00 Inbox/RPAE Prep.md", "# RPAE Prep\n\nWork-project planning notes.\n")
+        result = self.route_run({"RPAE Prep": ok_response(belongs_to="Work")}, "--apply")
+        self.assertEqual(result["data"]["counts"]["routed_to_vault"], 1)
+        self.assertFalse((self.vault / "00 Inbox" / "RPAE Prep.md").exists())
+        moved = self.work_inbox / "RPAE Prep.md"
+        self.assertTrue(moved.exists())
+        self.assertIn("Work-project planning notes", moved.read_text(encoding="utf-8"))
+
+    def write_transcript_pair(self):
+        """A processed note and its raw transcript half, paired by a parent link."""
+        self.write_note("00 Inbox/Load Shift Session.md", "# Load Shift Session\n\nA work meeting.\n")
+        self.write_note(
+            "00 Inbox/Load Shift Session - Transcript.md",
+            '---\ntype: source\nstatus: raw\nsource_kind: transcript\n'
+            'parent: "[[Load Shift Session]]"\n---\n'
+            "# Load Shift Session - Transcript\n\n**Speaker** the verbatim record.\n",
+        )
+
+    def test_routing_the_processed_half_pulls_its_transcript(self):
+        self.write_transcript_pair()
+        result = self.route_run(
+            {
+                "Load Shift Session": ok_response(belongs_to="Work"),
+                # The raw half files to Sources on its own; the pair keeps it together.
+                "Load Shift Session - Transcript": ok_response(
+                    metadata={"type": "source", "status": "raw", "domain": "technology", "source_kind": "transcript"}
+                ),
+            },
+            "--apply",
+        )
+        self.assertEqual(result["data"]["counts"]["routed_to_vault"], 2)
+        pair = self.record_for(result, "00 Inbox/Load Shift Session - Transcript.md")
+        self.assertEqual(pair["action"], "route_vault")
+        self.assertEqual(pair["route_to"], "Work")
+        for name in ("Load Shift Session.md", "Load Shift Session - Transcript.md"):
+            self.assertTrue((self.work_inbox / name).exists())
+            self.assertFalse((self.vault / "00 Inbox" / name).exists())
+
+    def test_routing_the_transcript_half_pulls_its_processed_note(self):
+        # The model routes the raw half and files the processed half elsewhere:
+        # the pair must still move together rather than split across vaults.
+        self.write_transcript_pair()
+        result = self.route_run(
+            {
+                "Load Shift Session": ok_response(),  # classified locally, not routed
+                "Load Shift Session - Transcript": ok_response(belongs_to="Work"),
+            },
+            "--apply",
+        )
+        self.assertEqual(result["data"]["counts"]["routed_to_vault"], 2)
+        processed = self.record_for(result, "00 Inbox/Load Shift Session.md")
+        self.assertEqual(processed["action"], "route_vault")
+        self.assertEqual(processed["route_to"], "Work")
+        for name in ("Load Shift Session.md", "Load Shift Session - Transcript.md"):
+            self.assertTrue((self.work_inbox / name).exists())
+            self.assertFalse((self.vault / "00 Inbox" / name).exists())
+
+    def test_an_undeclared_vault_name_falls_back_to_review(self):
+        self.write_note("00 Inbox/Mystery.md", "# Mystery\n\nBelongs to a vault nobody declared.\n")
+        result = self.route_run({"Mystery": ok_response(belongs_to="Archive Vault")})
+        record = self.record_for(result, "00 Inbox/Mystery.md")
+        self.assertTrue(record["needs_review"])
+        self.assertNotEqual(record["action"], "route_vault")
+        self.assertIn("not a declared sibling vault", record["review_reason"])
+        self.assertEqual(result["data"]["counts"]["routed_to_vault"], 0)
+        # Held, not moved.
+        self.assertTrue((self.vault / "00 Inbox" / "Mystery.md").exists())
+
+    def test_a_missing_sibling_inbox_falls_back_to_review(self):
+        self.set_schema(self.root / "Nowhere" / "00 Inbox")
+        self.write_note("00 Inbox/Orphan.md", "# Orphan\n\nWork content, but the target vault is gone.\n")
+        result = self.route_run({"Orphan": ok_response(belongs_to="Work")}, "--apply")
+        record = self.record_for(result, "00 Inbox/Orphan.md")
+        self.assertTrue(record["needs_review"])
+        self.assertNotEqual(record["action"], "route_vault")
+        self.assertIn("inbox does not exist", record["review_reason"])
+        self.assertEqual(result["data"]["counts"]["routed_to_vault"], 0)
+        # Apply must not have invented the missing folder or moved the note.
+        self.assertTrue((self.vault / "00 Inbox" / "Orphan.md").exists())
+        self.assertFalse((self.root / "Nowhere").exists())
 
 
 if __name__ == "__main__":

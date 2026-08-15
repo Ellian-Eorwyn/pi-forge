@@ -75,10 +75,12 @@ from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
     is_divider_row,
     is_workspace_dir,
     iter_heading_lines,
+    link_basename,
     normalize_body_for_hash,
     normalize_project_value,
     note_title,
     optional_bullet_lines,
+    other_vaults_enabled,
     pad2,
     parse_assignment,
     parse_bullet_registry,
@@ -118,6 +120,7 @@ from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
     unsafe_filename_reason,
     valid_wikilink,
     validate_derived_paths,
+    wikilink_target,
     withheld_properties,
     yaml_quote,
     yaml_scalar,
@@ -127,7 +130,9 @@ import vault_guide
 
 WORKFLOW = "vault-organizer"
 DEFAULT_MODEL = "chat"
-PROMPT_VERSION = "vault-organizer-v3"
+# v4 adds cross-vault routing (belongs_to) to the classifier prompt, so a cache
+# written under v3 must not be reused for a note that might now route.
+PROMPT_VERSION = "vault-organizer-v4"
 MAX_BODY_CHARS = 30000
 # The embed backend pools each input in one ubatch (~512 tokens) and 500s on
 # anything wider rather than truncating; dense text (speaker-labelled transcripts)
@@ -950,6 +955,11 @@ def base_record(item):
         "created_evidence": None,
         "needs_review": False,
         "review_reason": None,
+        # The sibling vault this note was classified into, resolved to a route in
+        # route_records; None for every note that belongs in this vault.
+        "belongs_to": None,
+        "route_to": None,
+        "route_destination": None,
         "suggestions": [],
         "warnings": [],
         "status": "ok",
@@ -1015,23 +1025,30 @@ def classify_items(args, vault, schema, schema_hash, items, losers, run_dir):
                 record["metadata"] = classification["metadata"]
                 record["needs_review"] = classification.get("needs_review", False)
                 record["review_reason"] = classification.get("review_reason")
+                record["belongs_to"] = classification.get("belongs_to")
                 record["suggestions"] = classification.get("suggestions", [])
                 record["excerpted"] = bool(classification.get("excerpted"))
                 record["created_evidence"] = classification.get("created_evidence")
                 record["warnings"] = record_warnings
-                missing = missing_required_properties(record["metadata"], schema)
-                if missing and not record["needs_review"]:
-                    record["needs_review"] = True
-                    record["review_reason"] = f"missing required properties: {', '.join(missing)}"
-                if record["needs_review"]:
-                    record["status"] = "review"
+                if record["belongs_to"]:
+                    # Bound for a sibling vault: route_records confirms the target
+                    # inbox and turns this into the move. It is never filed here, so
+                    # its (deliberately empty) local classification is not checked.
+                    record["status"] = "ok"
                 else:
-                    destination_dir = compile_destination(schema, record["metadata"])
-                    filed_name = filing_name(record, path.name, record_warnings)
-                    record["destination"] = (destination_dir / filed_name).as_posix()
-                    revised = revised_note_text(record["metadata"], schema, body)
-                    record["frontmatter_changed"] = revised != data.decode("utf-8-sig")
-                    record["move_required"] = record["destination"] != rel
+                    missing = missing_required_properties(record["metadata"], schema)
+                    if missing and not record["needs_review"]:
+                        record["needs_review"] = True
+                        record["review_reason"] = f"missing required properties: {', '.join(missing)}"
+                    if record["needs_review"]:
+                        record["status"] = "review"
+                    else:
+                        destination_dir = compile_destination(schema, record["metadata"])
+                        filed_name = filing_name(record, path.name, record_warnings)
+                        record["destination"] = (destination_dir / filed_name).as_posix()
+                        revised = revised_note_text(record["metadata"], schema, body)
+                        record["frontmatter_changed"] = revised != data.decode("utf-8-sig")
+                        record["move_required"] = record["destination"] != rel
             except Exception as error:
                 message = str(error)
                 warnings.append(f"{rel}: {message}")
@@ -1080,6 +1097,7 @@ def verifiable_records(records):
         for rel, record in sorted(records.items())
         if record.get("destination")
         and not record.get("needs_review")
+        and not record.get("belongs_to")
         and record.get("status") != "failed"
         and record.get("classification_source") != "frontmatter"
     ]
@@ -1292,7 +1310,157 @@ def assign_unique_destination(vault, directory, name, taken_casefold):
     return candidate.as_posix()
 
 
-def route_records(args, vault, items, losers, class_records, warnings, done_map=None):
+def assign_unique_route_path(inbox, name, taken_casefold):
+    """A collision-free absolute path for a routed note in a sibling vault's inbox.
+
+    The target inbox is outside this vault, so this is the cross-vault twin of
+    ``assign_unique_destination`` and works in absolute paths rather than
+    vault-relative ones.
+    """
+    base = inbox / name
+    candidate = base
+    suffix = 1
+    while candidate.exists() or str(candidate).casefold() in taken_casefold:
+        candidate = base.with_name(f"{base.stem}-{suffix}{base.suffix}")
+        suffix += 1
+    taken_casefold.add(str(candidate).casefold())
+    return str(candidate)
+
+
+def demote_route(record, reason):
+    """A note the classifier sent to a sibling vault that could not be resolved.
+
+    Falls back to the same review hold it would have had before cross-vault
+    routing existed, carrying the reason so the report says why.
+    """
+    record["belongs_to"] = None
+    record["route_to"] = None
+    record["route_destination"] = None
+    record["needs_review"] = True
+    record["review_reason"] = reason
+    record["status"] = "review"
+    record["destination"] = record["source"]
+    record["frontmatter_changed"] = False
+    record["move_required"] = False
+
+
+def mark_route(record, name, destination):
+    """Turn a resolved sibling-vault classification into a cross-vault move.
+
+    The in-vault destination stays the note's own path so every filing invariant
+    (collision, escape, dedupe) treats a routed note as a no-op; the real target
+    rides along in ``route_destination`` and is honored only by apply.
+    """
+    record["belongs_to"] = name
+    record["route_to"] = name
+    record["route_destination"] = destination
+    record["action"] = "route_vault"
+    record["needs_review"] = False
+    record["review_reason"] = None
+    record["status"] = "ok"
+    record["destination"] = record["source"]
+    record["frontmatter_changed"] = False
+    record["move_required"] = False
+
+
+def resolve_vault_routes(vault, schema, records, warnings, done_map=None):
+    """Turn ``belongs_to`` classifications into cross-vault route actions.
+
+    A note the classifier assigned to a declared sibling vault is moved to that
+    vault's inbox instead of filed here, and a transcript's recording pair travels
+    with it: if either half of a pair is routed, both are, so the model routing
+    only one half never splits the two across vaults. Falls back to
+    ``needs_review`` when the named vault is not declared or its inbox is missing.
+    """
+    done_map = done_map or {}
+    other_vaults = schema.get("other_vaults") or {}
+
+    def routable(record):
+        return record["status"] != "failed" and record.get("action") != "quarantine"
+
+    # A route that already applied in an earlier pass is re-planned exactly so a
+    # resumed run skips it rather than moving a note that is already gone. This
+    # covers a pulled-in pair too, whose own classification never carried
+    # belongs_to; the journal is the only record that it was routed.
+    resumed = set()
+    for record in records:
+        done = done_map.get(record["source"])
+        if done and done.get("op") == "route_vault" and done.get("destination") and done.get("route_to"):
+            mark_route(record, done["route_to"], done["destination"])
+            record["already_applied"] = True
+            resumed.add(id(record))
+
+    routes = [(record, record["route_to"]) for record in records if id(record) in resumed]
+    for record in records:
+        if id(record) in resumed or not routable(record):
+            continue
+        name = record.get("belongs_to")
+        if not name:
+            continue
+        entry = other_vaults.get(name)
+        if entry is None:
+            demote_route(record, f"classified as belonging to '{name}', which is not a declared sibling vault")
+            continue
+        if not Path(entry["inbox"]).expanduser().is_dir():
+            demote_route(record, f"sibling vault '{name}' inbox does not exist: {entry['inbox']}")
+            continue
+        routes.append((record, name))
+
+    if not routes:
+        return
+
+    # Close the routed set over transcript pairs. The raw half is the link: it
+    # declares source_kind: transcript and a parent back-link to the processed
+    # note, read from disk because a routed note's classification metadata is
+    # intentionally emptied. Routing either half routes both.
+    by_basename = {link_basename(record["source"]).casefold(): record for record in records if routable(record)}
+    route_of = {id(record): name for record, name in routes}
+    for record in records:
+        if not routable(record):
+            continue
+        is_transcript, parent_basename = transcript_link(vault, record["source"])
+        if not is_transcript or not parent_basename:
+            continue
+        processed = by_basename.get(parent_basename)
+        if processed is None:
+            continue
+        name = route_of.get(id(record)) or route_of.get(id(processed))
+        if name:
+            route_of[id(record)] = name
+            route_of[id(processed)] = name
+    routes = [(record, route_of[id(record)]) for record in records if id(record) in route_of]
+
+    taken = {}  # inbox str -> set of casefolded absolute paths already claimed this run
+    for record, name in routes:
+        if id(record) in resumed:
+            continue  # destination already restored from the journal
+        inbox = Path(other_vaults[name]["inbox"]).expanduser()
+        seen = taken.setdefault(str(inbox), set())
+        mark_route(record, name, assign_unique_route_path(inbox, Path(record["source"]).name, seen))
+
+
+def transcript_link(vault, rel):
+    """``(is_transcript, parent_basename)`` for a note, from its on-disk frontmatter.
+
+    A transcript's raw half declares ``type: source`` / ``source_kind: transcript``
+    and a ``parent`` back-link to its processed note; that pairing is what lets a
+    routed half carry the other along. Read from disk rather than the record
+    because a routed note's classification metadata is intentionally empty.
+    """
+    try:
+        frontmatter = split_frontmatter((vault / rel).read_bytes())
+    except OSError:
+        return False, ""
+    metadata = parse_frontmatter(frontmatter["frontmatter_text"])
+    is_transcript = metadata.get("type") == "source" and metadata.get("source_kind") == "transcript"
+    parent = metadata.get("parent")
+    if isinstance(parent, list):
+        parent = parent[0] if parent else None
+    parent_basename = link_basename(wikilink_target(parent)).casefold() if valid_wikilink(parent) else ""
+    return is_transcript, parent_basename
+
+
+def route_records(args, vault, schema, items, losers, class_records, warnings, done_map=None):
     done_map = done_map or {}
     records = []
     for item in items:
@@ -1327,10 +1495,13 @@ def route_records(args, vault, items, losers, class_records, warnings, done_map=
                 record["destination"] = done["destination"]
                 record["already_applied"] = True
         records.append(record)
+    # Resolve cross-vault routes before validation, so a routed note carries the
+    # route_vault action the checks below know to leave alone.
+    resolve_vault_routes(vault, schema, records, warnings, done_map)
     validate_plan(vault, records)
     taken = {record["destination"].casefold() for record in records if record["action"] == "quarantine"}
     for record in records:
-        if record["action"] == "quarantine":
+        if record["action"] in {"quarantine", "route_vault"}:
             continue
         if record.get("already_applied"):
             if record["status"] == "ok" and not record["needs_review"]:
@@ -1360,7 +1531,7 @@ def validate_plan(vault, records):
         if record["action"] == "quarantine":
             seen[record["destination"].casefold()] = record["source"]
     for record in records:
-        if record["status"] != "ok" or record["needs_review"] or record["action"] == "quarantine":
+        if record["status"] != "ok" or record["needs_review"] or record["action"] in {"quarantine", "route_vault"}:
             continue
         if record.get("already_applied"):
             seen.setdefault(record["destination"].casefold(), record["source"])
@@ -1407,6 +1578,7 @@ def initial_counts():
         "duplicate_review": 0,
         "empty": 0,
         "moved_to_inbox": 0,
+        "routed_to_vault": 0,
     }
 
 
@@ -1430,6 +1602,11 @@ def recompute_counts(records, dedupe, items):
             counts["classified"] += 1
         if record.get("status") == "failed":
             counts["failed"] += 1
+        if record.get("action") == "route_vault":
+            # A routed note leaves for a sibling vault: not filed, moved to inbox,
+            # or reviewed here, so it is counted once and nothing else applies.
+            counts["routed_to_vault"] += 1
+            continue
         if record.get("action") == "move_only":
             counts["moved_to_inbox"] += 1
         if record.get("needs_review"):
@@ -1475,7 +1652,7 @@ def scan_base_references(vault, records, session=None):
     moved_sources = [
         record["source"]
         for record in records
-        if record["action"] in {"move_only", "quarantine"}
+        if record["action"] in {"move_only", "quarantine", "route_vault"}
         or (record["action"] == "rewrite" and record.get("move_required"))
     ]
     if not moved_sources:
@@ -1625,6 +1802,25 @@ def created_report_lines(records):
     return lines
 
 
+def routed_report_lines(records):
+    """The `## Routed to Other Vaults` section: notes sent to a sibling vault."""
+    routed = [record for record in records if record.get("action") == "route_vault"]
+    if not routed:
+        return []
+    by_vault = {}
+    for record in routed:
+        by_vault.setdefault(record.get("route_to"), []).append(record)
+    lines = ["## Routed to Other Vaults", ""]
+    for vault_name in sorted(by_vault, key=lambda name: (name is None, name or "")):
+        group = by_vault[vault_name]
+        plural = "s" if len(group) != 1 else ""
+        lines.append(f"- routed to {vault_name} ({len(group)} note{plural})")
+        for record in sorted(group, key=lambda entry: entry["source"]):
+            lines.append(f"    - `{record['source']}` → `{record['route_destination']}`")
+    lines.append("")
+    return lines
+
+
 def drift_report_lines(findings):
     """The `## Schema Drift` section: where the schema and the folders disagree."""
     lines = ["## Schema Drift", ""]
@@ -1678,7 +1874,7 @@ def write_plan(
     run_state.atomic_write_json(plan_path, data)
     destination_counts = {}
     for record in records:
-        if record["status"] == "ok" and not record["needs_review"] and record["action"] != "quarantine":
+        if record["status"] == "ok" and not record["needs_review"] and record["action"] not in {"quarantine", "route_vault"}:
             first = record["destination"].split("/", 1)[0]
             destination_counts[first] = destination_counts.get(first, 0) + 1
     report = [
@@ -1697,6 +1893,7 @@ def write_plan(
         f"- Unchanged: {counts['unchanged']}",
         f"- Review required: {counts['review_required']}",
         f"- Moved to inbox for review: {counts['moved_to_inbox']}",
+        f"- Routed to other vaults: {counts['routed_to_vault']}",
         f"- Empty notes: {counts['empty']}",
         f"- Exact duplicates quarantined: {counts['duplicates_exact']}",
         f"- Near duplicates quarantined: {counts['duplicates_near']}",
@@ -1719,6 +1916,7 @@ def write_plan(
             report.append(f"- `{record['original_name']}` → `{Path(record['destination']).name}`")
         report.append("")
     report.extend(created_report_lines(records))
+    report.extend(routed_report_lines(records))
     report.extend(verification_report(verification, records))
     report.extend(["## Destination Counts", ""])
     if destination_counts:
@@ -1854,9 +2052,32 @@ def apply_move_operation(vault, run_dir, record, expected, mover):
     return backup, detail
 
 
+def apply_route_operation(vault, run_dir, record, expected):
+    """Move a routed note out of this vault into a sibling vault's inbox.
+
+    A plain move by design: the destination is in another vault, where Obsidian's
+    link rewriter (scoped to one vault) cannot follow, and a fresh inbox note has
+    nothing linking to it anyway. A transcript's recording pair is routed in the
+    same run, so its ``parent`` back-link resolves by basename in the target vault.
+    """
+    source = vault / record["source"]
+    destination = Path(record["route_destination"])
+    data = source.read_bytes()
+    if sha256_bytes(data) != expected[record["source"]]:
+        raise UserError("source changed since planning")
+    if destination.exists() and destination.resolve() != source.resolve():
+        raise UserError("destination collision")
+    backup = backup_once(run_dir, record["source"], source)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(source), str(destination))
+    expected.pop(record["source"], None)
+    return backup
+
+
 # The journal op each action writes in the move phase. A `rewrite` that also
 # relocates journals twice — `rewrite` for the content, `rewrite_move` for the
-# move — so a resumed run can tell which half already landed.
+# move — so a resumed run can tell which half already landed. `route_vault` moves
+# a note to a sibling vault's inbox, journaling that vault's absolute path.
 MOVE_OPS = {"quarantine": "quarantine", "move_only": "move_only", "rewrite": "rewrite_move"}
 
 
@@ -1868,7 +2089,7 @@ def apply_records(args, vault, run_dir, records, counts, schema, mover=None):
         mover = PlainMover()
     fallback = PlainMover()
     actionable = [
-        record for record in records if record["action"] in {"quarantine", "move_only", "rewrite"}
+        record for record in records if record["action"] in {"quarantine", "move_only", "rewrite", "route_vault"}
         and record["status"] != "failed"
     ]
     for record in records:
@@ -1931,6 +2152,31 @@ def apply_records(args, vault, run_dir, records, counts, schema, mover=None):
         except Exception as error:
             counts["failed"] += 1
             journal(op, record, "error", error=str(error))
+
+    # Cross-vault routes leave the vault last, after every in-vault move has
+    # settled. The journal records the sibling inbox's absolute path so a resumed
+    # run targets the same file rather than re-deriving a new unique name.
+    routes = sorted(
+        (record for record in actionable if record["action"] == "route_vault"),
+        key=lambda record: record["source"],
+    )
+    for record in routes:
+        if ("route_vault", record["source"]) in done:
+            counts["applied"] += 1
+            continue
+        try:
+            backup = apply_route_operation(vault, run_dir, record, expected)
+            counts["applied"] += 1
+            journal(
+                "route_vault", record, "ok",
+                backup=str(backup), destination=record["route_destination"], route_to=record["route_to"],
+            )
+        except Exception as error:
+            counts["failed"] += 1
+            journal(
+                "route_vault", record, "error",
+                error=str(error), destination=record["route_destination"], route_to=record["route_to"],
+            )
 
     # A rewrite that did not need to move still counts as applied; one that did
     # was counted by its move above.
@@ -2162,7 +2408,7 @@ def organize(args):
             for entry in applied_log
             if entry.get("status") == "ok" and entry.get("source") and entry.get("destination")
         }
-        records = route_records(args, vault, items, losers, class_records, warnings, done_map=done_map)
+        records = route_records(args, vault, schema, items, losers, class_records, warnings, done_map=done_map)
         counts = recompute_counts(records, dedupe, items)
         write_review_queue(run_dir, records)
         base_references = scan_base_references(vault, records, session=obsidian_cli.probe(vault))

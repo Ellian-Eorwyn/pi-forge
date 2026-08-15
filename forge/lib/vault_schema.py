@@ -65,12 +65,17 @@ REQUIRED_SECTIONS = [
     "Legacy normalization map",
     "Folder routing",
 ]
-COMPILED_SCHEMA_VERSION = 5
+COMPILED_SCHEMA_VERSION = 6
 # Declaring a "Sources root" section turns on the sources tree. It is optional so
 # that a vault filing sources by domain keeps working untouched, and so the two
 # forms cannot be half-adopted: with a root declared the Source kinds registry
 # must carry numbers and labels, and without one it stays a plain bullet list.
 SOURCES_ROOT_SECTION = "Sources root"
+# Declaring an "Other vaults" section turns on cross-vault routing: a note that
+# fits a sibling vault's scope better than any local domain is moved to that
+# vault's inbox instead of held for review. Optional, so a vault with no siblings
+# behaves exactly as before.
+OTHER_VAULTS_SECTION = "Other vaults"
 FRONTMATTER_KEY_RE = re.compile(r"^([a-z][a-z0-9_]*):(.*)$")
 LIST_ITEM_RE = re.compile(r"^(\s*)-\s+(.*)$")
 
@@ -241,6 +246,43 @@ def parse_sources_root(lines):
         "label": require_safe_label(row["Label"], SOURCES_ROOT_SECTION),
         "definition": row["Definition"].strip(),
     }
+
+
+def parse_other_vaults(lines):
+    """Sibling vaults a note may be routed to, or {} when the section is absent.
+
+    Declaring an ``## Other vaults`` table turns on cross-vault routing: the
+    classifier may return ``belongs_to: <name>`` for a note that fits a sibling
+    vault's scope better than any local domain, and the organizer moves it to
+    that vault's inbox instead of holding it for review. Removing the section
+    turns the feature off, so a vault with no siblings behaves exactly as before.
+
+    Each row declares a vault by ``Name``, the ``Scope`` of content that belongs
+    there (shown to the classifier verbatim), and the absolute ``Inbox path`` its
+    own pipeline watches. The path is stored as written; whether it exists on disk
+    is a runtime question the organizer answers, not a parse-time one, so a
+    declared-but-missing inbox falls back to review rather than failing the run.
+    """
+    if not has_section(lines, OTHER_VAULTS_SECTION):
+        return {}
+    rows = table_after(lines, OTHER_VAULTS_SECTION, ["Name", "Scope", "Inbox path"])
+    vaults = {}
+    for row in rows:
+        name = require_safe_label(row["Name"], f"{OTHER_VAULTS_SECTION} name")
+        if name in vaults:
+            raise UserError(f"{OTHER_VAULTS_SECTION}: duplicate vault {name}")
+        inbox = strip_schema_value(row["Inbox path"])
+        if not inbox:
+            raise UserError(f"{OTHER_VAULTS_SECTION} {name}: inbox path is empty")
+        if not (inbox.startswith("~") or Path(inbox).is_absolute()):
+            raise UserError(f"{OTHER_VAULTS_SECTION} {name}: inbox path must be absolute: {inbox}")
+        vaults[name] = {"name": name, "scope": row["Scope"].strip(), "inbox": inbox}
+    return vaults
+
+
+def other_vaults_enabled(schema):
+    """Whether the schema declares sibling vaults notes can be routed to."""
+    return bool(schema.get("other_vaults"))
 
 
 def parse_source_kinds(lines, sources_root):
@@ -830,6 +872,7 @@ def parse_schema_note(text):
         "sources_root": sources_root,
         "source_kinds": source_kinds,
         "capture_types": capture_types,
+        "other_vaults": parse_other_vaults(lines),
         "legacy": legacy,
         "domain_rules": optional_bullet_lines(lines, "Domain decision rules"),
         "project_rules": optional_bullet_lines(lines, "Project assignment rules"),
