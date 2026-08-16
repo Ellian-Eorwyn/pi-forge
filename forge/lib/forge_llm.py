@@ -42,8 +42,10 @@ Configuration:
   client does not read; see ``chatTemplateKwargs`` below.
 """
 
+import base64
 import http.client
 import json
+import mimetypes
 import os
 import re
 import threading
@@ -192,6 +194,15 @@ CHARACTERS_PER_TOKEN = 3.0
 # against observed promptTokens and converges near 3.42 — and is used to decide
 # whether a prompt fits a slot.
 PROMPT_CHARACTERS_PER_TOKEN = 3.42
+# What one image contributes to the prompt-fit preflight. There is no character
+# count to divide, and the real figure is tokenizer- and tiling-specific (a
+# dynamic-tiling vision model spends more on a large image than a small one), so
+# this is a single conservative upper-ish estimate rather than a measurement.
+# Its only job is to keep estimate_prompt_tokens from budgeting an image at zero
+# and letting an image-bearing prompt sail past the check into a server refusal.
+IMAGE_TOKENS_ESTIMATE = 1600
+# The formats the vision backend and the interactive agent's reader both accept.
+_ACCEPTED_IMAGE_MIMES = ("image/png", "image/jpeg", "image/gif", "image/webp")
 
 
 # Which service URLs have already had their backend identity written to a
@@ -252,20 +263,84 @@ def estimate_prompt_tokens(messages):
     """Approximate the prompt size of a message list, in tokens.
 
     Character density is a run-to-run estimate, not a tokenizer, so this is only
-    accurate enough to catch a prompt that cannot possibly fit.
+    accurate enough to catch a prompt that cannot possibly fit. Image parts have
+    no text to count, so each adds a flat ``IMAGE_TOKENS_ESTIMATE`` instead of the
+    zero the character path would give them.
     """
     characters = 0
+    image_tokens = 0
     for message in messages or ():
         content = message.get("content") if isinstance(message, dict) else None
         if isinstance(content, str):
             characters += len(content)
         elif isinstance(content, list):
             for part in content:
-                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                if not isinstance(part, dict):
+                    continue
+                if isinstance(part.get("text"), str):
                     characters += len(part["text"])
+                elif part.get("type") == "image_url":
+                    image_tokens += IMAGE_TOKENS_ESTIMATE
         elif content is not None:
             characters += len(str(content))
-    return int(characters / PROMPT_CHARACTERS_PER_TOKEN)
+    return int(characters / PROMPT_CHARACTERS_PER_TOKEN) + image_tokens
+
+
+def _sniff_image_mime(data, path):
+    """Best-effort image MIME from magic bytes, falling back to the extension.
+
+    Sniffing beats trusting the suffix — a screenshot saved as ``.img`` is still a
+    PNG to the backend — but a truncated or odd file can still name its type, so
+    the extension is the fallback before giving up.
+    """
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    guessed, _ = mimetypes.guess_type(str(path))
+    if guessed in _ACCEPTED_IMAGE_MIMES:
+        return guessed
+    raise ValueError(f"{path!r} is not a supported image (need PNG, JPEG, GIF, or WEBP)")
+
+
+def image_content_part(path):
+    """Load an image file into an OpenAI ``image_url`` content part.
+
+    Returns ``{"type": "image_url", "image_url": {"url": "data:<mime>;base64,…"}}``,
+    the shape llama.cpp's OpenAI-compatible endpoint expects for a multimodal
+    request. The bytes are inlined as a data URI rather than a link because the
+    inference host cannot fetch from wherever a skill happens to be running.
+
+    Accepts PNG, JPEG, GIF, and WEBP; raises ``ValueError`` for anything else so a
+    caller learns at build time rather than from a server refusal.
+    """
+    data = Path(path).read_bytes()
+    mime = _sniff_image_mime(data, path)
+    encoded = base64.b64encode(data).decode("ascii")
+    return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}}
+
+
+def image_message(prompt, images, *, role="user"):
+    """Build one chat message carrying ``prompt`` text plus one or more images.
+
+    ``images`` is a single path or an iterable of paths. The result is one message
+    whose ``content`` is a parts list — the text followed by an image part per file
+    — ready to drop straight into the ``messages`` list ``call`` takes::
+
+        forge_llm.call(service, [forge_llm.image_message("Describe this.", path)])
+
+    Any vision-capable service works; on this deployment the primary backend behind
+    ``chat``/``think`` reports ``vision: true``, so no separate service is needed.
+    """
+    if isinstance(images, (str, os.PathLike)):
+        images = [images]
+    content = [{"type": "text", "text": prompt}]
+    content.extend(image_content_part(path) for path in images)
+    return {"role": role, "content": content}
 
 
 class ChatError(RuntimeError):

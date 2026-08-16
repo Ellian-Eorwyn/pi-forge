@@ -23,7 +23,7 @@
             "high": "xhigh",
             "xhigh": "xhigh"
           },
-          "input": ["text"],
+          "input": ["text", "image"],
           "cost": {
             "input": 0,
             "output": 0,
@@ -58,7 +58,7 @@
             "high": "xhigh",
             "xhigh": "xhigh"
           },
-          "input": ["text"],
+          "input": ["text", "image"],
           "cost": {
             "input": 0,
             "output": 0,
@@ -84,7 +84,7 @@
           "id": "chat",
           "name": "Chat (Local, non-thinking) :8004",
           "reasoning": false,
-          "input": ["text"],
+          "input": ["text", "image"],
           "cost": {
             "input": 0,
             "output": 0,

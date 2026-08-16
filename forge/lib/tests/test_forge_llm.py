@@ -585,5 +585,66 @@ class StackConditionTests(unittest.TestCase):
         forge_llm.reset_stack_conditions()
 
 
+# A 1×1 PNG — enough to exercise magic-byte sniffing and base64 wrapping.
+_PNG_BYTES = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+    "0000000d49444154789c62f80f0400010101000a2d0f1b0000000049454e44ae426082"
+)
+
+
+class ImageInputTests(unittest.TestCase):
+    def _write(self, suffix, data=_PNG_BYTES):
+        handle = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        handle.write(data)
+        handle.close()
+        self.addCleanup(lambda: Path(handle.name).unlink(missing_ok=True))
+        return handle.name
+
+    def test_content_part_is_a_base64_data_uri(self):
+        part = forge_llm.image_content_part(self._write(".png"))
+        self.assertEqual(part["type"], "image_url")
+        self.assertTrue(part["image_url"]["url"].startswith("data:image/png;base64,"))
+
+    def test_mime_is_sniffed_not_taken_from_the_extension(self):
+        # A PNG saved under an opaque suffix is still a PNG to the backend.
+        part = forge_llm.image_content_part(self._write(".bin"))
+        self.assertTrue(part["image_url"]["url"].startswith("data:image/png;base64,"))
+
+    def test_unsupported_file_is_rejected_at_build_time(self):
+        with self.assertRaises(ValueError):
+            forge_llm.image_content_part(self._write(".txt", b"not an image"))
+
+    def test_message_carries_text_then_one_part_per_image(self):
+        path = self._write(".png")
+        message = forge_llm.image_message("Describe this.", [path, path])
+        self.assertEqual(message["role"], "user")
+        self.assertEqual(message["content"][0], {"type": "text", "text": "Describe this."})
+        self.assertEqual([part["type"] for part in message["content"][1:]], ["image_url", "image_url"])
+
+    def test_estimate_counts_images_instead_of_zero(self):
+        path = self._write(".png")
+        text_only = forge_llm.estimate_prompt_tokens([{"role": "user", "content": "Describe this."}])
+        one = forge_llm.estimate_prompt_tokens([forge_llm.image_message("Describe this.", path)])
+        two = forge_llm.estimate_prompt_tokens([forge_llm.image_message("Describe this.", [path, path])])
+        self.assertEqual(one - text_only, forge_llm.IMAGE_TOKENS_ESTIMATE)
+        self.assertEqual(two - text_only, 2 * forge_llm.IMAGE_TOKENS_ESTIMATE)
+
+    def test_image_message_reaches_the_endpoint_as_image_url(self):
+        # The whole point: an image built by the helper must arrive at the
+        # backend as an OpenAI image_url part, not get dropped en route.
+        path = self._write(".png")
+        with FakeChatServer(responses=["a red circle"]) as chat:
+            content, _ = forge_llm.call(
+                service(chat.url),
+                [forge_llm.image_message("Describe this.", path)],
+                env={"PI_FORGE_SKIP_STACK_DISCOVERY": "1"},
+            )
+        self.assertEqual(content, "a red circle")
+        sent = chat.requests[0]["messages"][0]["content"]
+        self.assertEqual(sent[0], {"type": "text", "text": "Describe this."})
+        self.assertEqual(sent[1]["type"], "image_url")
+        self.assertTrue(sent[1]["image_url"]["url"].startswith("data:image/png;base64,"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -52,6 +52,20 @@ const CHARACTERS_PER_TOKEN = 3.0;
 // density actually measured on this model and is used to decide whether a
 // prompt fits a slot. Must match forge_llm.PROMPT_CHARACTERS_PER_TOKEN.
 const PROMPT_CHARACTERS_PER_TOKEN = 3.42;
+// What one image contributes to the prompt-fit preflight. There is no character
+// count to divide, and the real figure is tokenizer- and tiling-specific, so this
+// is a single conservative estimate whose only job is to stop estimatePromptTokens
+// from budgeting an image at zero. Must match forge_llm.IMAGE_TOKENS_ESTIMATE.
+const IMAGE_TOKENS_ESTIMATE = 1600;
+// Extension fallback for the magic-byte sniff; the keys are the formats the vision
+// backend and the interactive agent's reader both accept.
+const IMAGE_MIME_BY_EXT = {
+	png: "image/png",
+	jpg: "image/jpeg",
+	jpeg: "image/jpeg",
+	gif: "image/gif",
+	webp: "image/webp",
+};
 
 export class ChatError extends Error {
 	constructor(message) {
@@ -95,6 +109,7 @@ export function hiddenTokenCount(generatedTokens, content) {
  */
 export function estimatePromptTokens(messages) {
 	let characters = 0;
+	let imageTokens = 0;
 	for (const message of messages ?? []) {
 		const content = message?.content;
 		if (typeof content === "string") {
@@ -102,12 +117,60 @@ export function estimatePromptTokens(messages) {
 		} else if (Array.isArray(content)) {
 			for (const part of content) {
 				if (typeof part?.text === "string") characters += part.text.length;
+				else if (part?.type === "image_url") imageTokens += IMAGE_TOKENS_ESTIMATE;
 			}
 		} else if (content !== undefined && content !== null) {
 			characters += String(content).length;
 		}
 	}
-	return Math.trunc(characters / PROMPT_CHARACTERS_PER_TOKEN);
+	return Math.trunc(characters / PROMPT_CHARACTERS_PER_TOKEN) + imageTokens;
+}
+
+/**
+ * Best-effort image MIME from magic bytes, falling back to the extension.
+ *
+ * Mirrors `forge_llm._sniff_image_mime`. Sniffing beats trusting the suffix — a
+ * screenshot saved as `.img` is still a PNG to the backend — but a truncated or
+ * odd file can still name its type, so the extension is the fallback.
+ */
+function sniffImageMime(buffer, path) {
+	const head = buffer.subarray(0, 12).toString("hex");
+	if (head.startsWith("89504e470d0a1a0a")) return "image/png";
+	if (head.startsWith("ffd8ff")) return "image/jpeg";
+	if (head.startsWith("474946383761") || head.startsWith("474946383961")) return "image/gif"; // GIF87a / GIF89a
+	if (head.startsWith("52494646") && buffer.subarray(8, 12).toString("latin1") === "WEBP") return "image/webp"; // RIFF….WEBP
+	const ext = path.toLowerCase().split(".").pop();
+	const guessed = IMAGE_MIME_BY_EXT[ext];
+	if (guessed) return guessed;
+	throw new ChatError(`${JSON.stringify(path)} is not a supported image (need PNG, JPEG, GIF, or WEBP)`);
+}
+
+/**
+ * Load an image file into an OpenAI `image_url` content part.
+ *
+ * Mirrors `forge_llm.image_content_part`. Returns
+ * `{ type: "image_url", image_url: { url: "data:<mime>;base64,…" } }`, inlined as a
+ * data URI because the inference host cannot fetch from wherever a skill runs.
+ * Accepts PNG, JPEG, GIF, WEBP; throws for anything else.
+ */
+export function imageContentPart(path) {
+	const buffer = readFileSync(path);
+	const mime = sniffImageMime(buffer, String(path));
+	return { type: "image_url", image_url: { url: `data:${mime};base64,${buffer.toString("base64")}` } };
+}
+
+/**
+ * Build one chat message carrying `prompt` text plus one or more images.
+ *
+ * Mirrors `forge_llm.image_message`. `images` is a single path or an array of
+ * paths; the result is one message whose `content` is a text part followed by an
+ * image part per file, ready for the `messages` list `call` takes.
+ */
+export function imageMessage(prompt, images, { role = "user" } = {}) {
+	const list = Array.isArray(images) ? images : [images];
+	const content = [{ type: "text", text: prompt }];
+	for (const path of list) content.push(imageContentPart(path));
+	return { role, content };
 }
 
 /**
