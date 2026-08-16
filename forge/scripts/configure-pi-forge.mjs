@@ -189,6 +189,10 @@ for (const stale of ["forge-task-local", "forge-local", "forge-chat-local"]) {
 // everyday default; `code` (:8008, stricter temp) is the alternate thinking
 // profile; `chat` (:8004) is the non-thinking fast path. :8003 and :8008 honour
 // graded reasoning_effort, so both carry reasoning + a thinkingLevelMap for /think.
+// All three front the one primary llama-server, which loads an mmproj and reports
+// `vision: true`, so each declares `input: ["text", "image"]`. Without "image" the
+// agent's transform layer (downgradeUnsupportedImages) rewrites every attached
+// image to a "(image omitted…)" placeholder before the request leaves the client.
 const localThinkingCompat = {
 	supportsDeveloperRole: false,
 	supportsReasoningEffort: true,
@@ -206,7 +210,7 @@ models.providers["forge-local-think"] = {
 			name: "Think (Local, thinking, temp-1)",
 			reasoning: true,
 			thinkingLevelMap: { ...LOCAL_THINKING_LEVEL_MAP },
-			input: ["text"],
+			input: ["text", "image"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow,
 			maxTokens: MAX_OUTPUT_TOKENS,
@@ -224,7 +228,7 @@ models.providers["forge-local-code"] = {
 			name: "Code (Local, thinking, stricter temp)",
 			reasoning: true,
 			thinkingLevelMap: { ...LOCAL_THINKING_LEVEL_MAP },
-			input: ["text"],
+			input: ["text", "image"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow,
 			maxTokens: MAX_OUTPUT_TOKENS,
@@ -245,7 +249,7 @@ models.providers["forge-local-chat"] = {
 			id: "chat",
 			name: "Chat (Local, non-thinking)",
 			reasoning: false,
-			input: ["text"],
+			input: ["text", "image"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow: chatContextWindow,
 			maxTokens: MAX_OUTPUT_TOKENS,

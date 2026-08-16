@@ -25,6 +25,8 @@ const {
 	estimatePromptTokens,
 	extractJsonContent,
 	hiddenTokenCount,
+	imageContentPart,
+	imageMessage,
 	parseJsonContent,
 	resetStackConditions,
 	resolveService,
@@ -682,5 +684,78 @@ test("reports and records are unchanged without a stack", async () => {
 	} finally {
 		resetStackConditions();
 		await stub.close();
+	}
+});
+
+// A 1×1 PNG — enough to exercise magic-byte sniffing and base64 wrapping. Same
+// bytes as `_PNG_BYTES` in `test_forge_llm.py`.
+const PNG_BYTES = Buffer.from(
+	"89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489" +
+		"0000000d49444154789c62f80f0400010101000a2d0f1b0000000049454e44ae426082",
+	"hex",
+);
+
+function withImage(suffix, bytes = PNG_BYTES) {
+	const dir = mkdtempSync(join(tmpdir(), "forge-llm-img-"));
+	const path = join(dir, `image${suffix}`);
+	writeFileSync(path, bytes);
+	return { path, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+test("imageContentPart wraps bytes as a base64 data URI", () => {
+	const { path, cleanup } = withImage(".png");
+	try {
+		const part = imageContentPart(path);
+		assert.equal(part.type, "image_url");
+		assert.ok(part.image_url.url.startsWith("data:image/png;base64,"));
+	} finally {
+		cleanup();
+	}
+});
+
+test("imageContentPart sniffs the MIME rather than trusting the extension", () => {
+	const { path, cleanup } = withImage(".bin");
+	try {
+		assert.ok(imageContentPart(path).image_url.url.startsWith("data:image/png;base64,"));
+	} finally {
+		cleanup();
+	}
+});
+
+test("imageContentPart rejects a non-image", () => {
+	const { path, cleanup } = withImage(".txt", Buffer.from("not an image"));
+	try {
+		assert.throws(() => imageContentPart(path), ChatError);
+	} finally {
+		cleanup();
+	}
+});
+
+test("imageMessage carries text then one part per image", () => {
+	const { path, cleanup } = withImage(".png");
+	try {
+		const message = imageMessage("Describe this.", [path, path]);
+		assert.equal(message.role, "user");
+		assert.deepEqual(message.content[0], { type: "text", text: "Describe this." });
+		assert.deepEqual(
+			message.content.slice(1).map((part) => part.type),
+			["image_url", "image_url"],
+		);
+	} finally {
+		cleanup();
+	}
+});
+
+test("estimatePromptTokens counts images instead of zero", () => {
+	const { path, cleanup } = withImage(".png");
+	try {
+		const textOnly = estimatePromptTokens([{ role: "user", content: "Describe this." }]);
+		const one = estimatePromptTokens([imageMessage("Describe this.", path)]);
+		const two = estimatePromptTokens([imageMessage("Describe this.", [path, path])]);
+		// IMAGE_TOKENS_ESTIMATE — kept in step with forge_llm.IMAGE_TOKENS_ESTIMATE.
+		assert.equal(one - textOnly, 1600);
+		assert.equal(two - textOnly, 3200);
+	} finally {
+		cleanup();
 	}
 });
