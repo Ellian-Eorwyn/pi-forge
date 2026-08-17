@@ -2096,9 +2096,10 @@ class FidelityProvisionalTests(unittest.TestCase):
         self.assertEqual(self.review_queue(run_dir_of(result)), [])
 
     def test_a_flagged_note_the_repair_cannot_fix_is_held(self):
-        # The judge flags, chat is asked to restore, and the second look still
-        # flags (the repair changed nothing here) — so it holds, carrying the
-        # judge's objection, not the floor's word-overlap score.
+        # The judge flags, chat is asked to restore, and every re-review still
+        # flags — so after the bounded repair rounds (each handed the re-review's
+        # sharper objection) it holds, carrying the judge's objection, not the
+        # floor's word-overlap score.
         source, cleanup = self.gutted_cleanup()
         self.write_source(source)
         objection = FlagFidelityHandler.FIDELITY_REASON
@@ -2110,8 +2111,8 @@ class FidelityProvisionalTests(unittest.TestCase):
         self.assertEqual(verification["provisionalCleared"], 0)
         self.assertEqual(verification["provisionalRepaired"], 0)
         self.assertEqual(verification["provisionalHeld"], 1)
-        # A repair was attempted on chat before the note was held.
-        self.assertEqual(len(self.repair_requests(chat)), 1)
+        # A repair was attempted on chat each round before the note was held.
+        self.assertEqual(len(self.repair_requests(chat)), vt.FIDELITY_REPAIR_ROUNDS)
         queued = self.review_queue(run_dir_of(result))
         self.assertEqual(len(queued), 1)
         self.assertIn("cleaned transcript may not be faithful", queued[0]["reason"])
@@ -2254,6 +2255,67 @@ class FidelityProvisionalTests(unittest.TestCase):
         record = self.record_for(run_dir_of(result))
         self.assertTrue(record["needs_review"])
         self.assertIn("could not be located in the cleaned text", record["review_reason"])
+
+    def test_autonomous_files_a_routine_note_without_a_tick(self):
+        # A faithful cleanup (the default echo) clears every gate, so an autonomous
+        # run files the note with no human tick and leaves a receipt, not a staged
+        # proposal to approve.
+        source, _gutted = self.gutted_cleanup()
+        self.write_source(source)
+        with StubServer() as chat, StubServer(handler_cls=SecondStubChatHandler) as think:
+            result = self.result_of(self.process(chat.url, think.url, "--autonomous"))
+        self.assertCountEqual(self.inbox(), [self.DESTINATION, f"{self.DESTINATION[:-3]} - Transcript.md"])
+        self.assertFalse(result["data"]["dry_run"])
+        review = (self.vault / "00 Inbox" / vt.vault_review.REVIEW_NOTE_NAME).read_text(encoding="utf-8")
+        self.assertIn("## Filed automatically", review)
+        self.assertIn("Nothing needs you", review)
+        self.assertNotIn("- [x]", review)  # a receipt, nothing to tick
+        self.assertNotIn("## Apply", review)
+        self.assertFalse((self.vault / "00 Inbox" / vt.vault_review.PENDING_DIRNAME).exists())
+
+    def test_autonomous_still_holds_a_serious_failure_and_surfaces_it(self):
+        # Autonomy stops for a genuinely serious hold: an unfixable fidelity failure
+        # stays in the inbox and is listed for a person rather than filed.
+        source, cleanup = self.gutted_cleanup()
+        self.write_source(source)
+        with StubServer(scripted={"clean": [cleanup]}) as chat, \
+                StubServer(handler_cls=FlagFidelityHandler) as think:
+            result = self.result_of(self.process(chat.url, think.url, "--autonomous"))
+        self.assertEqual(self.inbox(), [self.NAME])  # not filed
+        self.assertFalse(result["data"]["dry_run"])
+        self.assertEqual(result["data"]["verification"]["provisionalHeld"], 1)
+        review = (self.vault / "00 Inbox" / vt.vault_review.REVIEW_NOTE_NAME).read_text(encoding="utf-8")
+        self.assertIn("## Needs a decision", review)
+        self.assertIn("still needs you", review)
+        self.assertIn("cleaned transcript may not be faithful", review)
+
+    def test_a_scoped_run_processes_only_the_named_note(self):
+        # --note scopes the run to one export: only it appears in the plan and only
+        # it is cleaned; the other raw note in the inbox is never read.
+        source, _ = self.gutted_cleanup()
+        (self.vault / "00 Inbox" / "20260724 131748-AAAA0001.md").write_text(source, encoding="utf-8")
+        (self.vault / "00 Inbox" / "20260724 131748-BBBB0002.md").write_text(source, encoding="utf-8")
+        with StubServer() as chat, StubServer(handler_cls=SecondStubChatHandler) as think:
+            result = self.result_of(
+                self.process(chat.url, think.url, "--note", "20260724 131748-AAAA0001.md")
+            )
+        plan = json.loads((run_dir_of(result) / "plan.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            {record["source"] for record in plan["records"]}, {"00 Inbox/20260724 131748-AAAA0001.md"}
+        )
+        # --note implies autonomous, so the scoped note is filed (not just planned)
+        # and its resulting inbox paths are reported for the organizer to pick up.
+        self.assertFalse(result["data"]["dry_run"])
+        self.assertEqual(result["data"]["held"], [])
+        self.assertTrue(result["data"]["filed"])
+        self.assertTrue(all(path.startswith("00 Inbox/") for path in result["data"]["filed"]))
+
+    def test_a_scope_selector_that_matches_nothing_fails_loudly(self):
+        # A typo must not silently widen to the whole inbox.
+        source, _ = self.gutted_cleanup()
+        self.write_source(source)
+        completed = self.process("http://127.0.0.1:1/x", "http://127.0.0.1:1/x", "--note", "Missing.md")
+        self.assertIn("no note matched", completed.stdout + completed.stderr)
 
 
 PROFILE_CARD = {
@@ -3471,6 +3533,42 @@ class ReviewNoteRenderParseTests(unittest.TestCase):
         )
         self.assertNotIn("obsidian://", note)
         self.assertIn("python3 x.py --from-review", note)
+
+    def test_autonomous_note_is_a_receipt_plus_the_held_set(self):
+        vr = vt.vault_review
+        note = vr.render_review_note(
+            generated_at="2026-08-17 09:00 UTC",
+            run_directory=".vault-transcripts/runs/R2",
+            applied=[vr.ReviewItem(name="A Filed Note", summary="Filed.", facts="memo · 2m")],
+            decisions=[vr.ReviewItem(name="held", source="held.md", reason="cleaned transcript may not be faithful")],
+            apply_uri=vr.apply_uri("Loom", "cmd-1"),
+            apply_command="python3 x.py process --autonomous",
+        )
+        # A receipt, not a tick list: the filed note has no checkbox.
+        self.assertIn("## Filed automatically", note)
+        self.assertIn("[[A Filed Note]]", note)
+        self.assertNotIn("- [x]", note)
+        self.assertNotIn("- [ ]", note)
+        # The held item is surfaced with its reason; there is no Apply section.
+        self.assertIn("still needs you", note)
+        self.assertIn("cleaned transcript may not be faithful", note)
+        self.assertNotIn("## Apply", note)
+        # The run reference still round-trips for a re-run.
+        self.assertEqual(vr.parse_review_note(note).run_directory, ".vault-transcripts/runs/R2")
+
+    def test_autonomous_note_with_nothing_held_still_reports_what_it_filed(self):
+        vr = vt.vault_review
+        note = vr.render_review_note(
+            generated_at="t",
+            run_directory="r",
+            applied=[vr.ReviewItem(name="Filed", facts="memo")],
+            decisions=[],
+            apply_uri=None,
+            apply_command="python3 x.py process --autonomous",
+        )
+        self.assertIn("1 note filed automatically", note)
+        self.assertIn("Nothing needs you", note)
+        self.assertIn("[[Filed]]", note)
 
 
 class CleanOneChunkRetryTests(unittest.TestCase):

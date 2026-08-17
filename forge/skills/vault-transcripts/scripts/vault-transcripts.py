@@ -65,6 +65,7 @@ from vault_schema import (
     path_is_inside,
     relative_path,
     resolve_schema_path,
+    resolve_selection,
     safe_title,
     selected_notes,
     serialize_frontmatter,
@@ -831,9 +832,11 @@ def unusable_input_reason(stats):
     return None
 
 
-def scan_inbox(vault, limit=None):
+def scan_inbox(vault, limit=None, select=None):
     """Every Markdown file directly under the inbox tree, with what can be known
-    about it without a model."""
+    about it without a model. ``select`` scopes the run to a set of vault-relative
+    POSIX paths, filtered before any file is read or hashed, so a single-note run
+    touches only that note."""
     root = vault / INBOX_DIR
     if not root.is_dir():
         raise UserError(f"inbox directory does not exist: {root}")
@@ -859,6 +862,9 @@ def scan_inbox(vault, limit=None):
                 continue
             paths.append(path)
     paths.sort(key=lambda path: relative_path(vault, path))
+    if select is not None:
+        wanted = set(select)
+        paths = [path for path in paths if relative_path(vault, path) in wanted]
     if limit is not None:
         paths = paths[:limit]
     items = []
@@ -4181,6 +4187,12 @@ def fidelity_payloads(vault, record, run_dir, lexicon=None):
 
 ESCALATION_EFFORT = "xhigh"
 
+# How many chat-repair → think-revalidate rounds a provisional note gets before it
+# is held for a human. Two covers the measured cases (a first restore, then one more
+# against the re-review's sharper objection); the no-progress guard in
+# ``forge_verify.repair_until_verified`` ends it sooner when a round changes nothing.
+FIDELITY_REPAIR_ROUNDS = 2
+
 
 def hold_provisional_unjudged(candidates, warnings, why):
     """Fall a provisional note back onto its deterministic hold.
@@ -4377,16 +4389,20 @@ def judge_and_repair_provisional(args, vault, schema, think, provisional_records
     lost). A clean verdict finishes the note. A flag does not end it: the judge's
     objection is handed to the cleanup tier (`chat`), which restores exactly what
     was named — grounded in the source, gated for fabrication — and the thinking
-    model validates the rebuilt note a second time. Because `chat` produced the
-    fix and `think` checks it, that second verdict is a real independent approval,
-    not the judge blessing its own edit. Clean on the second look → finish
-    (``fidelity-repaired``); still flagged, or nothing usable came back → hold with
-    the objection. One repair round, then a human. Returns
+    model validates the rebuilt note again. Because `chat` produced the fix and
+    `think` checks it, that verdict is a real independent approval, not the judge
+    blessing its own edit. Clean → finish (``fidelity-repaired``); still flagged
+    after ``FIDELITY_REPAIR_ROUNDS`` rounds, or nothing usable came back → hold
+    with the objection. The bounded loop itself is
+    ``forge_verify.repair_until_verified``; this wires the whole-note judge, the
+    chat repair, and the record bookkeeping into it. Returns
     ``(cleared, repaired, held)``.
     """
     if not provisional_records:
         return 0, 0, 0
     chat = chat_service(args)
+    chat_producer = forge_routing.routing_record(chat)
+    record_by_source = {record["source"]: record for record in provisional_records}
     items = []
     for record in provisional_records:
         payload = whole_note_fidelity_payload(vault, record, run_dir, args)
@@ -4398,6 +4414,7 @@ def judge_and_repair_provisional(args, vault, schema, think, provisional_records
     if not items:
         return 0, 0, held
 
+    # First pass: the whole-note meaning-judge, resumable on its own journal.
     try:
         verdicts = judge_notes_whole(
             think, items, run_dir / "verified-fidelity-provisional.jsonl",
@@ -4413,85 +4430,57 @@ def judge_and_repair_provisional(args, vault, schema, think, provisional_records
     if independence:
         warnings.append(f"fidelity check: {independence}")
 
-    payload_by_source = {item["id"]: item for item in items}
-    cleared = 0
-    to_revalidate = []
-    for record in provisional_records:
-        if record["needs_review"]:
-            continue  # already held (too large to review)
-        verdict = verdicts.get(record["source"])
-        if verdict is None:
-            hold_provisional(record, warnings, "held by the fidelity floor: the meaning-judge returned no verdict")
-            held += 1
-            continue
-        if verdict["verdict"] == forge_verify.VERDICT_OK:
-            record.pop("fidelity_provisional", None)
-            if not record.get("verified"):
-                record["verified"] = "fidelity-cleared"
-            cleared += 1
-            continue
-        # Flagged: hand the objection to chat and try to restore what was lost.
-        objection = verdict["reason"]
-        payload = payload_by_source[record["source"]]
+    def fix(payload, objection, round_idx):
+        # chat restores exactly what the judge named; the rebuild re-gates
+        # structure and fabrication (not the fidelity floors — think re-validates
+        # those). A repair that gave nothing, failed a gate, or grew past the
+        # review size returns None, which the loop reads as a failed fix → held.
+        record = record_by_source[payload["id"]]
         revised = repair_cleaned_note(args, chat, record, payload["rawTranscript"], payload["cleanedNote"], objection)
-        held_reason = f"cleaned transcript may not be faithful: {objection}"
         if revised is None:
-            hold_provisional(record, warnings, held_reason, verify_reason=objection)
-            held += 1
-            continue
-        problems = rebuild_note_with_cleaned(
-            vault, schema, record, items_by_path[record["source"]], revised, args, run_dir
-        )
-        if problems:
-            hold_provisional(record, warnings, held_reason, verify_reason=objection)
-            held += 1
-            continue
+            return None
+        if rebuild_note_with_cleaned(vault, schema, record, items_by_path[payload["id"]], revised, args, run_dir):
+            return None
         # The repaired body is now the canonical cleaned text, so a note whose
-        # title was also escalated is reassembled from the fix, not the original.
-        if record["source"] in clean_results:
-            clean_results[record["source"]]["cleaned"] = revised
-        new_payload = whole_note_fidelity_payload(vault, record, run_dir, args)
-        if new_payload is None:
-            hold_provisional(record, warnings, held_reason, verify_reason=objection)
-            held += 1
-            continue
-        to_revalidate.append((record, new_payload, objection))
+        # title was also escalated reassembles from the fix, not the original.
+        if payload["id"] in clean_results:
+            clean_results[payload["id"]]["cleaned"] = revised
+        return whole_note_fidelity_payload(vault, record, run_dir, args)
 
-    if to_revalidate:
-        chat_producer = forge_routing.routing_record(chat)
-        try:
-            revalidated = judge_notes_whole(
-                think, [payload for _record, payload, _objection in to_revalidate],
-                run_dir / "verified-fidelity-repaired.jsonl",
-                {record["source"]: chat_producer for record, _payload, _objection in to_revalidate},
-                args.request_timeout, FIDELITY_REVIEW_EFFORT,
-            )
-        except forge_verify.VerificationError as error:
-            for record, _payload, objection in to_revalidate:
-                hold_provisional(
-                    record, warnings,
-                    f"cleaned transcript may not be faithful: {objection}", verify_reason=objection,
-                )
-                held += 1
-            warnings.append(f"fidelity repair: re-validation failed ({error})")
-            return cleared, 0, held
-        repaired = 0
-        for record, _payload, objection in to_revalidate:
-            verdict = revalidated.get(record["source"])
-            if verdict and verdict["verdict"] == forge_verify.VERDICT_OK:
-                record.pop("fidelity_provisional", None)
+    def reverify(fixed_items, round_idx):
+        # A per-round journal keeps round k's verdict from being read back as
+        # round k+1's when a resume replays the repair.
+        return judge_notes_whole(
+            think, fixed_items, run_dir / f"verified-fidelity-repaired-{round_idx}.jsonl",
+            {item["id"]: chat_producer for item in fixed_items}, args.request_timeout, FIDELITY_REVIEW_EFFORT,
+        )
+
+    outcomes = forge_verify.repair_until_verified(
+        items, verdicts, fix=fix, reverify=reverify,
+        fingerprint=lambda payload: payload["cleanedNote"],
+        max_rounds=FIDELITY_REPAIR_ROUNDS, progress=progress,
+    )
+
+    cleared = repaired = 0
+    for payload in items:
+        record = record_by_source[payload["id"]]
+        outcome = outcomes[payload["id"]]
+        if outcome["status"] == "passed":
+            record.pop("fidelity_provisional", None)
+            if outcome["rounds"] == 0:
+                if not record.get("verified"):
+                    record["verified"] = "fidelity-cleared"
+                cleared += 1
+            else:
                 # An escalated title keeps that headline; the body was still mended.
                 if not record.get("verified") or record["verified"] == "needs-review":
                     record["verified"] = "fidelity-repaired"
                 repaired += 1
-            else:
-                reason = (verdict or {}).get("reason") or "the repair did not restore the missing content"
-                hold_provisional(
-                    record, warnings, f"cleaned transcript may not be faithful: {reason}", verify_reason=reason
-                )
-                held += 1
-        return cleared, repaired, held
-    return cleared, 0, held
+        else:
+            reason = outcome["reason"] or "the repair did not restore the missing content"
+            hold_provisional(record, warnings, f"cleaned transcript may not be faithful: {reason}", verify_reason=reason)
+            held += 1
+    return cleared, repaired, held
 
 
 def verify_records(args, vault, schema, clean_results, items_by_path, records, run_dir):
@@ -5045,6 +5034,44 @@ def stage_review_note(vault, run_dir, records, generated_at):
         apply_uri=vault_review.apply_uri(vault.name, command_id),
         apply_command=apply_command_line(vault),
         empty=not (to_process or decisions),
+    )
+    write_atomic(review_path, note)
+    return warnings
+
+
+def write_autonomous_review(vault, run_dir, records, generated_at):
+    """After an autonomous run has filed its routine work, write the standing Inbox
+    Review note as a receipt plus the held set. Unlike the dry-run stager nothing is
+    staged into `_Pending Review/`: the filed notes are already in place, and a held
+    note stays in the inbox with its reason shown here for a person to resolve.
+    Returns any warnings.
+    """
+    warnings = []
+    inbox = vault / INBOX_DIR
+    pending = inbox / vault_review.PENDING_DIRNAME
+    review_path = inbox / vault_review.REVIEW_NOTE_NAME
+    run_rel = os.path.relpath(run_dir, vault)
+    # A prior dry run's staged proposals would be stale now that this run filed on
+    # its own, so clear them; the note then describes only this autonomous run.
+    if pending.is_dir():
+        backup = run_dir / "backup" / "prior-review"
+        backup.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(pending), str(backup / vault_review.PENDING_DIRNAME))
+        warnings.append(f"cleared staged proposals from an earlier dry run; moved to {backup}")
+    applied, decisions = [], []
+    for record in records:
+        if record["action"] == "process" and record.get("artifact"):
+            applied.append(review_item(record))
+        elif record["needs_review"] or record["status"] == "failed":
+            decisions.append(review_item(record))
+    note = vault_review.render_review_note(
+        generated_at=generated_at,
+        run_directory=run_rel,
+        applied=applied,
+        decisions=decisions,
+        apply_uri=None,
+        apply_command=apply_command_line(vault),
+        empty=not (applied or decisions),
     )
     write_atomic(review_path, note)
     return warnings
@@ -5688,7 +5715,7 @@ def dictionary_path(args):
 
 
 def resolved_options(args):
-    return {
+    options = {
         "model": args.model,
         "base_url": args.base_url,
         "filename_pattern": args.filename_pattern,
@@ -5708,6 +5735,13 @@ def resolved_options(args):
         "profile": args.profile,
         "no_profile": args.no_profile,
     }
+    if getattr(args, "notes", None):
+        # A scoped run pins its selection into the fingerprint so a resume with the
+        # same --note is compatible and a different one is a new run. Present only
+        # when scoping is active, so a whole-inbox run's fingerprint is unchanged and
+        # runs started before this option stay resumable.
+        options["notes"] = args.notes
+    return options
 
 
 RESUMABLE_OPTION_FLAGS = {
@@ -5746,6 +5780,10 @@ def adopt_stored_options(args, state):
     if not args.cache_prompt and stored.get("cache_prompt"):
         raise UserError("--no-cache-prompt differs from the original run; start a new run instead of --run")
     args.cache_prompt = stored.get("cache_prompt", args.cache_prompt)
+    # A scoped run resumes with the selection it was started with; --note on a
+    # resume is ignored so a re-specified (and possibly since-filed) note cannot
+    # silently change the work-list.
+    args.notes = stored.get("notes")
 
 
 def run_configuration(args, vault, schema_hash, voice_path, voice_hash, lexicon_path, lexicon_hash,
@@ -6033,12 +6071,25 @@ def process(args):
         args.apply = True
         if not args.run:
             args.run = resolve_run_from_review(vault)
+    if getattr(args, "autonomous", None) is None:
+        # A scoped single-note request is autonomous by default; --no-autonomous
+        # opts back into the dry-run-then-approve flow, and a whole-inbox run only
+        # goes autonomous when --autonomous is given explicitly.
+        args.autonomous = bool(getattr(args, "notes", None))
+    if args.autonomous:
+        # An autonomous run files its own routine work; only held items wait, and
+        # the Inbox Review note becomes a receipt plus that held set.
+        args.apply = True
     resuming = bool(args.run)
     state = None
     if resuming:
         run_dir = Path(args.run).expanduser().resolve()
         state = run_state.load_run_state(run_dir, workflow=WORKFLOW)
         adopt_stored_options(args, state)
+    if getattr(args, "notes", None) and not resuming:
+        # Canonicalize --note selectors (a typo fails loudly) so scoping is a
+        # first-class, fingerprintable option; a resume adopts the stored selection.
+        args.notes = resolve_selection(vault, args.notes, root=vault / INBOX_DIR)
     schema_path = resolve_schema_path(vault, args.schema)
     schema, schema_hash = compiled_schema_for(vault, schema_path, cache_dir=vault / STATE_DIR / "cache")
     voice_path = vault_voice.resolve_voice_path(vault, args.voice, disabled=args.no_voice)
@@ -6082,7 +6133,7 @@ def process(args):
         if scan_path.is_file():
             items = json.loads(scan_path.read_text(encoding="utf-8"))["items"]
             if resuming:
-                drift = run_state.input_drift(items, scan_inbox(vault, args.limit))
+                drift = run_state.input_drift(items, scan_inbox(vault, args.limit, select=getattr(args, "notes", None)))
                 for added in drift["added"]:
                     warnings.append(f"input drift: {added['path']} appeared after the scan; run again to include it")
                 for removed in drift["removed"]:
@@ -6092,7 +6143,7 @@ def process(args):
                         f"input drift: {changed['after']['path']} changed after the scan; it will be refused at apply"
                     )
         else:
-            items = scan_inbox(vault, args.limit)
+            items = scan_inbox(vault, args.limit, select=getattr(args, "notes", None))
             run_state.atomic_write_json(scan_path, {"items": items})
             run_state.update_run_state(
                 run_dir,
@@ -6217,6 +6268,10 @@ def process(args):
                         "nothing was applied from the review — the review note and staged proposals "
                         "were left in place. Tick at least one note, or resolve the reasons shown."
                     )
+            elif getattr(args, "autonomous", False):
+                # The run filed its routine work; the standing note now reports what
+                # went in and lists only what a person still has to resolve.
+                warnings.extend(write_autonomous_review(vault, run_dir, records, review_timestamp()))
             final_phase = "complete"
         else:
             final_phase = "planned"
@@ -6250,6 +6305,23 @@ def process(args):
             or draft,
             event={"type": "phase", "phase": final_phase, "counts": counts},
         )
+    # The processed notes stay in the inbox (with frontmatter now) for the organizer
+    # to file; a scoped autonomous run reports their paths so the caller can hand
+    # exactly those to `vault-organizer inbox --note ...` without re-scanning.
+    filed = sorted(
+        {
+            dest
+            for record in records
+            if record.get("action") == "process" and not record.get("needs_review")
+            for dest in (record.get("destination"), record.get("raw_destination"))
+            if dest
+        }
+    )
+    held = [
+        {"note": record["source"], "reason": record.get("review_reason") or "held for review"}
+        for record in records
+        if record.get("needs_review")
+    ]
     return structured(
         "ok",
         artifacts=[str(plan_path), str(report_path)],
@@ -6261,6 +6333,8 @@ def process(args):
             "options": resolved_options(args),
             "counts": counts,
             "verification": verification,
+            "filed": filed,
+            "held": held,
         },
     )
 
@@ -7268,6 +7342,21 @@ def parse_args(argv):
     parser.add_argument("--no-profile", action="store_true", help="disable personal context for this run")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument(
+        "--autonomous",
+        action="store_true",
+        help="apply routine results without review, stopping only for held items; the report and the "
+        "Inbox Review note say what was filed and what still needs you",
+    )
+    parser.add_argument(
+        "--no-autonomous",
+        dest="autonomous",
+        action="store_false",
+        help="force the dry-run-then-approve flow even when a scoped run would otherwise go autonomous",
+    )
+    # Default None (not False) so a single-note run can default to autonomous while
+    # --no-autonomous still forces the review flow; resolved in process().
+    parser.set_defaults(autonomous=None)
+    parser.add_argument(
         "--link-rewrite",
         choices=["auto", "off", "require"],
         default="auto",
@@ -7292,6 +7381,13 @@ def parse_args(argv):
     parser.add_argument("--format", action=TrackingAction, help="note-format note (default: the vault's, when present)")
     parser.add_argument("--no-format", action="store_true", help="disable the vault note-format policy")
     parser.add_argument("--limit", type=int, action=TrackingAction)
+    parser.add_argument(
+        "--note",
+        action="append",
+        dest="notes",
+        help="scope the run to this note (repeatable): a vault-relative path, a filename, or a stem. "
+        "A selector that matches no note fails loudly rather than widening to the whole inbox",
+    )
     parser.add_argument("--filename-pattern", choices=FILENAME_PATTERNS, action=TrackingAction)
     parser.add_argument("--summary-style", choices=SUMMARY_STYLES, action=TrackingAction)
     parser.add_argument("--speaker-policy", choices=SPEAKER_POLICIES, action=TrackingAction)

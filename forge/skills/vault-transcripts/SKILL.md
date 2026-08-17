@@ -71,6 +71,58 @@ conversations.
 6. Offer to run `vault-organizer inbox` next, which files the cleaned notes —
    both halves of each pair, the note and its recording.
 
+The steps above are the **review-first** flow: use it when the user wants to
+preview and approve before anything is written. When they instead want the inbox
+just handled, use the autonomous flow below.
+
+## Autonomous runs, and a single note end-to-end
+
+`--autonomous` makes a run file its own routine work and stop only for the
+genuinely serious set, then report what it did. Reach for it when the user asks
+you to just handle their voice notes rather than to prepare something to review
+("process my voice notes", "sort out my inbox", "clean up and file this").
+
+```bash
+python3 <skill-directory>/scripts/vault-transcripts.py process --vault <vault> --autonomous
+```
+
+- **What it files on its own:** every recording that clears the gates — renamed,
+  cleaned, summarized, with its recording kept as a linked source note. No tick.
+- **What still waits for a person (the serious set):** a cleaned transcript the
+  diagnose→fix loop could not make faithful, a structural failure, and unusable
+  (corrupt speech-to-text) input. These stay in `00 Inbox`; the standing
+  `! Inbox Review.md` becomes a receipt of what was filed plus a "Needs a
+  decision" list of exactly these, with the reason on each. Relay that list.
+- **The diagnose→fix loop is why "usually right" is safe to apply unreviewed.**
+  When the thinking model flags a cleaned transcript as unfaithful, it names what
+  was dropped and quotes the source; the non-thinking model restores exactly that
+  from the source; the thinking model re-checks. That repeats up to a small bound
+  before the note is held — so most flags are repaired automatically, and only a
+  note it genuinely cannot fix reaches you.
+
+**Scope to one note (or a few) with `--note`**, which *implies* `--autonomous`
+unless you pass `--no-autonomous`. A selector is a vault-relative path, a
+filename, or a stem; it is repeatable; a selector that matches nothing fails
+loudly rather than processing the whole inbox.
+
+```bash
+python3 <skill-directory>/scripts/vault-transcripts.py process --vault <vault> --note "<filename>"
+```
+
+For "run the transcript on this one note, categorize it, and file it," run the
+scoped process above, then hand the notes it reports under `data.filed` (both the
+cleaned note and its recording, still in `00 Inbox` with frontmatter now) to the
+organizer, scoped the same way:
+
+```bash
+python3 <organizer-skill-directory>/scripts/vault-organizer.py inbox --vault <vault> --note "<filed-path>" --autonomous
+```
+
+That is the whole single-note end-to-end path: cleanup on this note, then classify
+and file it, each touching only that note and each stopping only for a serious
+issue. If the transcripts stage reports the note under `data.held`, do **not** run
+the organizer on it — surface the hold instead.
+
 ## Reviewing and approving in the vault
 
 A dry run leaves a control note the user reviews in Obsidian rather than reading a
@@ -325,7 +377,15 @@ note — either lands where the next run will find it.
 
 ## Rules
 
-- Dry run is the default and `--apply` needs the user's approval.
+- Two ways to run. The **review-first** flow is dry-run by default and `--apply`
+  needs approval — use it when the user wants to preview. The **autonomous** flow
+  (`--autonomous`, and implied by `--note`) files routine work on its own and
+  holds only the serious set — use it when the user wants the inbox handled. Match
+  the flow to the request; when in doubt on a whole-inbox run, prefer review-first.
+- Autonomy changes *who approves*, never *what is checked at write*: every
+  auto-applied note still passes the same gates, is backed up, and recomputes from
+  the bytes on disk before it is written. It only ever files what cleared; a
+  serious failure is held, never quietly filed.
 - Nothing is ever deleted. Duplicates go to `.vault-transcripts/duplicates/`,
   every rewritten note is copied into the run's `backup/` first, and renames are
   journaled to `renames.jsonl`.

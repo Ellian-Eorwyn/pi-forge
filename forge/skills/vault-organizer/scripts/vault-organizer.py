@@ -107,6 +107,7 @@ from vault_schema import (  # noqa: F401  (re-exported for callers and tests)
     safe_title,
     section_bounds,
     selected_notes,
+    resolve_selection,
     serialize_frontmatter,
     sha256_bytes,
     sha256_file,
@@ -385,12 +386,12 @@ def clean_suggestions(raw, warnings):
     return cleaned
 
 
-def scan_vault(vault, schema_path, mode, limit, only_sources=False):
+def scan_vault(vault, schema_path, mode, limit, only_sources=False, select=None):
     schema_data = schema_path.read_bytes()
     schema_split = split_frontmatter(schema_data)
     schema_body_hash = sha256_text(normalize_body_for_hash(schema_split["body"]))
     items = []
-    for path in selected_notes(vault, schema_path, mode, limit):
+    for path in selected_notes(vault, schema_path, mode, limit, select=select):
         rel = relative_path(vault, path)
         stat = path.stat()
         item = {
@@ -2186,7 +2187,7 @@ def apply_records(args, vault, run_dir, records, counts, schema, mover=None):
 
 
 def resolved_options(args):
-    return {
+    options = {
         "model": args.model,
         "base_url": args.base_url,
         "embeddings_url": args.embeddings_url,
@@ -2204,6 +2205,13 @@ def resolved_options(args):
         "schema": args.schema,
         "profile": args.profile,
     }
+    if getattr(args, "notes", None):
+        # A scoped run pins its selection into the fingerprint so a resume with the
+        # same --note is compatible and a different one is correctly a new run. Only
+        # present when scoping is active, so a whole-inbox run's fingerprint is
+        # unchanged and runs started before this option stay resumable.
+        options["notes"] = args.notes
+    return options
 
 
 def run_configuration(args, vault, schema_hash):
@@ -2260,13 +2268,34 @@ def adopt_stored_options(args, state):
     if args.think_prefill and not stored.get("think_prefill"):
         raise UserError("--think-prefill differs from the original run; start a new run instead of --run")
     args.think_prefill = stored.get("think_prefill", args.think_prefill)
+    # A scoped run resumes with the selection it was started with; --note on a
+    # resume is ignored so a re-specified (and possibly since-moved) note cannot
+    # silently change the work-list.
+    args.notes = stored.get("notes")
 
 
 def organize(args):
     vault = Path(args.vault).expanduser().resolve()
     if not vault.is_dir():
         raise UserError(f"vault root does not exist: {vault}")
+    if getattr(args, "autonomous", None) is None:
+        # A scoped run is autonomous by default; --no-autonomous opts back into the
+        # review flow, and a whole-vault/inbox run goes autonomous only when
+        # --autonomous is given explicitly.
+        args.autonomous = bool(getattr(args, "notes", None))
+    if args.autonomous:
+        # File the routine work without a review pass. The serious set still holds:
+        # the high-drift refusal below is left armed (autonomous never sets
+        # --allow-schema-drift), notes needing a decision are skipped by apply, and
+        # the near-duplicate review band is reported, not merged.
+        args.apply = True
     resuming = bool(args.run)
+    if getattr(args, "notes", None) and not resuming:
+        # Resolve --note selectors to canonical vault-relative paths (a typo fails
+        # loudly) so scoping is a first-class, fingerprintable run option. On a
+        # resume the selection is read from stored state instead (adopt_stored_options).
+        root = vault / INBOX_DIR if args.mode == "inbox" else None
+        args.notes = resolve_selection(vault, args.notes, root=root)
     state = None
     if resuming:
         run_dir = Path(args.run).expanduser().resolve()
@@ -2337,7 +2366,9 @@ def organize(args):
                 for changed in input_drift["changed"]:
                     warnings.append(f"input drift: {changed['after']['path']} changed after the scan; it will be refused at apply")
         else:
-            items, _ = scan_vault(vault, schema_path, args.mode, args.limit, args.only_sources)
+            items, _ = scan_vault(
+                vault, schema_path, args.mode, args.limit, args.only_sources, select=getattr(args, "notes", None)
+            )
             run_state.atomic_write_json(scan_path, {"items": items})
             run_state.update_run_state(
                 run_dir,
@@ -4113,6 +4144,22 @@ def parse_args(argv):
     parser.add_argument("--vault")
     parser.add_argument("--schema", action=TrackingAction)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument(
+        "--autonomous",
+        action="store_true",
+        help="file routine results without review, stopping only for the serious set the run already "
+        "holds: high schema drift, notes needing a decision, and the near-duplicate review band. Does "
+        "not grant --allow-schema-drift, renumber, or --fix-schema — schema changes still wait for you",
+    )
+    parser.add_argument(
+        "--no-autonomous",
+        dest="autonomous",
+        action="store_false",
+        help="force the dry-run-then-apply flow even when a scoped run would otherwise go autonomous",
+    )
+    # Default None (not False) so a scoped run can default to autonomous while
+    # --no-autonomous still forces the review flow; resolved in organize().
+    parser.set_defaults(autonomous=None)
     # Deliberately not a TrackingAction: an override granted for one apply must
     # not be adopted into resumed run state and silently persist.
     parser.add_argument(
@@ -4192,6 +4239,13 @@ def parse_args(argv):
     )
     parser.add_argument("--run", help="existing run directory to resume")
     parser.add_argument("--limit", type=int, action=TrackingAction)
+    parser.add_argument(
+        "--note",
+        action="append",
+        dest="notes",
+        help="scope the run to this note (repeatable): a vault-relative path, a filename, or a stem. "
+        "A selector that matches no note fails loudly rather than widening to the whole run",
+    )
     parser.add_argument("--base-url", action=TrackingAction)
     parser.add_argument("--model", action=TrackingAction)
     parser.add_argument("--api-key")

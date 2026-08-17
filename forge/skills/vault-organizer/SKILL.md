@@ -75,6 +75,42 @@ section.
 
 9. Report the final structured counts and run directory.
 
+## Autonomous runs, and scoping to a note
+
+The steps above are the **review-first** flow. When the user wants the inbox just
+filed rather than a plan to review, use `--autonomous`: it files the routine work
+in one pass and stops only for the serious set, then reports what it did.
+
+```bash
+python3 <skill-directory>/scripts/vault-organizer.py inbox --vault <vault> --autonomous
+```
+
+- **Files on its own:** every note that classifies cleanly, into an existing
+  schema folder, plus confident de-duplication (the duplicate goes to the
+  never-delete quarantine).
+- **Held for a person — anything that would change the vault schema, plus the
+  unresolved:** `high` schema drift (the run refuses to file into a schema the
+  folders disagree with; autonomous never passes `--allow-schema-drift`), a
+  classification that needs a decision or a category the schema does not have, the
+  near-duplicate review band, and low-confidence dates. Renumbering and schema-note
+  edits are never triggered autonomously — they stay their own reviewed commands.
+  These are reported (in `report.md` and the counts) and left in place. Relay them.
+
+**Scope to one note (or a few) with `--note`**, which *implies* `--autonomous`
+unless you pass `--no-autonomous`. A selector is a vault-relative path, a filename,
+or a stem; it is repeatable; a selector that matches nothing fails loudly. A scoped
+inbox run still de-duplicates the named note against the whole vault, so scoping
+never files a duplicate it would otherwise have caught.
+
+```bash
+python3 <skill-directory>/scripts/vault-organizer.py inbox --vault <vault> --note "<filename>"
+```
+
+This is the second half of the single-note end-to-end path: after
+`vault-transcripts process --note <note>` cleans a recording, hand the paths it
+reports under `data.filed` to this scoped, autonomous inbox run to classify and
+file exactly those, stopping only for a serious issue.
+
 ## Link-safe moves
 
 Obsidian resolves `[[Note]]` by basename regardless of folder, so filing a note
@@ -473,8 +509,13 @@ See [../vault-transcripts/references/personal-context-format.md](../vault-transc
   in a report, to make the schema agree with folders that already exist. Never
   reach for it to make a note file somewhere.
 - Tell the user the Markdown schema note remains the source of truth.
+- `--autonomous` files routine work without a review pass, but the schema boundary
+  is absolute: it never renumbers, never edits the schema note, and never passes
+  `--allow-schema-drift`. Anything that would change the schema is held, reported,
+  and left for the user — the same answer as review-first, reached without a stop.
 - Resuming with different options is refused by design; start a new run when
-  the model, thresholds, limit, or schema changed.
+  the model, thresholds, limit, or schema changed. `--note` scoping is part of that
+  identity: a resume keeps the scope it started with.
 - Keep stdout machine-readable; diagnostics belong on stderr.
 
 ## Reference

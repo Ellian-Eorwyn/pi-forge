@@ -2023,7 +2023,11 @@ def path_is_inside(parent, child):
         return False
 
 
-def selected_notes(vault, schema_path, mode, limit):
+def selected_notes(vault, schema_path, mode, limit, select=None):
+    """Notes the run will process. ``select`` scopes the run to a specific set of
+    vault-relative POSIX paths (single-note or few-note runs); it is intersected
+    with the scanned candidates *before* the caller reads or hashes any file, so a
+    scoped run touches only the notes named. ``None`` means the whole set."""
     vault = vault.resolve()
     schema_path = schema_path.resolve()
     # The inbox-review lane's own surface is never filing input: the staged
@@ -2093,7 +2097,61 @@ def selected_notes(vault, schema_path, mode, limit):
                     continue
                 candidates.append(path.resolve())
     candidates = sorted(candidates, key=lambda item: item.relative_to(vault).as_posix())
+    if select is not None:
+        wanted = set(select)
+        candidates = [path for path in candidates if path.relative_to(vault).as_posix() in wanted]
     return candidates[:limit] if limit is not None else candidates
+
+
+def resolve_selection(vault, values, root=None):
+    """Resolve raw ``--note`` selectors to the canonical vault-relative POSIX paths
+    they name, so a run can be scoped to them and the same note named different ways
+    (absolute path, vault-relative path, bare filename, or stem) resolves to one
+    identity — which is what lets the run fingerprint treat scoping as first-class
+    rather than input drift. A selector that matches no note raises ``UserError``: a
+    typo must fail loudly, never silently widen the run to the whole inbox. The walk
+    is stat-only, so resolving one note does not read the vault. Returns a sorted
+    list of vault-relative POSIX paths."""
+    vault = vault.resolve()
+    search_root = Path(root).resolve() if root is not None else vault
+    known = []
+    for directory, dirnames, filenames in os.walk(search_root, followlinks=False):
+        dirnames[:] = [name for name in dirnames if not name.startswith(".")]
+        for filename in filenames:
+            if filename.lower().endswith(".md"):
+                known.append((Path(directory) / filename).resolve().relative_to(vault).as_posix())
+    by_rel = set(known)
+    by_name, by_stem = {}, {}
+    for rel in known:
+        name = rel.rsplit("/", 1)[-1]
+        by_name.setdefault(name, []).append(rel)
+        by_stem.setdefault(name[:-3], []).append(rel)  # a known note always ends in .md
+    resolved, missing = set(), []
+    for raw in values:
+        value = raw.strip().replace("\\", "/")
+        if value.startswith("/"):
+            # An absolute path is accepted only when it points inside this vault.
+            try:
+                value = Path(value).resolve().relative_to(vault).as_posix()
+            except (ValueError, OSError):
+                missing.append(raw)
+                continue
+        value = value.strip("/")
+        matches = [candidate for candidate in (value, f"{value}.md") if candidate in by_rel]
+        if not matches:
+            name = value.rsplit("/", 1)[-1]
+            stem = name[:-3] if name.endswith(".md") else name
+            matches = by_name.get(name) or by_name.get(f"{stem}.md") or by_stem.get(stem) or []
+        if matches:
+            resolved.update(matches)
+        else:
+            missing.append(raw)
+    if missing:
+        raise UserError(
+            "no note matched " + ", ".join(repr(value) for value in missing)
+            + "; name a vault-relative path, a filename, or a stem that exists in the vault"
+        )
+    return sorted(resolved)
 
 
 def split_frontmatter(data):

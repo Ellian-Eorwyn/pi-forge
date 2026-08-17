@@ -85,20 +85,27 @@ def render_review_note(
     *,
     generated_at: str,
     run_directory: str,
-    to_process: list,
     decisions: list,
     apply_uri: Optional[str],
     apply_command: str,
+    to_process: Optional[list] = None,
+    applied: Optional[list] = None,
     empty: bool = False,
 ) -> str:
     """Render the control note.
 
     ``to_process`` cleared every gate and is ticked by default — approving them
-    all is the common case. ``decisions`` is everything the run could not settle
-    (structural holds, unfaithful cleanups flagged by the verify pass, duplicate
-    pairs), shown for information with no checkbox. ``empty`` renders the standing
+    all is the common case of a dry run. ``applied`` is what an *autonomous* run
+    already filed on its own, shown as a receipt with no checkbox; passing it (even
+    empty) switches the note into autonomous mode, where the surface exists to
+    report what happened and list what still needs a person, not to be ticked.
+    ``decisions`` is everything the run could not settle (structural holds,
+    unfaithful cleanups, duplicate pairs, schema changes it will not make on its
+    own), shown for information with no checkbox. ``empty`` renders the standing
     note when no run is pending.
     """
+    to_process = to_process or []
+    autonomous = applied is not None
     lines = [
         "---",
         "type: index",
@@ -116,22 +123,43 @@ def render_review_note(
         ]
         return "\n".join(lines) + "\n"
 
-    lines += [
-        "> [!summary] Inbox Review",
-        f"> Dry run {generated_at}. "
-        f"{_count(len(to_process), 'note')} to process, "
-        f"{_count(len(decisions), 'note')} needing a decision.",
-        ">",
-        "> Tick what to keep, edit any staged note in place, then apply below.",
-        "",
-        "## To process",
-        "",
-    ]
-    if to_process:
-        for item in to_process:
-            lines += _item_block(item, checked=True)
+    if autonomous:
+        held = "Nothing needs you." if not decisions else f"{_count(len(decisions), 'note')} still needs you."
+        lines += [
+            "> [!summary] Inbox Review",
+            f"> Autonomous run {generated_at}. "
+            f"{_count(len(applied), 'note')} filed automatically. {held}",
+            ">",
+            "> These were filed for you. Resolve anything under “Needs a decision”, then re-run.",
+            "",
+            "## Filed automatically",
+            "",
+        ]
+        if applied:
+            for item in applied:
+                detail = " · ".join(part for part in (item.facts, item.summary) if part)
+                lines.append(f"- [[{item.name}]]" + (f" — {detail}" if detail else ""))
+            lines.append("")
+        else:
+            lines += ["- _Nothing needed filing._", ""]
     else:
-        lines += ["- _None cleared every check._", ""]
+        lines += [
+            "> [!summary] Inbox Review",
+            f"> Dry run {generated_at}. "
+            f"{_count(len(to_process), 'note')} to process, "
+            f"{_count(len(decisions), 'note')} needing a decision.",
+            ">",
+            "> Tick what to keep, edit any staged note in place, then apply below.",
+            "",
+        ]
+
+    if to_process or not autonomous:
+        lines += ["## To process", ""]
+        if to_process:
+            for item in to_process:
+                lines += _item_block(item, checked=True)
+        else:
+            lines += ["- _None cleared every check._", ""]
 
     lines += ["## Needs a decision", ""]
     if decisions:
@@ -141,6 +169,11 @@ def render_review_note(
         lines.append("")
     else:
         lines += ["- _None._", ""]
+
+    if autonomous:
+        # Nothing here is tickable, so there is no Apply section; the run already
+        # filed what it could and the held items need a person, not a checkbox.
+        return "\n".join(lines) + "\n"
 
     lines += ["## Apply", ""]
     if apply_uri:

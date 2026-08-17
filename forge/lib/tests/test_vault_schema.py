@@ -129,5 +129,65 @@ class WorkspaceMarkerWritingTests(unittest.TestCase):
             self.assertIn(f'"{line}",', source)
 
 
+class SelectionTests(unittest.TestCase):
+    """--note scoping: selected_notes filters to a set, and resolve_selection turns
+    however a note was named into one canonical identity so the run fingerprint does
+    not depend on the spelling."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.vault = Path(self.temporary.name).resolve()
+        self.schema = write(self.vault / vs.DEFAULT_SCHEMA, SCHEMA)
+        write(self.vault / "00 Inbox" / "Alpha.md")
+        write(self.vault / "00 Inbox" / "Beta.md")
+        write(self.vault / "10 Sources" / "Gamma.md")
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def selected(self, select):
+        return [
+            vs.relative_path(self.vault, path)
+            for path in vs.selected_notes(self.vault, self.schema, "vault", None, select=select)
+        ]
+
+    def test_select_narrows_the_scan_to_the_named_notes(self):
+        self.assertEqual(self.selected(["00 Inbox/Alpha.md"]), ["00 Inbox/Alpha.md"])
+
+    def test_select_none_returns_the_whole_set(self):
+        whole = self.selected(None)
+        self.assertIn("00 Inbox/Alpha.md", whole)
+        self.assertIn("10 Sources/Gamma.md", whole)
+
+    def test_a_note_named_five_ways_resolves_to_one_identity(self):
+        canonical = ["00 Inbox/Alpha.md"]
+        for spelling in (
+            "00 Inbox/Alpha.md",
+            "00 Inbox/Alpha",
+            "Alpha.md",
+            "Alpha",
+            str(self.vault / "00 Inbox" / "Alpha.md"),
+        ):
+            self.assertEqual(vs.resolve_selection(self.vault, [spelling]), canonical, spelling)
+
+    def test_multiple_selectors_merge_and_sort(self):
+        self.assertEqual(
+            vs.resolve_selection(self.vault, ["Beta", "00 Inbox/Alpha.md"]),
+            ["00 Inbox/Alpha.md", "00 Inbox/Beta.md"],
+        )
+
+    def test_a_selector_that_matches_nothing_raises(self):
+        with self.assertRaises(vs.UserError):
+            vs.resolve_selection(self.vault, ["Nonexistent"])
+
+    def test_resolving_is_idempotent_for_a_canonical_path(self):
+        once = vs.resolve_selection(self.vault, ["Alpha"])
+        self.assertEqual(vs.resolve_selection(self.vault, once), once)
+
+    def test_an_absolute_path_outside_the_vault_matches_nothing(self):
+        with self.assertRaises(vs.UserError):
+            vs.resolve_selection(self.vault, ["/etc/hosts"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

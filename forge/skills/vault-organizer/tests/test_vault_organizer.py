@@ -792,6 +792,48 @@ class VaultOrganizerV2Tests(unittest.TestCase):
         self.assertNotIn("processed_by", record["metadata"])
         self.assertIn("previous processed_by dropped: schema does not define it as a list property", record["warnings"])
 
+    def test_autonomous_files_a_routine_note_without_review(self):
+        # A clean classification files itself: --autonomous implies apply, and the
+        # routine note leaves the inbox for its domain folder with no review pass.
+        self.write_note("00 Inbox/Routine.md", "# Routine\n\nA clear note about Obsidian.\n")
+        with StubServer([ok_response()]) as server:
+            payload = self.run_ok(
+                "inbox", "--vault", str(self.vault), "--base-url", server.url, "--no-embeddings", "--autonomous",
+            )
+        self.assertFalse(payload["data"]["dry_run"])  # applied, not planned
+        self.assertTrue((self.vault / "04 Technology" / "4.03 Obsidian" / "Routine.md").is_file())
+        self.assertFalse((self.vault / "00 Inbox" / "Routine.md").exists())
+
+    def test_autonomous_holds_a_note_that_needs_a_decision(self):
+        # The serious set still stops for a person: a classification that asks for
+        # review is left in the inbox even under --autonomous.
+        self.write_note("00 Inbox/Ambiguous.md", "# Ambiguous\n\nCould be anything.\n")
+        with StubServer([ok_response(needs_review=True, review_reason="ambiguous domain")]) as server:
+            payload = self.run_ok(
+                "inbox", "--vault", str(self.vault), "--base-url", server.url, "--no-embeddings", "--autonomous",
+            )
+        self.assertFalse(payload["data"]["dry_run"])
+        self.assertTrue((self.vault / "00 Inbox" / "Ambiguous.md").is_file())  # held, not filed
+
+    def test_a_scoped_run_touches_only_the_named_note(self):
+        # --note scopes the whole run to one note: only it is classified and only it
+        # appears in the plan; the other inbox note is never read.
+        self.write_note("00 Inbox/Chosen.md", "# Chosen\n\nAbout Obsidian.\n")
+        self.write_note("00 Inbox/Ignored.md", "# Ignored\n\nAlso about Obsidian.\n")
+        with StubServer([ok_response()]) as server:
+            payload = self.run_ok(
+                "inbox", "--vault", str(self.vault), "--base-url", server.url, "--no-embeddings", "--note", "Chosen.md",
+            )
+        self.assertEqual(len(server.requests), 1)  # one classification, not two
+        plan = json.loads((Path(payload["data"]["run_directory"]) / "plan.json").read_text(encoding="utf-8"))
+        self.assertEqual({row["source"] for row in plan["records"]}, {"00 Inbox/Chosen.md"})
+
+    def test_a_scope_selector_that_matches_nothing_fails_loudly(self):
+        # A typo must not silently widen to the whole inbox.
+        self.write_note("00 Inbox/Real.md", "# Real\n\nBody.\n")
+        result = run_script("inbox", "--vault", str(self.vault), "--no-embeddings", "--note", "Nonexistent.md")
+        self.assertIn("no note matched", result.stdout + result.stderr)
+
     def verify_run(self, chat_responses, flags=None, escalations=None, *extra):
         """Classification and verification against two separate stub endpoints."""
         VerdictHandler.flags = flags or {}
