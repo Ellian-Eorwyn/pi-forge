@@ -143,9 +143,9 @@ profile answers 10 of 10 at 48k, 60k and 80k tokens with an omniscience index of
 proxy, so there is no swap to pay, only latency.
 
 In the vault workflow that means: read the corpus during `/plan` or `/verify`,
-both of which already run on `forge-local`. The `/execute` phase deliberately
-drops to `forge-chat-local`, which is right for applying a vetted diff and wrong
-for answering questions from 60k tokens of project history.
+both of which already run on `forge-local-think`. The `/execute` phase
+deliberately drops to `forge-local-chat`, which is right for applying a vetted
+diff and wrong for answering questions from 60k tokens of project history.
 
 ## What to relay to the user
 

@@ -6,6 +6,7 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 import {
 	LEGACY_CHAT_SCHEDULING,
 	LEGACY_CHAT_SERVICE,
+	LOCAL_MODEL_PROVIDERS,
 	SLOT_CONTEXT_TOKENS,
 	seedConnectedServicesSettings,
 } from "../lib/connected-services.mjs";
@@ -110,7 +111,7 @@ const retainedPackages = packages.filter((entry) => {
 const profileInstructions =
 	readFileSync(sourceAgentsPath, "utf8") + identityBlock(settings.forgeUser) + vaultBlock(settings.forgeVault);
 settings.packages = [profileDirectory, ...retainedPackages];
-settings.defaultProvider = "forge-local-think";
+settings.defaultProvider = LOCAL_MODEL_PROVIDERS.think;
 settings.defaultModel = "think";
 // Forge is a knowledge-work profile, not a profile for developing pi itself. The
 // pointer block to pi's README/docs/examples costs ~300 tokens of launch context on
@@ -199,7 +200,7 @@ const localThinkingCompat = {
 	thinkingFormat: LOCAL_THINKING_FORMAT,
 	maxTokensField: "max_tokens",
 };
-models.providers["forge-local-think"] = {
+models.providers[LOCAL_MODEL_PROVIDERS.think] = {
 	baseUrl: "http://llms:8003/v1",
 	api: "openai-completions",
 	apiKey: "local",
@@ -217,7 +218,7 @@ models.providers["forge-local-think"] = {
 		},
 	],
 };
-models.providers["forge-local-code"] = {
+models.providers[LOCAL_MODEL_PROVIDERS.code] = {
 	baseUrl: "http://llms:8008/v1",
 	api: "openai-completions",
 	apiKey: "local",
@@ -235,7 +236,7 @@ models.providers["forge-local-code"] = {
 		},
 	],
 };
-models.providers["forge-local-chat"] = {
+models.providers[LOCAL_MODEL_PROVIDERS.chat] = {
 	baseUrl: "http://llms:8004/v1",
 	api: "openai-completions",
 	apiKey: "local",

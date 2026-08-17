@@ -10,6 +10,28 @@ import { join } from "node:path";
 // It rejects at tokenization, in a few seconds, without prefilling.
 export const SLOT_CONTEXT_TOKENS = 131072;
 
+// The local model providers written by configure-pi-forge. Extensions also use
+// these names to choose the connected service whose slot policy applies, so the
+// installer and request hooks must share one registry rather than duplicate
+// string literals that can drift during a provider rename.
+export const LOCAL_MODEL_PROVIDERS = Object.freeze({
+	think: "forge-local-think",
+	code: "forge-local-code",
+	chat: "forge-local-chat",
+});
+
+const LOCAL_PROVIDER_SERVICES = Object.freeze({
+	[LOCAL_MODEL_PROVIDERS.think]: "think",
+	[LOCAL_MODEL_PROVIDERS.code]: "think",
+	[LOCAL_MODEL_PROVIDERS.chat]: "chat",
+});
+
+/** The connected inference service whose scheduling applies to a local provider. */
+export function serviceNameForLocalProvider(provider) {
+	if (typeof provider !== "string" || !Object.hasOwn(LOCAL_PROVIDER_SERVICES, provider)) return null;
+	return LOCAL_PROVIDER_SERVICES[provider];
+}
+
 export const DEFAULT_CONNECTED_SERVICES = Object.freeze({
 	searxng: Object.freeze({
 		enabled: true,

@@ -8,13 +8,13 @@ detail, execute carefully, verify the result — within the constraint that one
 
 ## Why it exists
 
-The pi-forge agent brain is the local model (`forge-local`,
-`http://llms:8008/v1`, model `code`). That server *thinks* — it spends hidden
+The pi-forge agent brain defaults to the local thinking profile
+(`forge-local-think`, `http://llms:8003/v1`, model `think`). That profile spends hidden
 reasoning tokens — which is valuable for planning and verification but wasteful
 for mechanical execution. Measured on this deployment it spends ~410 hidden
 tokens before answering, even to reply with one word.
 
-The same weights are also served without thinking as `forge-chat-local`
+The same weights are also served without thinking as `forge-local-chat`
 (`http://llms:8004/v1`, model `chat`). Both run at once, so each phase simply
 uses the model that suits it: the extension calls `pi.setModel` on entering and
 leaving execute. Earlier versions suppressed thinking with a `<think></think>`
@@ -26,7 +26,7 @@ is gone.
 | Command | Phase | Thinking | Tools | Role |
 | --- | --- | --- | --- | --- |
 | `/plan` | plan | on | read-only (`read`, `bash`, `grep`, `find`, `ls`, `questionnaire`) | Interview, investigate, write a numbered plan, ask for approval. |
-| `/execute` | execute | off (`forge-chat-local`) | read-only **plus** `edit`, `write` | Apply the approved plan one change at a time, dry-run first, approve each change. |
+| `/execute` | execute | off (`forge-local-chat`) | read-only **plus** `edit`, `write` | Apply the approved plan one change at a time, dry-run first, approve each change. |
 | `/verify` | verify | on | read-only | Check the result against the plan and report. |
 | `/workflow off` | off | default | all tools | Leave the workflow; normal pi behaviour. |
 
@@ -40,7 +40,7 @@ Phase is persisted (`pi.appendEntry("vault-workflow", …)`) and restored on
   tools are simply absent, and a `tool_call` handler additionally blocks mutating
   bash (`rm`, `mv`, `--apply`, redirects, `git commit/push`, `sed -i`, …) so the
   model cannot change the vault while "thinking out loud".
-- **Thinking toggle** — entering execute looks up `forge-chat-local/chat` in the
+- **Thinking toggle** — entering execute looks up `forge-local-chat/chat` in the
   model registry and switches to it with `pi.setModel`; leaving execute restores
   the model that was active before. The model actually in use is restored only
   if it is still the non-thinking one, so a model the user picked by hand during
@@ -52,12 +52,10 @@ Phase is persisted (`pi.appendEntry("vault-workflow", …)`) and restored on
   and rules (the approve-each-change rule, the schema-edit → `doctor`
   discipline) fresh each turn.
 
-The `forge-local` model sets `compat.thinkingFormat: "qwen"` (in
-`configure-pi-forge.mjs`) so pi parses the model's `<think>…</think>` as
-reasoning instead of leaking raw tags into displayed content. In practice this
-deployment's llama.cpp strips the block server-side, which is why a thinking
-backend cannot be recognised from the response body — only from its token
-count.
+The `forge-local-think` and `forge-local-code` models set
+`compat.thinkingFormat: "openai"` (in `configure-pi-forge.mjs`) so pi sends
+graded `reasoning_effort` and reads the server's `reasoning_content` separately
+from displayed content.
 
 ## Guardrails
 

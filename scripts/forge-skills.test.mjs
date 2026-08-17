@@ -22,7 +22,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { addInteractiveSlot } from "../forge/extensions/inference-scheduling.ts";
 import webResearchExtension, { formatRunFailure } from "../forge/extensions/web-research.ts";
-import { DEFAULT_CONNECTED_SERVICES } from "../forge/lib/connected-services.mjs";
+import { DEFAULT_CONNECTED_SERVICES, LOCAL_MODEL_PROVIDERS } from "../forge/lib/connected-services.mjs";
 import {
 	appendRunEvent,
 	assertCompatibleRun,
@@ -7592,8 +7592,8 @@ test("profile configuration installs local service defaults without dropping use
 		]);
 
 		const settings = JSON.parse(readFileSync(join(agentDirectory, "settings.json"), "utf8"));
-		assert.equal(settings.defaultProvider, "forge-local");
-		assert.equal(settings.defaultModel, "code");
+		assert.equal(settings.defaultProvider, LOCAL_MODEL_PROVIDERS.think);
+		assert.equal(settings.defaultModel, "think");
 		assert.equal(settings.theme, "light");
 		assert.deepEqual(settings.compaction, { keepRecentTokens: 12345, enabled: true, reserveTokens: 32768 });
 		assert.equal("taskModel" in settings, false);
@@ -7619,12 +7619,12 @@ test("profile configuration installs local service defaults without dropping use
 
 		const models = JSON.parse(readFileSync(join(agentDirectory, "models.json"), "utf8"));
 		assert.equal(models.providers.existing.baseUrl, "https://example.invalid/v1");
-		assert.equal(models.providers["forge-local"].baseUrl, "http://llms:8008/v1");
-		const localModel = models.providers["forge-local"].models[0];
-		assert.equal(localModel.id, "code");
+		assert.equal(models.providers[LOCAL_MODEL_PROVIDERS.think].baseUrl, "http://llms:8003/v1");
+		const localModel = models.providers[LOCAL_MODEL_PROVIDERS.think].models[0];
+		assert.equal(localModel.id, "think");
 		assert.equal(localModel.contextWindow, 131072);
 		assert.equal(localModel.maxTokens, 32768);
-		assert.equal(models.providers["forge-local"].compat.supportsDeveloperRole, false);
+		assert.equal(models.providers[LOCAL_MODEL_PROVIDERS.think].compat.supportsDeveloperRole, false);
 		assert.equal("forge-task-local" in models.providers, false);
 	});
 });

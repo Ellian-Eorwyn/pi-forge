@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import vaultWorkflowExtension from "../forge/extensions/vault-workflow.ts";
+import { LOCAL_MODEL_PROVIDERS } from "../forge/lib/connected-services.mjs";
 
 const TOOL_NAMES = ["read", "bash", "edit", "write", "multiedit", "grep", "glob", "find", "ls", "questionnaire"];
+const THINK_MODEL = `${LOCAL_MODEL_PROVIDERS.think}/think`;
+const CHAT_MODEL = `${LOCAL_MODEL_PROVIDERS.chat}/chat`;
 
 type Handler = (...args: unknown[]) => unknown;
 
@@ -11,7 +14,7 @@ function harness(options: { knownModels?: string[] } = {}) {
 	const events = new Map<string, Handler>();
 	let activeTools: string[] = [];
 	const entries: { type: string; customType?: string; data?: unknown }[] = [];
-	const known = new Set(options.knownModels ?? ["forge-local/code", "forge-chat-local/chat"]);
+	const known = new Set(options.knownModels ?? [THINK_MODEL, CHAT_MODEL]);
 	const modelChanges: string[] = [];
 
 	const pi = {
@@ -38,7 +41,7 @@ function harness(options: { knownModels?: string[] } = {}) {
 	};
 
 	const ctx = {
-		model: { provider: "forge-local", id: "code" } as { provider: string; id: string },
+		model: { provider: LOCAL_MODEL_PROVIDERS.think, id: "think" } as { provider: string; id: string },
 		modelRegistry: {
 			find(provider: string, id: string) {
 				return known.has(`${provider}/${id}`) ? { provider, id } : undefined;
@@ -95,20 +98,20 @@ test("plan and verify phases are read-only; execute unlocks write tools", async 
 test("execute switches to the non-thinking model and restores it afterwards", async () => {
 	const h = harness();
 	await h.run("plan");
-	assert.equal(h.model(), "forge-local/code", "planning stays on the thinking model");
+	assert.equal(h.model(), THINK_MODEL, "planning stays on the thinking model");
 
 	await h.run("execute");
-	assert.equal(h.model(), "forge-chat-local/chat");
+	assert.equal(h.model(), CHAT_MODEL);
 
 	await h.run("verify");
-	assert.equal(h.model(), "forge-local/code", "verification thinks again");
-	assert.deepEqual(h.modelChanges, ["forge-chat-local/chat", "forge-local/code"]);
+	assert.equal(h.model(), THINK_MODEL, "verification thinks again");
+	assert.deepEqual(h.modelChanges, [CHAT_MODEL, THINK_MODEL]);
 });
 
 test("a model the user picked during execute is not overwritten on the way out", async () => {
-	const h = harness({ knownModels: ["forge-local/code", "forge-chat-local/chat", "anthropic/opus"] });
+	const h = harness({ knownModels: [THINK_MODEL, CHAT_MODEL, "anthropic/opus"] });
 	await h.run("execute");
-	assert.equal(h.model(), "forge-chat-local/chat");
+	assert.equal(h.model(), CHAT_MODEL);
 
 	h.ctx.model = { provider: "anthropic", id: "opus" };
 	await h.run("verify");
@@ -116,13 +119,13 @@ test("a model the user picked during execute is not overwritten on the way out",
 });
 
 test("execute still works when the non-thinking provider is not configured", async () => {
-	const h = harness({ knownModels: ["forge-local/code"] });
+	const h = harness({ knownModels: [THINK_MODEL] });
 	await h.run("execute");
-	assert.equal(h.model(), "forge-local/code");
+	assert.equal(h.model(), THINK_MODEL);
 	assert.deepEqual(h.modelChanges, []);
 
 	await h.run("verify");
-	assert.equal(h.model(), "forge-local/code");
+	assert.equal(h.model(), THINK_MODEL);
 });
 
 test("the prefill hook is gone", () => {
@@ -241,7 +244,10 @@ test("phase persists and restores on session_start", async () => {
 	const h = harness();
 	await h.run("execute");
 	const persisted = h.entries.filter((entry) => entry.customType === "vault-workflow").pop();
-	assert.deepEqual(persisted?.data, { phase: "execute", previousModel: { provider: "forge-local", id: "code" } });
+	assert.deepEqual(persisted?.data, {
+		phase: "execute",
+		previousModel: { provider: LOCAL_MODEL_PROVIDERS.think, id: "think" },
+	});
 
 	// fresh instance, same session entries -> restores execute + its tools + model
 	const h2 = harness();
@@ -250,7 +256,7 @@ test("phase persists and restores on session_start", async () => {
 	assert.ok(sessionStart);
 	await sessionStart({}, h2.ctx);
 	assert.ok(h2.activeTools().includes("write"), "restored execute tool set");
-	assert.equal(h2.model(), "forge-chat-local/chat", "resumed mid-execute stays non-thinking");
+	assert.equal(h2.model(), CHAT_MODEL, "resumed mid-execute stays non-thinking");
 });
 
 test("a session that crashed mid-execute does not strand the user on the non-thinking model", async () => {
@@ -259,11 +265,11 @@ test("a session that crashed mid-execute does not strand the user on the non-thi
 	h.entries.push({
 		type: "custom",
 		customType: "vault-workflow",
-		data: { phase: "verify", previousModel: { provider: "forge-local", id: "code" } },
+		data: { phase: "verify", previousModel: { provider: LOCAL_MODEL_PROVIDERS.think, id: "think" } },
 	});
-	h.ctx.model = { provider: "forge-chat-local", id: "chat" };
+	h.ctx.model = { provider: LOCAL_MODEL_PROVIDERS.chat, id: "chat" };
 	const sessionStart = h.events.get("session_start");
 	assert.ok(sessionStart);
 	await sessionStart({}, h.ctx);
-	assert.equal(h.model(), "forge-local/code");
+	assert.equal(h.model(), THINK_MODEL);
 });

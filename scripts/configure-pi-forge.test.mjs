@@ -5,6 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { LOCAL_MODEL_PROVIDERS } from "../forge/lib/connected-services.mjs";
 
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -51,7 +52,7 @@ test("profile configuration exposes the three direct-port local models with thin
 	withAgentDirectory(undefined, (agentDirectory) => {
 		const settings = configure(agentDirectory);
 		// The temp-1 thinking profile is the interactive default.
-		assert.equal(settings.defaultProvider, "forge-local-think");
+		assert.equal(settings.defaultProvider, LOCAL_MODEL_PROVIDERS.think);
 		assert.equal(settings.defaultModel, "think");
 
 		const { providers } = JSON.parse(readFileSync(join(agentDirectory, "models.json"), "utf8"));
@@ -62,8 +63,8 @@ test("profile configuration exposes the three direct-port local models with thin
 
 		// think (:8003) and code (:8008) both reason via graded reasoning_effort.
 		for (const [name, port, id] of [
-			["forge-local-think", "8003", "think"],
-			["forge-local-code", "8008", "code"],
+			[LOCAL_MODEL_PROVIDERS.think, "8003", "think"],
+			[LOCAL_MODEL_PROVIDERS.code, "8008", "code"],
 		]) {
 			assert.equal(providers[name].baseUrl, `http://llms:${port}/v1`);
 			assert.equal(providers[name].models[0].id, id);
@@ -75,11 +76,11 @@ test("profile configuration exposes the three direct-port local models with thin
 		}
 
 		// chat (:8004) is the non-thinking fast path.
-		assert.equal(providers["forge-local-chat"].baseUrl, "http://llms:8004/v1");
-		assert.equal(providers["forge-local-chat"].models[0].id, "chat");
-		assert.equal(providers["forge-local-chat"].models[0].reasoning, false);
-		assert.equal(providers["forge-local-chat"].compat.supportsReasoningEffort, false);
-		assert.equal("thinkingFormat" in providers["forge-local-chat"].compat, false);
+		assert.equal(providers[LOCAL_MODEL_PROVIDERS.chat].baseUrl, "http://llms:8004/v1");
+		assert.equal(providers[LOCAL_MODEL_PROVIDERS.chat].models[0].id, "chat");
+		assert.equal(providers[LOCAL_MODEL_PROVIDERS.chat].models[0].reasoning, false);
+		assert.equal(providers[LOCAL_MODEL_PROVIDERS.chat].compat.supportsReasoningEffort, false);
+		assert.equal("thinkingFormat" in providers[LOCAL_MODEL_PROVIDERS.chat].compat, false);
 	});
 });
 

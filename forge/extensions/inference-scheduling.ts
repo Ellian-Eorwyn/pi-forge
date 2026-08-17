@@ -2,11 +2,21 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { getForgeAgentDir, resolveConnectedServices } from "../lib/connected-services.mjs";
+import {
+	getForgeAgentDir,
+	LOCAL_MODEL_PROVIDERS,
+	resolveConnectedServices,
+	serviceNameForLocalProvider,
+} from "../lib/connected-services.mjs";
 
 interface SchedulingConfiguration {
 	enabled: boolean;
 	interactiveSlot: number;
+}
+
+interface SchedulingServices {
+	chat?: { scheduling?: SchedulingConfiguration };
+	think?: { scheduling?: SchedulingConfiguration };
 }
 
 export function addInteractiveSlot(payload: unknown, configuration: SchedulingConfiguration): unknown {
@@ -14,24 +24,23 @@ export function addInteractiveSlot(payload: unknown, configuration: SchedulingCo
 	return { ...payload, id_slot: configuration.interactiveSlot, cache_prompt: true };
 }
 
-// The interactive session runs on the thinking server by default and moves to
-// the non-thinking one during the vault workflow's execute phase. Both share a
-// GPU with background batch work, so leases have to cover both providers: if
-// only one were watched, an execute-phase turn would stop announcing itself and
-// background workers would never yield to the user.
-const PROVIDER_SERVICES: Record<string, "think" | "chat"> = {
-	"forge-local": "think",
-	"forge-chat-local": "chat",
-};
+// The interactive session runs on either thinking profile by default and moves
+// to the non-thinking one during the vault workflow's execute phase. All three
+// front the same backend as background batch work, so every local provider must
+// select the slot policy for its connected service.
+export function schedulingForProvider(
+	provider: string | undefined,
+	services: SchedulingServices,
+): SchedulingConfiguration | undefined {
+	const service = serviceNameForLocalProvider(provider) as "think" | "chat" | null;
+	const scheduling = service ? services[service]?.scheduling : undefined;
+	return scheduling?.enabled ? scheduling : undefined;
+}
 
 export default function inferenceSchedulingExtension(pi: ExtensionAPI) {
 	const services = resolveConnectedServices();
-	const schedulingFor = (provider: string | undefined) => {
-		const service = provider ? PROVIDER_SERVICES[provider] : undefined;
-		const scheduling = service ? services[service]?.scheduling : undefined;
-		return scheduling?.enabled ? scheduling : undefined;
-	};
-	if (!Object.keys(PROVIDER_SERVICES).some((provider) => schedulingFor(provider))) return;
+	const schedulingFor = (provider: string | undefined) => schedulingForProvider(provider, services);
+	if (!Object.values(LOCAL_MODEL_PROVIDERS).some((provider) => schedulingFor(provider))) return;
 
 	const leaseDirectory = join(getForgeAgentDir(), "inference-leases");
 	const leasePath = join(leaseDirectory, `${process.pid}-${randomUUID()}.json`);

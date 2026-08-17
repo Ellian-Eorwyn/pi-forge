@@ -3,8 +3,9 @@
  *
  * A single-session plan -> execute -> verify loop for local-model vault work.
  *
- * The same weights are served twice: forge-local (http://llms:8008) reasons
- * before answering, and forge-chat-local (http://llms:8004) does not. Each
+ * The same weights are served through thinking and non-thinking profiles.
+ * forge-local-think (http://llms:8003) reasons before answering, while
+ * forge-local-chat (http://llms:8004) does not. Each
  * phase gets the behaviour it needs by switching the session model:
  *
  *   plan    - thinking model,     read-only tools  -> interview + write a plan
@@ -19,6 +20,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { LOCAL_MODEL_PROVIDERS } from "../lib/connected-services.mjs";
 
 type Phase = "off" | "plan" | "execute" | "verify";
 
@@ -27,7 +29,7 @@ interface ModelReference {
 	id: string;
 }
 
-const EXECUTE_MODEL: ModelReference = { provider: "forge-chat-local", id: "chat" };
+const EXECUTE_MODEL: ModelReference = { provider: LOCAL_MODEL_PROVIDERS.chat, id: "chat" };
 
 // Desired tools per phase; intersected with the tools that actually exist so an
 // environment without (say) a standalone "grep" tool still works.
