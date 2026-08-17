@@ -38,6 +38,8 @@
 		"access": "public"
 	},
 	"dependencies": {
+		"@earendil-works/pi-agent-core": "^0.79.8",
+		"@earendil-works/pi-ai": "^0.79.8",
 		"@earendil-works/pi-coding-agent": "^0.79.8",
 		"@modelcontextprotocol/sdk": "1.29.0",
 		"@mozilla/readability": "0.5.0",
