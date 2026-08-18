@@ -401,6 +401,56 @@ class ResponseParsingTests(unittest.TestCase):
             leases = list((Path(directory) / "inference-leases").glob("*.json"))
             self.assertEqual(leases, [])
 
+    def test_preemption_is_retried_then_succeeds(self):
+        # A background call preempted by a transient interactive turn is retried, not
+        # failed: re-acquiring the lease waits the burst out and the next attempt lands.
+        calls = {"n": 0}
+
+        def flaky_post(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise InterruptedError("background inference preempted by interactive activity")
+            return {"choices": [{"message": {"content": '{"ok": true}'}}], "usage": {}, "timings": {}}
+
+        original_post = forge_llm._post_preemptible
+        original_acquire = forge_llm._acquire_background_lease
+        forge_llm._post_preemptible = flaky_post
+        forge_llm._acquire_background_lease = lambda scheduling, env=None: Path(tempfile.gettempdir()) / "fake.lease"
+        try:
+            value, _record = forge_llm.call_json(
+                service("http://unused/v1/chat/completions", name="think", scheduling_enabled=True),
+                [{"role": "user", "content": "hi"}],
+                background=True,
+                env={},
+            )
+        finally:
+            forge_llm._post_preemptible = original_post
+            forge_llm._acquire_background_lease = original_acquire
+        self.assertEqual(value, {"ok": True})
+        self.assertEqual(calls["n"], 3)  # two preemptions absorbed, third attempt lands
+
+    def test_preemption_past_the_retry_budget_raises(self):
+        # When every windowed attempt is preempted, the error propagates so the skill
+        # can turn it into a resume hint rather than looping forever.
+        def always_preempt(*args, **kwargs):
+            raise InterruptedError("background inference preempted by interactive activity")
+
+        original_post = forge_llm._post_preemptible
+        original_acquire = forge_llm._acquire_background_lease
+        forge_llm._post_preemptible = always_preempt
+        forge_llm._acquire_background_lease = lambda scheduling, env=None: Path(tempfile.gettempdir()) / "fake.lease"
+        try:
+            with self.assertRaises(InterruptedError):
+                forge_llm.call_json(
+                    service("http://unused/v1/chat/completions", name="think", scheduling_enabled=True),
+                    [{"role": "user", "content": "hi"}],
+                    background=True,
+                    env={},
+                )
+        finally:
+            forge_llm._post_preemptible = original_post
+            forge_llm._acquire_background_lease = original_acquire
+
 
 class DoctorTests(unittest.TestCase):
     def test_doctor_flags_a_bulk_endpoint_that_still_thinks(self):

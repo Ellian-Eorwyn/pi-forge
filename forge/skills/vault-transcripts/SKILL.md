@@ -353,6 +353,21 @@ edit, or reject. `--retry-failed` re-cleans a held chunk with the retry;
 defect (a kept timestamp, a stray heading, a speaker label on a solo note) is not
 waivable and still gets its automatic retry.
 
+When a run's thinking-model review shares the endpoint an interactive session is
+using, a turn there can preempt the review ("background inference preempted by
+interactive activity"). The run retries past brief bursts on its own; if it still
+cannot proceed it exits with its state intact and the exact resume command in the
+error — resume with `--run <run-directory>`, in the foreground or with the session
+idle so the two do not compete for the endpoint.
+
+Two input shapes worth knowing about. An export whose two-part timestamps are
+really elapsed **minutes** (`*01:03*` = 63 minutes, which reads as 63 seconds under
+`MM:SS`) is detected by its impossible speaking rate and read as `HH:MM` instead of
+being held as corrupt; the report says it made that assumption. A speaker-labelled
+export that carries **no timestamps** is reported in its own lane ("Looks Like A
+Transcript — No Timestamps") and left alone rather than filed as a raw note;
+`--unlabeled` cleans these verbatim, with no clock markers since there are none.
+
 ## Terms and speakers
 
 `99 Meta/99.02 Schemas/0.02 Speakers and Terms.md` holds two tables the owner

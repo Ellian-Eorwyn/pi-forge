@@ -36,6 +36,11 @@ import { capacityForUrl, explainUnreachable, healthWarnings, identityForUrl, rea
 const THINK_BLOCK = /^\s*<think>[\s\S]*?<\/think>\s*/;
 export const DEFAULT_TIMEOUT_MS = 600_000;
 export const MAX_TRANSIENT_ATTEMPTS = 3;
+// A background call preempted by an interactive turn is retried a few times rather
+// than failing the whole run on the first turn. Re-acquiring the background lease
+// waits for the interactive burst to pass, so each retry is a fresh windowed attempt;
+// only when every attempt is preempted does PreemptedError propagate to the caller.
+export const PREEMPT_MAX_RETRIES = 3;
 // Must match forge_llm.LEASE_STALE_MS. A Python worker and a JavaScript one read
 // each other's leases, so a disagreement here means one of them ignores the
 // other and both generate at once.
@@ -514,17 +519,26 @@ export async function call(service, messages, options = {}) {
 	}
 	const body = JSON.stringify(request);
 
-	const lease = useSlot ? await acquireBackgroundLease(scheduling) : null;
-	if (useSlot && lease === null) useSlot = false; // no lease held, so not scheduled
-	const started = Date.now();
 	let payload;
-	try {
-		payload =
-			lease === null
-				? await postSimple(service.url, body, timeoutMs)
-				: await postPreemptible(service.url, body, timeoutMs, lease, scheduling);
-	} finally {
-		if (lease !== null) rmSync(lease, { force: true });
+	let started = Date.now();
+	for (let attempt = 0; attempt <= PREEMPT_MAX_RETRIES; attempt += 1) {
+		const lease = useSlot ? await acquireBackgroundLease(scheduling) : null;
+		if (useSlot && lease === null) useSlot = false; // no lease held, so not scheduled
+		started = Date.now();
+		try {
+			payload =
+				lease === null
+					? await postSimple(service.url, body, timeoutMs)
+					: await postPreemptible(service.url, body, timeoutMs, lease, scheduling);
+			break;
+		} catch (error) {
+			// Re-acquiring the lease below waits for the interactive burst to pass, so a
+			// transient turn costs a retry rather than the run; give up after a few windows.
+			if (error instanceof PreemptedError && attempt < PREEMPT_MAX_RETRIES) continue;
+			throw error;
+		} finally {
+			if (lease !== null) rmSync(lease, { force: true });
+		}
 	}
 
 	const usage = payload.usage ?? {};
@@ -603,16 +617,24 @@ export async function callWithTools(service, messages, options = {}) {
 	}
 	const body = JSON.stringify(request);
 
-	const lease = useSlot ? await acquireBackgroundLease(scheduling) : null;
-	if (useSlot && lease === null) useSlot = false;
 	let payload;
-	try {
-		payload =
-			lease === null
-				? await postSimple(service.url, body, timeoutMs)
-				: await postPreemptible(service.url, body, timeoutMs, lease, scheduling);
-	} finally {
-		if (lease !== null) rmSync(lease, { force: true });
+	for (let attempt = 0; attempt <= PREEMPT_MAX_RETRIES; attempt += 1) {
+		const lease = useSlot ? await acquireBackgroundLease(scheduling) : null;
+		if (useSlot && lease === null) useSlot = false;
+		try {
+			payload =
+				lease === null
+					? await postSimple(service.url, body, timeoutMs)
+					: await postPreemptible(service.url, body, timeoutMs, lease, scheduling);
+			break;
+		} catch (error) {
+			// Re-acquiring the lease below waits for the interactive burst to pass, so a
+			// transient turn costs a retry rather than the run; give up after a few windows.
+			if (error instanceof PreemptedError && attempt < PREEMPT_MAX_RETRIES) continue;
+			throw error;
+		} finally {
+			if (lease !== null) rmSync(lease, { force: true });
+		}
 	}
 
 	const choices = payload.choices ?? [];

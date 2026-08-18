@@ -263,6 +263,20 @@ TINY_RATIO_MIN = 0.3
 # recording any cleanup can rescue — it belongs in the re-record list, not the
 # review lane a person is meant to act on.
 MAX_WORDS_PER_SECOND = 6.0
+# The other end of the same sanity check, used only to disambiguate a two-part
+# timestamp. One transcription app writes elapsed time as *HH:MM* (a 63-minute
+# lecture ends *01:03*), which reads as 63 *seconds* under MM:SS and looks corrupt.
+# Rescaling to minutes is only trusted when the resulting rate is real speech: a
+# rate this far below normal means the minutes reading is wrong too, so the file is
+# left alone rather than coarsened into a plausible-looking lie.
+WPS_FLOOR = 0.2
+# A timestamp-less export that is still plainly a transcript — a small set of
+# speaker labels, each recurring, on their own lines above what they said — is
+# reported as its own lane rather than filed as a raw note, and can be processed
+# verbatim with --unlabeled. The thresholds keep an ordinary prose note, whose
+# paragraph first-lines never recur, out of the lane.
+UNLABELED_MIN_WORDS = 200
+UNLABELED_MIN_TURNS = 6
 FIDELITY_SAMPLES = 4
 FIDELITY_MIN_CONTAINMENT = 0.5
 FIDELITY_MIN_WORDS = 4
@@ -633,7 +647,7 @@ def _line_kind(line):
     return "text", stripped
 
 
-def parse_transcript(body):
+def parse_transcript(body, allow_unlabeled=False):
     """Split an exported transcript into preamble, blocks, and trailing text.
 
     Blocks are the app's unit: an optional bold speaker label, an italic
@@ -660,10 +674,15 @@ def parse_transcript(body):
             continue
         index += 1
     if not starts:
+        # No timestamped blocks. A note the pipeline should skip stays empty; under
+        # --unlabeled a speaker-labelled export with no timestamps is parsed instead.
+        if allow_unlabeled:
+            return parse_unlabeled(body)
         return {"preamble": body, "blocks": [], "trailing": ""}
 
     first = starts[0][0]
     blocks = []
+    part_counts = []
     end = first
     for position, (start, speaker) in enumerate(starts):
         if position + 1 < len(starts):
@@ -677,16 +696,91 @@ def parse_transcript(body):
             while end < len(lines) and not lines[end].strip():
                 end += 1
         offset = start + (2 if speaker is not None else 1)
+        stamp = kinds[offset - 1][1]
         text_lines = [line.strip() for line in lines[offset:end] if line.strip()]
         blocks.append(
             {
                 "speaker": speaker,
-                "seconds": timestamp_seconds(kinds[offset - 1][1]),
+                "seconds": timestamp_seconds(stamp),
                 "text": " ".join(text_lines),
                 "raw": "".join(lines[start:end]),
             }
         )
-    return {"preamble": "".join(lines[:first]), "blocks": blocks, "trailing": "".join(lines[end:])}
+        part_counts.append(stamp.count(":") + 1)
+    parsed = {"preamble": "".join(lines[:first]), "blocks": blocks, "trailing": "".join(lines[end:])}
+    coarsen_minutes_if_impossible(parsed, part_counts)
+    return parsed
+
+
+def coarsen_minutes_if_impossible(parsed, part_counts):
+    """Reinterpret two-part timestamps as ``*HH:MM*`` when the ``*MM:SS*`` reading
+    implies an impossible speaking rate, in place.
+
+    One transcription app writes elapsed time as ``*HH:MM*`` — a 63-minute lecture
+    ends at ``*01:03*`` — which ``timestamp_seconds`` reads as 63 *seconds*. Left
+    alone, thousands of words against a minute look like corrupt speech-to-text and
+    the recording is wrongly held for re-recording. The rescale is trusted only when
+    the evidence is unambiguous: every timestamp is two-part (a genuine ``HH:MM:SS``
+    file is never touched), the span is monotonic, the MM:SS rate is impossible, and
+    the ``*60`` reading lands in the real-speech band. When even the minutes reading
+    is impossible the file is left untouched and the corrupt-input gate still holds
+    it — the reinterpretation only ever rescues a plausible recording, never
+    launders a corrupt one into looking fine.
+
+    Seconds are the only thing rewritten; ``raw`` is preserved, so the byte-exact
+    round-trip and the verbatim recording are unaffected.
+    """
+    blocks = parsed["blocks"]
+    if not blocks or any(count != 2 for count in part_counts):
+        return
+    seconds = [block["seconds"] for block in blocks]
+    if any(earlier > later for earlier, later in zip(seconds, seconds[1:])):
+        return
+    duration = max(seconds, default=0)
+    words = sum(len(block["text"].split()) for block in blocks)
+    if not duration or not words:
+        return
+    if words / duration <= MAX_WORDS_PER_SECOND:
+        return
+    if not (WPS_FLOOR <= words / (duration * 60) <= MAX_WORDS_PER_SECOND):
+        return
+    for block in blocks:
+        block["seconds"] *= 60
+    parsed["timestamp_style"] = "HH:MM"
+
+
+def parse_unlabeled(body):
+    """Parse a speaker-labelled export that carries no timestamps.
+
+    The transcriber writes each turn as a short label line — a bare name or role,
+    ``Ellian`` then ``Sopagna`` — followed by what they said and a blank line. Each
+    blank-separated group is one turn whose first line is the speaker; blocks carry
+    ``seconds = None`` because there is no clock to read. Slicing stays contiguous, so
+    ``preamble + blocks + trailing`` reproduces the body byte for byte, and the
+    verbatim recording is preserved exactly as with a timestamped export.
+    """
+    lines = body.splitlines(keepends=True)
+    starts = [
+        index
+        for index, line in enumerate(lines)
+        if line.strip() and (index == 0 or not lines[index - 1].strip())
+    ]
+    if not starts:
+        return {"preamble": body, "blocks": [], "trailing": ""}
+    first = starts[0]
+    blocks = []
+    for position, start in enumerate(starts):
+        end = starts[position + 1] if position + 1 < len(starts) else len(lines)
+        text_lines = [line.strip() for line in lines[start + 1 : end] if line.strip()]
+        blocks.append(
+            {
+                "speaker": lines[start].strip().rstrip(":").strip() or None,
+                "seconds": None,
+                "text": " ".join(text_lines),
+                "raw": "".join(lines[start:end]),
+            }
+        )
+    return {"preamble": "".join(lines[:first]), "blocks": blocks, "trailing": "", "timestamp_style": "unlabeled"}
 
 
 def serialize_parsed(parsed):
@@ -723,7 +817,9 @@ def transcript_stats(parsed):
     blocks = parsed["blocks"]
     labels = Counter(block["speaker"] for block in blocks if block["speaker"])
     words = sum(len(block["text"].split()) for block in blocks)
-    seconds = [block["seconds"] for block in blocks]
+    # An unlabeled export has no clock, so its blocks carry no seconds; they drop out
+    # here, leaving a zero duration the rate gate correctly declines to judge.
+    seconds = [block["seconds"] for block in blocks if block["seconds"] is not None]
     return {
         "blocks": len(blocks),
         "words": words,
@@ -734,7 +830,11 @@ def transcript_stats(parsed):
         "speaker_labels": dict(labels),
         "has_preamble": bool(parsed["preamble"].strip()),
         "has_trailing": bool(parsed["trailing"].strip()),
-        "timestamp_style": "HH:MM:SS" if any(block["seconds"] >= 3600 for block in blocks) else "MM:SS",
+        # A file coarsened to minutes carries its style on the parsed dict; without
+        # that marker the seconds decide, and a rescaled file would otherwise look
+        # like a genuine HH:MM:SS export.
+        "timestamp_style": parsed.get("timestamp_style")
+        or ("HH:MM:SS" if any((block["seconds"] or 0) >= 3600 for block in blocks) else "MM:SS"),
     }
 
 
@@ -807,6 +907,42 @@ def is_transcript(split, parsed):
     return True, None
 
 
+def looks_like_untimestamped_transcript(split, body):
+    """A no-frontmatter, no-timestamp note that is still plainly a speaker-labelled
+    transcript: a small roster of labels, each recurring, covering most turns.
+
+    A transcript names the same few speakers over and over; an ordinary note's
+    blank-separated paragraphs open with a different sentence each time, so their
+    first lines do not recur. That difference is the whole test.
+    """
+    if split["malformed"] or split["had_frontmatter"]:
+        return False
+    if any(TIMESTAMP_RE.match(line.strip()) for line in body.splitlines()):
+        return False
+    if len(body.split()) < UNLABELED_MIN_WORDS:
+        return False
+    turns = parse_unlabeled(body)["blocks"]
+    if len(turns) < UNLABELED_MIN_TURNS:
+        return False
+    speakers = Counter(block["speaker"] for block in turns if block["speaker"])
+    # A real speaker label is a short name or role, not a sentence or a heading: that
+    # is what separates a transcript's recurring labels from prose whose paragraphs
+    # happen to repeat an opening line.
+    recurring = {name for name, count in speakers.items() if count >= 2 and _is_label_like(name)}
+    if len(recurring) < 2:
+        return False
+    covered = sum(count for name, count in speakers.items() if name in recurring)
+    return covered >= UNLABELED_MIN_TURNS and covered / len(turns) >= 0.6
+
+
+def _is_label_like(name):
+    if not name or name[0] in "#-*>|":
+        return False
+    if not (1 <= len(name.split()) <= 5):
+        return False
+    return name[-1] not in ".?!"
+
+
 # --------------------------------------------------------------------------
 # Scan and dedupe
 # --------------------------------------------------------------------------
@@ -832,11 +968,12 @@ def unusable_input_reason(stats):
     return None
 
 
-def scan_inbox(vault, limit=None, select=None):
+def scan_inbox(vault, limit=None, select=None, allow_unlabeled=False):
     """Every Markdown file directly under the inbox tree, with what can be known
     about it without a model. ``select`` scopes the run to a set of vault-relative
     POSIX paths, filtered before any file is read or hashed, so a single-note run
-    touches only that note."""
+    touches only that note. ``allow_unlabeled`` lets a speaker-labelled export with no
+    timestamps count as a transcript rather than being reported as a skipped lane."""
     root = vault / INBOX_DIR
     if not root.is_dir():
         raise UserError(f"inbox directory does not exist: {root}")
@@ -878,6 +1015,8 @@ def scan_inbox(vault, limit=None, select=None):
             "mtime": int(stat.st_mtime),
             "is_transcript": False,
             "skip_reason": None,
+            "no_timestamps": False,
+            "unlabeled": False,
             "error": None,
             **parse_filename(path.name),
             "filename_hint": filename_title_hint(path.name),
@@ -887,12 +1026,25 @@ def scan_inbox(vault, limit=None, select=None):
             data = path.read_bytes()
             item["sha256"] = sha256_bytes(data)
             split = split_frontmatter(data)
-            parsed = parse_transcript(transcript_source(split["body"], vault))
+            body = transcript_source(split["body"], vault)
+            parsed = parse_transcript(body, allow_unlabeled=allow_unlabeled)
             transcript, reason = is_transcript(split, parsed)
             item["is_transcript"] = transcript
             item["skip_reason"] = reason
+            # Recorded on the item so downstream stages (and a resume that reloads the
+            # cached scan) parse this note the same way scan did, without re-reading the
+            # run-wide flag.
+            item["unlabeled"] = transcript and parsed.get("timestamp_style") == "unlabeled"
             if transcript:
                 item["stats"] = transcript_stats(parsed)
+            elif reason == "no timestamped transcript blocks" and looks_like_untimestamped_transcript(split, body):
+                # A speaker-labelled transcript the transcriber never timestamped: named
+                # as its own lane so the deliberate skip is visible, not filed silently
+                # as a raw note. --unlabeled processes it.
+                item["no_timestamps"] = True
+                item["skip_reason"] = (
+                    "looks like a transcript but has no timestamps — pass --unlabeled to process it verbatim"
+                )
         except (OSError, UnicodeDecodeError) as error:
             item["error"] = str(error)
             item["skip_reason"] = f"unreadable: {error}"
@@ -1429,7 +1581,10 @@ def classify_items(args, vault, items, run_dir, skip):
         started = time.time()
         try:
             data = (vault / item["path"]).read_bytes()
-            parsed = parse_transcript(transcript_source(split_frontmatter(data)["body"], vault))
+            parsed = parse_transcript(
+                transcript_source(split_frontmatter(data)["body"], vault),
+                allow_unlabeled=item.get("unlabeled", False),
+            )
             payload = classify_payload(item, parsed, getattr(args, "compiled_lexicon", None))
             roster_names = [offer["name"] for offer in payload.get("knownSpeakers", [])]
             messages = [
@@ -1503,7 +1658,11 @@ def classify_items(args, vault, items, run_dir, skip):
                 "review_reason": f"classification failed: {message}",
             }
         except InterruptedError as error:
-            raise UserError(f"classification was preempted by interactive activity: {error}") from error
+            raise UserError(
+                f"classification was preempted by interactive activity: {error}. The run is "
+                f"checkpointed — resume it with `process --vault {vault} --run {run_dir}`, or run the "
+                "resume in the foreground so its review does not compete with the interactive session"
+            ) from error
         unusable = unusable_input_reason(item.get("stats"))
         if unusable:
             # Corrupt input can't be cleaned; hold it, but mark it so the report
@@ -2074,7 +2233,10 @@ def clean_items(args, vault, items, class_records, run_dir, skip):
     for item, record in plans:
         try:
             data = (vault / item["path"]).read_bytes()
-            parsed = parse_transcript(transcript_source(split_frontmatter(data)["body"], vault))
+            parsed = parse_transcript(
+                transcript_source(split_frontmatter(data)["body"], vault),
+                allow_unlabeled=item.get("unlabeled", False),
+            )
         except (OSError, UnicodeDecodeError) as error:
             warnings.append(f"{item['path']}: could not re-read for cleanup ({error})")
             results[item["path"]] = {"error": str(error)}
@@ -2158,7 +2320,11 @@ def clean_items(args, vault, items, class_records, run_dir, skip):
                     summarized=is_summarized(record["recording_type"]),
                 )
             except InterruptedError as error:
-                raise UserError(f"cleanup was preempted by interactive activity: {error}") from error
+                raise UserError(
+                    f"cleanup was preempted by interactive activity: {error}. The run is checkpointed "
+                    f"— resume it with `process --vault {vault} --run {run_dir}`, or run the resume in "
+                    "the foreground so its review does not compete with the interactive session"
+                ) from error
             except (forge_llm.ChatError, UserError, ValueError) as error:
                 failure = f"{type(error).__name__}: {error}"
                 with progress_lock:
@@ -2715,7 +2881,11 @@ def summarize_items(args, vault, items, class_records, clean_results, run_dir, s
                 "skipped": None,
             }
         except InterruptedError as error:
-            raise UserError(f"summarizing was preempted by interactive activity: {error}") from error
+            raise UserError(
+                f"summarizing was preempted by interactive activity: {error}. The run is checkpointed "
+                f"— resume it with `process --vault {vault} --run {run_dir}`, or run the resume in the "
+                "foreground so its review does not compete with the interactive session"
+            ) from error
         except (forge_llm.ChatError, UserError, ValueError) as error:
             message = f"{type(error).__name__}: {error}"
             warnings.append(f"{item['path']}: summary failed ({message})")
@@ -2800,7 +2970,7 @@ def fidelity_samples(path, blocks, count=FIDELITY_SAMPLES):
         return []
     rng = random.Random(sha256_text(path))
     chosen = rng.sample(usable, min(count, len(usable)))
-    return sorted(chosen, key=lambda block: block["seconds"])
+    return sorted(chosen, key=lambda block: block["seconds"] if block["seconds"] is not None else 0)
 
 
 def strip_callout_lines(text):
@@ -3091,6 +3261,15 @@ def check_note(
 
 
 def base_record(item):
+    stats = item["stats"]
+    warnings = []
+    if isinstance(stats, dict) and stats.get("timestamp_style") == "HH:MM":
+        # The report should say what was assumed: a two-part timestamp read as
+        # minutes rather than seconds because the seconds reading was impossible.
+        warnings.append(
+            "timestamps read as HH:MM (elapsed minutes), not MM:SS — the seconds reading "
+            "implied an impossible speaking rate"
+        )
     return {
         "source": item["path"],
         "source_hash": item["sha256"],
@@ -3099,11 +3278,11 @@ def base_record(item):
         "status": "ok",
         "needs_review": False,
         "review_reason": None,
-        "warnings": [],
+        "warnings": warnings,
         "recording_type": None,
         "title": None,
         "summary": None,
-        "stats": item["stats"],
+        "stats": stats,
     }
 
 
@@ -3173,6 +3352,7 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
             record = base_record(item)
             record["status"] = "skipped"
             record["review_reason"] = item["skip_reason"]
+            record["no_timestamps"] = item.get("no_timestamps", False)
             records.append(record)
             continue
         planned.append(item)
@@ -3221,7 +3401,7 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
                 records.append(review_record(item, "note changed on disk during this run"))
                 continue
             raw_body = transcript_source(split_frontmatter(data)["body"], vault)
-            parsed = parse_transcript(raw_body)
+            parsed = parse_transcript(raw_body, allow_unlabeled=item.get("unlabeled", False))
             metadata = frontmatter_metadata(schema, record["recording_type"], date)
             note_text, head = build_note(
                 schema,
@@ -4842,6 +5022,7 @@ def initial_counts():
         "selected": 0,
         "transcripts": 0,
         "skipped_non_transcript": 0,
+        "untimestamped_transcript": 0,
         "duplicates_exact": 0,
         "duplicate_review": 0,
         "undated": 0,
@@ -4864,7 +5045,10 @@ def recompute_counts(records, dedupe, items):
         if record["action"] == "quarantine":
             continue
         if record["status"] == "skipped":
-            counts["skipped_non_transcript"] += 1
+            if record.get("no_timestamps"):
+                counts["untimestamped_transcript"] += 1
+            else:
+                counts["skipped_non_transcript"] += 1
             continue
         if record["action"] == "process":
             counts["processed"] += 1
@@ -5361,6 +5545,7 @@ def write_plan(run_dir, records, counts, dedupe, dry_run, vault, schema_hash, op
         record for record in held_all if record.get("status") == "unusable" or record.get("unusable_reason")
     ]
     review = [record for record in held_all if record not in unusable_records]
+    no_timestamps = [record for record in records if record.get("no_timestamps")]
     report = [
         "# Vault Transcripts Report",
         "",
@@ -5377,6 +5562,7 @@ def write_plan(run_dir, records, counts, dedupe, dry_run, vault, schema_hash, op
         f"- Exact duplicates to quarantine: {counts['duplicates_exact']}",
         f"- Duplicate pairs needing your decision: {counts['duplicate_review']}",
         f"- Not transcripts (left alone): {counts['skipped_non_transcript']}",
+        f"- Untimestamped transcripts (skipped — pass --unlabeled): {counts['untimestamped_transcript']}",
         f"- Without a date in the filename: {counts['undated']}",
         "",
     ]
@@ -5434,6 +5620,18 @@ def write_plan(run_dir, records, counts, dedupe, dry_run, vault, schema_hash, op
             unusable_records,
             lambda record: f"- `{record['source']}`: {record.get('unusable_reason') or record['review_reason']}",
         )
+    if no_timestamps:
+        report.extend(
+            [
+                "",
+                "## Looks Like A Transcript — No Timestamps",
+                "",
+                "Speaker-labelled but with no timestamps, so the pipeline left them alone rather than "
+                "filing them as raw notes. Re-run with `--unlabeled` to clean them verbatim (no clock markers).",
+                "",
+            ]
+        )
+        append_listing(report, no_timestamps, lambda record: f"- `{record['source']}`")
     report.extend(["", "## Held For Review", "", "These notes were not renamed or rewritten.", ""])
     append_listing(
         report,
@@ -6133,7 +6331,7 @@ def process(args):
         if scan_path.is_file():
             items = json.loads(scan_path.read_text(encoding="utf-8"))["items"]
             if resuming:
-                drift = run_state.input_drift(items, scan_inbox(vault, args.limit, select=getattr(args, "notes", None)))
+                drift = run_state.input_drift(items, scan_inbox(vault, args.limit, select=getattr(args, "notes", None), allow_unlabeled=getattr(args, "unlabeled", False)))
                 for added in drift["added"]:
                     warnings.append(f"input drift: {added['path']} appeared after the scan; run again to include it")
                 for removed in drift["removed"]:
@@ -6143,7 +6341,7 @@ def process(args):
                         f"input drift: {changed['after']['path']} changed after the scan; it will be refused at apply"
                     )
         else:
-            items = scan_inbox(vault, args.limit, select=getattr(args, "notes", None))
+            items = scan_inbox(vault, args.limit, select=getattr(args, "notes", None), allow_unlabeled=getattr(args, "unlabeled", False))
             run_state.atomic_write_json(scan_path, {"items": items})
             run_state.update_run_state(
                 run_dir,
@@ -7356,6 +7554,12 @@ def parse_args(argv):
     # Default None (not False) so a single-note run can default to autonomous while
     # --no-autonomous still forces the review flow; resolved in process().
     parser.set_defaults(autonomous=None)
+    parser.add_argument(
+        "--unlabeled",
+        action="store_true",
+        help="process speaker-labelled exports that carry no timestamps (otherwise they are reported as a "
+        "skipped lane rather than filed as raw notes); no clock markers are written, since there are none to read",
+    )
     parser.add_argument(
         "--link-rewrite",
         choices=["auto", "off", "require"],

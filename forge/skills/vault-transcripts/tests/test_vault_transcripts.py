@@ -616,6 +616,89 @@ class ParsingTests(unittest.TestCase):
         minutes = vt.parse_transcript(transcript([block("Early on.", 67)]))
         self.assertEqual(minutes["blocks"][0]["seconds"], 67)
 
+    def test_impossible_mmss_rate_is_reinterpreted_as_hhmm(self):
+        # A 57-minute recording an app wrote as *00:57* reads as 57 seconds under
+        # MM:SS — 6000 words against it is impossible speech, so it is coarsened to
+        # minutes and the corrupt-input gate no longer holds it.
+        body = transcript([block("Opening remarks.", 0), block(" ".join(["word"] * 6000), 57)])
+        parsed = vt.parse_transcript(body)
+        self.assertEqual(parsed["blocks"][-1]["seconds"], 57 * 60)
+        stats = vt.transcript_stats(parsed)
+        self.assertEqual(stats["timestamp_style"], "HH:MM")
+        self.assertEqual(stats["duration_seconds"], 57 * 60)
+        self.assertIsNone(vt.unusable_input_reason(stats))
+
+    def test_reinterpretation_preserves_byte_exact_raw(self):
+        body = transcript([block("Opening remarks.", 0), block(" ".join(["word"] * 6000), 57)])
+        self.assertEqual(vt.serialize_parsed(vt.parse_transcript(body)), body)
+
+    def test_both_readings_impossible_is_not_reinterpreted_and_still_held(self):
+        body = transcript([block("start", 0), block(" ".join(["word"] * 30000), 63)])
+        parsed = vt.parse_transcript(body)
+        self.assertEqual(parsed["blocks"][-1]["seconds"], 63)
+        stats = vt.transcript_stats(parsed)
+        self.assertEqual(stats["timestamp_style"], "MM:SS")
+        self.assertIsNotNone(vt.unusable_input_reason(stats))
+
+    def test_fast_short_memo_below_floor_is_not_reinterpreted(self):
+        # 80 words at *00:10* is over the MM:SS ceiling, but the minutes reading
+        # (0.13 wps) is below the floor, so it is left alone rather than rescaled
+        # into a plausible-looking lie.
+        body = transcript([block("hi", 0), block(" ".join(["word"] * 80), 10)])
+        parsed = vt.parse_transcript(body)
+        self.assertEqual(parsed["blocks"][-1]["seconds"], 10)
+        self.assertEqual(vt.transcript_stats(parsed)["timestamp_style"], "MM:SS")
+
+    def test_three_part_timestamps_are_never_reinterpreted(self):
+        # Even with an impossible two-part rate in the same file, any 3-part stamp
+        # blocks the minutes rescale — a blanket *60 would corrupt a real HH:MM:SS.
+        body = "*00:05*\n" + " ".join(["word"] * 6000) + "\n\n*0:10:30*\nlate\n\n"
+        parsed = vt.parse_transcript(body)
+        self.assertEqual([entry["seconds"] for entry in parsed["blocks"]], [5, 630])
+        self.assertNotEqual(vt.transcript_stats(parsed)["timestamp_style"], "HH:MM")
+
+    def test_unordered_timestamps_are_not_reinterpreted(self):
+        body = transcript([block(" ".join(["word"] * 6000), 57), block("earlier", 5)])
+        parsed = vt.parse_transcript(body)
+        self.assertEqual([entry["seconds"] for entry in parsed["blocks"]], [57, 5])
+
+    def _unlabeled_body(self, turns=8):
+        speakers = ["Ellian", "Sopagna"]
+        utterance = " ".join(["word"] * 30)
+        return "".join(f"{speakers[index % 2]}\n{utterance}\n\n" for index in range(turns))
+
+    def test_untimestamped_speaker_transcript_is_detected(self):
+        split = {"malformed": False, "had_frontmatter": False}
+        self.assertTrue(vt.looks_like_untimestamped_transcript(split, self._unlabeled_body()))
+
+    def test_untimestamped_transcript_is_skipped_by_default(self):
+        parsed = vt.parse_transcript(self._unlabeled_body())  # no allow_unlabeled
+        self.assertEqual(parsed["blocks"], [])
+        transcript_flag, reason = vt.is_transcript({"malformed": False, "had_frontmatter": False}, parsed)
+        self.assertFalse(transcript_flag)
+        self.assertEqual(reason, "no timestamped transcript blocks")
+
+    def test_unlabeled_parse_is_byte_exact_and_has_no_seconds(self):
+        body = self._unlabeled_body()
+        parsed = vt.parse_transcript(body, allow_unlabeled=True)
+        self.assertEqual(len(parsed["blocks"]), 8)
+        self.assertEqual([block["speaker"] for block in parsed["blocks"][:2]], ["Ellian", "Sopagna"])
+        self.assertTrue(all(block["seconds"] is None for block in parsed["blocks"]))
+        self.assertEqual(vt.serialize_parsed(parsed), body)
+
+    def test_unlabeled_stats_have_no_duration_and_pass_the_rate_gate(self):
+        stats = vt.transcript_stats(vt.parse_transcript(self._unlabeled_body(), allow_unlabeled=True))
+        self.assertEqual(stats["timestamp_style"], "unlabeled")
+        self.assertEqual(stats["duration_seconds"], 0)
+        self.assertIsNone(vt.unusable_input_reason(stats))
+
+    def test_prose_note_is_not_detected_as_a_transcript(self):
+        split = {"malformed": False, "had_frontmatter": False}
+        prose = "# Heading\n\n" + " ".join(["The meeting went well and we made real progress today."] * 40)
+        self.assertFalse(vt.looks_like_untimestamped_transcript(split, prose))
+        # A short speaker exchange is under the word floor and also left alone.
+        self.assertFalse(vt.looks_like_untimestamped_transcript(split, "Ann\nHi.\n\nBob\nHello.\n"))
+
     def test_real_names_are_accepted_as_speaker_labels(self):
         body = transcript([block("Over here.", 0, "Gillian"), block("Coming.", 4, "Ellie")])
         parsed = vt.parse_transcript(body)
@@ -3869,6 +3952,10 @@ class SoloLabelStripTests(unittest.TestCase):
 
 
 class UnusableInputTests(unittest.TestCase):
+    # These exercise the gate on already-final stats. In the real pipeline a file
+    # whose only problem is an impossible MM:SS rate is reinterpreted as HH:MM in
+    # parse_transcript before it reaches here (see the coarsening tests above); the
+    # gate still fires when even the minutes reading is impossible.
     def test_impossible_speaking_rate_is_flagged(self):
         reason = vt.unusable_input_reason({"words": 6000, "duration_seconds": 57, "timestamps_ordered": True})
         self.assertIsNotNone(reason)

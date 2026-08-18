@@ -180,6 +180,12 @@ SERVICE_REASONING_EFFORT_ENVIRONMENT = {
 THINK_BLOCK_RE = re.compile(r"^\s*<think>.*?</think>\s*", re.DOTALL)
 DEFAULT_TIMEOUT = 600.0
 MAX_TRANSIENT_ATTEMPTS = 3
+# A background call preempted by an interactive turn is retried a few times rather
+# than failing the whole run on the first turn. Re-acquiring the background lease
+# waits for the interactive burst to pass, so each retry is a fresh windowed attempt;
+# only when every attempt is preempted does the InterruptedError propagate, for the
+# skill to turn into a resume hint.
+PREEMPT_MAX_RETRIES = 3
 LEASE_STALE_MS = 15000
 # Reasoning is invisible in the response body: llama.cpp strips the think block
 # server-side and reports no reasoning_content, so the only evidence is the
@@ -792,18 +798,28 @@ def call(
         )
     body = json.dumps(request).encode("utf-8")
 
-    lease = _acquire_background_lease(scheduling, env) if use_slot else None
     started = time.monotonic()
-    try:
-        if lease is not None:
-            payload = _post_preemptible(service["url"], body, timeout, api_key, lease, scheduling, env, allow_preemption)
-        else:
-            payload = _post_simple(service["url"], body, timeout, api_key)
-    finally:
-        if lease is not None:
-            lease.unlink(missing_ok=True)
-        elif use_slot:
-            use_slot = False  # no lease was held, so do not report this as scheduled
+    preempt_attempt = 0
+    while True:
+        lease = _acquire_background_lease(scheduling, env) if use_slot else None
+        try:
+            if lease is not None:
+                payload = _post_preemptible(service["url"], body, timeout, api_key, lease, scheduling, env, allow_preemption)
+            else:
+                payload = _post_simple(service["url"], body, timeout, api_key)
+            break
+        except InterruptedError:
+            # Preempted mid-request. Re-acquiring the lease below waits for the
+            # interactive burst to pass before the next attempt, so transient activity
+            # costs a retry rather than the run; give up only after a few windows.
+            preempt_attempt += 1
+            if preempt_attempt > PREEMPT_MAX_RETRIES:
+                raise
+        finally:
+            if lease is not None:
+                lease.unlink(missing_ok=True)
+            elif use_slot:
+                use_slot = False  # no lease was held, so do not report this as scheduled
 
     usage = payload.get("usage") or {}
     details = usage.get("prompt_tokens_details") or {}

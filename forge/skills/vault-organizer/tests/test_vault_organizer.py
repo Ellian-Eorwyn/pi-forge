@@ -815,6 +815,23 @@ class VaultOrganizerV2Tests(unittest.TestCase):
         self.assertFalse(payload["data"]["dry_run"])
         self.assertTrue((self.vault / "00 Inbox" / "Ambiguous.md").is_file())  # held, not filed
 
+    def test_autonomous_files_a_colliding_note_under_a_suffix(self):
+        # End-to-end: a new inbox note whose filing name is already taken is filed
+        # to a numbered suffix instead of dead-ending in a hold, and the existing
+        # note is never touched.
+        self.write_note("00 Inbox/Collision.md", "# Collision\n\nA clear note about Obsidian.\n")
+        existing = self.vault / "04 Technology" / "4.03 Obsidian" / "Collision.md"
+        existing.parent.mkdir(parents=True, exist_ok=True)
+        existing.write_text("existing note\n", encoding="utf-8")
+        with StubServer([ok_response()]) as server:
+            payload = self.run_ok(
+                "inbox", "--vault", str(self.vault), "--base-url", server.url, "--no-embeddings", "--autonomous",
+            )
+        self.assertFalse(payload["data"]["dry_run"])
+        self.assertEqual(existing.read_text(encoding="utf-8"), "existing note\n")
+        self.assertTrue((self.vault / "04 Technology" / "4.03 Obsidian" / "Collision-1.md").is_file())
+        self.assertFalse((self.vault / "00 Inbox" / "Collision.md").exists())
+
     def test_a_scoped_run_touches_only_the_named_note(self):
         # --note scopes the whole run to one note: only it is classified and only it
         # appears in the plan; the other inbox note is never read.
@@ -1289,6 +1306,112 @@ class VaultOrganizerV2Tests(unittest.TestCase):
             [row["op"] for row in log_rows if row["status"] == "ok"],
             ["rewrite", "rewrite_move"],
         )
+
+    def test_resume_keeps_filing_an_autonomous_run(self):
+        # An autonomous run interrupted mid-classification resumes as an autonomous
+        # apply, not a silent dry run: the effective mode is read back from run
+        # state, so a bare --run keeps filing without re-passing --autonomous. This
+        # is the regression that made an overnight run come back with applied: 0.
+        for name in ("Alpha", "Beta"):
+            self.write_note(f"00 Inbox/{name}.md", f"# {name}\n\n{name} unique body about Obsidian.\n")
+        release = threading.Event()
+        BlockingChatHandler.release = release
+        BlockingChatHandler.block_after = 1
+        env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        with StubServer([], handler_cls=BlockingChatHandler) as server:
+            process = subprocess.Popen(
+                [sys.executable, str(SCRIPT), "inbox", "--vault", str(self.vault),
+                 "--base-url", server.url, "--no-embeddings", "--autonomous"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=env,
+            )
+            journal = None
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                candidates = sorted((self.vault / ".vault-organizer" / "runs").glob("*/classified.jsonl"))
+                if candidates and candidates[0].read_text(encoding="utf-8").strip():
+                    journal = candidates[0]
+                    break
+                time.sleep(0.1)
+            self.assertIsNotNone(journal, "first classification was never journaled")
+            process.kill()
+            process.wait()
+            release.set()
+            run_dir = journal.parent
+            # No --autonomous and no --apply on the resume: the mode must come back
+            # from run state, and --no-embeddings is likewise adopted from it.
+            payload = self.run_ok(
+                "inbox", "--vault", str(self.vault), "--base-url", server.url, "--run", str(run_dir)
+            )
+        self.assertFalse(payload["data"]["dry_run"], "resume silently downgraded to a dry run")
+        self.assertTrue(payload["data"]["autonomous"], "resume lost the autonomous mode")
+        self.assertTrue(payload["data"]["resumed"])
+        self.assertFalse((self.vault / "00 Inbox" / "Alpha.md").exists(), "Alpha was not filed on resume")
+        self.assertFalse((self.vault / "00 Inbox" / "Beta.md").exists(), "Beta was not filed on resume")
+
+
+class ValidatePlanCollisionTests(unittest.TestCase):
+    """The destination-collision branch: autonomous inbox filing resolves a clash
+    itself; every other mode holds it and names the file that collides."""
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.vault = Path(self._dir.name)
+        self.addCleanup(self._dir.cleanup)
+
+    def _occupy(self, rel):
+        path = self.vault / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("existing\n", encoding="utf-8")
+
+    def _record(self, source, destination):
+        return {
+            "action": "move", "status": "ok", "needs_review": False,
+            "source": source, "destination": destination, "warnings": [], "review_reason": None,
+        }
+
+    def _case_insensitive(self):
+        probe = self.vault / "CaseProbe.tmp"
+        probe.write_text("x", encoding="utf-8")
+        answer = (self.vault / "caseprobe.tmp").exists()
+        probe.unlink()
+        return answer
+
+    def test_autonomous_inbox_suffixes_collision_without_touching_the_existing_file(self):
+        self._occupy("Dest/Note.md")
+        record = self._record("00 Inbox/Note.md", "Dest/Note.md")
+        vault_organizer.validate_plan(self.vault, [record], autonomous=True, mode="inbox")
+        self.assertEqual(record["destination"], "Dest/Note-1.md")
+        self.assertEqual(record["status"], "ok")
+        self.assertFalse(record["needs_review"])
+        self.assertTrue(any("already exists" in warning for warning in record["warnings"]))
+        self.assertEqual((self.vault / "Dest/Note.md").read_text(encoding="utf-8"), "existing\n")
+
+    def test_review_mode_holds_and_names_the_colliding_file(self):
+        self._occupy("Dest/Note.md")
+        record = self._record("00 Inbox/Note.md", "Dest/Note.md")
+        vault_organizer.validate_plan(self.vault, [record], autonomous=False, mode="inbox")
+        self.assertTrue(record["needs_review"])
+        self.assertEqual(record["status"], "review")
+        self.assertIn("Dest/Note.md", record["review_reason"])
+
+    def test_vault_mode_does_not_auto_suffix_even_under_autonomy(self):
+        # vault mode never built the whole-vault dedupe index, so a blind suffix
+        # could seat a near-duplicate beside its original: it holds instead.
+        self._occupy("Dest/Note.md")
+        record = self._record("Somewhere/Note.md", "Dest/Note.md")
+        vault_organizer.validate_plan(self.vault, [record], autonomous=True, mode="vault")
+        self.assertTrue(record["needs_review"])
+
+    def test_casefold_only_collision_is_suffixed_not_overwritten(self):
+        if not self._case_insensitive():
+            self.skipTest("case-sensitive filesystem: no case-only collision to resolve")
+        self._occupy("Dest/Note.md")
+        record = self._record("00 Inbox/note.md", "Dest/note.md")
+        vault_organizer.validate_plan(self.vault, [record], autonomous=True, mode="inbox")
+        self.assertEqual(record["destination"], "Dest/note-1.md")
+        self.assertEqual((self.vault / "Dest/Note.md").read_text(encoding="utf-8"), "existing\n")
 
 
 class PersonalContextTests(unittest.TestCase):

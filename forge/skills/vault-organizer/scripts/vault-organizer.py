@@ -1499,7 +1499,7 @@ def route_records(args, vault, schema, items, losers, class_records, warnings, d
     # Resolve cross-vault routes before validation, so a routed note carries the
     # route_vault action the checks below know to leave alone.
     resolve_vault_routes(vault, schema, records, warnings, done_map)
-    validate_plan(vault, records)
+    validate_plan(vault, records, autonomous=getattr(args, "autonomous", False), mode=getattr(args, "mode", None))
     taken = {record["destination"].casefold() for record in records if record["action"] == "quarantine"}
     for record in records:
         if record["action"] in {"quarantine", "route_vault"}:
@@ -1526,7 +1526,7 @@ def route_records(args, vault, schema, items, losers, class_records, warnings, d
     return records
 
 
-def validate_plan(vault, records):
+def validate_plan(vault, records, autonomous=False, mode=None):
     seen = {}
     for record in records:
         if record["action"] == "quarantine":
@@ -1554,10 +1554,23 @@ def validate_plan(vault, records):
             record["review_reason"] = "destination escapes vault"
             continue
         if destination_path.exists() and destination != record["source"]:
-            record["status"] = "review"
-            record["warnings"].append("destination collision")
-            record["needs_review"] = True
-            record["review_reason"] = "destination collision"
+            if autonomous and mode == "inbox":
+                # Autonomous filing of a new inbox note resolves the clash itself.
+                # Dedupe already ran against the whole vault, so a file already sitting
+                # at this name is a different note (often just a case difference), and a
+                # numbered suffix files it without a hand-rename or a dead-end hold. Only
+                # inbox mode gets this: vault mode never built the whole-vault index, so a
+                # blind suffix there could seat a near-duplicate beside its original.
+                directory = str(Path(destination).parent)
+                unique = assign_unique_destination(vault, directory, Path(destination).name, set(seen))
+                record["warnings"].append(f"destination {destination} already exists; filed as {unique} instead")
+                record["destination"] = unique
+                seen[unique.casefold()] = record["source"]
+            else:
+                record["status"] = "review"
+                record["warnings"].append(f"destination already exists: {destination}")
+                record["needs_review"] = True
+                record["review_reason"] = f"destination collision with {destination}"
 
 
 def initial_counts():
@@ -1851,7 +1864,7 @@ def drift_report_lines(findings):
 
 def write_plan(
     run_dir, records, counts, dedupe, base_references, mode, dry_run, vault, schema_hash, warnings,
-    verification=None, schema_drift=None, link_rewrite=("rename", None),
+    verification=None, schema_drift=None, link_rewrite=("rename", None), autonomous=None, resumed=False,
 ):
     plan_path = run_dir / "plan.json"
     report_path = run_dir / "report.md"
@@ -1860,6 +1873,8 @@ def write_plan(
     data = {
         "mode": mode,
         "dry_run": dry_run,
+        "autonomous": bool(autonomous),
+        "resumed": bool(resumed),
         "vault": str(vault),
         "schema_hash": schema_hash,
         "run_directory": str(run_dir),
@@ -1883,6 +1898,8 @@ def write_plan(
         "",
         f"- Mode: `{mode}`",
         f"- Dry run: `{str(dry_run).lower()}`",
+        f"- Filing: `{'autonomous' if autonomous else 'review-first'}`",
+        f"- Resumed run: `{str(bool(resumed)).lower()}`",
         f"- Vault: `{vault}`",
         f"- Schema hash: `{schema_hash}`",
         f"- Selected: {counts['selected']}",
@@ -2278,17 +2295,6 @@ def organize(args):
     vault = Path(args.vault).expanduser().resolve()
     if not vault.is_dir():
         raise UserError(f"vault root does not exist: {vault}")
-    if getattr(args, "autonomous", None) is None:
-        # A scoped run is autonomous by default; --no-autonomous opts back into the
-        # review flow, and a whole-vault/inbox run goes autonomous only when
-        # --autonomous is given explicitly.
-        args.autonomous = bool(getattr(args, "notes", None))
-    if args.autonomous:
-        # File the routine work without a review pass. The serious set still holds:
-        # the high-drift refusal below is left armed (autonomous never sets
-        # --allow-schema-drift), notes needing a decision are skipped by apply, and
-        # the near-duplicate review band is reported, not merged.
-        args.apply = True
     resuming = bool(args.run)
     if getattr(args, "notes", None) and not resuming:
         # Resolve --note selectors to canonical vault-relative paths (a typo fails
@@ -2303,6 +2309,22 @@ def organize(args):
         if state.get("command") != args.mode:
             raise UserError(f"run was started in {state.get('command')} mode, not {args.mode}")
         adopt_stored_options(args, state)
+    if getattr(args, "autonomous", None) is None:
+        # Decided only after stored options are adopted, so a resume sees the
+        # restored --note scope and the mode its original run was started in. A
+        # scoped run is autonomous by default; --no-autonomous opts back into the
+        # review flow; a whole-vault/inbox run goes autonomous only when --autonomous
+        # is given explicitly. Resuming one keeps filing without re-passing the flag,
+        # because the effective mode is read back from run state — the interrupted
+        # apply run is not silently downgraded to a dry run.
+        stored_autonomous = state.get("autonomous") if resuming and state else None
+        args.autonomous = stored_autonomous if stored_autonomous is not None else bool(getattr(args, "notes", None))
+    if args.autonomous:
+        # File the routine work without a review pass. The serious set still holds:
+        # the high-drift refusal below is left armed (autonomous never sets
+        # --allow-schema-drift), notes needing a decision are skipped by apply, and
+        # the near-duplicate review band is reported, not merged.
+        args.apply = True
     schema_path = resolve_schema_path(vault, args.schema)
     schema, schema_hash = compiled_schema_for(vault, schema_path)
     load_profile(args, vault)
@@ -2347,6 +2369,11 @@ def organize(args):
                 configuration["options"],
                 phase="scan",
             )
+            # The filing mode rides as a top-level field, not inside options: options
+            # feed the fingerprint, and neither apply nor autonomous belongs to a run's
+            # identity (the documented resume flow flips a dry run to --apply). Stored
+            # here, a resumed autonomous run keeps filing instead of coming back dry.
+            state["autonomous"] = bool(args.autonomous)
             run_state.initialize_run_state(run_dir, state)
 
         scan_path = run_dir / "scan.json"
@@ -2425,7 +2452,18 @@ def organize(args):
 
         verification = None
         if args.verify:
-            verification, verify_warnings = verify_classifications(args, vault, schema, class_records, run_dir)
+            try:
+                verification, verify_warnings = verify_classifications(args, vault, schema, class_records, run_dir)
+            except InterruptedError as error:
+                # The thinking-review batch shares the endpoint the interactive session
+                # uses, and forge_llm already retried past a few interactive bursts. The
+                # run state is journaled and intact, so the fix is a resume, not a
+                # restart — and it keeps its filing mode and scope.
+                raise UserError(
+                    f"{error}. The run is checkpointed — resume it with "
+                    f"`{args.mode} --vault {vault} --run {run_dir}`, or run the resume in the "
+                    "foreground so its review does not compete with the interactive session"
+                ) from error
             warnings.extend(verify_warnings)
         run_state.update_run_state(
             run_dir,
@@ -2460,6 +2498,7 @@ def organize(args):
         plan_path, report_path = write_plan(
             run_dir, records, counts, dedupe, base_references, args.mode, not args.apply, vault, schema_hash, warnings,
             verification, schema_drift, link_rewrite=(mover.mode, mover_reason),
+            autonomous=args.autonomous, resumed=resuming,
         )
         run_state.update_run_state(
             run_dir,
@@ -2477,6 +2516,8 @@ def organize(args):
         data={
             "mode": args.mode,
             "dry_run": not args.apply,
+            "autonomous": bool(args.autonomous),
+            "resumed": resuming,
             "vault": str(vault),
             "schema_hash": schema_hash,
             "run_directory": str(run_dir),

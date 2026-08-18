@@ -66,8 +66,14 @@ section.
    ```
 
 8. If a run is interrupted at any point, resume it with `--run
-   <run-directory>` (same options); completed work is never redone. Check
-   progress from another shell with:
+   <run-directory>` (same options); completed work is never redone, and the
+   resume keeps the filing mode it started in — a resumed autonomous run keeps
+   filing rather than silently coming back as a dry run. A run whose thinking-model
+   review is preempted by the interactive session ("background inference preempted
+   by interactive activity") retries past brief bursts on its own and, if it still
+   cannot proceed, exits checkpointed with the exact resume command in the error;
+   run that resume in the foreground (or with the session idle) so its review does
+   not compete for the endpoint. Check progress from another shell with:
 
    ```bash
    python3 <skill-directory>/scripts/vault-organizer.py status --run <run-directory>
@@ -87,7 +93,9 @@ python3 <skill-directory>/scripts/vault-organizer.py inbox --vault <vault> --aut
 
 - **Files on its own:** every note that classifies cleanly, into an existing
   schema folder, plus confident de-duplication (the duplicate goes to the
-  never-delete quarantine).
+  never-delete quarantine). A note whose filing name is already taken by a
+  different note is filed under a numbered suffix (`Name-1.md`), never held or
+  overwritten; the report names the file it collided with.
 - **Held for a person — anything that would change the vault schema, plus the
   unresolved:** `high` schema drift (the run refuses to file into a schema the
   folders disagree with; autonomous never passes `--allow-schema-drift`), a
