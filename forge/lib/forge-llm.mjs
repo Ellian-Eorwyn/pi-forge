@@ -560,6 +560,67 @@ export async function call(service, messages, options = {}) {
 	return { content, record };
 }
 
+/**
+ * `call` for agentic tool use. Forwards an OpenAI `tools` array (and optional
+ * `toolChoice`) and returns the raw assistant message, so a tool-call turn —
+ * where `content` is null and `tool_calls` is set — is handled rather than
+ * rejected the way `call` rejects a missing string content. Shares the same
+ * slot-lease scheduling, so `background: true` pins the background slot exactly
+ * as bulk work does. Returns `{ message, finishReason, usage }`.
+ */
+export async function callWithTools(service, messages, options = {}) {
+	const {
+		temperature = 0,
+		maxTokens = null,
+		cachePrompt = true,
+		background = false,
+		timeoutMs = DEFAULT_TIMEOUT_MS,
+		tools = null,
+		toolChoice = null,
+		reasoningEffort = null,
+	} = options;
+	const scheduling = service.scheduling ?? {};
+	const request = { model: service.model, messages, temperature, stream: false };
+	if (cachePrompt) request.cache_prompt = true;
+	if (maxTokens) request.max_tokens = maxTokens;
+	if (service.chatTemplateKwargs) request.chat_template_kwargs = service.chatTemplateKwargs;
+	if (Array.isArray(tools) && tools.length) request.tools = tools;
+	if (toolChoice) request.tool_choice = toolChoice;
+	const effort = reasoningEffort ?? service.reasoningEffort;
+	if (effort) request.reasoning_effort = effort;
+	let useSlot = background && Boolean(scheduling.enabled);
+	if (useSlot) request.id_slot = scheduling.backgroundSlot;
+
+	const contextTokens = service.contextTokens || SLOT_CONTEXT_TOKENS;
+	const estimatedPrompt = estimatePromptTokens(messages);
+	const reservedOutput = maxTokens || 0;
+	if (estimatedPrompt + reservedOutput > contextTokens) {
+		throw new ContextBudgetError(
+			`prompt is about ${estimatedPrompt} tokens and reserves ${reservedOutput} for output, ` +
+				`over the ${contextTokens}-token limit on service ${JSON.stringify(service.name)}. ` +
+				`Send less text per call, or lower maxTokens.`,
+		);
+	}
+	const body = JSON.stringify(request);
+
+	const lease = useSlot ? await acquireBackgroundLease(scheduling) : null;
+	if (useSlot && lease === null) useSlot = false;
+	let payload;
+	try {
+		payload =
+			lease === null
+				? await postSimple(service.url, body, timeoutMs)
+				: await postPreemptible(service.url, body, timeoutMs, lease, scheduling);
+	} finally {
+		if (lease !== null) rmSync(lease, { force: true });
+	}
+
+	const choices = payload.choices ?? [];
+	const message = choices.length ? (choices[0].message ?? {}) : {};
+	const finishReason = choices.length ? (choices[0].finish_reason ?? null) : null;
+	return { message, finishReason, usage: payload.usage ?? {} };
+}
+
 /** `call` with the response parsed as JSON. Returns `{value, record}`. */
 export async function callJson(service, messages, options = {}) {
 	const { content, record } = await call(service, messages, options);

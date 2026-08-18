@@ -18,6 +18,7 @@ process.env.PI_FORGE_SKIP_STACK_DISCOVERY = "1";
 const libraryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const {
 	call,
+	callWithTools,
 	callJsonWithRetry,
 	ChatError,
 	ContextBudgetError,
@@ -261,6 +262,59 @@ test("background bulk work pins the slot it was assigned", async () => {
 		assert.equal(stub.requests[0].id_slot, 1);
 	} finally {
 		await stub.close();
+	}
+});
+
+test("callWithTools forwards tools, pins the background slot, and returns a tool-call turn", async () => {
+	// The delegate's agentic calls: a tool-call turn has content null and
+	// tool_calls set, which `call` rejects but `callWithTools` must return.
+	const toolCallMessage = {
+		role: "assistant",
+		content: null,
+		tool_calls: [{ id: "c1", type: "function", function: { name: "grep", arguments: "{}" } }],
+	};
+	const requests = [];
+	const server = createServer((request, response) => {
+		let body = "";
+		request.setEncoding("utf8");
+		request.on("data", (chunk) => {
+			body += chunk;
+		});
+		request.on("end", () => {
+			requests.push(JSON.parse(body));
+			response.writeHead(200, { "Content-Type": "application/json" });
+			response.end(
+				JSON.stringify({ choices: [{ message: toolCallMessage, finish_reason: "tool_calls" }], usage: {} }),
+			);
+		});
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const url = `http://127.0.0.1:${server.address().port}/v1/chat/completions`;
+	const scheduled = {
+		name: "chat",
+		enabled: true,
+		url,
+		model: "chat",
+		scheduling: { enabled: true, interactiveSlot: 0, backgroundSlot: 1, idleGraceMs: 0 },
+	};
+	const oaTools = [
+		{
+			type: "function",
+			function: { name: "grep", description: "search", parameters: { type: "object", properties: {} } },
+		},
+	];
+	try {
+		const { message, finishReason } = await callWithTools(scheduled, [{ role: "user", content: "hi" }], {
+			background: true,
+			tools: oaTools,
+		});
+		assert.equal(requests[0].id_slot, 1, "background tool calls pin slot 1");
+		assert.deepEqual(requests[0].tools, oaTools, "the tools array is forwarded verbatim");
+		assert.equal(finishReason, "tool_calls");
+		assert.equal(message.content, null, "a null-content tool-call turn is returned, not rejected");
+		assert.equal(message.tool_calls[0].function.name, "grep");
+	} finally {
+		await new Promise((done) => server.close(done));
 	}
 });
 

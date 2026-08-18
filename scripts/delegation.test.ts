@@ -1,32 +1,25 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DELEGATE_SLOT, pinBackgroundSlot } from "../forge/extensions/delegation.ts";
+import { createReadOnlyTools } from "@earendil-works/pi-coding-agent";
+import { toOpenAITools } from "../forge/extensions/delegation.ts";
 
-// The delegate shares one llama-server with the interactive session. Its requests
-// MUST pin the background slot: a request on slot 0 evicts the interactive
-// session's prefix cache. These tests guard that invariant.
+// Importing delegation.ts also asserts it loads with only sandbox-safe imports
+// (coding-agent + ../lib/forge-llm.mjs) — the regression that broke the extension
+// loader was an import of the non-allowlisted @earendil-works/pi-ai/base.
 
-test("the delegate always pins the background slot and enables its own prefix cache", () => {
-	assert.equal(DELEGATE_SLOT, 1);
-	assert.deepEqual(pinBackgroundSlot({ model: "chat", messages: [] }), {
-		model: "chat",
-		messages: [],
-		id_slot: 1,
-		cache_prompt: true,
-	});
-});
+test("read-only tools convert to OpenAI function-tool definitions", () => {
+	const tools = createReadOnlyTools(process.cwd());
+	const oa = toOpenAITools(tools);
 
-test("the delegate can never leave a payload on the interactive slot 0", () => {
-	// A payload that somehow already carried slot 0 is corrected to slot 1, never trusted.
-	const pinned = pinBackgroundSlot({ id_slot: 0, cache_prompt: false }) as Record<string, unknown>;
-	assert.equal(pinned.id_slot, DELEGATE_SLOT);
-	assert.notEqual(pinned.id_slot, 0);
-	assert.equal(pinned.cache_prompt, true);
-});
-
-test("non-object payloads are left unchanged so a malformed body is not silently rewritten", () => {
-	assert.equal(pinBackgroundSlot(undefined), undefined);
-	assert.equal(pinBackgroundSlot(null), undefined);
-	assert.equal(pinBackgroundSlot("body"), undefined);
-	assert.equal(pinBackgroundSlot([1, 2, 3]), undefined);
+	assert.equal(oa.length, tools.length);
+	assert.ok(oa.length > 0);
+	// The read-only set is read/grep/find/ls — never a mutating tool.
+	const names = oa.map((t) => t.function.name).sort();
+	assert.deepEqual(names, ["find", "grep", "ls", "read"]);
+	for (const entry of oa) {
+		assert.equal(entry.type, "function");
+		assert.equal(typeof entry.function.name, "string");
+		assert.equal(typeof entry.function.description, "string");
+		assert.ok(entry.function.parameters, "each tool carries a JSON-schema parameters object");
+	}
 });
