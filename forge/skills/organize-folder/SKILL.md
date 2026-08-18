@@ -68,7 +68,11 @@ are relocated, never deleted, and every move is reversible.
 
 4. Open the files listed in `review_queue.md` (low confidence, unknown type, or
    generic names) before trusting their category; high-confidence files rarely
-   need per-file inspection. Review `near_duplicates.md` and decide what to do
+   need per-file inspection. When the queue flags more than a handful, delegate
+   the reading to `forge_delegate` — pass it the paths and ask it to characterize
+   each file's content and suggest a category, `want_evidence: true` — so their
+   contents stay out of your context; you keep the layout and routing decisions.
+   Review `near_duplicates.md` and decide what to do
    with each candidate pair (keep both, relocate, or set one to `duplicate` in
    `manifest.csv`); never assume a near-duplicate is identical. In
    `manifest.csv`, correct `category` and

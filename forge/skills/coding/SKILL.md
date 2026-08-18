@@ -36,7 +36,10 @@ user's existing work. Inspect before editing and record what was done.
    clean or known git state and state the intended change scope before editing.
    If the working tree is already dirty, confirm which changes are the user's.
 4. Make small targeted edits. Reuse existing utilities and match the project's
-   conventions rather than introducing new patterns or broad rewrites. Append
+   conventions rather than introducing new patterns or broad rewrites. When
+   finding an existing utility or its call sites would take several greps and
+   file reads, hand that lookup to `forge_delegate` (`want_evidence: true` for the
+   `file:line` locators) instead of pulling the search into your context. Append
    every command you run to `run_log.md` in the output directory.
 5. Run the project's tests, linters, and type checks using the commands from the
    profile. Record every result, including failures, in `run_log.md`. Never

@@ -10,12 +10,12 @@
 
 | Launch context block | Tokens |
 |---|---:|
-| Base system prompt (intro, tools list, guidelines, connected services) | 785 |
+| Base system prompt (intro, tools list, guidelines, connected services) | 807 |
 | Tool JSON schemas (17 tools) | 4115 |
 | Managed instructions (`AGENTS.md` with its `<project_context>` wrapper) | 2414 |
 | Skills menu (metadata for all model-visible skills) | 4070 |
-| **Total launch context (always processed)** | **11384** |
-| Maximum if every `SKILL.md` body is also loaded at once | 83628 |
+| **Total launch context (always processed)** | **11406** |
+| Maximum if every `SKILL.md` body is also loaded at once | 83857 |
 
 Of that total, the forge profile itself owns 6484 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
 
@@ -55,12 +55,12 @@ Sorted by launch cost. `Prompt lines` counts a tool's `promptSnippet` and `promp
 
 | Skill | Summary | Launch metadata tokens | On-demand body tokens | Complete file tokens | Launch visibility |
 |---|---|---:|---:|---:|---|
-| [`coding`](forge/skills/coding/SKILL.md) | Inspect repos and ship small reviewable changes | 141 | 792 | 910 | Model-visible |
+| [`coding`](forge/skills/coding/SKILL.md) | Inspect repos and ship small reviewable changes | 141 | 852 | 970 | Model-visible |
 | [`document-ingest`](forge/skills/document-ingest/SKILL.md) | Normalize documents and email with provenance | 127 | 3645 | 3746 | Model-visible |
 | [`file-conversion`](forge/skills/file-conversion/SKILL.md) | Convert files and EML with originals preserved | 142 | 1401 | 1517 | Model-visible |
 | [`literature-extraction`](forge/skills/literature-extraction/SKILL.md) | Extract structured evidence from research documents | 142 | 3596 | 3710 | Model-visible |
 | [`literature-library`](forge/skills/literature-library/SKILL.md) | Turn a citation file into a library of PDFs and clean Markdown | 150 | 3036 | 3159 | Model-visible |
-| [`organize-folder`](forge/skills/organize-folder/SKILL.md) | Sort a messy folder via a reviewable manifest | 132 | 1790 | 1895 | Model-visible |
+| [`organize-folder`](forge/skills/organize-folder/SKILL.md) | Sort a messy folder via a reviewable manifest | 132 | 1864 | 1970 | Model-visible |
 | [`personal-admin`](forge/skills/personal-admin/SKILL.md) | Summarize personal documents into action plans | 143 | 1259 | 1376 | Model-visible |
 | [`project-extraction`](forge/skills/project-extraction/SKILL.md) | Search and refresh live project controls | 146 | 2436 | 2555 | Model-visible |
 | [`report-output`](forge/skills/report-output/SKILL.md) | Assemble polished deliverables from processed outputs | 140 | 773 | 887 | Model-visible |
@@ -73,7 +73,7 @@ Sorted by launch cost. `Prompt lines` counts a tool's `promptSnippet` and `promp
 | [`transcription`](forge/skills/transcription/SKILL.md) | Transcribe audio or video, then correct and clean it | 141 | 2065 | 2180 | Model-visible |
 | [`vault-capture`](forge/skills/vault-capture/SKILL.md) | Turn a braindump into schema-valid notes in an Obsidian vault inbox - split unedited thinking... | 138 | 2583 | 2694 | Model-visible |
 | [`vault-compose`](forge/skills/vault-compose/SKILL.md) | Compose a vault note from material already in hand - a web-research run, existing notes, or t... | 144 | 1827 | 1938 | Model-visible |
-| [`vault-connections`](forge/skills/vault-connections/SKILL.md) | Search an Obsidian vault by meaning, propose links for per-id review, publish completed liter... | 151 | 2682 | 2807 | Model-visible |
+| [`vault-connections`](forge/skills/vault-connections/SKILL.md) | Search an Obsidian vault by meaning, propose links for per-id review, publish completed liter... | 151 | 2755 | 2879 | Model-visible |
 | [`vault-curator`](forge/skills/vault-curator/SKILL.md) | Research how a field catalogues its records and propose what that means for an Obsidian vault... | 151 | 2403 | 2526 | Model-visible |
 | [`vault-media`](forge/skills/vault-media/SKILL.md) | Catalog books, films, television, music, and games in an Obsidian vault as `work` notes under... | 149 | 2129 | 2251 | Model-visible |
 | [`vault-naturalist`](forge/skills/vault-naturalist/SKILL.md) | Compile the seasonal Phenology tables on animal, plant, and fungus wiki cards into a queryabl... | 142 | 1570 | 1684 | Model-visible |

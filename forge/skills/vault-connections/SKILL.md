@@ -42,7 +42,10 @@ Nothing is written without the user naming the proposal ids they approve.
    ```
 
    Results are hybrid-ranked. Read the full note only when the snippets are
-   insufficient.
+   insufficient. When answering needs several full notes read, delegate that
+   reading to `forge_delegate` — give it the question and the candidate paths and
+   set `want_evidence: true` — so the note bodies never enter your context; you
+   synthesize the user's answer from the distilled facts it returns.
 5. When the user asks to send a completed literature, meta-literature, or deep
    research run to the vault, use `import-run`:
 
