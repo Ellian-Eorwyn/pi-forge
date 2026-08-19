@@ -51,6 +51,58 @@
 			"ocr": {
 				"url": "http://llms:5002/glmocr/parse"
 			}
+		},
+		"distributed-parallel": {
+			"description": "Two GPUs at once: interactive + a bulk lane on GPU1; a second bulk lane, independent verify, compaction, and delegation on GPU2. Skill batch work fans across both.",
+			"primary": {
+				"host": "http://llms",
+				"images": true,
+				"contextTokens": 131072
+			},
+			"secondary": {
+				"host": "http://llms",
+				"images": false,
+				"contextTokens": 131072,
+				"ports": {
+					"chat2": 8104,
+					"think2": 8103,
+					"code2": 8108
+				},
+				"chatTemplateKwargs": {
+					"enable_thinking": false
+				}
+			},
+			"delegation": {
+				"enabled": true,
+				"baseUrl": "http://llms:8104/v1/chat/completions",
+				"model": "chat",
+				"images": false,
+				"contextTokens": 131072,
+				"chatTemplateKwargs": {
+					"enable_thinking": false
+				}
+			},
+			"bulk": {
+				"lanes": ["chat", "chat2"]
+			},
+			"verify": {
+				"service": "think2"
+			},
+			"compaction": {
+				"offload": true,
+				"service": "chat2"
+			},
+			"embedding": {
+				"url": "http://laptop:8005/v1/embeddings",
+				"model": "embed"
+			},
+			"transcription": {
+				"baseUrl": "http://laptop:8014",
+				"engine": "parakeet-v3"
+			},
+			"ocr": {
+				"url": "http://llms:5002/glmocr/parse"
+			}
 		}
 	}
 }

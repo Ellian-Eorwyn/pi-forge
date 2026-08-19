@@ -32,6 +32,12 @@ import { DEFAULT_CONNECTED_SERVICES, getForgeAgentDir, SLOT_CONTEXT_TOKENS } fro
 // hardcodes the same numbers.
 export const PRIMARY_PORTS = Object.freeze({ think: 8003, code: 8008, chat: 8004 });
 
+// The mirror of PRIMARY_PORTS on the second GPU. `chat2` is the non-thinking bulk
+// aggregate; `code2` is the thinking configuration the `think2` verify lane and
+// the `think` service map to (exactly as primary `think` maps to the code port).
+// `think2` (8103) is carried for completeness but not fronted by a forge service.
+export const SECONDARY_PORTS = Object.freeze({ chat2: 8104, think2: 8103, code2: 8108 });
+
 // Matches COMPACTION_TRIGGER_RATIO in configure-pi-forge.mjs: the interactive
 // agent compacts at this fraction of its window, so the reserve is the remainder.
 // Recomputed here because a setup can change the interactive context.
@@ -78,6 +84,41 @@ export const DEFAULT_BACKENDS = Object.freeze({
 				contextTokens: SLOT_CONTEXT_TOKENS,
 				chatTemplateKwargs: Object.freeze({ enable_thinking: false }),
 			}),
+			embedding: Object.freeze({ url: "http://laptop:8005/v1/embeddings", model: "embed" }),
+			transcription: Object.freeze({ baseUrl: "http://laptop:8014", engine: "parakeet-v3" }),
+			ocr: Object.freeze({ url: "http://llms:5002/glmocr/parse" }),
+		}),
+		"distributed-parallel": Object.freeze({
+			// Two full copies of the model, one per GPU, used at the same time. The
+			// vision primary on GPU 1 keeps the interactive session and one bulk lane;
+			// the vision-free secondary on GPU 2 adds a second bulk lane, an independent
+			// verify lane, delegation, and interactive-session compaction — so skill
+			// batch work fans across both GPUs while the main session stays responsive.
+			description:
+				"Two GPUs at once: interactive + a bulk lane on GPU1; a second bulk lane, independent verify, " +
+				"compaction, and delegation on GPU2. Skill batch work fans across both.",
+			primary: Object.freeze({ host: "http://llms", images: true, contextTokens: SLOT_CONTEXT_TOKENS }),
+			secondary: Object.freeze({
+				host: "http://llms",
+				images: false,
+				contextTokens: SLOT_CONTEXT_TOKENS,
+				ports: Object.freeze({ ...SECONDARY_PORTS }),
+				chatTemplateKwargs: Object.freeze({ enable_thinking: false }),
+			}),
+			delegation: Object.freeze({
+				enabled: true,
+				baseUrl: "http://llms:8104/v1/chat/completions",
+				model: "chat",
+				images: false,
+				contextTokens: SLOT_CONTEXT_TOKENS,
+				chatTemplateKwargs: Object.freeze({ enable_thinking: false }),
+			}),
+			// Fan per-item bulk work across both GPUs' non-thinking lanes.
+			bulk: Object.freeze({ lanes: Object.freeze(["chat", "chat2"]) }),
+			// Review on the second GPU — an independent instance from the producers.
+			verify: Object.freeze({ service: "think2" }),
+			// Offload interactive-session compaction to the second GPU's non-thinking lane.
+			compaction: Object.freeze({ offload: true, service: "chat2" }),
 			embedding: Object.freeze({ url: "http://laptop:8005/v1/embeddings", model: "embed" }),
 			transcription: Object.freeze({ baseUrl: "http://laptop:8014", engine: "parakeet-v3" }),
 			ocr: Object.freeze({ url: "http://llms:5002/glmocr/parse" }),
@@ -160,7 +201,11 @@ function positiveInt(value, fallback) {
 
 /**
  * Turn one setup into the concrete values the two registries hold. Returns
- * `{ connectedServices, providers, contextWindow }` — a patch, not a full file.
+ * `{ connectedServices, providers, contextWindow, taskModel, taskProvider }` — a
+ * patch, not a full file. `chat2`/`think2`/`bulk`/`verify` and the compaction
+ * `taskModel`/`taskProvider` are ALWAYS present (their off-state when the setup
+ * declares no secondary), so switching to a one-GPU setup writes every dual-GPU
+ * knob back off and no stale flag can point skills at an absent GPU 2.
  */
 export function projectProfile(profile) {
 	const primary = profile.primary;
@@ -178,10 +223,17 @@ export function projectProfile(profile) {
 	const delegation = profile.delegation && typeof profile.delegation === "object" ? profile.delegation : {};
 	const delegateEnabled = delegation.enabled === true;
 
+	const secondary = profile.secondary && typeof profile.secondary === "object" ? profile.secondary : null;
+	const projectedSecondary = projectSecondary(secondary);
+
 	const connectedServices = {
 		chat: { baseUrl: `${host}:${ports.chat}/v1/chat/completions`, model: chatModel, contextTokens: ctx },
 		think: { baseUrl: `${host}:${ports.code}/v1/chat/completions`, model: thinkModel, contextTokens: ctx },
 		delegate: projectDelegate(delegation, delegateEnabled),
+		chat2: projectedSecondary.chat2,
+		think2: projectedSecondary.think2,
+		bulk: projectBulk(profile.bulk),
+		verify: projectVerify(profile.verify),
 	};
 	const embedding = profile.embedding && typeof profile.embedding === "object" ? profile.embedding : {};
 	if (typeof embedding.url === "string" && embedding.url.trim()) {
@@ -206,7 +258,113 @@ export function projectProfile(profile) {
 		"forge-local-code": { baseUrl: `${host}:${ports.code}/v1`, input, contextWindow: ctx },
 		"forge-local-chat": { baseUrl: `${host}:${ports.chat}/v1`, input, contextWindow: ctx },
 	};
-	return { connectedServices, providers, contextWindow: ctx };
+	const { taskModel, taskProvider } = projectCompaction(
+		profile.compaction,
+		projectedSecondary.host,
+		projectedSecondary.ports,
+		projectedSecondary.contextTokens,
+	);
+	return { connectedServices, providers, contextWindow: ctx, taskModel, taskProvider };
+}
+
+/**
+ * The GPU-2 `chat2`/`think2` service blocks. Always returns both: enabled and
+ * pointed at the secondary when the setup declares one, else their off-state
+ * (`enabled: false`), mirroring `projectDelegate`. Scheduling is forced off — a
+ * separate single-slot server has no shared prefix cache to protect and would
+ * reject an out-of-range `id_slot`. `chat2` is the non-thinking bulk lane
+ * (`enable_thinking: false`); `think2` is the thinking verify lane on the code
+ * port (`chatTemplateKwargs: null`, it is meant to reason).
+ */
+function projectSecondary(secondary) {
+	const schedulingOff = { ...DEFAULT_CONNECTED_SERVICES.chat2.scheduling, enabled: false };
+	if (!secondary) {
+		return {
+			chat2: { enabled: false, scheduling: schedulingOff },
+			think2: { enabled: false, scheduling: schedulingOff },
+			host: null,
+			ports: null,
+			contextTokens: SLOT_CONTEXT_TOKENS,
+		};
+	}
+	const host = cleanHost(secondary.host);
+	const ports = { ...SECONDARY_PORTS, ...(secondary.ports && typeof secondary.ports === "object" ? secondary.ports : {}) };
+	const contextTokens = positiveInt(secondary.contextTokens, SLOT_CONTEXT_TOKENS);
+	const models = secondary.models && typeof secondary.models === "object" ? secondary.models : {};
+	const chat2Model = typeof models.chat2 === "string" && models.chat2.trim() ? models.chat2.trim() : "chat";
+	const think2Model = typeof models.think2 === "string" && models.think2.trim() ? models.think2.trim() : "code";
+	const images = secondary.images === true;
+	const templateKwargs =
+		secondary.chatTemplateKwargs && typeof secondary.chatTemplateKwargs === "object"
+			? { ...secondary.chatTemplateKwargs }
+			: { enable_thinking: false };
+	return {
+		chat2: {
+			enabled: true,
+			baseUrl: `${host}:${ports.chat2}/v1/chat/completions`,
+			model: chat2Model,
+			images,
+			contextTokens,
+			chatTemplateKwargs: templateKwargs,
+			scheduling: schedulingOff,
+		},
+		think2: {
+			enabled: true,
+			baseUrl: `${host}:${ports.code2}/v1/chat/completions`,
+			model: think2Model,
+			images,
+			contextTokens,
+			chatTemplateKwargs: null,
+			scheduling: schedulingOff,
+		},
+		host,
+		ports,
+		contextTokens,
+	};
+}
+
+/** The `bulk.lanes` block, collapsing to the single primary `chat` lane when unset. */
+function projectBulk(bulk) {
+	const lanes =
+		bulk && Array.isArray(bulk.lanes)
+			? bulk.lanes.filter((name) => typeof name === "string" && name.trim()).map((name) => name.trim())
+			: [];
+	return { lanes: lanes.length ? lanes : ["chat"] };
+}
+
+/** The `verify.service` block, `null` (primary thinking lane) when unset. */
+function projectVerify(verify) {
+	const service = verify && typeof verify.service === "string" && verify.service.trim() ? verify.service.trim() : null;
+	return { service };
+}
+
+/**
+ * The harness compaction offload. When the setup asks for it AND has a secondary,
+ * returns a `taskModel` pointed at the secondary lane and a `taskProvider` for
+ * `models.json` whose `qwen-chat-template` compat + `reasoning: true` makes the
+ * non-thinking `:8104` return visible content (see openai-completions.ts). Off or
+ * without a secondary, returns the off-state so `applyProfile` clears any prior
+ * offload and removes the provider.
+ */
+function projectCompaction(compaction, secondaryHost, secondaryPorts, secondaryCtx) {
+	const wantsOffload = Boolean(compaction && compaction.offload === true) && Boolean(secondaryHost && secondaryPorts);
+	if (!wantsOffload) return { taskModel: { enabled: false }, taskProvider: null };
+	const service = compaction.service === "think2" ? "think2" : "chat2";
+	const port = service === "think2" ? secondaryPorts.code2 : secondaryPorts.chat2;
+	const model = service === "think2" ? "code" : "chat";
+	const baseUrl = `${secondaryHost}:${port}/v1`;
+	return {
+		taskModel: {
+			enabled: true,
+			provider: "forge-task-local",
+			model,
+			baseUrl,
+			contextWindow: secondaryCtx,
+			thinkingEnabled: false,
+			maxConcurrency: 1,
+		},
+		taskProvider: { id: "forge-task-local", baseUrl, model, input: ["text"], contextWindow: secondaryCtx },
+	};
 }
 
 /**
@@ -225,6 +383,7 @@ function projectDelegate(delegation, enabled) {
 	const block = {
 		enabled: true,
 		baseUrl: delegation.baseUrl.trim().replace(/\/+$/, ""),
+		images: delegation.images === true,
 		scheduling: schedulingOff,
 	};
 	if (typeof delegation.model === "string" && delegation.model.trim()) block.model = delegation.model.trim();
@@ -257,6 +416,40 @@ function writeJsonObject(path, value) {
 function mergeInto(target, key, patch) {
 	const current = target[key] && typeof target[key] === "object" && !Array.isArray(target[key]) ? target[key] : {};
 	target[key] = { ...current, ...patch };
+}
+
+/**
+ * The `models.json` provider entry for the compaction offload, from a
+ * `projectCompaction` `taskProvider` spec. `reasoning: true` +
+ * `thinkingFormat: "qwen-chat-template"` is what makes the harness send
+ * `enable_thinking: false` to the non-thinking secondary (it passes no reasoning
+ * effort because `taskModel.thinkingEnabled` is false), so the lane returns
+ * visible content the summarizer can parse. The model id matches
+ * `taskModel.model`, which is how the registry resolves the provider.
+ */
+function taskLocalProvider(spec) {
+	return {
+		baseUrl: spec.baseUrl,
+		api: "openai-completions",
+		apiKey: "local",
+		compat: {
+			supportsDeveloperRole: false,
+			supportsReasoningEffort: false,
+			thinkingFormat: "qwen-chat-template",
+			maxTokensField: "max_tokens",
+		},
+		models: [
+			{
+				id: spec.model,
+				name: "Task (GPU2 compaction, non-thinking)",
+				reasoning: true,
+				input: [...spec.input],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: spec.contextWindow,
+				maxTokens: 4096,
+			},
+		],
+	};
 }
 
 /**
@@ -321,6 +514,33 @@ export function applyProfile({ env = process.env, agentDir, name } = {}) {
 		}
 	} else {
 		missingProviders.push(...Object.keys(patch.providers));
+	}
+
+	// Compaction offload to the second GPU. `settings.taskModel` is the harness
+	// summarizer config and `contextBudget.useTaskModel` gates it; both are written
+	// every apply, and the task model is removed when off, so switching to a
+	// one-GPU setup turns offload back off with no residue (matching the installer,
+	// which deletes taskModel and sets useTaskModel:false on a plain `single`).
+	if (patch.taskModel.enabled === true) {
+		settings.taskModel = { ...patch.taskModel };
+	} else {
+		delete settings.taskModel;
+	}
+	if (!settings.contextBudget || typeof settings.contextBudget !== "object" || Array.isArray(settings.contextBudget)) {
+		settings.contextBudget = {};
+	}
+	settings.contextBudget.useTaskModel = patch.taskModel.enabled === true;
+
+	// The offload provider lives in models.json so the harness's model registry can
+	// find it. Created/refreshed when offload is on, removed when off — so a revert
+	// leaves no `forge-task-local` pointing at an absent GPU. This is the one place
+	// applyProfile may CREATE a provider; the three interactive ones stay update-only.
+	if (models.providers && typeof models.providers === "object" && !Array.isArray(models.providers)) {
+		if (patch.taskProvider) {
+			models.providers[patch.taskProvider.id] = taskLocalProvider(patch.taskProvider);
+		} else {
+			delete models.providers["forge-task-local"];
+		}
 	}
 
 	writeJsonObject(settingsPath, settings);
