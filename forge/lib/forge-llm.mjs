@@ -23,10 +23,12 @@ import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { join } from "node:path";
 import {
 	getForgeAgentDir,
+	resolveBulkLanes,
 	resolveConnectedServices,
 	resolveDelegateOrChat,
 	resolveTaskOrChat,
 	resolveThinkOrChat,
+	resolveVerifyOrThinkOrChat,
 	SLOT_CONTEXT_TOKENS,
 } from "./connected-services.mjs";
 import { isTransientFailure } from "./run-state.mjs";
@@ -203,7 +205,23 @@ export function normalizeChatUrl(value) {
  * `connected-services.mjs` speaks `{enabled, baseUrl, model, scheduling}`;
  * everything here and in `forge_llm.py` speaks `{name, url, model, ...}`.
  */
-const INFERENCE_SERVICES = new Set(["chat", "think", "task", "delegate"]);
+const INFERENCE_SERVICES = new Set(["chat", "think", "task", "delegate", "chat2", "think2"]);
+
+/** Shape a raw `connectedServices` block into this module's `{name, url, ...}`. */
+function shapeService(name, service, extra = {}) {
+	return {
+		name,
+		enabled: Boolean(service.enabled),
+		url: normalizeChatUrl(service.baseUrl),
+		model: service.model,
+		images: service.images !== false,
+		contextTokens: service.contextTokens,
+		chatTemplateKwargs: service.chatTemplateKwargs,
+		reasoningEffort: service.reasoningEffort,
+		scheduling: service.scheduling,
+		...extra,
+	};
+}
 
 export function resolveService(name, options = {}) {
 	const services = resolveConnectedServices(options);
@@ -211,16 +229,7 @@ export function resolveService(name, options = {}) {
 	// rather than `baseUrl`, so falling through to it would produce a service
 	// with an undefined endpoint rather than an error.
 	const service = INFERENCE_SERVICES.has(name) ? services[name] : services.chat;
-	return {
-		name,
-		enabled: Boolean(service.enabled),
-		url: normalizeChatUrl(service.baseUrl),
-		model: service.model,
-		contextTokens: service.contextTokens,
-		chatTemplateKwargs: service.chatTemplateKwargs,
-		reasoningEffort: service.reasoningEffort,
-		scheduling: service.scheduling,
-	};
+	return shapeService(name, service);
 }
 
 /**
@@ -233,17 +242,7 @@ export function resolveThinkService(options = {}) {
 	const services = resolveConnectedServices(options);
 	const chosen = resolveThinkOrChat(services);
 	const isFallback = chosen === services.chat;
-	return {
-		name: "think",
-		enabled: Boolean(chosen.enabled),
-		url: normalizeChatUrl(chosen.baseUrl),
-		model: chosen.model,
-		contextTokens: chosen.contextTokens,
-		chatTemplateKwargs: chosen.chatTemplateKwargs,
-		reasoningEffort: chosen.reasoningEffort,
-		scheduling: chosen.scheduling,
-		...(isFallback ? { fallback: "chat" } : {}),
-	};
+	return shapeService("think", chosen, isFallback ? { fallback: "chat" } : {});
 }
 
 /**
@@ -254,17 +253,7 @@ export function resolveTaskService(options = {}) {
 	const services = resolveConnectedServices(options);
 	const chosen = resolveTaskOrChat(services);
 	const isFallback = chosen === services.chat;
-	return {
-		name: "task",
-		enabled: Boolean(chosen.enabled),
-		url: normalizeChatUrl(chosen.baseUrl),
-		model: chosen.model,
-		contextTokens: chosen.contextTokens,
-		chatTemplateKwargs: chosen.chatTemplateKwargs,
-		reasoningEffort: chosen.reasoningEffort,
-		scheduling: chosen.scheduling,
-		...(isFallback ? { fallback: "chat" } : {}),
-	};
+	return shapeService("task", chosen, isFallback ? { fallback: "chat" } : {});
 }
 
 /**
@@ -278,18 +267,48 @@ export function resolveDelegateService(options = {}) {
 	const services = resolveConnectedServices(options);
 	const chosen = resolveDelegateOrChat(services);
 	const isFallback = chosen === services.chat;
-	return {
-		name: "delegate",
-		enabled: Boolean(chosen.enabled),
-		url: normalizeChatUrl(chosen.baseUrl),
-		model: chosen.model,
-		contextTokens: chosen.contextTokens,
-		chatTemplateKwargs: chosen.chatTemplateKwargs,
-		reasoningEffort: chosen.reasoningEffort,
-		scheduling: chosen.scheduling,
-		...(isFallback ? { fallback: "chat" } : {}),
-	};
+	return shapeService("delegate", chosen, isFallback ? { fallback: "chat" } : {});
 }
+
+/**
+ * The service skill verification/review runs on. Prefers the `verify.service`
+ * lane (normally `think2` on the second GPU) so review is a genuinely independent
+ * instance from the bulk producers; degrades to the primary thinking lane and
+ * then to `chat`, exactly as `resolveThinkService` does, so a setup without a
+ * secondary keeps verifying. `fallback` names where it landed when that is not
+ * the requested verify lane, for journaling.
+ */
+export function resolveVerifyService(options = {}) {
+	const services = resolveConnectedServices(options);
+	const chosen = resolveVerifyOrThinkOrChat(services);
+	const wanted = services.verify?.service ?? null;
+	// Identify the chosen block among the named services to label a degrade.
+	const landed =
+		INFERENCE_SERVICES_ORDER.find((candidate) => services[candidate] === chosen) ?? (chosen === services.chat ? "chat" : null);
+	const isFallback = wanted ? landed !== wanted : landed === "chat";
+	return shapeService("verify", chosen, isFallback ? { fallback: landed ?? "chat" } : {});
+}
+
+/**
+ * The ordered list of shaped services a batch skill fans per-item bulk work
+ * across, from `bulk.lanes`. Disabled lanes drop out; when `carriesImage` is true
+ * every text-only (`images:false`) lane drops too, so an image-bearing batch can
+ * only run on GPU-1 vision lanes. Always returns at least the `chat` lane, so a
+ * misconfiguration degrades to single-lane rather than to nothing. Each entry is
+ * a full `{name, url, images, ...}` service ready to pass to `call`.
+ */
+export function resolveBulkLaneServices(options = {}, { carriesImage = false } = {}) {
+	const services = resolveConnectedServices(options);
+	const lanes = resolveBulkLanes(services, { carriesImage });
+	return lanes.map((lane) => {
+		const name = INFERENCE_SERVICES_ORDER.find((candidate) => services[candidate] === lane) ?? "chat";
+		return shapeService(name, lane);
+	});
+}
+
+// The named inference services, in a stable order, for identifying which block a
+// resolver returned (raw blocks carry no `name`).
+const INFERENCE_SERVICES_ORDER = ["chat", "think", "task", "delegate", "chat2", "think2"];
 
 /** Strip a stray think block and any code fence, returning JSON text. */
 export function extractJsonContent(content) {

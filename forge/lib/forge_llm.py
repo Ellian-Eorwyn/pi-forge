@@ -86,6 +86,11 @@ DEFAULT_SERVICES = {
         "enabled": True,
         "url": "http://llms:8004/v1/chat/completions",
         "model": "chat",
+        # The primary is served with an mmproj loaded, so this lane accepts images.
+        # The bulk fan-out and the routing image guard read this: an image-bearing
+        # item must never land on an `images: False` lane, where the agent's
+        # transform layer would silently drop it to a placeholder.
+        "images": True,
         "contextTokens": SLOT_CONTEXT_TOKENS,
         "chatTemplateKwargs": None,
         "reasoningEffort": None,
@@ -102,6 +107,7 @@ DEFAULT_SERVICES = {
         "enabled": True,
         "url": "http://llms:8008/v1/chat/completions",
         "model": "code",
+        "images": True,
         "contextTokens": SLOT_CONTEXT_TOKENS,
         "chatTemplateKwargs": None,
         "reasoningEffort": None,
@@ -129,6 +135,7 @@ DEFAULT_SERVICES = {
         "enabled": False,
         "url": "http://llms:8007/v1/chat/completions",
         "model": "task",
+        "images": False,
         # Half the chat slot, and read off the live stack rather than assumed:
         # this was recorded as 32,768 for months after the backend moved, which
         # quietly under-budgeted every task-tier prompt.
@@ -161,8 +168,57 @@ DEFAULT_SERVICES = {
         # reports `chat`; the URL, not the name, selects the secondary backend).
         # `chat-custom2` is the stack's internal alias, not a servable id here.
         "model": "chat",
+        # The secondary GPU runs without an mmproj (vision off to save VRAM).
+        "images": False,
         "contextTokens": SLOT_CONTEXT_TOKENS,
         "chatTemplateKwargs": {"enable_thinking": False},
+        "reasoningEffort": None,
+        "scheduling": {
+            "enabled": False,
+            "interactiveSlot": 0,
+            "backgroundSlot": 0,
+            "idleGraceMs": 2000,
+            "yieldMs": 1000,
+            "backgroundOutputTokens": 4096,
+        },
+    },
+    # GPU-2 bulk lane. The second full copy of the model on the other GPU, served
+    # non-thinking on :8104 — the same endpoint `delegate` uses, but exposed as a
+    # first-class bulk service so `bulk.lanes` can fan per-item batch work across
+    # both GPUs at once. Off by default; a two-GPU setup enables it. Scheduling
+    # off and `enable_thinking: False` for the same reasons as `delegate`, and
+    # `images: False` — no mmproj — so the fan-out keeps image work off it.
+    "chat2": {
+        "enabled": False,
+        "url": "http://llms:8104/v1/chat/completions",
+        "model": "chat",
+        "images": False,
+        "contextTokens": SLOT_CONTEXT_TOKENS,
+        "chatTemplateKwargs": {"enable_thinking": False},
+        "reasoningEffort": None,
+        "scheduling": {
+            "enabled": False,
+            "interactiveSlot": 0,
+            "backgroundSlot": 0,
+            "idleGraceMs": 2000,
+            "yieldMs": 1000,
+            "backgroundOutputTokens": 4096,
+        },
+    },
+    # GPU-2 verify lane. The secondary's thinking configuration on :8108 (its code
+    # port), the mirror of primary `think`->:8008. Pointing skill verification here
+    # makes the reviewer a genuinely independent instance from the bulk producers,
+    # and lets verify overlap with bulk instead of serializing on one GPU.
+    # `chatTemplateKwargs` is None: unlike `chat2` this lane is meant to reason, and
+    # :8108 returns its reasoning in visible content the way :8008 does. Off by
+    # default; scheduling off (separate single-slot server); `images: False`.
+    "think2": {
+        "enabled": False,
+        "url": "http://llms:8108/v1/chat/completions",
+        "model": "code",
+        "images": False,
+        "contextTokens": SLOT_CONTEXT_TOKENS,
+        "chatTemplateKwargs": None,
         "reasoningEffort": None,
         "scheduling": {
             "enabled": False,
@@ -180,30 +236,40 @@ SERVICE_URL_ENVIRONMENT = {
     "think": ("FORGE_THINK_URL",),
     "task": ("FORGE_TASK_URL",),
     "delegate": ("FORGE_DELEGATE_URL",),
+    "chat2": ("FORGE_CHAT2_URL",),
+    "think2": ("FORGE_THINK2_URL",),
 }
 SERVICE_MODEL_ENVIRONMENT = {
     "chat": ("FORGE_BASE_MODEL",),
     "think": ("FORGE_THINK_MODEL",),
     "task": ("FORGE_TASK_MODEL",),
     "delegate": ("FORGE_DELEGATE_MODEL",),
+    "chat2": ("FORGE_CHAT2_MODEL",),
+    "think2": ("FORGE_THINK2_MODEL",),
 }
 SERVICE_CONTEXT_ENVIRONMENT = {
     "chat": ("FORGE_BASE_CHAT_CONTEXT_TOKENS",),
     "think": ("FORGE_THINK_CONTEXT_TOKENS",),
     "task": ("FORGE_TASK_CONTEXT_TOKENS",),
     "delegate": ("FORGE_DELEGATE_CONTEXT_TOKENS",),
+    "chat2": ("FORGE_CHAT2_CONTEXT_TOKENS",),
+    "think2": ("FORGE_THINK2_CONTEXT_TOKENS",),
 }
 SERVICE_TEMPLATE_KWARGS_ENVIRONMENT = {
     "chat": ("FORGE_BASE_CHAT_TEMPLATE_KWARGS",),
     "think": ("FORGE_THINK_TEMPLATE_KWARGS",),
     "task": ("FORGE_TASK_TEMPLATE_KWARGS",),
     "delegate": ("FORGE_DELEGATE_TEMPLATE_KWARGS",),
+    "chat2": ("FORGE_CHAT2_TEMPLATE_KWARGS",),
+    "think2": ("FORGE_THINK2_TEMPLATE_KWARGS",),
 }
 SERVICE_REASONING_EFFORT_ENVIRONMENT = {
     "chat": ("FORGE_BASE_CHAT_REASONING_EFFORT",),
     "think": ("FORGE_THINK_REASONING_EFFORT",),
     "task": ("FORGE_TASK_REASONING_EFFORT",),
     "delegate": ("FORGE_DELEGATE_REASONING_EFFORT",),
+    "chat2": ("FORGE_CHAT2_REASONING_EFFORT",),
+    "think2": ("FORGE_THINK2_REASONING_EFFORT",),
 }
 
 # A thinking backend that was asked not to think can still emit a stray block.
@@ -504,11 +570,14 @@ def resolve_service(name, base_url=None, model=None, env=None, settings=None):
     for key, value in persisted_scheduling.items():
         if key in scheduling and isinstance(value, type(scheduling[key])):
             scheduling[key] = value
+    persisted_images = persisted.get("images")
+    resolved_images = persisted_images if isinstance(persisted_images, bool) else defaults["images"]
     return {
         "name": name,
         "enabled": bool(persisted.get("enabled", defaults["enabled"])),
         "url": resolved_url,
         "model": resolved_model,
+        "images": resolved_images,
         "contextTokens": resolved_context,
         "chatTemplateKwargs": resolved_template,
         "reasoningEffort": resolved_effort,
@@ -567,6 +636,72 @@ def resolve_delegate_or_chat(base_url=None, model=None, env=None, settings=None)
     fallback["name"] = "delegate"
     fallback["fallback"] = "chat"
     return fallback
+
+
+def resolve_verify_or_think_or_chat(base_url=None, model=None, env=None, settings=None):
+    """The service skill verification/review runs on.
+
+    Prefers the ``connectedServices.verify.service`` lane — normally ``think2`` on
+    the second GPU, a genuinely independent instance from the bulk producers — and
+    degrades to the primary thinking lane, then ``chat``, exactly the way
+    ``resolve_think_or_chat`` does, so a setup without a secondary still verifies.
+    The result is named ``verify``; when it landed somewhere other than the
+    requested lane it carries ``fallback`` so a run can journal the degrade.
+    """
+    configured = settings if settings is not None else load_connected_services(env)
+    verify = configured.get("verify") if isinstance(configured.get("verify"), dict) else {}
+    wanted = verify.get("service") if isinstance(verify.get("service"), str) else None
+    if wanted in DEFAULT_SERVICES:
+        candidate = resolve_service(wanted, env=env, settings=configured)
+        if candidate["enabled"] and candidate["url"]:
+            candidate["name"] = "verify"
+            return candidate
+    think = resolve_think_or_chat(base_url=base_url, model=model, env=env, settings=configured)
+    landed = "chat" if think.get("fallback") == "chat" else "think"
+    result = dict(think)
+    result["name"] = "verify"
+    if wanted and wanted != landed:
+        result["fallback"] = landed
+    elif not wanted and landed == "chat":
+        result["fallback"] = "chat"
+    else:
+        result.pop("fallback", None)
+    return result
+
+
+def resolve_bulk_lanes(env=None, settings=None, carries_image=False):
+    """The list of resolved services a batch skill fans per-item bulk work across.
+
+    Reads ``connectedServices.bulk.lanes`` (a list of service names, default
+    ``["chat"]``). Disabled lanes drop out; when ``carries_image`` is true every
+    text-only (``images: False``) lane drops too, so an image-bearing batch can
+    only run on GPU-1 vision lanes — never on a ``:8104``/``:8108`` lane where the
+    image would be silently dropped. Always returns at least the ``chat`` lane, so
+    a misconfiguration degrades to single-lane rather than to nothing.
+    """
+    configured = settings if settings is not None else load_connected_services(env)
+    bulk = configured.get("bulk") if isinstance(configured.get("bulk"), dict) else {}
+    raw = bulk.get("lanes")
+    names = []
+    if isinstance(raw, list):
+        for value in raw:
+            if isinstance(value, str) and value in DEFAULT_SERVICES and value not in names:
+                names.append(value)
+    if not names:
+        names = ["chat"]
+    lanes = []
+    for name in names:
+        service = resolve_service(name, env=env, settings=configured)
+        if not (service["enabled"] and service["url"]):
+            continue
+        if carries_image and service.get("images") is False:
+            continue
+        lanes.append(service)
+    if not lanes:
+        chat = resolve_service("chat", env=env, settings=configured)
+        if chat["enabled"] and chat["url"] and not (carries_image and chat.get("images") is False):
+            lanes.append(chat)
+    return lanes
 
 
 SERVICE_ARGUMENT_NAMES = {
