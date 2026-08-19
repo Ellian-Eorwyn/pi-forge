@@ -93,7 +93,14 @@ export function serviceNameFor(stage, options = {}) {
 export function serviceFor(stage, options = {}) {
 	const name = serviceNameFor(stage, options);
 	const resolve = RESOLVERS[name] ?? RESOLVERS[DEFAULT_SERVICE];
-	return { ...resolve(options), stage, routedTo: name };
+	const service = { ...resolve(options), stage, routedTo: name };
+	// Keep image-bearing work on a vision lane: a stage routed to a text-only lane
+	// (`task`, or a GPU-2 lane) would have its image silently dropped by the agent's
+	// transform layer, so pin such an item to the primary `chat` vision lane.
+	if (options.carriesImage && service.images === false) {
+		return { ...RESOLVERS.chat(options), stage, routedTo: name, fallback: "chat", imageGuard: true };
+	}
+	return service;
 }
 
 /** What to journal about where a call went. */
