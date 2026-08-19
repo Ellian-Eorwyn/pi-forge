@@ -175,6 +175,8 @@ Persistent local backend settings live in `~/.pi-forge/agent/settings.json` unde
 
 Delegation and OCR also have their own `connectedServices` entries (`delegate`, `ocr`), and every field is still overridable per-launch by the matching `FORGE_*` env var (`FORGE_DELEGATE_URL`, `FORGE_EMBEDDINGS_URL`, `FORGE_TRANSCRIPTION_URL`, `FORGE_GLMOCR_URL`, …).
 
+Transcription can also target an OpenAI-compatible ASR server (e.g. a laptop-local mlx-audio server) by setting `connectedServices.transcription.api` to `"openai"` (or `FORGE_TRANSCRIPTION_API=openai`); the default `"sidecar"` speaks the pi-forge async `/transcribe` API. The `distributed` setup sets this for you.
+
 ### Optional Moshi hooks
 
 `moshi-hook` resolves its `pi` target from `PI_CODING_AGENT_DIR`, so a standard `moshi-hook install` covers `~/.pi` and leaves this distribution's `~/.pi-forge/agent` uncovered. Install and `pi-forge-update` close that gap themselves: when `moshi-hook` is present on the host they have it generate `~/.pi-forge/agent/extensions/moshi-hooks.ts`, which pi-forge then discovers like any other agent-directory extension. The generated hook is always the daemon's own current version — nothing is vendored here. The daemon is restarted (`systemctl --user restart moshi-hook.service`) only when the hook actually changed, so a no-op update cannot drop a live session's bridge; elsewhere the step prints a one-line restart reminder. Hosts without `moshi-hook` install exactly as before and print nothing.

@@ -13,6 +13,7 @@ that carries no ``text`` at all.
 import importlib.util
 import json
 import sys
+import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -56,11 +57,31 @@ TRANSCRIPT = {
     "timings": {"queued_ms": 2, "load_ms": 24500, "decode_ms": 550, "total_ms": 25052},
 }
 
+# A real mlx-audio `verbose_json` response: no `ok`, no `job_id`, no top-level
+# `duration`; segments carry the timeline (with per-word times nested).
+OPENAI_TRANSCRIPT = {
+    "text": "This is a test recording.",
+    "language": "en",
+    "segments": [
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 3.76,
+            "text": "This is a test recording.",
+            "words": [{"word": "This", "start": 0.0, "end": 0.2}],
+        },
+        {"id": 1, "start": 3.92, "end": 8.72, "text": "  "},
+    ],
+    "words": [{"word": "This", "start": 0.0, "end": 0.2}],
+    "model": "parakeet-v3-en",
+    "backend": "mlx-audio",
+}
+
 
 class FakeTranscriptionServer:
     """A stub sidecar that can misbehave in each way a real one might."""
 
-    def __init__(self, *, transcribe_status=200, transcribe_body=None, job_states=None):
+    def __init__(self, *, transcribe_status=200, transcribe_body=None, job_states=None, openai_status=200, openai_body=None):
         self.requests = []
         server = self
         self._job_states = list(job_states or [])
@@ -105,6 +126,9 @@ class FakeTranscriptionServer:
                         "body": body.decode("utf-8", errors="replace"),
                     }
                 )
+                if self.path.endswith("/v1/audio/transcriptions"):
+                    self._respond(openai_status, openai_body if openai_body is not None else OPENAI_TRANSCRIPT)
+                    return
                 self._respond(transcribe_status, transcribe_body if transcribe_body is not None else TRANSCRIPT)
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -171,6 +195,24 @@ class ResolutionTests(unittest.TestCase):
         self.assertEqual(forge_transcribe.resolve_transcription(env={}, settings=settings)["token"], "persisted-secret")
         cleared = forge_transcribe.resolve_transcription(env={"FORGE_TRANSCRIPTION_TOKEN": ""}, settings=settings)
         self.assertIsNone(cleared["token"])
+
+    def test_api_defaults_to_sidecar_and_model_to_none(self):
+        resolved = forge_transcribe.resolve_transcription(env={}, settings={})
+        self.assertEqual(resolved["api"], "sidecar")
+        self.assertIsNone(resolved["model"])
+
+    def test_api_resolves_explicit_then_env_then_settings(self):
+        settings = {"transcription": {"api": "openai", "model": "from-settings"}}
+        self.assertEqual(forge_transcribe.resolve_transcription(env={}, settings=settings)["api"], "openai")
+        self.assertEqual(forge_transcribe.resolve_transcription(env={}, settings=settings)["model"], "from-settings")
+        env = {"FORGE_TRANSCRIPTION_API": "sidecar", "FORGE_TRANSCRIPTION_MODEL": "from-env"}
+        self.assertEqual(forge_transcribe.resolve_transcription(env=env, settings=settings)["api"], "sidecar")
+        self.assertEqual(forge_transcribe.resolve_transcription(env=env, settings=settings)["model"], "from-env")
+        self.assertEqual(forge_transcribe.resolve_transcription(api="openai", env=env, settings=settings)["api"], "openai")
+
+    def test_an_unknown_api_falls_back_to_sidecar(self):
+        resolved = forge_transcribe.resolve_transcription(env={}, settings={"transcription": {"api": "grpc"}})
+        self.assertEqual(resolved["api"], "sidecar")
 
 
 class EngineStatusTests(unittest.TestCase):
@@ -338,6 +380,64 @@ class ResultShapeTests(unittest.TestCase):
         self.assertAlmostEqual(forge_transcribe.load_seconds(TRANSCRIPT), 24.5)
         self.assertEqual(forge_transcribe.load_seconds({"timings": {"load_ms": 0}}), 0.0)
         self.assertEqual(forge_transcribe.load_seconds({}), 0.0)
+
+
+class OpenAiTranscribeTests(unittest.TestCase):
+    """The synchronous OpenAI ``/v1/audio/transcriptions`` route."""
+
+    def setUp(self):
+        self._directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        self.audio = audio_fixture(self._directory.name)
+
+    def test_posts_to_the_openai_route_and_adapts_the_response(self):
+        with FakeTranscriptionServer() as stub:
+            envelope = forge_transcribe.transcribe(
+                service(stub.base_url, api="openai", model="parakeet-v3-en"), self.audio
+            )
+        posts = [item for item in stub.requests if item["method"] == "POST"]
+        self.assertEqual(len(posts), 1)
+        self.assertTrue(posts[0]["path"].endswith("/v1/audio/transcriptions"))
+        # A synchronous route: it never touches the sidecar's async job API.
+        self.assertFalse(any(item["path"].startswith("/jobs/") for item in stub.requests))
+        # Sends OpenAI's `model` field and verbose_json; not the sidecar `engine` field.
+        self.assertIn('name="model"\r\n\r\nparakeet-v3-en', posts[0]["body"])
+        self.assertIn('name="response_format"\r\n\r\nverbose_json', posts[0]["body"])
+        self.assertNotIn('name="engine"', posts[0]["body"])
+        # The adapted envelope carries what the skill reads.
+        self.assertTrue(envelope["ok"])
+        self.assertEqual(envelope["text"], "This is a test recording.")
+        self.assertEqual(envelope["language"], "en")
+        self.assertAlmostEqual(envelope["duration"], 8.72)  # last segment end
+        self.assertEqual(envelope["model"], "parakeet-v3-en")
+        self.assertFalse(envelope["degraded"])
+        self.assertTrue(envelope["capabilities"]["word_timestamps"])
+        segments = forge_transcribe.segments_from_result(envelope)
+        self.assertEqual(len(segments), 1)  # the empty-text segment is dropped
+        self.assertEqual(segments[0]["text"], "This is a test recording.")
+
+    def test_a_text_only_response_degrades_to_one_block(self):
+        with FakeTranscriptionServer(openai_body={"text": "just words, no timeline"}) as stub:
+            envelope = forge_transcribe.transcribe(service(stub.base_url, api="openai"), self.audio)
+        self.assertTrue(envelope["ok"])
+        self.assertTrue(envelope["degraded"])
+        self.assertEqual(envelope["segments"], [])
+        segments = forge_transcribe.segments_from_result(envelope)
+        self.assertEqual(segments, [{"start": 0.0, "end": 0.0, "text": "just words, no timeline"}])
+
+    def test_the_model_field_is_omitted_when_unset(self):
+        with FakeTranscriptionServer() as stub:
+            forge_transcribe.transcribe(service(stub.base_url, api="openai"), self.audio)
+        posts = [item for item in stub.requests if item["method"] == "POST"]
+        self.assertNotIn('name="model"', posts[0]["body"])
+
+    def test_a_fastapi_422_is_permanent_and_names_the_field(self):
+        detail = {"detail": [{"type": "missing", "loc": ["body", "file"], "msg": "Field required"}]}
+        with FakeTranscriptionServer(openai_status=422, openai_body=detail) as stub:
+            with self.assertRaises(forge_transcribe.TranscribeError) as caught:
+                forge_transcribe.transcribe(service(stub.base_url, api="openai"), self.audio)
+        self.assertFalse(caught.exception.transient)
+        self.assertIn("Field required", str(caught.exception))
 
 
 if __name__ == "__main__":

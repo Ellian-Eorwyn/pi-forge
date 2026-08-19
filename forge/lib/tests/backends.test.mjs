@@ -9,7 +9,9 @@ const libraryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const { projectProfile, applyProfile, setDelegation, DEFAULT_BACKENDS, activeProfileName, loadBackends } = await import(
 	join(libraryRoot, "backends.mjs")
 );
-const { seedConnectedServicesSettings } = await import(join(libraryRoot, "connected-services.mjs"));
+const { seedConnectedServicesSettings, resolveConnectedServices } = await import(
+	join(libraryRoot, "connected-services.mjs")
+);
 
 /** A temp agent dir seeded the way the installer leaves it: full settings + the three providers. */
 function seedAgentDir() {
@@ -53,9 +55,39 @@ test("projectProfile maps the distributed setup onto both registries", () => {
 	assert.equal(patch.connectedServices.delegate.scheduling.enabled, false);
 	assert.equal(patch.connectedServices.embeddings.url, "http://laptop:8005/v1/embeddings");
 	assert.equal(patch.connectedServices.transcription.baseUrl, "http://laptop:8014");
+	assert.equal(patch.connectedServices.transcription.api, "openai");
+	assert.equal(patch.connectedServices.transcription.model, "parakeet-v3-en");
 	assert.equal(patch.connectedServices.ocr.url, "http://llms:5002/glmocr/parse");
 	assert.deepEqual(patch.providers["forge-local-think"].input, ["text", "image"]);
 	assert.equal(patch.providers["forge-local-think"].baseUrl, "http://llms:8003/v1");
+});
+
+test("transcription api/model default, resolve, and survive seeding", () => {
+	// Default is the sidecar protocol.
+	const base = resolveConnectedServices({ env: {}, settings: {} });
+	assert.equal(base.transcription.api, "sidecar");
+
+	// env and settings both reach it; an unknown protocol falls back to sidecar.
+	const fromSettings = resolveConnectedServices({
+		env: {},
+		settings: { connectedServices: { transcription: { api: "openai", model: "parakeet-v3-en" } } },
+	});
+	assert.equal(fromSettings.transcription.api, "openai");
+	assert.equal(fromSettings.transcription.model, "parakeet-v3-en");
+	const fromEnv = resolveConnectedServices({ env: { FORGE_TRANSCRIPTION_API: "openai" }, settings: {} });
+	assert.equal(fromEnv.transcription.api, "openai");
+	const bogus = resolveConnectedServices({
+		env: {},
+		settings: { connectedServices: { transcription: { api: "grpc" } } },
+	});
+	assert.equal(bogus.transcription.api, "sidecar");
+
+	// Seeding (which the installer runs) must not drop api/model — otherwise a
+	// re-install would silently revert an openai setup to the sidecar route.
+	const settings = { connectedServices: { transcription: { api: "openai", model: "parakeet-v3-en" } } };
+	seedConnectedServicesSettings(settings);
+	assert.equal(settings.connectedServices.transcription.api, "openai");
+	assert.equal(settings.connectedServices.transcription.model, "parakeet-v3-en");
 });
 
 test("a vision-free primary projects a text-only input array", () => {

@@ -199,6 +199,12 @@ export const DEFAULT_CONNECTED_SERVICES = Object.freeze({
 		// same audio. Following the server's current preference would change how
 		// dates reach a note with nothing here recording that anything changed.
 		engine: "parakeet-v3",
+		// The wire protocol. `sidecar` is the pi-forge async `/transcribe` + `/jobs`
+		// API; `openai` is a single synchronous `POST /v1/audio/transcriptions`
+		// (mlx-audio and other OpenAI-compatible ASR servers). `model` is the OpenAI
+		// `model` form field, unused on the sidecar route; empty lets the server pick.
+		api: "sidecar",
+		model: "",
 		// The service's TRANSCRIPT_API_TOKEN is empty today, so no header is sent.
 		// It is a supported setting there and may be turned on; carrying the field
 		// now costs nothing and saves an outage later.
@@ -314,6 +320,10 @@ export function seedConnectedServicesSettings(settings) {
 			enabled: transcription.enabled ?? DEFAULT_CONNECTED_SERVICES.transcription.enabled,
 			baseUrl: normalizeHttpBaseUrl(transcription.baseUrl) ?? DEFAULT_CONNECTED_SERVICES.transcription.baseUrl,
 			engine: normalizeServiceName(transcription.engine) ?? DEFAULT_CONNECTED_SERVICES.transcription.engine,
+			api: normalizeTranscriptionApi(transcription.api) ?? DEFAULT_CONNECTED_SERVICES.transcription.api,
+			// Like `token`: an empty string is a real value (server default), so it is
+			// preserved rather than falling through to the default.
+			model: normalizeServiceName(transcription.model) ?? DEFAULT_CONNECTED_SERVICES.transcription.model,
 			// Deliberately not `normalizeServiceName(...) ?? default`: the default
 			// is the empty string, and a token cleared on purpose must stay cleared
 			// rather than fall through to anything.
@@ -416,6 +426,8 @@ export function resolveConnectedServices(options = {}) {
 	const envEmbeddingsModel = normalizeServiceName(env.FORGE_EMBEDDINGS_MODEL);
 	const envTranscription = normalizeHttpBaseUrl(env.FORGE_TRANSCRIPTION_URL);
 	const envTranscriptionEngine = normalizeServiceName(env.FORGE_TRANSCRIPTION_ENGINE);
+	const envTranscriptionApi = normalizeTranscriptionApi(env.FORGE_TRANSCRIPTION_API);
+	const envTranscriptionModel = normalizeServiceName(env.FORGE_TRANSCRIPTION_MODEL);
 	const envTranscriptionToken = normalizeServiceName(env.FORGE_TRANSCRIPTION_TOKEN);
 	const transcriptionEnvPresent = Object.hasOwn(env, "FORGE_TRANSCRIPTION_URL");
 	const searxngEnvPresent = Object.hasOwn(env, "FORGE_SEARXNG_URL");
@@ -439,6 +451,8 @@ export function resolveConnectedServices(options = {}) {
 	const explicitEmbeddingsModel = normalizeServiceName(options.embeddingsModel);
 	const explicitTranscription = normalizeHttpBaseUrl(options.transcriptionUrl);
 	const explicitTranscriptionEngine = normalizeServiceName(options.transcriptionEngine);
+	const explicitTranscriptionApi = normalizeTranscriptionApi(options.transcriptionApi);
+	const explicitTranscriptionModel = normalizeServiceName(options.transcriptionModel);
 	const envChatContext = normalizePositiveInteger(parseInteger(env.FORGE_BASE_CHAT_CONTEXT_TOKENS), undefined);
 	const envThinkContext = normalizePositiveInteger(parseInteger(env.FORGE_THINK_CONTEXT_TOKENS), undefined);
 	const envChatTemplate = normalizeTemplateKwargs(env.FORGE_BASE_CHAT_TEMPLATE_KWARGS);
@@ -544,6 +558,8 @@ export function resolveConnectedServices(options = {}) {
 					: seeded.transcription.enabled,
 			baseUrl: explicitTranscription ?? envTranscription ?? seeded.transcription.baseUrl,
 			engine: explicitTranscriptionEngine ?? envTranscriptionEngine ?? seeded.transcription.engine,
+			api: explicitTranscriptionApi ?? envTranscriptionApi ?? seeded.transcription.api,
+			model: explicitTranscriptionModel ?? envTranscriptionModel ?? seeded.transcription.model,
 			token: envTranscriptionToken ?? seeded.transcription.token,
 			timeoutSeconds: seeded.transcription.timeoutSeconds,
 		},
@@ -634,6 +650,14 @@ function normalizeServiceName(value) {
 	if (typeof value !== "string") return undefined;
 	const trimmed = value.trim();
 	return trimmed || undefined;
+}
+
+/** The transcription wire protocol, or undefined for anything that is not one. */
+function normalizeTranscriptionApi(value) {
+	const name = normalizeServiceName(value);
+	if (!name) return undefined;
+	const lowered = name.toLowerCase();
+	return lowered === "openai" || lowered === "sidecar" ? lowered : undefined;
 }
 
 function normalizeNonnegativeInteger(value, fallback) {

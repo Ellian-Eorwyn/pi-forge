@@ -439,10 +439,13 @@ test("a configured task tier keeps its own ceiling and template kwargs", () => {
 });
 
 test("the delegate tier is off by default and forge_delegate falls back to chat", () => {
-	const delegate = resolveDelegateService({ env: {} });
+	// Empty settings, not the machine's real ones: this asserts the built-in
+	// default, which a host that has switched to a delegation-enabled setup would
+	// otherwise override (making the fallback the secondary, not chat).
+	const delegate = resolveDelegateService({ env: {}, settings: {} });
 	assert.equal(delegate.name, "delegate");
 	assert.equal(delegate.fallback, "chat");
-	assert.equal(delegate.url, resolveService("chat", { env: {} }).url);
+	assert.equal(delegate.url, resolveService("chat", { env: {}, settings: {} }).url);
 	// The fallback runs on the primary's background slot, exactly as delegation
 	// did before a secondary was possible.
 	assert.equal(delegate.scheduling.enabled, true);

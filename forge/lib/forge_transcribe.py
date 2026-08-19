@@ -101,13 +101,19 @@ def _environment(env):
     return env if env is not None else os.environ
 
 
-def resolve_transcription(base_url=None, engine=None, env=None, settings=None):
-    """Resolve the sidecar to ``{enabled, baseUrl, engine, token, timeoutSeconds}``.
+def resolve_transcription(base_url=None, engine=None, env=None, settings=None, api=None, model=None):
+    """Resolve the service to ``{enabled, baseUrl, engine, api, model, token, timeoutSeconds}``.
 
     Precedence matches every other connected service: explicit argument, then
     environment, then the agent's ``connectedServices`` settings, then the
     built-in default. An env var set to the empty string turns the integration
     off for this process, the way ``FORGE_SEARXNG_URL=""`` disables search.
+
+    ``api`` selects the wire protocol: ``"sidecar"`` (default) is the pi-forge
+    async ``/transcribe`` + ``/jobs`` API; ``"openai"`` is a single synchronous
+    ``POST /v1/audio/transcriptions`` (mlx-audio and other OpenAI-compatible ASR
+    servers). ``model`` is the OpenAI ``model`` form field; unset lets the server
+    pick its default, and it is unused on the sidecar route.
     """
     environment = _environment(env)
 
@@ -142,12 +148,30 @@ def resolve_transcription(base_url=None, engine=None, env=None, settings=None):
         token = _clean(persisted.get("token"))
     timeout = _positive_number(persisted.get("timeoutSeconds")) or DEFAULT_TIMEOUT
 
+    resolved_api = (
+        _clean(api)
+        or _clean(environment.get("FORGE_TRANSCRIPTION_API"))
+        or _clean(persisted.get("api"))
+        or "sidecar"
+    ).lower()
+    if resolved_api not in ("sidecar", "openai"):
+        # An unknown protocol name would silently pick a route; fall back to the
+        # safe default rather than guess. The doctor surfaces the real setting.
+        resolved_api = "sidecar"
+    resolved_model = (
+        _clean(model)
+        or _clean(environment.get("FORGE_TRANSCRIPTION_MODEL"))
+        or _clean(persisted.get("model"))
+    )
+
     enabled = bool(persisted.get("enabled", True)) and bool(resolved_url)
     return {
         "name": "transcription",
         "enabled": enabled,
         "baseUrl": resolved_url,
         "engine": resolved_engine,
+        "api": resolved_api,
+        "model": resolved_model,
         "token": token,
         "timeoutSeconds": timeout,
     }
@@ -226,17 +250,44 @@ def _raise_for_error(payload, status):
     """Turn the service's error envelope into a typed exception.
 
     ``{"ok": false, "error": {"type", "message", "hint"}}`` on the native route;
-    OpenAI's ``{"error": {"message", "type", "code"}}`` on ``/v1/*``. Both are
-    read the same way.
+    OpenAI's ``{"error": {"message", "type", "code"}}`` on ``/v1/*``; and
+    FastAPI's ``{"detail": ...}`` validation shape that an mlx-audio server
+    returns for a 4xx. All three are read the same way.
     """
     error = payload.get("error") if isinstance(payload, dict) else None
     if not isinstance(error, dict):
         error = {}
-    error_type = error.get("type") or "upstream_error"
-    message = error.get("message") or payload.get("text") or f"the transcription service answered HTTP {status}"
+    error_type = error.get("type")
+    message = error.get("message") or payload.get("text")
+    if not message and isinstance(payload, dict) and payload.get("detail") is not None:
+        message = _detail_message(payload["detail"])
+        # A FastAPI 4xx is the request's own fault -- a wrong field or a rejected
+        # file -- so it is permanent; a 5xx keeps the transient default.
+        if error_type is None and 400 <= status < 500:
+            error_type = "bad_request"
+    error_type = error_type or "upstream_error"
+    if not message:
+        message = f"the transcription service answered HTTP {status}"
     hint = error.get("hint")
     transient = error_type not in PERMANENT_ERROR_TYPES
     raise TranscribeError(message, error_type=error_type, hint=hint, status=status, transient=transient)
+
+
+def _detail_message(detail):
+    """A human message from FastAPI's ``detail`` -- a string or a list of errors."""
+    if isinstance(detail, str):
+        return detail
+    if isinstance(detail, list):
+        parts = []
+        for item in detail:
+            if not isinstance(item, dict):
+                continue
+            location = ".".join(str(part) for part in (item.get("loc") or []) if part not in (None, "body"))
+            message = item.get("msg") or "invalid"
+            parts.append(f"{location}: {message}" if location else message)
+        if parts:
+            return "; ".join(parts)
+    return None
 
 
 def health(service):
@@ -371,6 +422,11 @@ def transcribe(
 
     A long file answers ``202`` with a job id; this polls it to completion and
     returns the same shape either way, so callers never handle two.
+
+    When ``service["api"] == "openai"`` the request instead goes to a single
+    synchronous ``POST /v1/audio/transcriptions`` and its response is adapted to
+    the same envelope, so callers -- and ``segments_from_result`` below -- are
+    unchanged regardless of which server answered.
     """
     source = Path(path)
     size = source.stat().st_size
@@ -381,6 +437,9 @@ def transcribe(
             error_type="too_large",
             transient=False,
         )
+
+    if (service.get("api") or "sidecar") == "openai":
+        return _openai_transcribe(service, source, language=language, word_timestamps=word_timestamps)
 
     boundary = f"----pi-forge-{uuid.uuid4().hex}"
     fields = {
@@ -411,6 +470,81 @@ def transcribe(
     if status >= 400 or not (isinstance(payload, dict) and payload.get("ok")):
         _raise_for_error(payload if isinstance(payload, dict) else {}, status)
     return payload
+
+
+def _openai_transcribe(service, source, *, language=None, word_timestamps=True):
+    """One synchronous ``POST /v1/audio/transcriptions``, adapted to the envelope.
+
+    ``verbose_json`` is requested unconditionally: it returns ``segments`` in the
+    exact ``{start, end, text}`` shape the sidecar route does (mlx-audio also
+    nests per-word times under each segment), so ``segments_from_result`` reads
+    it with no special case. A server that ignores the format and returns only
+    ``{"text": ...}`` still works -- the adapter falls back to the flat text.
+    """
+    boundary = f"----pi-forge-{uuid.uuid4().hex}"
+    fields = {
+        "response_format": "verbose_json",
+        "word_timestamps": "true" if word_timestamps else "false",
+    }
+    model = _clean(service.get("model"))
+    if model:
+        fields["model"] = model
+    if language:
+        fields["language"] = language
+    body = _MultipartBody(boundary, fields, source)
+    try:
+        status, payload = _request(
+            service,
+            "/v1/audio/transcriptions",
+            method="POST",
+            data=body,
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "Content-Length": str(body.content_length),
+            },
+            timeout=service.get("timeoutSeconds") or DEFAULT_TIMEOUT,
+        )
+    finally:
+        body.close()
+
+    # No ``ok`` discriminator on this route -- a 2xx with a JSON body is success.
+    if status >= 400 or not isinstance(payload, dict):
+        _raise_for_error(payload if isinstance(payload, dict) else {}, status)
+    return _openai_to_envelope(payload, service)
+
+
+def _openai_to_envelope(payload, service):
+    """Reshape an OpenAI transcription response into the sidecar's result envelope.
+
+    Fills the fields the transcription skill reads -- ``segments`` (native shape),
+    ``text``, ``duration`` (no top-level field on this route, so the last segment
+    end), ``language``, ``capabilities``, ``engine``/``model``/``device`` -- so a
+    text-only server degrades to one 0:00 block (via ``segments_from_result``)
+    rather than failing.
+    """
+    text = (payload.get("text") or "").strip()
+    segments = payload.get("segments")
+    segments = segments if isinstance(segments, list) else []
+    duration = 0.0
+    for segment in segments:
+        if isinstance(segment, dict):
+            duration = max(duration, _seconds(segment.get("end")))
+    has_words = any(isinstance(s, dict) and s.get("words") for s in segments) or bool(payload.get("words"))
+    return {
+        "ok": True,
+        "text": text,
+        "language": payload.get("language"),
+        "duration": duration,
+        "segments": segments,
+        "engine": service.get("engine") or DEFAULT_ENGINE,
+        "model": payload.get("model") or _clean(service.get("model")) or "",
+        "device": payload.get("backend") or "openai",
+        "capabilities": {"word_timestamps": bool(has_words), "diarization": False, "translate": False},
+        "timings": {},
+        # A response with no timeline is a flat block: mark it so the skill warns,
+        # the same way the sidecar flags a synthetic timeline.
+        "degraded": not segments,
+    }
 
 
 def _await_job(service, envelope, on_wait=None):

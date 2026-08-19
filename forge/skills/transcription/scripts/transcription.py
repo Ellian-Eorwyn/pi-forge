@@ -226,6 +226,8 @@ def resolve_service(args):
     return forge_transcribe.resolve_transcription(
         base_url=getattr(args, "base_url", None),
         engine=getattr(args, "engine", None),
+        api=getattr(args, "api", None),
+        model=getattr(args, "model", None),
     )
 
 
@@ -282,7 +284,10 @@ def command_doctor(args):
 
     health = forge_transcribe.health(service)
     report["health"] = health.get("status") if isinstance(health, dict) else None
-    if report["health"] != "ok":
+    # The sidecar answers "ok"; an OpenAI-API server (mlx-audio) answers "healthy".
+    # Both mean the same thing, so accept either rather than false-flagging the
+    # host as down when transcription would in fact work.
+    if report["health"] not in ("ok", "healthy"):
         report["remediation"].append(
             f"No answer from {service['baseUrl']}/health. Check the host is up and reachable "
             f"(curl -sf {service['baseUrl']}/health), or point FORGE_TRANSCRIPTION_URL elsewhere."
@@ -1137,6 +1142,12 @@ def add_dictionary_arguments(subparser, include_no_dictionary=True):
 def add_service_arguments(subparser):
     subparser.add_argument("--base-url", help="Transcription service base URL (default: the configured service).")
     subparser.add_argument("--engine", help="Recognition engine id, e.g. parakeet-v3 or faster-whisper.")
+    subparser.add_argument(
+        "--api",
+        choices=("sidecar", "openai"),
+        help="Wire protocol: sidecar (async /transcribe, default) or openai (/v1/audio/transcriptions).",
+    )
+    subparser.add_argument("--model", help="OpenAI model form field (openai api only); default lets the server pick.")
 
 
 def parser():

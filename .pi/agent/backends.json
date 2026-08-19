@@ -46,7 +46,9 @@
 			},
 			"transcription": {
 				"baseUrl": "http://laptop:8014",
-				"engine": "parakeet-v3"
+				"engine": "parakeet-v3",
+				"api": "openai",
+				"model": "parakeet-v3-en"
 			},
 			"ocr": {
 				"url": "http://llms:5002/glmocr/parse"

@@ -79,7 +79,13 @@ export const DEFAULT_BACKENDS = Object.freeze({
 				chatTemplateKwargs: Object.freeze({ enable_thinking: false }),
 			}),
 			embedding: Object.freeze({ url: "http://laptop:8005/v1/embeddings", model: "embed" }),
-			transcription: Object.freeze({ baseUrl: "http://laptop:8014", engine: "parakeet-v3" }),
+			transcription: Object.freeze({
+				baseUrl: "http://laptop:8014",
+				engine: "parakeet-v3",
+				// The laptop server is mlx-audio, which speaks the OpenAI ASR API.
+				api: "openai",
+				model: "parakeet-v3-en",
+			}),
 			ocr: Object.freeze({ url: "http://llms:5002/glmocr/parse" }),
 		}),
 	}),
@@ -196,6 +202,15 @@ export function projectProfile(profile) {
 		connectedServices.transcription = { baseUrl: transcription.baseUrl.trim() };
 		if (typeof transcription.engine === "string" && transcription.engine.trim()) {
 			connectedServices.transcription.engine = transcription.engine.trim();
+		}
+		// `api` selects the wire protocol (sidecar | openai); `model` is the OpenAI
+		// model form field. Carried through so a setup can point transcription at an
+		// OpenAI-compatible ASR server (mlx-audio) as easily as the sidecar.
+		if (typeof transcription.api === "string" && transcription.api.trim()) {
+			connectedServices.transcription.api = transcription.api.trim();
+		}
+		if (typeof transcription.model === "string" && transcription.model.trim()) {
+			connectedServices.transcription.model = transcription.model.trim();
 		}
 	}
 	const ocr = profile.ocr && typeof profile.ocr === "object" ? profile.ocr : {};

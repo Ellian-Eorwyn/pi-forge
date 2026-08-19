@@ -10,12 +10,32 @@ engine is Parakeet TDT v3.
 |---|---|
 | Default base URL | `http://llms:8014` |
 | Setting | `connectedServices.transcription` in `~/.pi-forge/agent/settings.json` |
-| Environment | `FORGE_TRANSCRIPTION_URL`, `FORGE_TRANSCRIPTION_ENGINE`, `FORGE_TRANSCRIPTION_TOKEN` |
+| Environment | `FORGE_TRANSCRIPTION_URL`, `FORGE_TRANSCRIPTION_ENGINE`, `FORGE_TRANSCRIPTION_API`, `FORGE_TRANSCRIPTION_MODEL`, `FORGE_TRANSCRIPTION_TOKEN` |
 | Flags | `--base-url`, `--engine` on `doctor` and `transcribe` |
 | Auth | None by default. A configured token is sent as `Authorization: Bearer <token>`. |
 
 `FORGE_TRANSCRIPTION_URL=""` turns the integration off for one process, the way
 `FORGE_SEARXNG_URL=""` disables search.
+
+### Wire protocol (`api`)
+
+`connectedServices.transcription.api` (or `FORGE_TRANSCRIPTION_API`) selects how the
+client talks to the server:
+
+- **`sidecar`** (default) — the pi-forge async API: `POST /transcribe` answers `202`
+  with a job id, and the transcript arrives from `/jobs/<id>`. This is what
+  `http://llms:8014` speaks.
+- **`openai`** — a single synchronous `POST /v1/audio/transcriptions` (mlx-audio and
+  other OpenAI-compatible ASR servers). `model` (`FORGE_TRANSCRIPTION_MODEL`) is the
+  OpenAI `model` form field; leave it empty to accept the server's default. The client
+  requests `verbose_json` so `segments` (with real timestamps) come back and map to the
+  same result envelope the sidecar produces — a server that returns only `{"text": …}`
+  still works, degrading to one `0:00` block. These servers do no diarization, so the
+  note is single-speaker (the same as the sidecar unless `--speaker` is passed), and
+  the doctor accepts their `status: "healthy"` health reply.
+
+The `distributed` backend setup (`/backend use distributed`) sets `api: "openai"` to
+reach a laptop-local mlx-audio server.
 
 ### Residency, and why the timeout is 900 s
 
