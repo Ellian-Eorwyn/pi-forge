@@ -6,15 +6,35 @@
  *   backends.mjs list                 — the setups and which is active
  *   backends.mjs show                 — the endpoints the active setup resolves to
  *   backends.mjs use <name>           — make <name> the active setup and apply it
+ *   backends.mjs single               — failsafe: revert to the single-model setup
+ *   backends.mjs parallel             — switch to the two-GPU distributed-parallel setup
  *   backends.mjs apply                — re-apply the active setup
  *   backends.mjs delegation on|off    — toggle delegation on the active setup
  *
- * All of it is the `backends.mjs` library; this is the CLI face. The `/backend`
- * slash command drives the same functions in-process.
+ * All of it is the `backends.mjs` library; this is the CLI face. The `/backend`,
+ * `/single`, and `/parallel` slash commands drive the same functions in-process.
  */
 
-import { activeProfileName, applyProfile, loadBackends, projectProfile, setDelegation } from "../lib/backends.mjs";
-import { resolveConnectedServices } from "../lib/connected-services.mjs";
+import {
+	activeProfileName,
+	applyProfile,
+	DEFAULT_BACKENDS,
+	loadBackends,
+	projectProfile,
+	saveBackends,
+	setDelegation,
+} from "../lib/backends.mjs";
+import { loadForgeSettings, resolveConnectedServices } from "../lib/connected-services.mjs";
+
+/** Seed a shipped setup into backends.json if the runtime file predates it. */
+function ensureShippedProfile(name) {
+	const config = loadBackends();
+	if (config.profiles?.[name]) return;
+	const template = DEFAULT_BACKENDS.profiles[name];
+	if (!template) return;
+	config.profiles = { ...(config.profiles ?? {}), [name]: template };
+	saveBackends(config);
+}
 
 function fail(message) {
 	process.stderr.write(`${message}\n`);
@@ -29,6 +49,18 @@ function printSummary(result) {
 		`  primary chat  : ${cs.chat.baseUrl} (model ${cs.chat.model}, ${cs.chat.contextTokens} ctx)\n`,
 	);
 	process.stdout.write(`  primary think : ${cs.think.baseUrl} (model ${cs.think.model})\n`);
+	if (cs.bulk?.lanes) {
+		process.stdout.write(
+			`  bulk lanes    : ${cs.bulk.lanes.join(", ")}${cs.bulk.lanes.length > 1 ? " (fan-out across GPUs)" : ""}\n`,
+		);
+	}
+	if (cs.verify) {
+		process.stdout.write(
+			cs.verify.service ? `  verify        : ${cs.verify.service}\n` : "  verify        : primary think\n",
+		);
+	}
+	if (cs.chat2?.enabled) process.stdout.write(`  chat2         : ${cs.chat2.baseUrl} (model ${cs.chat2.model})\n`);
+	if (cs.think2?.enabled) process.stdout.write(`  think2        : ${cs.think2.baseUrl} (model ${cs.think2.model})\n`);
 	process.stdout.write(
 		result.delegation === "on"
 			? `  delegation    : on → ${cs.delegate.baseUrl} (model ${cs.delegate.model ?? "?"})\n`
@@ -62,13 +94,37 @@ function cmdShow() {
 	// What a skill or the delegate would actually resolve right now — the settings
 	// on disk, not just the setup, so an env override or hand edit is visible too.
 	const services = resolveConnectedServices({});
+	const settings = loadForgeSettings();
+	const taskModel =
+		settings.taskModel && typeof settings.taskModel === "object" && !Array.isArray(settings.taskModel)
+			? settings.taskModel
+			: {};
+	const contextBudget =
+		settings.contextBudget && typeof settings.contextBudget === "object" && !Array.isArray(settings.contextBudget)
+			? settings.contextBudget
+			: {};
 	process.stdout.write(`Active setup: ${active}\n`);
 	process.stdout.write(`  chat          : ${services.chat.baseUrl} (${services.chat.contextTokens} ctx)\n`);
 	process.stdout.write(`  think         : ${services.think.baseUrl}\n`);
 	process.stdout.write(
+		`  bulk lanes    : ${services.bulk.lanes.join(", ")}${services.bulk.lanes.length > 1 ? " (fan-out across GPUs)" : ""}\n`,
+	);
+	process.stdout.write(
+		services.verify.service && services[services.verify.service]?.enabled
+			? `  verify        : ${services.verify.service} → ${services[services.verify.service].baseUrl}\n`
+			: `  verify        : primary think (${services.think.baseUrl})\n`,
+	);
+	if (services.chat2.enabled) process.stdout.write(`  chat2         : ${services.chat2.baseUrl}\n`);
+	if (services.think2.enabled) process.stdout.write(`  think2        : ${services.think2.baseUrl}\n`);
+	process.stdout.write(
 		services.delegate.enabled
 			? `  delegate      : ${services.delegate.baseUrl} (model ${services.delegate.model})\n`
 			: "  delegate      : off (forge_delegate runs on primary chat)\n",
+	);
+	process.stdout.write(
+		taskModel.enabled && contextBudget.useTaskModel
+			? `  compaction    : offload → ${taskModel.baseUrl}\n`
+			: "  compaction    : on primary (no offload)\n",
 	);
 	process.stdout.write(`  embeddings    : ${services.embeddings.url} (model ${services.embeddings.model})\n`);
 	process.stdout.write(
@@ -99,6 +155,14 @@ function main() {
 			printSummary(applyProfile({ name: argument }));
 			return;
 		}
+		case "single":
+			// Failsafe revert; `single` always exists as the shipped baseline.
+			printSummary(applyProfile({ name: "single" }));
+			return;
+		case "parallel":
+			ensureShippedProfile("distributed-parallel");
+			printSummary(applyProfile({ name: "distributed-parallel" }));
+			return;
 		case "apply":
 			printSummary(applyProfile({}));
 			return;
@@ -108,7 +172,10 @@ function main() {
 			return;
 		}
 		default:
-			fail(`unknown command: ${command}\nusage: backends.mjs [list|show|use <name>|apply|delegation on|off]`);
+			fail(
+				`unknown command: ${command}\n` +
+					"usage: backends.mjs [list|show|use <name>|single|parallel|apply|delegation on|off]",
+			);
 	}
 }
 
