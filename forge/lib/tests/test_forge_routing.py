@@ -130,6 +130,26 @@ class FallbackTests(unittest.TestCase):
         self.assertEqual(record["ranOn"], "task")
 
 
+class ImageGuardTests(unittest.TestCase):
+    """An image-bearing item must never land on a text-only lane."""
+
+    TASK = {"task": {"enabled": True, "baseUrl": "http://small:7/v1", "model": "small", "images": False}}
+
+    def test_a_text_item_still_routes_to_the_text_only_tier(self):
+        service = forge_routing.service_for("connection-judgment", env={}, settings=self.TASK, routing={})
+        self.assertEqual(service["url"], "http://small:7/v1/chat/completions")
+        self.assertNotIn("imageGuard", service)
+
+    def test_an_image_item_is_pinned_to_the_chat_vision_lane(self):
+        service = forge_routing.service_for(
+            "connection-judgment", env={}, settings=self.TASK, routing={}, carries_image=True
+        )
+        self.assertEqual(service["url"], "http://llms:8004/v1/chat/completions")
+        self.assertEqual(service["routedTo"], "task")
+        self.assertEqual(service["fallback"], "chat")
+        self.assertTrue(service["imageGuard"])
+
+
 class PinnedEndpointTests(unittest.TestCase):
     """`--base-url` has to keep meaning what it has always meant.
 

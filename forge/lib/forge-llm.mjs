@@ -287,7 +287,8 @@ export function resolveVerifyService(options = {}) {
 	const wanted = services.verify?.service ?? null;
 	// Identify the chosen block among the named services to label a degrade.
 	const landed =
-		INFERENCE_SERVICES_ORDER.find((candidate) => services[candidate] === chosen) ?? (chosen === services.chat ? "chat" : null);
+		INFERENCE_SERVICES_ORDER.find((candidate) => services[candidate] === chosen) ??
+		(chosen === services.chat ? "chat" : null);
 	const isFallback = wanted ? landed !== wanted : landed === "chat";
 	return shapeService("verify", chosen, isFallback ? { fallback: landed ?? "chat" } : {});
 }
@@ -847,7 +848,8 @@ export async function dispatchBulk(lanes, items, runOne, options = {}) {
 	};
 
 	const workers = [];
-	for (const lane of lanes) for (let slot = 0; slot < Math.max(1, concurrencyPerLane); slot += 1) workers.push(worker(lane));
+	for (const lane of lanes)
+		for (let slot = 0; slot < Math.max(1, concurrencyPerLane); slot += 1) workers.push(worker(lane));
 	await Promise.all(workers);
 	if (remaining > 0) {
 		throw new ChatError(

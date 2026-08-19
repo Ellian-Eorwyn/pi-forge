@@ -14,7 +14,14 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { activeProfileName, applyProfile, DEFAULT_BACKENDS, loadBackends, saveBackends, setDelegation } from "../lib/backends.mjs";
+import {
+	activeProfileName,
+	applyProfile,
+	DEFAULT_BACKENDS,
+	loadBackends,
+	saveBackends,
+	setDelegation,
+} from "../lib/backends.mjs";
 import { loadForgeSettings, resolveConnectedServices } from "../lib/connected-services.mjs";
 
 interface ApplyResult {
@@ -37,13 +44,17 @@ function statusLines(): string[] {
 		settings.contextBudget && typeof settings.contextBudget === "object" && !Array.isArray(settings.contextBudget)
 			? (settings.contextBudget as { useTaskModel?: boolean })
 			: {};
+	const verifyName: string | null = services.verify?.service ?? null;
+	const verifyLane = verifyName
+		? (services as Record<string, { enabled?: boolean; baseUrl?: string }>)[verifyName]
+		: undefined;
 	const lines = [
 		`Active setup: ${active}`,
 		`  chat          ${services.chat.baseUrl} (${services.chat.contextTokens} ctx)`,
 		`  think         ${services.think.baseUrl}`,
 		`  bulk lanes    ${services.bulk.lanes.join(", ")}${services.bulk.lanes.length > 1 ? " (fan-out across GPUs)" : ""}`,
-		services.verify.service && services[services.verify.service]?.enabled
-			? `  verify        ${services.verify.service} → ${services[services.verify.service].baseUrl}`
+		verifyLane?.enabled
+			? `  verify        ${verifyName} → ${verifyLane.baseUrl}`
 			: `  verify        primary think (${services.think.baseUrl})`,
 	];
 	if (services.chat2.enabled) lines.push(`  chat2         ${services.chat2.baseUrl}`);

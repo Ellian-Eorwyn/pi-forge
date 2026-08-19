@@ -288,7 +288,10 @@ function projectSecondary(secondary) {
 		};
 	}
 	const host = cleanHost(secondary.host);
-	const ports = { ...SECONDARY_PORTS, ...(secondary.ports && typeof secondary.ports === "object" ? secondary.ports : {}) };
+	const ports = {
+		...SECONDARY_PORTS,
+		...(secondary.ports && typeof secondary.ports === "object" ? secondary.ports : {}),
+	};
 	const contextTokens = positiveInt(secondary.contextTokens, SLOT_CONTEXT_TOKENS);
 	const models = secondary.models && typeof secondary.models === "object" ? secondary.models : {};
 	const chat2Model = typeof models.chat2 === "string" && models.chat2.trim() ? models.chat2.trim() : "chat";
