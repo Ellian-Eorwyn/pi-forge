@@ -279,6 +279,9 @@ export function resolveDelegateService(options = {}) {
  * the requested verify lane, for journaling.
  */
 export function resolveVerifyService(options = {}) {
+	// An explicit endpoint (e.g. a passed thinkUrl) wins over the configured verify
+	// lane, matching the module's precedence that an explicit argument beats settings.
+	if (options.thinkUrl) return resolveThinkService(options);
 	const services = resolveConnectedServices(options);
 	const chosen = resolveVerifyOrThinkOrChat(services);
 	const wanted = services.verify?.service ?? null;

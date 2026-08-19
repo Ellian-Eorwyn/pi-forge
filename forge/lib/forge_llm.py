@@ -652,7 +652,9 @@ def resolve_verify_or_think_or_chat(base_url=None, model=None, env=None, setting
     configured = settings if settings is not None else load_connected_services(env)
     verify = configured.get("verify") if isinstance(configured.get("verify"), dict) else {}
     wanted = verify.get("service") if isinstance(verify.get("service"), str) else None
-    if wanted in DEFAULT_SERVICES:
+    # An explicit endpoint (e.g. --think-url) wins over the configured verify lane,
+    # matching the module's precedence that an explicit argument beats settings.
+    if not base_url and wanted in DEFAULT_SERVICES:
         candidate = resolve_service(wanted, env=env, settings=configured)
         if candidate["enabled"] and candidate["url"]:
             candidate["name"] = "verify"
