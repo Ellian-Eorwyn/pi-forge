@@ -735,6 +735,125 @@ export async function callTextWithRetry(service, messages, options = {}) {
 	return { text: extractJsonContent(content), record };
 }
 
+/**
+ * Fan a batch skill's per-item bulk work across several inference lanes at once.
+ *
+ * `lanes` is the shaped-service list from `resolveBulkLaneServices` — with two
+ * GPUs it is `[chat, chat2]`, so items run on both GPUs in parallel; with one it
+ * is `[chat]` and this behaves like the old serial loop. `runOne(lane, item,
+ * index)` issues the model call for one item on the lane it is handed (it builds
+ * the messages, so the byte-stable system prefix stays per-lane and each lane's
+ * server prefix cache stays warm — this function never puts two different prompt
+ * shapes through one lane, and runs exactly `concurrencyPerLane` requests per lane
+ * at a time, one per GPU by default).
+ *
+ * Scheduling / invariants:
+ * - One in-flight request per lane keeps each lane's prefix cache warm; do not
+ *   raise `concurrencyPerLane` unless the lane's backend has the slots for it.
+ * - `carriesImage(item)` marks image-bearing items; they are only ever handed to
+ *   a vision lane (`images !== false`), and a hard error is raised up front if an
+ *   image item exists with no vision lane — an image must never reach a text-only
+ *   GPU-2 lane, where the transform layer would silently drop it.
+ * - A lane that throws requeues the item to another lane and, after
+ *   `maxLaneFailures` consecutive failures, drops out; the surviving lanes drain
+ *   the rest. If every capable lane dies with work left, this rejects so the
+ *   caller's own error path records it.
+ * - `onResult(item, result, lane, index)` is where the caller commits its journal
+ *   record; it is awaited before that worker pulls its next item, so resume state
+ *   never runs ahead of committed work.
+ *
+ * Returns `{ results, producedBy }`: `results` indexed by item order (a failed
+ * item is `{ __dispatchError }`), and `producedBy` keyed by `itemId(item, index)`
+ * mapping to `{ url, model }` — pass it straight to the verifier so per-item
+ * reviewer independence is exact.
+ */
+export async function dispatchBulk(lanes, items, runOne, options = {}) {
+	const {
+		concurrencyPerLane = 1,
+		carriesImage = null,
+		itemId = null,
+		onResult = null,
+		onError = null,
+		progress = null,
+		maxLaneFailures = 3,
+	} = options;
+	if (!Array.isArray(lanes) || lanes.length === 0) throw new ChatError("dispatchBulk needs at least one lane");
+	const list = Array.from(items);
+	const results = new Array(list.length).fill(undefined);
+	const producedBy = {};
+	const carries = list.map((item, index) => (carriesImage ? Boolean(carriesImage(item, index)) : false));
+	const hasVisionLane = lanes.some((lane) => lane.images !== false);
+	if (!hasVisionLane && carries.some(Boolean)) {
+		throw new ChatError("an item carries an image but no configured bulk lane accepts images");
+	}
+	const textQueue = [];
+	const visionQueue = [];
+	for (let index = 0; index < list.length; index += 1) (carries[index] ? visionQueue : textQueue).push(index);
+	const attempts = new Array(list.length).fill(0);
+	const maxItemAttempts = Math.max(2, lanes.length + 1);
+	let remaining = list.length;
+	let inFlight = 0;
+
+	// A vision lane prefers the vision-only work only it can serve, then falls to
+	// the shared text queue; a text-only lane serves the text queue alone. The
+	// shift is synchronous, so on JS's single thread no two workers claim one item.
+	const claim = (lane) => {
+		if (lane.images !== false && visionQueue.length) return visionQueue.shift();
+		if (textQueue.length) return textQueue.shift();
+		return -1;
+	};
+
+	const worker = async (lane) => {
+		let consecutiveFailures = 0;
+		for (;;) {
+			const index = claim(lane);
+			if (index === -1) {
+				// Nothing this lane can serve. If work is still in flight it might be
+				// requeued on failure, so wait and re-check rather than exiting early.
+				if (inFlight === 0) return;
+				await sleep(5);
+				continue;
+			}
+			attempts[index] += 1;
+			inFlight += 1;
+			const item = list[index];
+			try {
+				const result = await runOne(lane, item, index);
+				results[index] = result;
+				remaining -= 1;
+				consecutiveFailures = 0;
+				if (itemId) producedBy[itemId(item, index)] = { url: lane.url, model: lane.model };
+				if (onResult) await onResult(item, result, lane, index);
+				if (progress) progress({ done: list.length - remaining, total: list.length, lane: lane.name, index });
+			} catch (error) {
+				consecutiveFailures += 1;
+				const decision = onError ? onError(item, error, lane, index) || "retry" : "retry";
+				if (decision === "fail" || attempts[index] >= maxItemAttempts) {
+					results[index] = { __dispatchError: error };
+					remaining -= 1;
+					if (progress)
+						progress({ done: list.length - remaining, total: list.length, lane: lane.name, index, error });
+				} else {
+					(carries[index] ? visionQueue : textQueue).push(index);
+				}
+				if (consecutiveFailures >= maxLaneFailures) return;
+			} finally {
+				inFlight -= 1;
+			}
+		}
+	};
+
+	const workers = [];
+	for (const lane of lanes) for (let slot = 0; slot < Math.max(1, concurrencyPerLane); slot += 1) workers.push(worker(lane));
+	await Promise.all(workers);
+	if (remaining > 0) {
+		throw new ChatError(
+			`bulk fan-out could not complete ${remaining} of ${list.length} item(s): every capable lane failed`,
+		);
+	}
+	return { results, producedBy };
+}
+
 /** List the model ids a service actually serves, via `GET /v1/models`. */
 export async function servedModels(service, timeoutMs = 5000) {
 	const root = service.url.replace(/\/chat\/completions$/, "");

@@ -50,6 +50,7 @@ import os
 import re
 import threading
 import time
+from collections import deque
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -1068,6 +1069,136 @@ def call_json_with_retry(service, messages, attempts=MAX_TRANSIENT_ATTEMPTS, **o
                 continue
             raise
     raise last_error
+
+
+def dispatch_bulk(
+    lanes,
+    items,
+    run_one,
+    *,
+    concurrency_per_lane=1,
+    carries_image=None,
+    item_id=None,
+    on_result=None,
+    on_error=None,
+    progress=None,
+    max_lane_failures=3,
+):
+    """Fan a batch skill's per-item bulk work across several inference lanes at once.
+
+    The twin of ``dispatchBulk`` in ``forge-llm.mjs``. ``lanes`` is the shaped
+    service list from ``resolve_bulk_lanes`` — with two GPUs it is ``[chat, chat2]``,
+    so items run on both GPUs in parallel; with one it is ``[chat]`` and this behaves
+    like the old serial loop. ``run_one(lane, item, index)`` issues the model call
+    for one item on the lane it is handed, so the byte-stable system prefix stays
+    per-lane and each lane's server prefix cache stays warm; this function never puts
+    two prompt shapes through one lane, and runs ``concurrency_per_lane`` requests
+    per lane at a time (one per GPU by default).
+
+    Image-bearing items (``carries_image(item)``) are only ever handed to a vision
+    lane; an image item with no vision lane configured is a hard error up front, so
+    an image never reaches a text-only ``:8104``/``:8108`` lane where it would be
+    silently dropped. A lane that raises requeues the item elsewhere and, after
+    ``max_lane_failures`` consecutive failures, drops out; if every capable lane
+    dies with work left this raises. ``on_result(item, result, lane, index)`` is the
+    caller's journal commit and runs before that worker takes its next item, so
+    resume state never runs ahead of committed work — and it is serialized under the
+    dispatcher's lock, so the caller's journal append needs no lock of its own.
+
+    Returns ``{"results": [...], "producedBy": {...}}``: ``results`` indexed by item
+    order (a failed item is ``{"__dispatch_error": error}``), and ``producedBy``
+    keyed by ``item_id(item, index)`` mapping to ``{"url", "model"}`` for the
+    verifier's per-item independence check.
+    """
+    if not lanes:
+        raise ChatError("dispatch_bulk needs at least one lane")
+    items = list(items)
+    total = len(items)
+    results = [None] * total
+    produced_by = {}
+    carries = [bool(carries_image(items[i], i)) if carries_image else False for i in range(total)]
+    if any(carries) and not any(lane.get("images") is not False for lane in lanes):
+        raise ChatError("an item carries an image but no configured bulk lane accepts images")
+    lock = threading.Lock()
+    text_queue = deque(i for i in range(total) if not carries[i])
+    vision_queue = deque(i for i in range(total) if carries[i])
+    attempts = [0] * total
+    max_item_attempts = max(2, len(lanes) + 1)
+    state = {"remaining": total, "in_flight": 0}
+
+    def claim(lane):
+        # Caller holds the lock. A vision lane prefers the vision-only work only it
+        # can serve, then the shared text queue; a text-only lane serves text alone.
+        if lane.get("images") is not False and vision_queue:
+            return vision_queue.popleft()
+        if text_queue:
+            return text_queue.popleft()
+        return -1
+
+    def worker(lane):
+        consecutive = 0
+        while True:
+            with lock:
+                index = claim(lane)
+                if index == -1:
+                    if state["in_flight"] == 0:
+                        return
+                    idle = True
+                else:
+                    idle = False
+                    attempts[index] += 1
+                    state["in_flight"] += 1
+            if idle:
+                # Work is still in flight and may be requeued on failure; wait and
+                # re-check rather than exiting this lane early.
+                time.sleep(0.005)
+                continue
+            item = items[index]
+            try:
+                result = run_one(lane, item, index)
+            except Exception as error:  # noqa: BLE001 - lane isolation is the point
+                consecutive += 1
+                decision = on_error(item, error, lane, index) if on_error else "retry"
+                with lock:
+                    state["in_flight"] -= 1
+                    if decision == "fail" or attempts[index] >= max_item_attempts:
+                        results[index] = {"__dispatch_error": error}
+                        state["remaining"] -= 1
+                        done = total - state["remaining"]
+                    else:
+                        (vision_queue if carries[index] else text_queue).append(index)
+                        done = None
+                if progress and done is not None:
+                    progress({"done": done, "total": total, "lane": lane.get("name"), "index": index, "error": error})
+                if consecutive >= max_lane_failures:
+                    return
+                continue
+            consecutive = 0
+            with lock:
+                state["in_flight"] -= 1
+                results[index] = result
+                state["remaining"] -= 1
+                if item_id is not None:
+                    produced_by[item_id(item, index)] = {"url": lane["url"], "model": lane["model"]}
+                if on_result:
+                    on_result(item, result, lane, index)
+                done = total - state["remaining"]
+            if progress:
+                progress({"done": done, "total": total, "lane": lane.get("name"), "index": index})
+
+    threads = []
+    for lane in lanes:
+        for _ in range(max(1, concurrency_per_lane)):
+            thread = threading.Thread(target=worker, args=(lane,), daemon=True)
+            thread.start()
+            threads.append(thread)
+    for thread in threads:
+        thread.join()
+    if state["remaining"] > 0:
+        raise ChatError(
+            f"bulk fan-out could not complete {state['remaining']} of {total} item(s): every capable lane failed"
+        )
+    return {"results": results, "producedBy": produced_by}
 
 
 def served_models(service, timeout=5.0):
