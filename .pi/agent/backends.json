@@ -1,0 +1,56 @@
+{
+	"active": "single",
+	"profiles": {
+		"single": {
+			"description": "One image-capable model at 131k on llms; no delegation; embedding/transcription on llms.",
+			"primary": {
+				"host": "http://llms",
+				"images": true,
+				"contextTokens": 131072
+			},
+			"delegation": {
+				"enabled": false
+			},
+			"embedding": {
+				"url": "http://llms:8005/v1/embeddings",
+				"model": "embed"
+			},
+			"transcription": {
+				"baseUrl": "http://llms:8014",
+				"engine": "parakeet-v3"
+			},
+			"ocr": {
+				"url": "http://llms:5002/glmocr/parse"
+			}
+		},
+		"distributed": {
+			"description": "Embedding + transcription on this laptop; a vision primary and a vision-free delegation backend split across the two llms GPUs, running in parallel.",
+			"primary": {
+				"host": "http://llms",
+				"images": true,
+				"contextTokens": 131072
+			},
+			"delegation": {
+				"enabled": true,
+				"baseUrl": "http://llms:8104/v1/chat/completions",
+				"model": "chat",
+				"images": false,
+				"contextTokens": 131072,
+				"chatTemplateKwargs": {
+					"enable_thinking": false
+				}
+			},
+			"embedding": {
+				"url": "http://laptop:8005/v1/embeddings",
+				"model": "embed"
+			},
+			"transcription": {
+				"baseUrl": "http://laptop:8014",
+				"engine": "parakeet-v3"
+			},
+			"ocr": {
+				"url": "http://llms:5002/glmocr/parse"
+			}
+		}
+	}
+}

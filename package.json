@@ -23,7 +23,7 @@
 		"check:forge-reference": "node scripts/sync-forge-reference.mjs --check",
 		"check:forge-skill-manifests": "node scripts/check-forge-skills.mjs",
 		"check:forge-package": "node scripts/check-forge-package.mjs",
-		"test:forge-skills": "node --test forge/lib/tests/forge-llm.test.mjs && node --test forge/lib/tests/stack-state.test.mjs && node --test forge/lib/tests/http-fetch.test.mjs && node --test forge/lib/tests/searxng.test.mjs && node --test forge/lib/tests/moshi-hook.test.mjs && node --test scripts/configure-pi-forge.test.mjs",
+		"test:forge-skills": "node --test forge/lib/tests/forge-llm.test.mjs && node --test forge/lib/tests/backends.test.mjs && node --test forge/lib/tests/stack-state.test.mjs && node --test forge/lib/tests/http-fetch.test.mjs && node --test forge/lib/tests/searxng.test.mjs && node --test forge/lib/tests/moshi-hook.test.mjs && node --test scripts/configure-pi-forge.test.mjs",
 		"test:evals": "python3 forge/evals/tests/test_evals.py",
 		"test:search-providers": "node --test scripts/search-providers.test.mjs",
 		"test:provider-budget": "node --test scripts/provider-budget.test.mjs",

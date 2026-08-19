@@ -24,6 +24,7 @@ import { join } from "node:path";
 import {
 	getForgeAgentDir,
 	resolveConnectedServices,
+	resolveDelegateOrChat,
 	resolveTaskOrChat,
 	resolveThinkOrChat,
 	SLOT_CONTEXT_TOKENS,
@@ -202,7 +203,7 @@ export function normalizeChatUrl(value) {
  * `connected-services.mjs` speaks `{enabled, baseUrl, model, scheduling}`;
  * everything here and in `forge_llm.py` speaks `{name, url, model, ...}`.
  */
-const INFERENCE_SERVICES = new Set(["chat", "think", "task"]);
+const INFERENCE_SERVICES = new Set(["chat", "think", "task", "delegate"]);
 
 export function resolveService(name, options = {}) {
 	const services = resolveConnectedServices(options);
@@ -255,6 +256,30 @@ export function resolveTaskService(options = {}) {
 	const isFallback = chosen === services.chat;
 	return {
 		name: "task",
+		enabled: Boolean(chosen.enabled),
+		url: normalizeChatUrl(chosen.baseUrl),
+		model: chosen.model,
+		contextTokens: chosen.contextTokens,
+		chatTemplateKwargs: chosen.chatTemplateKwargs,
+		reasoningEffort: chosen.reasoningEffort,
+		scheduling: chosen.scheduling,
+		...(isFallback ? { fallback: "chat" } : {}),
+	};
+}
+
+/**
+ * The delegation target for `forge_delegate`. Returns the `delegate` service when
+ * a secondary is configured and enabled — a separate backend the investigation
+ * runs on in parallel — and otherwise falls back to `chat`, where it runs on the
+ * primary weights against the background slot as it always did. The fallback is
+ * flagged so a caller can tell "delegation off" from "delegation on".
+ */
+export function resolveDelegateService(options = {}) {
+	const services = resolveConnectedServices(options);
+	const chosen = resolveDelegateOrChat(services);
+	const isFallback = chosen === services.chat;
+	return {
+		name: "delegate",
 		enabled: Boolean(chosen.enabled),
 		url: normalizeChatUrl(chosen.baseUrl),
 		model: chosen.model,

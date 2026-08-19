@@ -3,6 +3,7 @@
 import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
+import { seedBackends } from "../lib/backends.mjs";
 import {
 	LEGACY_CHAT_SCHEDULING,
 	LEGACY_CHAT_SERVICE,
@@ -262,6 +263,21 @@ writeFileSync(modelsPath, `${JSON.stringify(models, undefined, "\t")}\n`, { mode
 writeFileSync(installedAgentsPath, profileInstructions, { mode: 0o600 });
 chmodSync(installedAgentsPath, 0o600);
 writeFileSync(profilePathMarker, `${profileDirectory}\n`, { mode: 0o600 });
+
+// The one-file backend-setup switcher. Seeded, not applied: the settings.json and
+// models.json just written are already the default `single` setup, and they carry
+// the live per-slot context probed above, which re-applying the profile would
+// overwrite. Switching to another setup (`backends.mjs use <name>` / `/backend`)
+// is the explicit action where a profile's values take over.
+try {
+	if (seedBackends({ agentDir: agentDirectory })) {
+		process.stdout.write(
+			`Wrote ${join(agentDirectory, "backends.json")} — edit it or run \`/backend\` to switch setups.\n`,
+		);
+	}
+} catch (error) {
+	process.stderr.write(`backends.json seed: ${error.message}\n`);
+}
 
 // Optional host integration, so it runs after the managed configuration is
 // written and can never leave that half-done. Moshi is absent on most machines;

@@ -16,6 +16,7 @@ import {
 } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadForgeSettings } from "../../../lib/connected-services.mjs";
 import { callJsonWithRetry, callTextWithRetry, resolveService, resolveThinkService } from "../../../lib/forge-llm.mjs";
 import { buildPackets, escalate, summarize, VERDICT_FLAG, verifyPackets } from "../../../lib/forge-verify.mjs";
 import {
@@ -41,6 +42,21 @@ import {
 const DEFAULT_CHUNK_CHARACTERS = 150_000;
 const DEFAULT_GLMOCR_URL = "http://llms:5002/glmocr/parse";
 const DEFAULT_GLMOCR_TIMEOUT_MS = 300_000;
+
+// The persisted `connectedServices.ocr.url`, read straight from settings so a
+// setup can point OCR somewhere in the same file as every other backend. It sits
+// below the env vars and the `--glmocr-url` flag and above the built-in default,
+// so nothing that already worked changes; an install that never sets it reads
+// undefined here and falls through to DEFAULT_GLMOCR_URL as before.
+function ocrUrlFromSettings() {
+	try {
+		const ocr = loadForgeSettings().connectedServices?.ocr;
+		const url = ocr && typeof ocr === "object" ? ocr.url : undefined;
+		return typeof url === "string" && url.trim() ? url.trim() : undefined;
+	} catch {
+		return undefined;
+	}
+}
 const LOW_TEXT_CHARACTERS = 40;
 const MINIMUM_ALPHANUMERIC_RATIO = 0.2;
 const MAXIMUM_PUNCTUATION_RATIO = 0.55;
@@ -144,7 +160,11 @@ function toolInfo(command, args = ["--version"]) {
 
 function inspectTools() {
 	const glmocrUrl =
-		process.env.FORGE_GLMOCR_URL || process.env.FORGE_OCR_URL || process.env.OCR_URL || DEFAULT_GLMOCR_URL;
+		process.env.FORGE_GLMOCR_URL ||
+		process.env.FORGE_OCR_URL ||
+		process.env.OCR_URL ||
+		ocrUrlFromSettings() ||
+		DEFAULT_GLMOCR_URL;
 	return {
 		pandoc: toolInfo("pandoc"),
 		pdftotext: toolInfo("pdftotext", ["-v"]),
@@ -1564,7 +1584,11 @@ function parsePrepareArguments(args) {
 	let ocr = "auto";
 	let ocrBackend = process.env.FORGE_OCR_BACKEND || "auto";
 	let glmocrUrl =
-		process.env.FORGE_GLMOCR_URL || process.env.FORGE_OCR_URL || process.env.OCR_URL || DEFAULT_GLMOCR_URL;
+		process.env.FORGE_GLMOCR_URL ||
+		process.env.FORGE_OCR_URL ||
+		process.env.OCR_URL ||
+		ocrUrlFromSettings() ||
+		DEFAULT_GLMOCR_URL;
 	let glmocrTimeoutMs = Number.parseInt(
 		process.env.FORGE_GLMOCR_TIMEOUT_MS || process.env.FORGE_OCR_TIMEOUT_MS || String(DEFAULT_GLMOCR_TIMEOUT_MS),
 		10,

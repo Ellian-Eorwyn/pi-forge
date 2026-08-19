@@ -67,12 +67,13 @@ owner". Given no name, use none rather than guess; given no pronouns, they/them.
 - Offload live, not only in scripts. When a well-scoped, read-only sub-task would
   pull a large or multi-step intermediate into your context — where is X defined
   and used, which of these files does Y, distill this dump to the facts I need —
-  hand it to `forge_delegate`. A read-only sub-agent runs it on the non-thinking
-  slot and returns only the answer; its searches and reasoning never enter your
-  context or spend your thinking budget. It shares your weights, so it runs while
-  you wait, not in parallel — the win is a clean context, not speed. Skip it for a
-  single trivial lookup you can run yourself, for reasoning that needs your
-  context, or for anything the sub-agent cannot see (pass it everything in `task`).
+  hand it to `forge_delegate`. A read-only sub-agent runs it and returns only the
+  answer; its searches and reasoning never enter your context or spend your
+  thinking budget. When a setup enables a delegation backend (a second GPU), it
+  runs there in parallel with you; otherwise it shares your weights and runs while
+  you wait. Either way the win is a clean context. Skip it for a single trivial
+  lookup you can run yourself, for reasoning that needs your context, or for
+  anything the sub-agent cannot see (pass it everything in `task`).
 - Route the piece, not the command: smallest capable model, capability first and
   speed only as tiebreak. Summaries stay on `chat` by standing preference.
 

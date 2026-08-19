@@ -2,11 +2,12 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createReadOnlyTools } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 // forge-llm.mjs is pure Node (no @earendil-works imports), so it loads under the
-// extension sandbox where the pi-ai provider layer does not. Its `callWithTools`
-// pins the background slot (slot 1) via a cooperative lease when `background:true`,
-// which is the whole point: the delegate must never touch the interactive slot-0
-// prefix cache. See connected-services.mjs.
-import { callWithTools, resolveService } from "../lib/forge-llm.mjs";
+// extension sandbox where the pi-ai provider layer does not. `resolveDelegateService`
+// returns the secondary backend when one is configured — a separate llama-server on
+// another GPU, so the investigation runs in parallel — and otherwise `chat`, where
+// `callWithTools` pins the background slot (slot 1) via a cooperative lease so the
+// delegate never touches the interactive slot-0 prefix cache. See connected-services.mjs.
+import { callWithTools, resolveDelegateService } from "../lib/forge-llm.mjs";
 
 // Budgets. A read-only investigation that cannot answer within these returns its
 // best partial answer with `hitBudget: true` rather than hanging or ballooning.
@@ -120,9 +121,9 @@ async function executeReadOnlyToolCall(
  * so an over-scoped task still returns a partial rather than hanging.
  */
 export async function runDelegate(cwd: string, params: DelegateParams, signal?: AbortSignal): Promise<DelegateResult> {
-	const service = resolveService("chat");
+	const service = resolveDelegateService();
 	if (!service?.url) {
-		return { answer: "", toolTurns: 0, hitBudget: false, error: "the local chat service is not configured" };
+		return { answer: "", toolTurns: 0, hitBudget: false, error: "the delegation service is not configured" };
 	}
 
 	const tools = createReadOnlyTools(cwd);
@@ -188,8 +189,10 @@ export default function delegationExtension(pi: ExtensionAPI) {
 			"several search/read steps (e.g. 'where is X defined and used', 'which of these files does Y', 'distill " +
 			"this large output down to the facts I need'). Do NOT use it for a single trivial grep you can run " +
 			"yourself, for open-ended reasoning, or for anything needing the conversation's context — pass everything " +
-			"it needs in task/context. It is read-only: it cannot edit files or run mutating commands. Runs on the " +
-			"same weights as you, so it does not run in parallel; it runs while you wait, keeping your context clean.",
+			"it needs in task/context. It is read-only: it cannot edit files or run mutating commands. When a " +
+			"secondary backend is configured it runs there on another GPU, in parallel with your session; otherwise " +
+			"it runs on the same weights as you while you wait. Either way its searches and reasoning stay out of " +
+			"your context.",
 		promptSnippet: "Offload a bounded read-only investigation to the fast non-thinking model",
 		promptGuidelines: [
 			"Delegate a bounded, read-only investigation to forge_delegate when its intermediate output would be large or multi-step, to keep your own context clean; run a single trivial lookup yourself.",

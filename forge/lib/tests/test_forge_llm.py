@@ -250,6 +250,48 @@ class TaskServiceTests(unittest.TestCase):
         self.assertEqual(resolved["chatTemplateKwargs"], {"enable_thinking": True})
 
 
+class DelegateServiceTests(unittest.TestCase):
+    """The delegation target. Off unless configured, and it degrades toward chat."""
+
+    def test_the_default_points_at_the_secondary_with_thinking_off(self):
+        delegate = forge_llm.resolve_service("delegate", env={}, settings={})
+        self.assertEqual(delegate["url"], "http://llms:8104/v1/chat/completions")
+        self.assertEqual(delegate["model"], "chat")
+        self.assertEqual(delegate["chatTemplateKwargs"], {"enable_thinking": False})
+
+    def test_its_scheduling_is_off_so_no_slot_is_pinned(self):
+        # The secondary is a separate, single-slot backend, so pinning id_slot 1
+        # would be out of range. Scheduling off means no id_slot is sent.
+        delegate = forge_llm.resolve_service("delegate", env={}, settings={})
+        self.assertFalse(delegate["scheduling"]["enabled"])
+
+    def test_it_is_off_until_someone_turns_it_on(self):
+        self.assertFalse(forge_llm.resolve_service("delegate", env={}, settings={})["enabled"])
+        enabled = forge_llm.resolve_service("delegate", env={}, settings={"delegate": {"enabled": True}})
+        self.assertTrue(enabled["enabled"])
+
+    def test_an_unconfigured_delegate_falls_back_up_to_chat(self):
+        resolved = forge_llm.resolve_delegate_or_chat(env={}, settings={})
+        self.assertEqual(resolved["url"], "http://llms:8004/v1/chat/completions")
+        self.assertEqual(resolved["fallback"], "chat")
+        self.assertEqual(resolved["name"], "delegate")
+
+    def test_a_configured_delegate_is_used(self):
+        settings = {"delegate": {"enabled": True, "baseUrl": "http://gpu2:8104/v1", "model": "chat-custom2"}}
+        resolved = forge_llm.resolve_delegate_or_chat(env={}, settings=settings)
+        self.assertEqual(resolved["url"], "http://gpu2:8104/v1/chat/completions")
+        self.assertEqual(resolved["model"], "chat-custom2")
+        self.assertNotIn("fallback", resolved)
+
+    def test_its_endpoint_resolves_through_every_layer(self):
+        settings = {"delegate": {"enabled": True, "baseUrl": "http://settings:1/v1", "model": "from-settings"}}
+        self.assertEqual(forge_llm.resolve_service("delegate", env={}, settings=settings)["model"], "from-settings")
+        environment = {"FORGE_DELEGATE_URL": "http://env:2/v1", "FORGE_DELEGATE_MODEL": "from-env"}
+        from_environment = forge_llm.resolve_service("delegate", env=environment, settings=settings)
+        self.assertEqual(from_environment["url"], "http://env:2/v1/chat/completions")
+        self.assertEqual(from_environment["model"], "from-env")
+
+
 class ServiceFromArgumentsTests(unittest.TestCase):
     """Rebuilding a service mid-run must not lose what resolution established.
 

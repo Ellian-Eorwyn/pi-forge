@@ -30,6 +30,7 @@ const {
 	imageMessage,
 	parseJsonContent,
 	resetStackConditions,
+	resolveDelegateService,
 	resolveService,
 	resolveTaskService,
 	resolveThinkService,
@@ -435,6 +436,40 @@ test("a configured task tier keeps its own ceiling and template kwargs", () => {
 	// chat slot, and the kwarg without which it answers into reasoning_content.
 	assert.equal(task.contextTokens, 65538);
 	assert.deepEqual(task.chatTemplateKwargs, { enable_thinking: false });
+});
+
+test("the delegate tier is off by default and forge_delegate falls back to chat", () => {
+	const delegate = resolveDelegateService({ env: {} });
+	assert.equal(delegate.name, "delegate");
+	assert.equal(delegate.fallback, "chat");
+	assert.equal(delegate.url, resolveService("chat", { env: {} }).url);
+	// The fallback runs on the primary's background slot, exactly as delegation
+	// did before a secondary was possible.
+	assert.equal(delegate.scheduling.enabled, true);
+});
+
+test("a configured delegate targets the secondary with slot pinning off", () => {
+	const delegate = resolveDelegateService({
+		env: {},
+		settings: {
+			connectedServices: {
+				delegate: {
+					enabled: true,
+					baseUrl: "http://llms:8104/v1/chat/completions",
+					model: "chat-custom2",
+					chatTemplateKwargs: { enable_thinking: false },
+					scheduling: { enabled: false, backgroundSlot: 0 },
+				},
+			},
+		},
+	});
+	assert.equal(delegate.url, "http://llms:8104/v1/chat/completions");
+	assert.equal(delegate.model, "chat-custom2");
+	assert.equal(delegate.fallback, undefined);
+	// Off on purpose: the secondary is a separate single-slot backend, so no
+	// id_slot is sent (see connected-services.mjs).
+	assert.equal(delegate.scheduling.enabled, false);
+	assert.deepEqual(delegate.chatTemplateKwargs, { enable_thinking: false });
 });
 
 test("leases written by the Python client are honored by this one, and the reverse", () => {

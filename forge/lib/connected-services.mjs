@@ -131,10 +131,53 @@ export const DEFAULT_CONNECTED_SERVICES = Object.freeze({
 			backgroundOutputTokens: 4096,
 		}),
 	}),
+	// A second, genuinely separate chat backend that `forge_delegate` offloads to.
+	// Off by default: a stock install has only the one primary, so delegation
+	// falls back to `chat` (same weights, background slot) and nothing here is used
+	// until a setup enables it. When it *is* enabled it points at a second
+	// llama-server on another GPU, so the delegated investigation runs in parallel
+	// with the interactive session rather than sharing its slots.
+	//
+	// `scheduling.enabled` is false on purpose, and it is the one field that must
+	// stay false: this backend does not share a prefix cache with the interactive
+	// slot-0 session (it is a different server), so there is nothing to protect by
+	// pinning, and the secondary runs a single slot — sending `id_slot: 1` at a
+	// one-slot server is an out-of-range error, not a hint. With scheduling off the
+	// delegate call sends no `id_slot` and the server assigns its own slot.
+	// `chatTemplateKwargs` mirrors `task`: the secondary reasons into
+	// `reasoning_content` and returns empty `content` unless told not to think.
+	delegate: Object.freeze({
+		enabled: false,
+		baseUrl: "http://llms:8104/v1/chat/completions",
+		// The model id the secondary's non-thinking aggregate actually serves (its
+		// `/v1/models` reports `chat`, same name the primary uses — the URL, not the
+		// name, is what selects the secondary backend). `chat-custom2` is only the
+		// stack's internal alias for the weights and is not a servable id here.
+		model: "chat",
+		contextTokens: SLOT_CONTEXT_TOKENS,
+		chatTemplateKwargs: Object.freeze({ enable_thinking: false }),
+		reasoningEffort: null,
+		scheduling: Object.freeze({
+			enabled: false,
+			interactiveSlot: 0,
+			backgroundSlot: 0,
+			idleGraceMs: 2000,
+			yieldMs: 1000,
+			backgroundOutputTokens: 4096,
+		}),
+	}),
 	embeddings: Object.freeze({
 		enabled: true,
 		url: "http://llms:8005/v1/embeddings",
 		model: "embed",
+	}),
+	// Document OCR: a separate GLM-OCR HTTP service, not the model router. Carried
+	// here so one config file can point it somewhere, but env
+	// (`FORGE_GLMOCR_URL`/`FORGE_OCR_URL`) and the `--glmocr-url` flag still win in
+	// `document-ingest`, and the local OCRmyPDF path ignores it entirely.
+	ocr: Object.freeze({
+		enabled: true,
+		url: "http://llms:5002/glmocr/parse",
 	}),
 	// Speech to text. Not an inference service: no chat completion, no context
 	// window, and no slot to pin, so it carries none of that shape.
@@ -227,10 +270,15 @@ export function seedConnectedServicesSettings(settings) {
 	const think =
 		current.think && typeof current.think === "object" && !Array.isArray(current.think) ? current.think : {};
 	const task = current.task && typeof current.task === "object" && !Array.isArray(current.task) ? current.task : {};
+	const delegate =
+		current.delegate && typeof current.delegate === "object" && !Array.isArray(current.delegate)
+			? current.delegate
+			: {};
 	const embeddings =
 		current.embeddings && typeof current.embeddings === "object" && !Array.isArray(current.embeddings)
 			? current.embeddings
 			: {};
+	const ocr = current.ocr && typeof current.ocr === "object" && !Array.isArray(current.ocr) ? current.ocr : {};
 	const transcription =
 		current.transcription && typeof current.transcription === "object" && !Array.isArray(current.transcription)
 			? current.transcription
@@ -252,10 +300,15 @@ export function seedConnectedServicesSettings(settings) {
 		chat: seedInferenceService(chat, DEFAULT_CONNECTED_SERVICES.chat),
 		think: seedInferenceService(think, DEFAULT_CONNECTED_SERVICES.think),
 		task: seedInferenceService(task, DEFAULT_CONNECTED_SERVICES.task),
+		delegate: seedInferenceService(delegate, DEFAULT_CONNECTED_SERVICES.delegate),
 		embeddings: {
 			enabled: embeddings.enabled ?? DEFAULT_CONNECTED_SERVICES.embeddings.enabled,
 			url: normalizeHttpBaseUrl(embeddings.url) ?? DEFAULT_CONNECTED_SERVICES.embeddings.url,
 			model: normalizeServiceName(embeddings.model) ?? DEFAULT_CONNECTED_SERVICES.embeddings.model,
+		},
+		ocr: {
+			enabled: ocr.enabled ?? DEFAULT_CONNECTED_SERVICES.ocr.enabled,
+			url: normalizeHttpBaseUrl(ocr.url) ?? DEFAULT_CONNECTED_SERVICES.ocr.url,
 		},
 		transcription: {
 			enabled: transcription.enabled ?? DEFAULT_CONNECTED_SERVICES.transcription.enabled,
@@ -404,6 +457,27 @@ export function resolveConnectedServices(options = {}) {
 	const explicitChatEffort = normalizeServiceName(options.chatReasoningEffort);
 	const explicitThinkEffort = normalizeServiceName(options.thinkReasoningEffort);
 	const explicitTaskEffort = normalizeServiceName(options.taskReasoningEffort);
+	// The delegate tier reuses `task`'s override shape (url/model/context/template/
+	// effort), keyed under FORGE_DELEGATE_*. It is off unless persisted or env
+	// enables it, so an env override that only sets, say, the model still leaves
+	// the tier disabled — the URL or the persisted `enabled: true` is what turns it
+	// on, matching how `chat`/`task` treat a bare URL as enabling.
+	const envDelegate = normalizeHttpBaseUrl(env.FORGE_DELEGATE_URL);
+	const envDelegateModel = normalizeServiceName(env.FORGE_DELEGATE_MODEL);
+	const envDelegateContext = normalizePositiveInteger(parseInteger(env.FORGE_DELEGATE_CONTEXT_TOKENS), undefined);
+	const envDelegateTemplate = normalizeTemplateKwargs(env.FORGE_DELEGATE_TEMPLATE_KWARGS);
+	const envDelegateEffort = normalizeServiceName(env.FORGE_DELEGATE_REASONING_EFFORT);
+	const delegateEnvPresent = Object.hasOwn(env, "FORGE_DELEGATE_URL");
+	const explicitDelegate = normalizeHttpBaseUrl(options.delegateUrl);
+	const explicitDelegateModel = normalizeServiceName(options.delegateModel);
+	const explicitDelegateContext = normalizePositiveInteger(parseInteger(options.delegateContextTokens), undefined);
+	const explicitDelegateTemplate = normalizeTemplateKwargs(options.delegateTemplateKwargs);
+	const explicitDelegateEffort = normalizeServiceName(options.delegateReasoningEffort);
+	// OCR takes the same env name document-ingest already honors, so setting it in
+	// one place reaches both the settings resolver and the skill's own default chain.
+	const envOcr = normalizeHttpBaseUrl(env.FORGE_GLMOCR_URL || env.FORGE_OCR_URL);
+	const ocrEnvPresent = Object.hasOwn(env, "FORGE_GLMOCR_URL") || Object.hasOwn(env, "FORGE_OCR_URL");
+	const explicitOcr = normalizeHttpBaseUrl(options.ocrUrl);
 	return {
 		searxng: {
 			enabled: explicitSearxng ? true : searxngEnvPresent ? Boolean(envSearxng) : seeded.searxng.enabled,
@@ -444,10 +518,23 @@ export function resolveConnectedServices(options = {}) {
 			reasoningEffort: explicitTaskEffort ?? envTaskEffort ?? seeded.task.reasoningEffort,
 			scheduling: seeded.task.scheduling,
 		},
+		delegate: {
+			enabled: explicitDelegate ? true : delegateEnvPresent ? Boolean(envDelegate) : seeded.delegate.enabled,
+			baseUrl: explicitDelegate ?? envDelegate ?? seeded.delegate.baseUrl,
+			model: explicitDelegateModel ?? envDelegateModel ?? seeded.delegate.model,
+			contextTokens: explicitDelegateContext ?? envDelegateContext ?? seeded.delegate.contextTokens,
+			chatTemplateKwargs: explicitDelegateTemplate ?? envDelegateTemplate ?? seeded.delegate.chatTemplateKwargs,
+			reasoningEffort: explicitDelegateEffort ?? envDelegateEffort ?? seeded.delegate.reasoningEffort,
+			scheduling: seeded.delegate.scheduling,
+		},
 		embeddings: {
 			enabled: explicitEmbeddings ? true : embeddingsEnvPresent ? Boolean(envEmbeddings) : seeded.embeddings.enabled,
 			url: explicitEmbeddings ?? envEmbeddings ?? seeded.embeddings.url,
 			model: explicitEmbeddingsModel ?? envEmbeddingsModel ?? seeded.embeddings.model,
+		},
+		ocr: {
+			enabled: explicitOcr ? true : ocrEnvPresent ? Boolean(envOcr) : seeded.ocr.enabled,
+			url: explicitOcr ?? envOcr ?? seeded.ocr.url,
 		},
 		transcription: {
 			enabled: explicitTranscription
@@ -515,6 +602,18 @@ export function resolveThinkOrChat(services) {
  */
 export function resolveTaskOrChat(services) {
 	return services.task?.enabled ? services.task : services.chat;
+}
+
+/**
+ * The delegation target, falling back to `chat` when no secondary is configured
+ * — which is the default. Enabled means a second backend exists on another GPU,
+ * so `forge_delegate` runs there in parallel with the interactive session; off
+ * means the investigation runs on the primary `chat` weights against the
+ * background slot, exactly as it did before a secondary was a possibility. The
+ * fallback is what makes the tool always available regardless of the setup.
+ */
+export function resolveDelegateOrChat(services) {
+	return services.delegate?.enabled ? services.delegate : services.chat;
 }
 
 function normalizeHttpBaseUrl(value) {

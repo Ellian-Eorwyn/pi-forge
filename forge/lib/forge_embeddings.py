@@ -57,12 +57,48 @@ RETRY_BACKOFF_BASE = 1.0
 SAFE_INPUT_CHARS = 1000
 
 
-def endpoint_url(explicit=None):
-    return explicit or os.environ.get("FORGE_EMBEDDINGS_URL") or DEFAULT_EMBEDDINGS_URL
+def _connected_embeddings(env=None):
+    """The persisted ``connectedServices.embeddings`` block, or ``{}``.
+
+    Read lazily and defensively: this module is standard-library-only and used by
+    skills that may run without ``forge_llm`` importable, so a missing module or an
+    unreadable settings file degrades to the env/default path rather than raising.
+    Precedence stays explicit arg > env > this > built-in default, matching every
+    other connected service (transcription resolves the same way).
+    """
+    try:
+        import forge_llm
+    except ImportError:
+        return {}
+    services = forge_llm.load_connected_services(env)
+    candidate = services.get("embeddings") if isinstance(services, dict) else None
+    return candidate if isinstance(candidate, dict) else {}
 
 
-def model_name(explicit=None):
-    return explicit or os.environ.get("FORGE_EMBEDDINGS_MODEL") or DEFAULT_EMBEDDINGS_MODEL
+def endpoint_url(explicit=None, env=None):
+    if explicit:
+        return explicit
+    environment = env if env is not None else os.environ
+    from_env = environment.get("FORGE_EMBEDDINGS_URL")
+    if from_env:
+        return from_env
+    persisted = _connected_embeddings(env).get("url")
+    if isinstance(persisted, str) and persisted.strip():
+        return persisted.strip()
+    return DEFAULT_EMBEDDINGS_URL
+
+
+def model_name(explicit=None, env=None):
+    if explicit:
+        return explicit
+    environment = env if env is not None else os.environ
+    from_env = environment.get("FORGE_EMBEDDINGS_MODEL")
+    if from_env:
+        return from_env
+    persisted = _connected_embeddings(env).get("model")
+    if isinstance(persisted, str) and persisted.strip():
+        return persisted.strip()
+    return DEFAULT_EMBEDDINGS_MODEL
 
 
 # Errors worth retrying: a 5xx, a 400 that means the router is still loading the

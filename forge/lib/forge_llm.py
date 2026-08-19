@@ -147,32 +147,63 @@ DEFAULT_SERVICES = {
             "backgroundOutputTokens": 4096,
         },
     },
+    # The secondary backend `forge_delegate` offloads to. Off by default, so a
+    # stock install falls back to `chat` and this is never touched. `scheduling`
+    # is off on purpose: unlike chat/think it is a separate server, so there is no
+    # shared prefix cache to protect by pinning, and it runs a single slot — an
+    # `id_slot: 1` at a one-slot server is an out-of-range error. With scheduling
+    # off the call sends no `id_slot`. `chatTemplateKwargs` mirrors `task`: the
+    # secondary reasons into `reasoning_content` unless told not to think.
+    "delegate": {
+        "enabled": False,
+        "url": "http://llms:8104/v1/chat/completions",
+        # The id the secondary's non-thinking aggregate serves (its /v1/models
+        # reports `chat`; the URL, not the name, selects the secondary backend).
+        # `chat-custom2` is the stack's internal alias, not a servable id here.
+        "model": "chat",
+        "contextTokens": SLOT_CONTEXT_TOKENS,
+        "chatTemplateKwargs": {"enable_thinking": False},
+        "reasoningEffort": None,
+        "scheduling": {
+            "enabled": False,
+            "interactiveSlot": 0,
+            "backgroundSlot": 0,
+            "idleGraceMs": 2000,
+            "yieldMs": 1000,
+            "backgroundOutputTokens": 4096,
+        },
+    },
 }
 
 SERVICE_URL_ENVIRONMENT = {
     "chat": ("FORGE_BASE_CHAT_URL", "FORGE_CHAT_URL"),
     "think": ("FORGE_THINK_URL",),
     "task": ("FORGE_TASK_URL",),
+    "delegate": ("FORGE_DELEGATE_URL",),
 }
 SERVICE_MODEL_ENVIRONMENT = {
     "chat": ("FORGE_BASE_MODEL",),
     "think": ("FORGE_THINK_MODEL",),
     "task": ("FORGE_TASK_MODEL",),
+    "delegate": ("FORGE_DELEGATE_MODEL",),
 }
 SERVICE_CONTEXT_ENVIRONMENT = {
     "chat": ("FORGE_BASE_CHAT_CONTEXT_TOKENS",),
     "think": ("FORGE_THINK_CONTEXT_TOKENS",),
     "task": ("FORGE_TASK_CONTEXT_TOKENS",),
+    "delegate": ("FORGE_DELEGATE_CONTEXT_TOKENS",),
 }
 SERVICE_TEMPLATE_KWARGS_ENVIRONMENT = {
     "chat": ("FORGE_BASE_CHAT_TEMPLATE_KWARGS",),
     "think": ("FORGE_THINK_TEMPLATE_KWARGS",),
     "task": ("FORGE_TASK_TEMPLATE_KWARGS",),
+    "delegate": ("FORGE_DELEGATE_TEMPLATE_KWARGS",),
 }
 SERVICE_REASONING_EFFORT_ENVIRONMENT = {
     "chat": ("FORGE_BASE_CHAT_REASONING_EFFORT",),
     "think": ("FORGE_THINK_REASONING_EFFORT",),
     "task": ("FORGE_TASK_REASONING_EFFORT",),
+    "delegate": ("FORGE_DELEGATE_REASONING_EFFORT",),
 }
 
 # A thinking backend that was asked not to think can still emit a stray block.
@@ -515,6 +546,25 @@ def resolve_task_or_chat(base_url=None, model=None, env=None, settings=None):
         return task
     fallback = resolve_service("chat", env=env, settings=settings)
     fallback["name"] = "task"
+    fallback["fallback"] = "chat"
+    return fallback
+
+
+def resolve_delegate_or_chat(base_url=None, model=None, env=None, settings=None):
+    """The delegation target, falling back to ``chat`` when no secondary is
+    configured — the default.
+
+    Enabled means a second backend on another GPU that a delegated investigation
+    runs on in parallel; disabled means it runs on the primary ``chat`` weights,
+    the way it did before a secondary was possible. As with the other tiers the
+    fallback degrades *toward* the always-present ``chat`` so the tool is never
+    unavailable for lack of a secondary.
+    """
+    delegate = resolve_service("delegate", base_url=base_url, model=model, env=env, settings=settings)
+    if delegate["enabled"] and delegate["url"]:
+        return delegate
+    fallback = resolve_service("chat", env=env, settings=settings)
+    fallback["name"] = "delegate"
     fallback["fallback"] = "chat"
     return fallback
 

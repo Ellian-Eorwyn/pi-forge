@@ -179,5 +179,46 @@ class EmbedTextsTests(_NoSleep):
         self.assertEqual(result["vectors"], [])
 
 
+class EndpointResolutionTests(unittest.TestCase):
+    """Explicit arg > env > connectedServices.embeddings > default.
+
+    The settings layer is the whole point: without it the 7 Python skills honored
+    only FORGE_EMBEDDINGS_URL, so a setup that moved embedding in the config file
+    reached the JS web-research client but not them.
+    """
+
+    def _agent_dir_with(self, embeddings):
+        import json
+        import tempfile
+
+        directory = tempfile.mkdtemp()
+        (Path(directory) / "settings.json").write_text(
+            json.dumps({"connectedServices": {"embeddings": embeddings}}), encoding="utf-8"
+        )
+        return directory
+
+    def test_explicit_wins(self):
+        self.assertEqual(fe.endpoint_url("http://explicit/v1/embeddings", env={}), "http://explicit/v1/embeddings")
+
+    def test_env_wins_over_settings(self):
+        env = {
+            "PI_FORGE_AGENT_DIR": self._agent_dir_with({"url": "http://settings:5/v1/embeddings"}),
+            "FORGE_EMBEDDINGS_URL": "http://env:9/v1/embeddings",
+        }
+        self.assertEqual(fe.endpoint_url(env=env), "http://env:9/v1/embeddings")
+
+    def test_settings_used_when_no_env(self):
+        env = {"PI_FORGE_AGENT_DIR": self._agent_dir_with({"url": "http://laptop:8005/v1/embeddings", "model": "embed"})}
+        self.assertEqual(fe.endpoint_url(env=env), "http://laptop:8005/v1/embeddings")
+        self.assertEqual(fe.model_name(env=env), "embed")
+
+    def test_default_when_nothing_set(self):
+        import tempfile
+
+        env = {"PI_FORGE_AGENT_DIR": tempfile.mkdtemp()}
+        self.assertEqual(fe.endpoint_url(env=env), fe.DEFAULT_EMBEDDINGS_URL)
+        self.assertEqual(fe.model_name(env=env), fe.DEFAULT_EMBEDDINGS_MODEL)
+
+
 if __name__ == "__main__":
     unittest.main()

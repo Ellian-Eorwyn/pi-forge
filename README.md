@@ -166,6 +166,15 @@ Use these only when you need a non-default layout, local smoke test, or developm
 
 Persistent local backend settings live in `~/.pi-forge/agent/settings.json` under `connectedServices`. The installed defaults are SearXNG at `http://llms/searxng` and Playwright rendered browsing at `ws://llms/playwright`.
 
+#### Switching backend setups
+
+`~/.pi-forge/agent/backends.json` is a one-file switcher for whole backend setups — where embedding, OCR, transcription, the primary model, and the delegation model each run. It holds named setups and an `active` pointer; switching one file (or running one command) repoints them all. The shipped setups are `single` (one image-capable model on `llms`, no delegation — the default) and `distributed` (embedding + transcription local, plus a vision-free delegation backend on a second GPU that `forge_delegate` offloads to in parallel).
+
+- From inside the agent: `/backend` shows the active setup, `/backend use <name>` switches, and `/backend on|off` toggles delegation. Skills and `forge_delegate` pick up the change on their next call; the interactive model updates on your next session.
+- From the terminal: `node <package>/scripts/backends.mjs [list|show|use <name>|apply|delegation on|off]`.
+
+Delegation and OCR also have their own `connectedServices` entries (`delegate`, `ocr`), and every field is still overridable per-launch by the matching `FORGE_*` env var (`FORGE_DELEGATE_URL`, `FORGE_EMBEDDINGS_URL`, `FORGE_TRANSCRIPTION_URL`, `FORGE_GLMOCR_URL`, …).
+
 ### Optional Moshi hooks
 
 `moshi-hook` resolves its `pi` target from `PI_CODING_AGENT_DIR`, so a standard `moshi-hook install` covers `~/.pi` and leaves this distribution's `~/.pi-forge/agent` uncovered. Install and `pi-forge-update` close that gap themselves: when `moshi-hook` is present on the host they have it generate `~/.pi-forge/agent/extensions/moshi-hooks.ts`, which pi-forge then discovers like any other agent-directory extension. The generated hook is always the daemon's own current version — nothing is vendored here. The daemon is restarted (`systemctl --user restart moshi-hook.service`) only when the hook actually changed, so a no-op update cannot drop a live session's bridge; elsewhere the step prints a one-line restart reminder. Hosts without `moshi-hook` install exactly as before and print nothing.
