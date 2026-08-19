@@ -6,6 +6,7 @@ import json
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -736,6 +737,123 @@ class ImageInputTests(unittest.TestCase):
         self.assertEqual(sent[0], {"type": "text", "text": "Describe this."})
         self.assertEqual(sent[1]["type"], "image_url")
         self.assertTrue(sent[1]["image_url"]["url"].startswith("data:image/png;base64,"))
+
+
+class DualGpuLaneTests(unittest.TestCase):
+    """The GPU-2 bulk/verify lanes, their resolvers, and the fan-out dispatcher.
+
+    The twin of the dual-GPU tests in forge-llm.test.mjs; the two must agree.
+    """
+
+    DUAL = {
+        "chat2": {
+            "enabled": True,
+            "baseUrl": "http://llms:8104/v1/chat/completions",
+            "model": "chat",
+            "images": False,
+            "chatTemplateKwargs": {"enable_thinking": False},
+        },
+        "think2": {"enabled": True, "baseUrl": "http://llms:8108/v1/chat/completions", "model": "code", "images": False},
+        "bulk": {"lanes": ["chat", "chat2"]},
+        "verify": {"service": "think2"},
+    }
+
+    def test_chat2_and_think2_default_off_with_scheduling_off(self):
+        chat2 = forge_llm.resolve_service("chat2", env={}, settings=self.DUAL)
+        self.assertEqual(chat2["url"], "http://llms:8104/v1/chat/completions")
+        self.assertFalse(chat2["images"])
+        self.assertFalse(chat2["scheduling"]["enabled"])
+        think2 = forge_llm.resolve_service("think2", env={}, settings=self.DUAL)
+        self.assertEqual(think2["url"], "http://llms:8108/v1/chat/completions")
+        self.assertEqual(think2["model"], "code")
+        # Off by default (empty settings).
+        self.assertFalse(forge_llm.resolve_service("chat2", env={}, settings={})["enabled"])
+
+    def test_env_url_overrides_the_gpu2_lane_endpoint(self):
+        # As with `delegate`, the Python twin takes `enabled` from settings/default
+        # and the env var overrides the endpoint (FORGE_CHAT2_*/FORGE_THINK2_*).
+        settings = {"chat2": {"enabled": True}, "think2": {"enabled": True}}
+        env = {"FORGE_CHAT2_URL": "http://gpu2:9104/v1", "FORGE_THINK2_URL": "http://gpu2:9108/v1"}
+        chat2 = forge_llm.resolve_service("chat2", env=env, settings=settings)
+        self.assertTrue(chat2["enabled"])
+        self.assertEqual(chat2["url"], "http://gpu2:9104/v1/chat/completions")
+        self.assertEqual(forge_llm.resolve_service("think2", env=env, settings=settings)["url"], "http://gpu2:9108/v1/chat/completions")
+
+    def test_verify_prefers_the_verify_lane_then_degrades(self):
+        verify = forge_llm.resolve_verify_or_think_or_chat(env={}, settings=self.DUAL)
+        self.assertEqual(verify["url"], "http://llms:8108/v1/chat/completions")
+        self.assertNotIn("fallback", verify)
+        # No secondary: the primary thinking lane, no fallback flag.
+        degraded = forge_llm.resolve_verify_or_think_or_chat(env={}, settings={})
+        self.assertEqual(degraded["url"], "http://llms:8008/v1/chat/completions")
+        self.assertNotIn("fallback", degraded)
+        # An explicit endpoint overrides the configured verify lane.
+        pinned = forge_llm.resolve_verify_or_think_or_chat(base_url="http://pinned:1/v1", env={}, settings=self.DUAL)
+        self.assertEqual(pinned["url"], "http://pinned:1/v1/chat/completions")
+
+    def test_bulk_lanes_span_both_and_drop_text_only_for_images(self):
+        lanes = forge_llm.resolve_bulk_lanes(env={}, settings=self.DUAL)
+        self.assertEqual(
+            [lane["url"] for lane in lanes],
+            ["http://llms:8004/v1/chat/completions", "http://llms:8104/v1/chat/completions"],
+        )
+        vision = forge_llm.resolve_bulk_lanes(env={}, settings=self.DUAL, carries_image=True)
+        self.assertEqual([lane["url"] for lane in vision], ["http://llms:8004/v1/chat/completions"])
+        self.assertEqual([lane["name"] for lane in forge_llm.resolve_bulk_lanes(env={}, settings={})], ["chat"])
+
+    def _lanes(self):
+        return (
+            {"name": "chat", "url": "http://gpu1/v1/chat/completions", "model": "chat", "images": True},
+            {"name": "chat2", "url": "http://gpu2/v1/chat/completions", "model": "chat", "images": False},
+        )
+
+    def test_dispatch_bulk_fans_and_records_produced_by(self):
+        chat, chat2 = self._lanes()
+        items = [{"id": "d%d" % i} for i in range(10)]
+        counts = {}
+        lock = threading.Lock()
+
+        def run_one(lane, item, _index):
+            with lock:
+                counts[lane["name"]] = counts.get(lane["name"], 0) + 1
+            time.sleep(0.005)
+            return "ok:" + item["id"]
+
+        out = forge_llm.dispatch_bulk([chat, chat2], items, run_one, item_id=lambda item, _index: item["id"])
+        self.assertTrue(all(out["results"][i] == ("ok:d%d" % i) for i in range(10)))
+        self.assertTrue(counts.get("chat", 0) > 0 and counts.get("chat2", 0) > 0)
+        self.assertEqual(out["producedBy"]["d0"]["url"], "http://gpu1/v1/chat/completions")
+
+    def test_dispatch_bulk_keeps_image_items_on_a_vision_lane(self):
+        chat, chat2 = self._lanes()
+        items = [{"id": "a", "img": False}, {"id": "b", "img": True}, {"id": "c", "img": False}]
+        ran = {}
+
+        def run_one(lane, item, _index):
+            ran[item["id"]] = lane["name"]
+            time.sleep(0.003)
+            return 1
+
+        forge_llm.dispatch_bulk([chat, chat2], items, run_one, carries_image=lambda item, _index: item["img"])
+        self.assertEqual(ran["b"], "chat")
+
+    def test_dispatch_bulk_drains_on_a_surviving_lane(self):
+        chat, chat2 = self._lanes()
+        items = [{"id": i} for i in range(6)]
+
+        def run_one(lane, _item, _index):
+            if lane["name"] == "chat2":
+                raise forge_llm.ChatError("gpu2 down")
+            time.sleep(0.002)
+            return "done"
+
+        out = forge_llm.dispatch_bulk([chat, chat2], items, run_one)
+        self.assertTrue(all(result == "done" for result in out["results"]))
+
+    def test_dispatch_bulk_rejects_an_image_with_no_vision_lane(self):
+        _chat, chat2 = self._lanes()
+        with self.assertRaises(forge_llm.ChatError):
+            forge_llm.dispatch_bulk([chat2], [{"id": "x"}], lambda lane, item, index: 1, carries_image=lambda item, index: True)
 
 
 if __name__ == "__main__":

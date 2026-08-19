@@ -168,12 +168,16 @@ Persistent local backend settings live in `~/.pi-forge/agent/settings.json` unde
 
 #### Switching backend setups
 
-`~/.pi-forge/agent/backends.json` is a one-file switcher for whole backend setups — where embedding, OCR, transcription, the primary model, and the delegation model each run. It holds named setups and an `active` pointer; switching one file (or running one command) repoints them all. The shipped setups are `single` (one image-capable model on `llms`, no delegation — the default) and `distributed` (embedding + transcription local, plus a vision-free delegation backend on a second GPU that `forge_delegate` offloads to in parallel).
+`~/.pi-forge/agent/backends.json` is a one-file switcher for whole backend setups — where embedding, OCR, transcription, the primary model, and the delegation model each run. It holds named setups and an `active` pointer; switching one file (or running one command) repoints them all. The shipped setups are:
 
-- From inside the agent: `/backend` shows the active setup, `/backend use <name>` switches, and `/backend on|off` toggles delegation. Skills and `forge_delegate` pick up the change on their next call; the interactive model updates on your next session.
-- From the terminal: `node <package>/scripts/backends.mjs [list|show|use <name>|apply|delegation on|off]`.
+- **`single`** (the default) — one image-capable model on `llms`, no delegation.
+- **`distributed`** — embedding + transcription local, plus a vision-free delegation backend on a second GPU that `forge_delegate` offloads to in parallel.
+- **`distributed-parallel`** — two full copies of the model, one per GPU, used at once. The interactive session and one bulk lane stay on the vision-capable GPU 1; the vision-free second GPU adds a **second bulk lane** (so a batch skill's per-item work fans across both GPUs — see `bulk.lanes`), an **independent verify lane** (`verify.service` → `think2`, so review runs on a separate instance from the producers), **delegation**, and **interactive-session compaction offload** (`compaction.offload`, so the main session stays responsive while GPU 2 summarizes). Embedding + transcription are local.
 
-Delegation and OCR also have their own `connectedServices` entries (`delegate`, `ocr`), and every field is still overridable per-launch by the matching `FORGE_*` env var (`FORGE_DELEGATE_URL`, `FORGE_EMBEDDINGS_URL`, `FORGE_TRANSCRIPTION_URL`, `FORGE_GLMOCR_URL`, …).
+- From inside the agent: `/backend` shows the active setup, `/backend use <name>` switches, and `/backend on|off` toggles delegation. **`/parallel`** switches to `distributed-parallel`, and **`/single`** is a one-word failsafe that reverts to the single-model setup — turning *every* dual-GPU knob (second bulk lane, verify lane, delegation, compaction offload) back off in one step, for when the second GPU is powered down or re-cabled. Skills and `forge_delegate` pick up the change on their next call; the interactive model updates on your next session.
+- From the terminal: `node <package>/scripts/backends.mjs [list|show|use <name>|single|parallel|apply|delegation on|off]`.
+
+Delegation, OCR, and the two GPU-2 lanes have their own `connectedServices` entries (`delegate`, `ocr`, `chat2`, `think2`), and every field is still overridable per-launch by the matching `FORGE_*` env var (`FORGE_DELEGATE_URL`, `FORGE_CHAT2_URL`, `FORGE_THINK2_URL`, `FORGE_EMBEDDINGS_URL`, `FORGE_TRANSCRIPTION_URL`, `FORGE_GLMOCR_URL`, …).
 
 Transcription can also target an OpenAI-compatible ASR server (e.g. a laptop-local mlx-audio server) by setting `connectedServices.transcription.api` to `"openai"` (or `FORGE_TRANSCRIPTION_API=openai`); the default `"sidecar"` speaks the pi-forge async `/transcribe` API. The `distributed` setup sets this for you.
 

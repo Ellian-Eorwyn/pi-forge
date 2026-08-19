@@ -932,12 +932,14 @@ def attempt_extraction(service, messages, item_types, source_text, args):
     return items, quote_violations(items, source_text)
 
 
-def record_extraction(run_directory, run, document_id, status, items, note, supersedes=False):
+def record_extraction(run_directory, run, document_id, status, items, note, supersedes=False, ran_on=None):
     """Commit one document's disposition. Shared by the CLI and the worker so
     both go through the same journal and state transition.
 
     ``supersedes`` marks a deliberate replacement of an earlier result, which is
-    how review escalation records a re-extraction.
+    how review escalation records a re-extraction. ``ran_on`` records which lane
+    produced it (``{"service", "url"}``) when the work came from the bulk fan-out,
+    so a run journals which GPU each document ran on.
     """
     result = {
         "documentId": document_id,
@@ -948,6 +950,8 @@ def record_extraction(run_directory, run, document_id, status, items, note, supe
     }
     if supersedes:
         result["supersedes"] = True
+    if ran_on:
+        result["ranOn"] = ran_on
     run_state.append_jsonl_fsync(run_directory / "extraction_results.jsonl", result)
     results = load_results(run_directory)
     by_id = {row["documentId"]: row for row in results}
@@ -1001,31 +1005,75 @@ def command_process(args):
     if not service["enabled"]:
         fail("connectedServices.chat is disabled; configure the local chat endpoint before processing")
 
+    # Fan per-document extraction across the configured bulk lanes, so a two-GPU
+    # setup runs on both GPUs at once. A caller that pinned one endpoint with
+    # --base-url keeps that single lane; otherwise connectedServices.bulk.lanes
+    # decide, degrading to the resolved chat lane when none are enabled. Documents
+    # are independent here (no cross-document state), so a document is the fan-out
+    # unit. Every lane sends the same byte-stable system prompt, so each lane's
+    # prefix cache stays warm.
+    lanes = [service] if getattr(args, "base_url", None) else (forge_llm.resolve_bulk_lanes() or [service])
+
+    total = len(run["documents"])
+    recorded = {row.get("documentId") for row in load_results(run_directory)}
+    pending = [document_id for document_id in document_order(run) if document_id not in recorded]
+    limit = args.limit if args.limit and args.limit > 0 else None
+    if limit is not None:
+        pending = pending[:limit]
+
     processed = 0
     failures = 0
-    limit = args.limit if args.limit and args.limit > 0 else None
-    while True:
-        results = load_results(run_directory)
-        document_id = next_pending(run, results)
-        if document_id is None or (limit is not None and processed >= limit):
-            break
-        document = document_by_id(run, document_id)
-        position = len(results) + 1
-        total = len(run["documents"])
-        label = document_label(document)
-        progress(f"[{position}/{total}] {label}")
-        try:
-            text = Path(document["sourcePath"]).read_text(encoding="utf-8", errors="replace")
-            items = extract_document(service, run, document, text, args)
-            record_extraction(run_directory, run, document_id, "success", items, None)
-            progress(f"[{position}/{total}] {label}: {len(items)} items")
-        except (UserError, OSError) as error:
-            failures += 1
-            record_extraction(run_directory, run, document_id, "needs_review", None, f"extraction failed: {error}")
-            progress(f"[{position}/{total}] {label}: needs review ({error})")
-        processed += 1
+    counters = {"done": 0}
 
-    verification = verify_extractions(args, run_directory, run) if args.verify else None
+    def run_one(lane, document_id, _index):
+        document = document_by_id(run, document_id)
+        text = Path(document["sourcePath"]).read_text(encoding="utf-8", errors="replace")
+        return extract_document(lane, run, document, text, args)
+
+    def on_result(document_id, items, lane, _index):
+        nonlocal processed
+        record_extraction(
+            run_directory,
+            run,
+            document_id,
+            "success",
+            items,
+            None,
+            ran_on={"service": lane.get("name"), "url": lane.get("url")},
+        )
+        processed += 1
+        counters["done"] += 1
+        label = document_label(document_by_id(run, document_id))
+        progress(f"[{counters['done']}/{len(pending)}] {label}: {len(items)} items on {lane.get('url')}")
+
+    def on_error(_document_id, error, _lane, _index):
+        # A validation/exhausted-transient failure (UserError) or a file problem
+        # (OSError) is the document's, not the lane's — record needs_review rather
+        # than retrying it on another GPU. Anything unexpected gets one more lane.
+        return "fail" if isinstance(error, (UserError, OSError)) else "retry"
+
+    produced_by = {}
+    if pending:
+        outcome = forge_llm.dispatch_bulk(
+            lanes,
+            pending,
+            run_one,
+            item_id=lambda document_id, _index: document_id,
+            on_result=on_result,
+            on_error=on_error,
+        )
+        produced_by = outcome["producedBy"]
+        for index, document_id in enumerate(pending):
+            result = outcome["results"][index]
+            if isinstance(result, dict) and "__dispatch_error" in result:
+                failures += 1
+                counters["done"] += 1
+                error = result["__dispatch_error"]
+                record_extraction(run_directory, run, document_id, "needs_review", None, f"extraction failed: {error}")
+                label = document_label(document_by_id(run, document_id))
+                progress(f"[{counters['done']}/{len(pending)}] {label}: needs review ({error})")
+
+    verification = verify_extractions(args, run_directory, run, produced_by) if args.verify else None
     remaining = len(run["documents"]) - len(load_results(run_directory))
     print(
         json.dumps(
@@ -1041,7 +1089,7 @@ def command_process(args):
     )
 
 
-def verify_extractions(args, run_directory, run):
+def verify_extractions(args, run_directory, run, produced_by=None):
     """Review every extraction on the thinking model, and redo what it flags."""
     results = {row["documentId"]: row for row in load_results(run_directory)}
     documents = {document["documentId"]: document for document in run["documents"]}
@@ -1052,7 +1100,10 @@ def verify_extractions(args, run_directory, run):
     ]
     if not reviewable:
         return None
-    think = forge_llm.resolve_think_or_chat(base_url=args.think_url, model=args.think_model)
+    # Review on the configured verify lane (think2 on the second GPU in a two-GPU
+    # setup), which is a genuinely independent instance from the bulk producers;
+    # degrades to the primary thinking lane when none is configured.
+    think = forge_llm.resolve_verify_or_think_or_chat(base_url=args.think_url, model=args.think_model)
     if not think["enabled"]:
         return {"skipped": "no thinking service is configured"}
     items = [verification_payload(document_id, documents[document_id], result) for document_id, result in reviewable]
@@ -1062,6 +1113,7 @@ def verify_extractions(args, run_directory, run):
             think,
             VERIFY_SYSTEM,
             items,
+            produced_by=produced_by,
             journal_path=run_directory / "verified.jsonl",
             packet_size=args.verify_packet_size,
             background=True,

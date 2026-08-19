@@ -242,7 +242,7 @@ def pinned_to_one_endpoint(args):
     return named_chat and not named_other
 
 
-def service_for(stage, args=None, override=None, env=None, settings=None, routing=None):
+def service_for(stage, args=None, override=None, env=None, settings=None, routing=None, carries_image=False):
     """Resolve the service for ``stage``.
 
     Precedence is explicit argument, then an endpoint the command was pinned to,
@@ -253,26 +253,39 @@ def service_for(stage, args=None, override=None, env=None, settings=None, routin
     way, and this preserves it rather than hiding it. A stage that quietly ran
     somewhere other than where it was routed is the failure this module exists to
     prevent, so the caller is always able to journal what actually happened.
+
+    ``carries_image`` keeps an image-bearing item on a vision lane: a stage routed
+    to a text-only lane (``task``, or a GPU-2 lane) would otherwise have its image
+    silently dropped to a placeholder by the agent's transform layer.
     """
     name = service_name_for(stage, override=override, env=env, routing=routing, args=args)
     if name != DEFAULT_SERVICE and override is None and pinned_to_one_endpoint(args):
         service = forge_llm.service_from_args(args, "chat", env=env, settings=settings)
-        return {**service, "stage": stage, "routedTo": name, "fallback": "chat", "pinned": True}
-    if args is None or name not in forge_llm.SERVICE_ARGUMENT_NAMES:
+        result = {**service, "stage": stage, "routedTo": name, "fallback": "chat", "pinned": True}
+    elif args is None or name not in forge_llm.SERVICE_ARGUMENT_NAMES:
         service = RESOLVERS.get(name, RESOLVERS[DEFAULT_SERVICE])(env=env, settings=settings)
-        return {**service, "stage": stage, "routedTo": name}
-    # A command that named an endpoint for this service keeps it — `--think-url`
-    # has to reach a think-routed stage, not just the verifier it was added for —
-    # and `service_from_args` caches the resolution for the hot loops.
-    service = forge_llm.service_from_args(args, name, env=env, settings=settings)
-    if name != DEFAULT_SERVICE and not (service["enabled"] and service["url"]):
-        # Disabled tiers degrade toward the 27B, exactly as the resolvers do.
-        service = {
-            **forge_llm.service_from_args(args, "chat", env=env, settings=settings),
-            "name": name,
-            "fallback": "chat",
-        }
-    return {**service, "stage": stage, "routedTo": name}
+        result = {**service, "stage": stage, "routedTo": name}
+    else:
+        # A command that named an endpoint for this service keeps it — `--think-url`
+        # has to reach a think-routed stage, not just the verifier it was added for —
+        # and `service_from_args` caches the resolution for the hot loops.
+        service = forge_llm.service_from_args(args, name, env=env, settings=settings)
+        if name != DEFAULT_SERVICE and not (service["enabled"] and service["url"]):
+            # Disabled tiers degrade toward the 27B, exactly as the resolvers do.
+            service = {
+                **forge_llm.service_from_args(args, "chat", env=env, settings=settings),
+                "name": name,
+                "fallback": "chat",
+            }
+        result = {**service, "stage": stage, "routedTo": name}
+    if carries_image and result.get("images") is False:
+        chat = (
+            forge_llm.service_from_args(args, "chat", env=env, settings=settings)
+            if args is not None
+            else RESOLVERS["chat"](env=env, settings=settings)
+        )
+        return {**chat, "stage": stage, "routedTo": name, "fallback": "chat", "imageGuard": True}
+    return result
 
 
 def routing_record(service):

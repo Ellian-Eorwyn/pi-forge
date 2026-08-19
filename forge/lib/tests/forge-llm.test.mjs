@@ -30,10 +30,13 @@ const {
 	imageMessage,
 	parseJsonContent,
 	resetStackConditions,
+	resolveBulkLaneServices,
 	resolveDelegateService,
 	resolveService,
 	resolveTaskService,
 	resolveThinkService,
+	resolveVerifyService,
+	dispatchBulk,
 	serviceDoctor,
 	activeInteractiveLeases,
 	LEASE_STALE_MS,
@@ -850,4 +853,150 @@ test("estimatePromptTokens counts images instead of zero", () => {
 	} finally {
 		cleanup();
 	}
+});
+
+// --- dual-GPU lanes: chat2/think2 resolution, verify chain, bulk lanes, fan-out ---
+
+const NONEXISTENT_ENV = { PI_FORGE_AGENT_DIR: "/nonexistent-agent-directory" };
+const DUAL_SETTINGS = {
+	connectedServices: {
+		chat2: {
+			enabled: true,
+			baseUrl: "http://llms:8104/v1/chat/completions",
+			model: "chat",
+			images: false,
+			chatTemplateKwargs: { enable_thinking: false },
+		},
+		think2: { enabled: true, baseUrl: "http://llms:8108/v1/chat/completions", model: "code", images: false },
+		bulk: { lanes: ["chat", "chat2"] },
+		verify: { service: "think2" },
+	},
+};
+
+test("resolveService reads chat2/think2 with scheduling off and images false", () => {
+	const chat2 = resolveService("chat2", { env: NONEXISTENT_ENV, settings: DUAL_SETTINGS });
+	assert.equal(chat2.url, "http://llms:8104/v1/chat/completions");
+	assert.equal(chat2.images, false);
+	assert.equal(chat2.scheduling.enabled, false);
+	const think2 = resolveService("think2", { env: NONEXISTENT_ENV, settings: DUAL_SETTINGS });
+	assert.equal(think2.url, "http://llms:8108/v1/chat/completions");
+	assert.equal(think2.model, "code");
+});
+
+test("FORGE_CHAT2_URL / FORGE_THINK2_URL enable and point the GPU-2 lanes", () => {
+	const env = {
+		...NONEXISTENT_ENV,
+		FORGE_CHAT2_URL: "http://gpu2:9104/v1",
+		FORGE_THINK2_URL: "http://gpu2:9108/v1",
+	};
+	assert.equal(resolveService("chat2", { env }).enabled, true);
+	assert.equal(resolveService("chat2", { env }).url, "http://gpu2:9104/v1/chat/completions");
+	assert.equal(resolveService("think2", { env }).url, "http://gpu2:9108/v1/chat/completions");
+});
+
+test("resolveVerifyService prefers the verify lane, else degrades to think", () => {
+	const verify = resolveVerifyService({ env: NONEXISTENT_ENV, settings: DUAL_SETTINGS });
+	assert.equal(verify.url, "http://llms:8108/v1/chat/completions");
+	assert.equal(verify.fallback, undefined);
+	// No secondary configured: falls back to the primary thinking lane, no fallback flag.
+	const fallback = resolveVerifyService({ env: NONEXISTENT_ENV });
+	assert.equal(fallback.url, resolveThinkService({ env: NONEXISTENT_ENV }).url);
+	// An explicit endpoint overrides the configured verify lane.
+	const pinned = resolveVerifyService({
+		env: NONEXISTENT_ENV,
+		settings: DUAL_SETTINGS,
+		thinkUrl: "http://pinned:1/v1",
+	});
+	assert.equal(pinned.url, "http://pinned:1/v1/chat/completions");
+});
+
+test("resolveBulkLaneServices spans both lanes, and drops text-only lanes for images", () => {
+	const lanes = resolveBulkLaneServices({ env: NONEXISTENT_ENV, settings: DUAL_SETTINGS });
+	assert.deepEqual(
+		lanes.map((lane) => lane.url),
+		["http://llms:8004/v1/chat/completions", "http://llms:8104/v1/chat/completions"],
+	);
+	const visionLanes = resolveBulkLaneServices(
+		{ env: NONEXISTENT_ENV, settings: DUAL_SETTINGS },
+		{ carriesImage: true },
+	);
+	assert.deepEqual(
+		visionLanes.map((lane) => lane.url),
+		["http://llms:8004/v1/chat/completions"],
+	);
+	// Default (no bulk config): the single primary chat lane.
+	const single = resolveBulkLaneServices({ env: NONEXISTENT_ENV });
+	assert.deepEqual(
+		single.map((lane) => lane.name),
+		["chat"],
+	);
+});
+
+const LANE_A = { name: "chat", url: "http://gpu1/v1/chat/completions", model: "chat", images: true };
+const LANE_B = { name: "chat2", url: "http://gpu2/v1/chat/completions", model: "chat", images: false };
+
+test("dispatchBulk fans items across both lanes and journals producedBy", async () => {
+	const items = Array.from({ length: 10 }, (_value, index) => ({ id: `d${index}` }));
+	const laneCounts = {};
+	const { results, producedBy } = await dispatchBulk(
+		[LANE_A, LANE_B],
+		items,
+		async (lane, item) => {
+			laneCounts[lane.name] = (laneCounts[lane.name] ?? 0) + 1;
+			await new Promise((resolve) => setTimeout(resolve, 3));
+			return `ok:${item.id}`;
+		},
+		{ itemId: (item) => item.id },
+	);
+	assert.ok(
+		results.every((result, index) => result === `ok:d${index}`),
+		"every item completes in order",
+	);
+	assert.ok(laneCounts.chat > 0 && laneCounts.chat2 > 0, "both lanes ran work");
+	assert.equal(producedBy.d0.url, "http://gpu1/v1/chat/completions");
+});
+
+test("dispatchBulk keeps image items on a vision lane", async () => {
+	const items = [
+		{ id: "a", img: false },
+		{ id: "b", img: true },
+		{ id: "c", img: false },
+	];
+	const ran = {};
+	await dispatchBulk(
+		[LANE_A, LANE_B],
+		items,
+		async (lane, item) => {
+			ran[item.id] = lane.name;
+			await new Promise((resolve) => setTimeout(resolve, 2));
+			return 1;
+		},
+		{ carriesImage: (item) => item.img },
+	);
+	assert.equal(ran.b, "chat", "the image item ran on the vision lane, never chat2");
+});
+
+test("dispatchBulk drains the rest on the surviving lane when one lane fails", async () => {
+	const items = Array.from({ length: 6 }, (_value, index) => ({ id: index }));
+	const { results } = await dispatchBulk(
+		[LANE_A, LANE_B],
+		items,
+		async (lane) => {
+			if (lane.name === "chat2") throw new ChatError("gpu2 down");
+			await new Promise((resolve) => setTimeout(resolve, 1));
+			return "done";
+		},
+		{},
+	);
+	assert.ok(
+		results.every((result) => result === "done"),
+		"all items complete despite one dead lane",
+	);
+});
+
+test("dispatchBulk rejects when an image item has no vision lane", async () => {
+	await assert.rejects(
+		() => dispatchBulk([LANE_B], [{ id: "x", img: true }], async () => 1, { carriesImage: () => true }),
+		/no configured bulk lane accepts images/,
+	);
 });

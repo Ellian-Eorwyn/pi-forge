@@ -157,6 +157,77 @@ test("setDelegation on/off toggles the active setup and re-applies", () => {
 	assert.equal(readJson(dir, "settings.json").connectedServices.delegate.enabled, false);
 });
 
+test("projectProfile maps distributed-parallel onto both GPUs and the offload", () => {
+	const patch = projectProfile(DEFAULT_BACKENDS.profiles["distributed-parallel"]);
+	// GPU-2 lanes: bulk chat2 on :8104 (non-thinking), verify think2 on the code2 port :8108.
+	assert.equal(patch.connectedServices.chat2.enabled, true);
+	assert.equal(patch.connectedServices.chat2.baseUrl, "http://llms:8104/v1/chat/completions");
+	assert.equal(patch.connectedServices.chat2.images, false);
+	assert.deepEqual(patch.connectedServices.chat2.chatTemplateKwargs, { enable_thinking: false });
+	assert.equal(patch.connectedServices.chat2.scheduling.enabled, false);
+	assert.equal(patch.connectedServices.think2.enabled, true);
+	assert.equal(patch.connectedServices.think2.baseUrl, "http://llms:8108/v1/chat/completions");
+	assert.equal(patch.connectedServices.think2.model, "code");
+	assert.equal(patch.connectedServices.think2.chatTemplateKwargs, null);
+	assert.equal(patch.connectedServices.think2.scheduling.enabled, false);
+	assert.deepEqual(patch.connectedServices.bulk.lanes, ["chat", "chat2"]);
+	assert.equal(patch.connectedServices.verify.service, "think2");
+	assert.equal(patch.connectedServices.delegate.enabled, true);
+	// Compaction offload to the second GPU's non-thinking lane.
+	assert.equal(patch.taskModel.enabled, true);
+	assert.equal(patch.taskModel.baseUrl, "http://llms:8104/v1");
+	assert.equal(patch.taskModel.thinkingEnabled, false);
+	assert.equal(patch.taskProvider.id, "forge-task-local");
+	assert.equal(patch.taskProvider.model, "chat");
+	assert.deepEqual(patch.taskProvider.input, ["text"]);
+});
+
+test("a setup without a secondary projects chat2/think2/bulk/verify in their off-state", () => {
+	const patch = projectProfile(DEFAULT_BACKENDS.profiles.single);
+	assert.equal(patch.connectedServices.chat2.enabled, false);
+	assert.equal(patch.connectedServices.think2.enabled, false);
+	assert.deepEqual(patch.connectedServices.bulk.lanes, ["chat"]);
+	assert.equal(patch.connectedServices.verify.service, null);
+	assert.equal(patch.taskModel.enabled, false);
+	assert.equal(patch.taskProvider, null);
+});
+
+test("applyProfile distributed-parallel enables offload and creates the task provider", () => {
+	const dir = seedAgentDir();
+	applyProfile({ env: {}, agentDir: dir, name: "distributed-parallel" });
+	const settings = readJson(dir, "settings.json");
+	assert.equal(settings.connectedServices.chat2.enabled, true);
+	assert.equal(settings.connectedServices.think2.enabled, true);
+	assert.deepEqual(settings.connectedServices.bulk.lanes, ["chat", "chat2"]);
+	assert.equal(settings.connectedServices.verify.service, "think2");
+	assert.equal(settings.taskModel.enabled, true);
+	assert.equal(settings.contextBudget.useTaskModel, true);
+	const provider = readJson(dir, "models.json").providers["forge-task-local"];
+	assert.ok(provider, "forge-task-local provider is created");
+	assert.equal(provider.baseUrl, "http://llms:8104/v1");
+	assert.equal(provider.compat.thinkingFormat, "qwen-chat-template");
+	assert.equal(provider.models[0].id, "chat");
+	assert.deepEqual(provider.models[0].input, ["text"]);
+});
+
+test("reverting distributed-parallel to single leaves no dual-GPU residue", () => {
+	const dir = seedAgentDir();
+	applyProfile({ env: {}, agentDir: dir, name: "distributed-parallel" });
+	applyProfile({ env: {}, agentDir: dir, name: "single" });
+	const settings = readJson(dir, "settings.json");
+	assert.equal(settings.connectedServices.chat2.enabled, false);
+	assert.equal(settings.connectedServices.think2.enabled, false);
+	assert.deepEqual(settings.connectedServices.bulk.lanes, ["chat"]);
+	assert.equal(settings.connectedServices.verify.service, null);
+	assert.equal(settings.connectedServices.delegate.enabled, false);
+	assert.equal(settings.contextBudget.useTaskModel, false);
+	assert.equal(Object.hasOwn(settings, "taskModel"), false, "settings.taskModel is removed");
+	const providers = readJson(dir, "models.json").providers;
+	assert.equal(Object.hasOwn(providers, "forge-task-local"), false, "the offload provider is removed");
+	// The three interactive providers are untouched.
+	assert.deepEqual(Object.keys(providers).sort(), ["forge-local-chat", "forge-local-code", "forge-local-think"]);
+});
+
 test("a switch to a larger window recomputes the compaction reserve", () => {
 	const dir = seedAgentDir();
 	// A one-off 262k profile: reserve must become 25% of the window, not stay at 1.

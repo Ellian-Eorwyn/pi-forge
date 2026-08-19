@@ -14,8 +14,15 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { activeProfileName, applyProfile, loadBackends, setDelegation } from "../lib/backends.mjs";
-import { resolveConnectedServices } from "../lib/connected-services.mjs";
+import {
+	activeProfileName,
+	applyProfile,
+	DEFAULT_BACKENDS,
+	loadBackends,
+	saveBackends,
+	setDelegation,
+} from "../lib/backends.mjs";
+import { loadForgeSettings, resolveConnectedServices } from "../lib/connected-services.mjs";
 
 interface ApplyResult {
 	profile: string;
@@ -28,20 +35,58 @@ function statusLines(): string[] {
 	const config = loadBackends();
 	const active = activeProfileName(config);
 	const services = resolveConnectedServices({});
+	const settings = loadForgeSettings();
+	const taskModel =
+		settings.taskModel && typeof settings.taskModel === "object" && !Array.isArray(settings.taskModel)
+			? (settings.taskModel as { enabled?: boolean; baseUrl?: string })
+			: {};
+	const contextBudget =
+		settings.contextBudget && typeof settings.contextBudget === "object" && !Array.isArray(settings.contextBudget)
+			? (settings.contextBudget as { useTaskModel?: boolean })
+			: {};
+	const verifyName: string | null = services.verify?.service ?? null;
+	const verifyLane = verifyName
+		? (services as Record<string, { enabled?: boolean; baseUrl?: string }>)[verifyName]
+		: undefined;
 	const lines = [
 		`Active setup: ${active}`,
 		`  chat          ${services.chat.baseUrl} (${services.chat.contextTokens} ctx)`,
 		`  think         ${services.think.baseUrl}`,
+		`  bulk lanes    ${services.bulk.lanes.join(", ")}${services.bulk.lanes.length > 1 ? " (fan-out across GPUs)" : ""}`,
+		verifyLane?.enabled
+			? `  verify        ${verifyName} → ${verifyLane.baseUrl}`
+			: `  verify        primary think (${services.think.baseUrl})`,
+	];
+	if (services.chat2.enabled) lines.push(`  chat2         ${services.chat2.baseUrl}`);
+	if (services.think2.enabled) lines.push(`  think2        ${services.think2.baseUrl}`);
+	lines.push(
 		services.delegate.enabled
 			? `  delegation    on → ${services.delegate.baseUrl} (${services.delegate.model})`
 			: "  delegation    off (forge_delegate runs on primary chat)",
+		taskModel.enabled && contextBudget.useTaskModel
+			? `  compaction    offload → ${taskModel.baseUrl}`
+			: "  compaction    on primary (no offload)",
 		`  embeddings    ${services.embeddings.url}`,
 		`  transcription ${services.transcription.baseUrl}`,
 		`  ocr           ${services.ocr.url}`,
-	];
+	);
 	const others = Object.keys(config.profiles ?? {}).filter((name) => name !== active);
 	if (others.length) lines.push(`Other setups: ${others.join(", ")} — /backend use <name>`);
 	return lines;
+}
+
+/**
+ * Make sure a shipped setup exists in the runtime backends.json before applying it,
+ * so `/parallel` works on an install whose file predates the setup. Seeds the
+ * template from DEFAULT_BACKENDS; a setup the user already customized is left as-is.
+ */
+function ensureShippedProfile(name: string): void {
+	const config = loadBackends();
+	if (config.profiles?.[name]) return;
+	const template = (DEFAULT_BACKENDS.profiles as Record<string, unknown>)[name];
+	if (!template) return;
+	config.profiles = { ...(config.profiles ?? {}), [name]: template };
+	saveBackends(config);
 }
 
 function announce(ctx: ExtensionContext, result: ApplyResult): void {
@@ -112,6 +157,35 @@ export default function backendsExtension(pi: ExtensionAPI): void {
 				announce(ctx, applyProfile({ name: target }) as ApplyResult);
 			} catch (error) {
 				ctx.ui.notify(`/backend failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+			}
+		},
+	});
+
+	// One-word failsafe: drop back to the single-model setup when the backend
+	// hardware changes (GPU 2 off / re-cabled). This reverts EVERY dual-GPU knob —
+	// verify lane, bulk fan-out, delegation, and compaction offload — so nothing
+	// keeps pointing skills at an absent GPU 2 (the revert lives in applyProfile).
+	pi.registerCommand("single", {
+		description: "Failsafe: switch to the single-model setup (revert all dual-GPU routing)",
+		handler: async (_args, ctx) => {
+			try {
+				announce(ctx, applyProfile({ name: "single" }) as ApplyResult);
+			} catch (error) {
+				ctx.ui.notify(`/single failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+			}
+		},
+	});
+
+	// Counterpart: switch to the two-GPU setup. Seeds the shipped profile first so
+	// it works even on an install whose backends.json predates it.
+	pi.registerCommand("parallel", {
+		description: "Switch to the two-GPU distributed-parallel setup (both GPUs at once)",
+		handler: async (_args, ctx) => {
+			try {
+				ensureShippedProfile("distributed-parallel");
+				announce(ctx, applyProfile({ name: "distributed-parallel" }) as ApplyResult);
+			} catch (error) {
+				ctx.ui.notify(`/parallel failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 			}
 		},
 	});

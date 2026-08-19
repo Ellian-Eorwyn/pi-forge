@@ -23,10 +23,12 @@ import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { join } from "node:path";
 import {
 	getForgeAgentDir,
+	resolveBulkLanes,
 	resolveConnectedServices,
 	resolveDelegateOrChat,
 	resolveTaskOrChat,
 	resolveThinkOrChat,
+	resolveVerifyOrThinkOrChat,
 	SLOT_CONTEXT_TOKENS,
 } from "./connected-services.mjs";
 import { isTransientFailure } from "./run-state.mjs";
@@ -203,7 +205,23 @@ export function normalizeChatUrl(value) {
  * `connected-services.mjs` speaks `{enabled, baseUrl, model, scheduling}`;
  * everything here and in `forge_llm.py` speaks `{name, url, model, ...}`.
  */
-const INFERENCE_SERVICES = new Set(["chat", "think", "task", "delegate"]);
+const INFERENCE_SERVICES = new Set(["chat", "think", "task", "delegate", "chat2", "think2"]);
+
+/** Shape a raw `connectedServices` block into this module's `{name, url, ...}`. */
+function shapeService(name, service, extra = {}) {
+	return {
+		name,
+		enabled: Boolean(service.enabled),
+		url: normalizeChatUrl(service.baseUrl),
+		model: service.model,
+		images: service.images !== false,
+		contextTokens: service.contextTokens,
+		chatTemplateKwargs: service.chatTemplateKwargs,
+		reasoningEffort: service.reasoningEffort,
+		scheduling: service.scheduling,
+		...extra,
+	};
+}
 
 export function resolveService(name, options = {}) {
 	const services = resolveConnectedServices(options);
@@ -211,16 +229,7 @@ export function resolveService(name, options = {}) {
 	// rather than `baseUrl`, so falling through to it would produce a service
 	// with an undefined endpoint rather than an error.
 	const service = INFERENCE_SERVICES.has(name) ? services[name] : services.chat;
-	return {
-		name,
-		enabled: Boolean(service.enabled),
-		url: normalizeChatUrl(service.baseUrl),
-		model: service.model,
-		contextTokens: service.contextTokens,
-		chatTemplateKwargs: service.chatTemplateKwargs,
-		reasoningEffort: service.reasoningEffort,
-		scheduling: service.scheduling,
-	};
+	return shapeService(name, service);
 }
 
 /**
@@ -233,17 +242,7 @@ export function resolveThinkService(options = {}) {
 	const services = resolveConnectedServices(options);
 	const chosen = resolveThinkOrChat(services);
 	const isFallback = chosen === services.chat;
-	return {
-		name: "think",
-		enabled: Boolean(chosen.enabled),
-		url: normalizeChatUrl(chosen.baseUrl),
-		model: chosen.model,
-		contextTokens: chosen.contextTokens,
-		chatTemplateKwargs: chosen.chatTemplateKwargs,
-		reasoningEffort: chosen.reasoningEffort,
-		scheduling: chosen.scheduling,
-		...(isFallback ? { fallback: "chat" } : {}),
-	};
+	return shapeService("think", chosen, isFallback ? { fallback: "chat" } : {});
 }
 
 /**
@@ -254,17 +253,7 @@ export function resolveTaskService(options = {}) {
 	const services = resolveConnectedServices(options);
 	const chosen = resolveTaskOrChat(services);
 	const isFallback = chosen === services.chat;
-	return {
-		name: "task",
-		enabled: Boolean(chosen.enabled),
-		url: normalizeChatUrl(chosen.baseUrl),
-		model: chosen.model,
-		contextTokens: chosen.contextTokens,
-		chatTemplateKwargs: chosen.chatTemplateKwargs,
-		reasoningEffort: chosen.reasoningEffort,
-		scheduling: chosen.scheduling,
-		...(isFallback ? { fallback: "chat" } : {}),
-	};
+	return shapeService("task", chosen, isFallback ? { fallback: "chat" } : {});
 }
 
 /**
@@ -278,18 +267,52 @@ export function resolveDelegateService(options = {}) {
 	const services = resolveConnectedServices(options);
 	const chosen = resolveDelegateOrChat(services);
 	const isFallback = chosen === services.chat;
-	return {
-		name: "delegate",
-		enabled: Boolean(chosen.enabled),
-		url: normalizeChatUrl(chosen.baseUrl),
-		model: chosen.model,
-		contextTokens: chosen.contextTokens,
-		chatTemplateKwargs: chosen.chatTemplateKwargs,
-		reasoningEffort: chosen.reasoningEffort,
-		scheduling: chosen.scheduling,
-		...(isFallback ? { fallback: "chat" } : {}),
-	};
+	return shapeService("delegate", chosen, isFallback ? { fallback: "chat" } : {});
 }
+
+/**
+ * The service skill verification/review runs on. Prefers the `verify.service`
+ * lane (normally `think2` on the second GPU) so review is a genuinely independent
+ * instance from the bulk producers; degrades to the primary thinking lane and
+ * then to `chat`, exactly as `resolveThinkService` does, so a setup without a
+ * secondary keeps verifying. `fallback` names where it landed when that is not
+ * the requested verify lane, for journaling.
+ */
+export function resolveVerifyService(options = {}) {
+	// An explicit endpoint (e.g. a passed thinkUrl) wins over the configured verify
+	// lane, matching the module's precedence that an explicit argument beats settings.
+	if (options.thinkUrl) return resolveThinkService(options);
+	const services = resolveConnectedServices(options);
+	const chosen = resolveVerifyOrThinkOrChat(services);
+	const wanted = services.verify?.service ?? null;
+	// Identify the chosen block among the named services to label a degrade.
+	const landed =
+		INFERENCE_SERVICES_ORDER.find((candidate) => services[candidate] === chosen) ??
+		(chosen === services.chat ? "chat" : null);
+	const isFallback = wanted ? landed !== wanted : landed === "chat";
+	return shapeService("verify", chosen, isFallback ? { fallback: landed ?? "chat" } : {});
+}
+
+/**
+ * The ordered list of shaped services a batch skill fans per-item bulk work
+ * across, from `bulk.lanes`. Disabled lanes drop out; when `carriesImage` is true
+ * every text-only (`images:false`) lane drops too, so an image-bearing batch can
+ * only run on GPU-1 vision lanes. Always returns at least the `chat` lane, so a
+ * misconfiguration degrades to single-lane rather than to nothing. Each entry is
+ * a full `{name, url, images, ...}` service ready to pass to `call`.
+ */
+export function resolveBulkLaneServices(options = {}, { carriesImage = false } = {}) {
+	const services = resolveConnectedServices(options);
+	const lanes = resolveBulkLanes(services, { carriesImage });
+	return lanes.map((lane) => {
+		const name = INFERENCE_SERVICES_ORDER.find((candidate) => services[candidate] === lane) ?? "chat";
+		return shapeService(name, lane);
+	});
+}
+
+// The named inference services, in a stable order, for identifying which block a
+// resolver returned (raw blocks carry no `name`).
+const INFERENCE_SERVICES_ORDER = ["chat", "think", "task", "delegate", "chat2", "think2"];
 
 /** Strip a stray think block and any code fence, returning JSON text. */
 export function extractJsonContent(content) {
@@ -714,6 +737,126 @@ export async function callTextWithRetry(service, messages, options = {}) {
 	const { attempts = MAX_TRANSIENT_ATTEMPTS, ...rest } = options;
 	const { content, record } = await withRetry(attempts, () => call(service, messages, rest));
 	return { text: extractJsonContent(content), record };
+}
+
+/**
+ * Fan a batch skill's per-item bulk work across several inference lanes at once.
+ *
+ * `lanes` is the shaped-service list from `resolveBulkLaneServices` — with two
+ * GPUs it is `[chat, chat2]`, so items run on both GPUs in parallel; with one it
+ * is `[chat]` and this behaves like the old serial loop. `runOne(lane, item,
+ * index)` issues the model call for one item on the lane it is handed (it builds
+ * the messages, so the byte-stable system prefix stays per-lane and each lane's
+ * server prefix cache stays warm — this function never puts two different prompt
+ * shapes through one lane, and runs exactly `concurrencyPerLane` requests per lane
+ * at a time, one per GPU by default).
+ *
+ * Scheduling / invariants:
+ * - One in-flight request per lane keeps each lane's prefix cache warm; do not
+ *   raise `concurrencyPerLane` unless the lane's backend has the slots for it.
+ * - `carriesImage(item)` marks image-bearing items; they are only ever handed to
+ *   a vision lane (`images !== false`), and a hard error is raised up front if an
+ *   image item exists with no vision lane — an image must never reach a text-only
+ *   GPU-2 lane, where the transform layer would silently drop it.
+ * - A lane that throws requeues the item to another lane and, after
+ *   `maxLaneFailures` consecutive failures, drops out; the surviving lanes drain
+ *   the rest. If every capable lane dies with work left, this rejects so the
+ *   caller's own error path records it.
+ * - `onResult(item, result, lane, index)` is where the caller commits its journal
+ *   record; it is awaited before that worker pulls its next item, so resume state
+ *   never runs ahead of committed work.
+ *
+ * Returns `{ results, producedBy }`: `results` indexed by item order (a failed
+ * item is `{ __dispatchError }`), and `producedBy` keyed by `itemId(item, index)`
+ * mapping to `{ url, model }` — pass it straight to the verifier so per-item
+ * reviewer independence is exact.
+ */
+export async function dispatchBulk(lanes, items, runOne, options = {}) {
+	const {
+		concurrencyPerLane = 1,
+		carriesImage = null,
+		itemId = null,
+		onResult = null,
+		onError = null,
+		progress = null,
+		maxLaneFailures = 3,
+	} = options;
+	if (!Array.isArray(lanes) || lanes.length === 0) throw new ChatError("dispatchBulk needs at least one lane");
+	const list = Array.from(items);
+	const results = new Array(list.length).fill(undefined);
+	const producedBy = {};
+	const carries = list.map((item, index) => (carriesImage ? Boolean(carriesImage(item, index)) : false));
+	const hasVisionLane = lanes.some((lane) => lane.images !== false);
+	if (!hasVisionLane && carries.some(Boolean)) {
+		throw new ChatError("an item carries an image but no configured bulk lane accepts images");
+	}
+	const textQueue = [];
+	const visionQueue = [];
+	for (let index = 0; index < list.length; index += 1) (carries[index] ? visionQueue : textQueue).push(index);
+	const attempts = new Array(list.length).fill(0);
+	const maxItemAttempts = Math.max(2, lanes.length + 1);
+	let remaining = list.length;
+	let inFlight = 0;
+
+	// A vision lane prefers the vision-only work only it can serve, then falls to
+	// the shared text queue; a text-only lane serves the text queue alone. The
+	// shift is synchronous, so on JS's single thread no two workers claim one item.
+	const claim = (lane) => {
+		if (lane.images !== false && visionQueue.length) return visionQueue.shift();
+		if (textQueue.length) return textQueue.shift();
+		return -1;
+	};
+
+	const worker = async (lane) => {
+		let consecutiveFailures = 0;
+		for (;;) {
+			const index = claim(lane);
+			if (index === -1) {
+				// Nothing this lane can serve. If work is still in flight it might be
+				// requeued on failure, so wait and re-check rather than exiting early.
+				if (inFlight === 0) return;
+				await sleep(5);
+				continue;
+			}
+			attempts[index] += 1;
+			inFlight += 1;
+			const item = list[index];
+			try {
+				const result = await runOne(lane, item, index);
+				results[index] = result;
+				remaining -= 1;
+				consecutiveFailures = 0;
+				if (itemId) producedBy[itemId(item, index)] = { url: lane.url, model: lane.model };
+				if (onResult) await onResult(item, result, lane, index);
+				if (progress) progress({ done: list.length - remaining, total: list.length, lane: lane.name, index });
+			} catch (error) {
+				consecutiveFailures += 1;
+				const decision = onError ? onError(item, error, lane, index) || "retry" : "retry";
+				if (decision === "fail" || attempts[index] >= maxItemAttempts) {
+					results[index] = { __dispatchError: error };
+					remaining -= 1;
+					if (progress)
+						progress({ done: list.length - remaining, total: list.length, lane: lane.name, index, error });
+				} else {
+					(carries[index] ? visionQueue : textQueue).push(index);
+				}
+				if (consecutiveFailures >= maxLaneFailures) return;
+			} finally {
+				inFlight -= 1;
+			}
+		}
+	};
+
+	const workers = [];
+	for (const lane of lanes)
+		for (let slot = 0; slot < Math.max(1, concurrencyPerLane); slot += 1) workers.push(worker(lane));
+	await Promise.all(workers);
+	if (remaining > 0) {
+		throw new ChatError(
+			`bulk fan-out could not complete ${remaining} of ${list.length} item(s): every capable lane failed`,
+		);
+	}
+	return { results, producedBy };
 }
 
 /** List the model ids a service actually serves, via `GET /v1/models`. */

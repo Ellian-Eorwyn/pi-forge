@@ -66,6 +66,11 @@ export const DEFAULT_CONNECTED_SERVICES = Object.freeze({
 		enabled: true,
 		baseUrl: "http://llms:8004/v1/chat/completions",
 		model: "chat",
+		// The primary is served with an mmproj loaded, so this lane accepts images.
+		// The bulk fan-out and the routing image guard read this: an image-bearing
+		// item must never land on an `images:false` lane, where the transform layer
+		// (downgradeUnsupportedImages) would silently drop it.
+		images: true,
 		contextTokens: SLOT_CONTEXT_TOKENS,
 		chatTemplateKwargs: null,
 		reasoningEffort: null,
@@ -88,6 +93,7 @@ export const DEFAULT_CONNECTED_SERVICES = Object.freeze({
 		enabled: true,
 		baseUrl: "http://llms:8008/v1/chat/completions",
 		model: "code",
+		images: true,
 		contextTokens: SLOT_CONTEXT_TOKENS,
 		chatTemplateKwargs: null,
 		reasoningEffort: null,
@@ -115,6 +121,7 @@ export const DEFAULT_CONNECTED_SERVICES = Object.freeze({
 		enabled: false,
 		baseUrl: "http://llms:8007/v1/chat/completions",
 		model: "task",
+		images: false,
 		// Half the chat slot. Recorded as 32,768 for months after the backend
 		// moved, which quietly under-budgeted every task-tier prompt.
 		contextTokens: 65538,
@@ -154,6 +161,8 @@ export const DEFAULT_CONNECTED_SERVICES = Object.freeze({
 		// name, is what selects the secondary backend). `chat-custom2` is only the
 		// stack's internal alias for the weights and is not a servable id here.
 		model: "chat",
+		// The secondary GPU runs without an mmproj (vision off to save VRAM).
+		images: false,
 		contextTokens: SLOT_CONTEXT_TOKENS,
 		chatTemplateKwargs: Object.freeze({ enable_thinking: false }),
 		reasoningEffort: null,
@@ -166,6 +175,65 @@ export const DEFAULT_CONNECTED_SERVICES = Object.freeze({
 			backgroundOutputTokens: 4096,
 		}),
 	}),
+	// GPU-2 bulk lane. The second full copy of the model on the other GPU, served
+	// non-thinking on :8104 — the same endpoint `delegate` uses, but exposed as a
+	// first-class bulk service so `bulk.lanes` can fan per-item batch work across
+	// both GPUs at once. Off by default; a two-GPU setup (`distributed-parallel`)
+	// enables it. `scheduling.enabled:false` for the same reason as `delegate`: a
+	// separate single-slot server has no shared prefix cache to protect, and
+	// sending `id_slot:1` there is out of range. `images:false` — no mmproj — so
+	// the fan-out and routing guards keep image-bearing work off it.
+	chat2: Object.freeze({
+		enabled: false,
+		baseUrl: "http://llms:8104/v1/chat/completions",
+		model: "chat",
+		images: false,
+		contextTokens: SLOT_CONTEXT_TOKENS,
+		chatTemplateKwargs: Object.freeze({ enable_thinking: false }),
+		reasoningEffort: null,
+		scheduling: Object.freeze({
+			enabled: false,
+			interactiveSlot: 0,
+			backgroundSlot: 0,
+			idleGraceMs: 2000,
+			yieldMs: 1000,
+			backgroundOutputTokens: 4096,
+		}),
+	}),
+	// GPU-2 verify lane. The secondary's thinking configuration on :8108 (its code
+	// port), the mirror of primary `think`→:8008. Pointing skill verification here
+	// makes the reviewer a genuinely independent instance from the bulk producers
+	// (a different server, not the same weights reviewing their own work) and lets
+	// verify overlap with bulk instead of serializing on one GPU. `chatTemplateKwargs`
+	// is null: unlike `chat2` this lane is meant to reason, and :8108 returns its
+	// reasoning in visible content the way :8008 does. Off by default; scheduling off
+	// (separate single-slot server). `images:false`.
+	think2: Object.freeze({
+		enabled: false,
+		baseUrl: "http://llms:8108/v1/chat/completions",
+		model: "code",
+		images: false,
+		contextTokens: SLOT_CONTEXT_TOKENS,
+		chatTemplateKwargs: null,
+		reasoningEffort: null,
+		scheduling: Object.freeze({
+			enabled: false,
+			interactiveSlot: 0,
+			backgroundSlot: 0,
+			idleGraceMs: 2000,
+			yieldMs: 1000,
+			backgroundOutputTokens: 4096,
+		}),
+	}),
+	// Which lanes a batch skill fans per-item bulk work across, by service name.
+	// Default is the single primary `chat` lane — byte-for-byte the pre-fan-out
+	// behavior. `distributed-parallel` sets `["chat","chat2"]` to use both GPUs.
+	// Names that do not resolve to a real inference service are dropped on seed.
+	bulk: Object.freeze({ lanes: Object.freeze(["chat"]) }),
+	// Which service skill verification/review runs on. `null` means the primary
+	// thinking lane (`resolveThinkOrChat`), the pre-existing behavior;
+	// `distributed-parallel` sets `"think2"` to review on the second GPU.
+	verify: Object.freeze({ service: null }),
 	embeddings: Object.freeze({
 		enabled: true,
 		url: "http://llms:8005/v1/embeddings",
@@ -280,6 +348,10 @@ export function seedConnectedServicesSettings(settings) {
 		current.delegate && typeof current.delegate === "object" && !Array.isArray(current.delegate)
 			? current.delegate
 			: {};
+	const chat2 =
+		current.chat2 && typeof current.chat2 === "object" && !Array.isArray(current.chat2) ? current.chat2 : {};
+	const think2 =
+		current.think2 && typeof current.think2 === "object" && !Array.isArray(current.think2) ? current.think2 : {};
 	const embeddings =
 		current.embeddings && typeof current.embeddings === "object" && !Array.isArray(current.embeddings)
 			? current.embeddings
@@ -307,6 +379,8 @@ export function seedConnectedServicesSettings(settings) {
 		think: seedInferenceService(think, DEFAULT_CONNECTED_SERVICES.think),
 		task: seedInferenceService(task, DEFAULT_CONNECTED_SERVICES.task),
 		delegate: seedInferenceService(delegate, DEFAULT_CONNECTED_SERVICES.delegate),
+		chat2: seedInferenceService(chat2, DEFAULT_CONNECTED_SERVICES.chat2),
+		think2: seedInferenceService(think2, DEFAULT_CONNECTED_SERVICES.think2),
 		embeddings: {
 			enabled: embeddings.enabled ?? DEFAULT_CONNECTED_SERVICES.embeddings.enabled,
 			url: normalizeHttpBaseUrl(embeddings.url) ?? DEFAULT_CONNECTED_SERVICES.embeddings.url,
@@ -333,6 +407,8 @@ export function seedConnectedServicesSettings(settings) {
 				DEFAULT_CONNECTED_SERVICES.transcription.timeoutSeconds,
 			),
 		},
+		bulk: normalizeBulk(current.bulk),
+		verify: normalizeVerify(current.verify),
 		routing: normalizeRouting(current.routing),
 		apiKeys: normalizeApiKeys(current.apiKeys),
 	};
@@ -357,6 +433,41 @@ function normalizeRouting(current) {
 }
 
 const ROUTABLE_SERVICES = new Set(["chat", "think", "task"]);
+
+// Every named inference service. `bulk.lanes` and `verify.service` validate
+// against this so a typo disables the feature rather than routing into nothing.
+// `chat2`/`think2` are deliberately absent from ROUTABLE_SERVICES above: they are
+// fan-out lanes and a verify role, not per-stage routing targets.
+const INFERENCE_SERVICE_NAMES = new Set(["chat", "think", "task", "delegate", "chat2", "think2"]);
+
+/**
+ * The bulk fan-out lane list: `{ lanes: ["chat", ...] }`. Names that do not name a
+ * real inference service are dropped, duplicates collapse, and an empty result
+ * falls back to the single primary `chat` lane — so a typo disables fan-out
+ * rather than fanning batch work onto nothing.
+ */
+function normalizeBulk(current) {
+	const raw = current && typeof current === "object" && !Array.isArray(current) ? current.lanes : undefined;
+	const lanes = [];
+	if (Array.isArray(raw)) {
+		for (const value of raw) {
+			const name = normalizeServiceName(value);
+			if (name && INFERENCE_SERVICE_NAMES.has(name) && !lanes.includes(name)) lanes.push(name);
+		}
+	}
+	return { lanes: lanes.length ? lanes : ["chat"] };
+}
+
+/**
+ * The verify lane selector: `{ service: "think2" | null }`. A value that is not a
+ * real inference service normalizes to `null`, which means "review on the primary
+ * thinking lane" (`resolveThinkOrChat`) — the pre-existing behavior.
+ */
+function normalizeVerify(current) {
+	const raw = current && typeof current === "object" && !Array.isArray(current) ? current.service : undefined;
+	const name = normalizeServiceName(raw);
+	return { service: name && INFERENCE_SERVICE_NAMES.has(name) ? name : null };
+}
 
 /**
  * Keep only non-empty string values. A key persisted as null, a number, or the
@@ -393,6 +504,7 @@ function seedInferenceService(current, defaults) {
 		enabled: current.enabled ?? defaults.enabled,
 		baseUrl: normalizeHttpBaseUrl(current.baseUrl) ?? defaults.baseUrl,
 		model: normalizeServiceName(current.model) ?? defaults.model,
+		images: typeof current.images === "boolean" ? current.images : defaults.images,
 		contextTokens: normalizePositiveInteger(current.contextTokens, defaults.contextTokens),
 		chatTemplateKwargs: normalizeTemplateKwargs(current.chatTemplateKwargs) ?? defaults.chatTemplateKwargs,
 		reasoningEffort: normalizeServiceName(current.reasoningEffort) ?? defaults.reasoningEffort,
@@ -487,6 +599,31 @@ export function resolveConnectedServices(options = {}) {
 	const explicitDelegateContext = normalizePositiveInteger(parseInteger(options.delegateContextTokens), undefined);
 	const explicitDelegateTemplate = normalizeTemplateKwargs(options.delegateTemplateKwargs);
 	const explicitDelegateEffort = normalizeServiceName(options.delegateReasoningEffort);
+	// The GPU-2 bulk (`chat2`) and verify (`think2`) lanes reuse `delegate`'s override
+	// shape, keyed under FORGE_CHAT2_* / FORGE_THINK2_*. Both are off unless persisted
+	// or a URL enables them, matching every other tier: a bare URL turns the lane on.
+	const envChat2 = normalizeHttpBaseUrl(env.FORGE_CHAT2_URL);
+	const envChat2Model = normalizeServiceName(env.FORGE_CHAT2_MODEL);
+	const envChat2Context = normalizePositiveInteger(parseInteger(env.FORGE_CHAT2_CONTEXT_TOKENS), undefined);
+	const envChat2Template = normalizeTemplateKwargs(env.FORGE_CHAT2_TEMPLATE_KWARGS);
+	const envChat2Effort = normalizeServiceName(env.FORGE_CHAT2_REASONING_EFFORT);
+	const chat2EnvPresent = Object.hasOwn(env, "FORGE_CHAT2_URL");
+	const explicitChat2 = normalizeHttpBaseUrl(options.chat2Url);
+	const explicitChat2Model = normalizeServiceName(options.chat2Model);
+	const explicitChat2Context = normalizePositiveInteger(parseInteger(options.chat2ContextTokens), undefined);
+	const explicitChat2Template = normalizeTemplateKwargs(options.chat2TemplateKwargs);
+	const explicitChat2Effort = normalizeServiceName(options.chat2ReasoningEffort);
+	const envThink2 = normalizeHttpBaseUrl(env.FORGE_THINK2_URL);
+	const envThink2Model = normalizeServiceName(env.FORGE_THINK2_MODEL);
+	const envThink2Context = normalizePositiveInteger(parseInteger(env.FORGE_THINK2_CONTEXT_TOKENS), undefined);
+	const envThink2Template = normalizeTemplateKwargs(env.FORGE_THINK2_TEMPLATE_KWARGS);
+	const envThink2Effort = normalizeServiceName(env.FORGE_THINK2_REASONING_EFFORT);
+	const think2EnvPresent = Object.hasOwn(env, "FORGE_THINK2_URL");
+	const explicitThink2 = normalizeHttpBaseUrl(options.think2Url);
+	const explicitThink2Model = normalizeServiceName(options.think2Model);
+	const explicitThink2Context = normalizePositiveInteger(parseInteger(options.think2ContextTokens), undefined);
+	const explicitThink2Template = normalizeTemplateKwargs(options.think2TemplateKwargs);
+	const explicitThink2Effort = normalizeServiceName(options.think2ReasoningEffort);
 	// OCR takes the same env name document-ingest already honors, so setting it in
 	// one place reaches both the settings resolver and the skill's own default chain.
 	const envOcr = normalizeHttpBaseUrl(env.FORGE_GLMOCR_URL || env.FORGE_OCR_URL);
@@ -509,6 +646,7 @@ export function resolveConnectedServices(options = {}) {
 			enabled: explicitChat ? true : chatEnvPresent ? Boolean(envChat) : seeded.chat.enabled,
 			baseUrl: explicitChat ?? envChat ?? seeded.chat.baseUrl,
 			model: explicitChatModel ?? envChatModel ?? seeded.chat.model,
+			images: seeded.chat.images,
 			contextTokens: explicitChatContext ?? envChatContext ?? seeded.chat.contextTokens,
 			chatTemplateKwargs: explicitChatTemplate ?? envChatTemplate ?? seeded.chat.chatTemplateKwargs,
 			reasoningEffort: explicitChatEffort ?? envChatEffort ?? seeded.chat.reasoningEffort,
@@ -518,6 +656,7 @@ export function resolveConnectedServices(options = {}) {
 			enabled: explicitThink ? true : thinkEnvPresent ? Boolean(envThink) : seeded.think.enabled,
 			baseUrl: explicitThink ?? envThink ?? seeded.think.baseUrl,
 			model: explicitThinkModel ?? envThinkModel ?? seeded.think.model,
+			images: seeded.think.images,
 			contextTokens: explicitThinkContext ?? envThinkContext ?? seeded.think.contextTokens,
 			chatTemplateKwargs: explicitThinkTemplate ?? envThinkTemplate ?? seeded.think.chatTemplateKwargs,
 			reasoningEffort: explicitThinkEffort ?? envThinkEffort ?? seeded.think.reasoningEffort,
@@ -527,6 +666,7 @@ export function resolveConnectedServices(options = {}) {
 			enabled: explicitTask ? true : taskEnvPresent ? Boolean(envTask) : seeded.task.enabled,
 			baseUrl: explicitTask ?? envTask ?? seeded.task.baseUrl,
 			model: explicitTaskModel ?? envTaskModel ?? seeded.task.model,
+			images: seeded.task.images,
 			contextTokens: explicitTaskContext ?? envTaskContext ?? seeded.task.contextTokens,
 			chatTemplateKwargs: explicitTaskTemplate ?? envTaskTemplate ?? seeded.task.chatTemplateKwargs,
 			reasoningEffort: explicitTaskEffort ?? envTaskEffort ?? seeded.task.reasoningEffort,
@@ -536,11 +676,34 @@ export function resolveConnectedServices(options = {}) {
 			enabled: explicitDelegate ? true : delegateEnvPresent ? Boolean(envDelegate) : seeded.delegate.enabled,
 			baseUrl: explicitDelegate ?? envDelegate ?? seeded.delegate.baseUrl,
 			model: explicitDelegateModel ?? envDelegateModel ?? seeded.delegate.model,
+			images: seeded.delegate.images,
 			contextTokens: explicitDelegateContext ?? envDelegateContext ?? seeded.delegate.contextTokens,
 			chatTemplateKwargs: explicitDelegateTemplate ?? envDelegateTemplate ?? seeded.delegate.chatTemplateKwargs,
 			reasoningEffort: explicitDelegateEffort ?? envDelegateEffort ?? seeded.delegate.reasoningEffort,
 			scheduling: seeded.delegate.scheduling,
 		},
+		chat2: {
+			enabled: explicitChat2 ? true : chat2EnvPresent ? Boolean(envChat2) : seeded.chat2.enabled,
+			baseUrl: explicitChat2 ?? envChat2 ?? seeded.chat2.baseUrl,
+			model: explicitChat2Model ?? envChat2Model ?? seeded.chat2.model,
+			images: seeded.chat2.images,
+			contextTokens: explicitChat2Context ?? envChat2Context ?? seeded.chat2.contextTokens,
+			chatTemplateKwargs: explicitChat2Template ?? envChat2Template ?? seeded.chat2.chatTemplateKwargs,
+			reasoningEffort: explicitChat2Effort ?? envChat2Effort ?? seeded.chat2.reasoningEffort,
+			scheduling: seeded.chat2.scheduling,
+		},
+		think2: {
+			enabled: explicitThink2 ? true : think2EnvPresent ? Boolean(envThink2) : seeded.think2.enabled,
+			baseUrl: explicitThink2 ?? envThink2 ?? seeded.think2.baseUrl,
+			model: explicitThink2Model ?? envThink2Model ?? seeded.think2.model,
+			images: seeded.think2.images,
+			contextTokens: explicitThink2Context ?? envThink2Context ?? seeded.think2.contextTokens,
+			chatTemplateKwargs: explicitThink2Template ?? envThink2Template ?? seeded.think2.chatTemplateKwargs,
+			reasoningEffort: explicitThink2Effort ?? envThink2Effort ?? seeded.think2.reasoningEffort,
+			scheduling: seeded.think2.scheduling,
+		},
+		bulk: { lanes: [...seeded.bulk.lanes] },
+		verify: { service: seeded.verify.service },
 		embeddings: {
 			enabled: explicitEmbeddings ? true : embeddingsEnvPresent ? Boolean(envEmbeddings) : seeded.embeddings.enabled,
 			url: explicitEmbeddings ?? envEmbeddings ?? seeded.embeddings.url,
@@ -630,6 +793,44 @@ export function resolveTaskOrChat(services) {
  */
 export function resolveDelegateOrChat(services) {
 	return services.delegate?.enabled ? services.delegate : services.chat;
+}
+
+/**
+ * The raw service block skill verification/review runs on. Chain: the lane named
+ * by `verify.service` (normally `think2` on the second GPU) → the primary thinking
+ * lane → `chat`. A `distributed-parallel` setup reviews on an independent GPU-2
+ * instance; every other setup degrades toward the always-present thinking lane,
+ * exactly as `resolveThinkOrChat` does, so verification is never skipped for lack
+ * of a secondary. Returns a raw block (like `resolveThinkOrChat`); the caller in
+ * `forge-llm.mjs` shapes it and labels any degrade.
+ */
+export function resolveVerifyOrThinkOrChat(services) {
+	const wanted = services.verify?.service;
+	if (wanted && services[wanted]?.enabled) return services[wanted];
+	return resolveThinkOrChat(services);
+}
+
+/**
+ * The ordered list of resolved services a batch skill fans per-item bulk work
+ * across, from `bulk.lanes`. Disabled lanes are dropped; when `carriesImage` is
+ * true every `images:false` lane is dropped too (an image must never land on a
+ * text-only GPU-2 lane, where the transform layer would silently drop it). The
+ * result always keeps at least the primary `chat` lane, so a misconfiguration
+ * degrades to single-lane rather than to nothing.
+ */
+export function resolveBulkLanes(services, { carriesImage = false } = {}) {
+	const names = services.bulk?.lanes?.length ? services.bulk.lanes : ["chat"];
+	const lanes = [];
+	for (const name of names) {
+		const service = services[name];
+		if (!service?.enabled) continue;
+		if (carriesImage && service.images === false) continue;
+		lanes.push(service);
+	}
+	if (!lanes.length && services.chat?.enabled && !(carriesImage && services.chat.images === false)) {
+		lanes.push(services.chat);
+	}
+	return lanes;
 }
 
 function normalizeHttpBaseUrl(value) {
