@@ -955,7 +955,7 @@ def verify_enrichments(args, run_directory, run, system):
             items,
             journal_path=run_directory / "verified.jsonl",
             packet_size=args.verify_packet_size,
-            background=True,
+            background=getattr(args, "background", False),
             timeout=args.request_timeout,
             progress=progress,
         )
@@ -1683,6 +1683,12 @@ def parser():
     row_process.add_argument("--verify-packet-size", type=int, default=15)
     row_process.add_argument("--no-cache-prompt", action="store_true")
     row_process.add_argument("--request-timeout", type=float, default=600)
+    row_process.add_argument(
+        "--background",
+        action="store_true",
+        help="run model calls as preemptible background inference; the default is foreground, because a "
+        "backgrounded run is preempted by the very interactive session that usually launches it",
+    )
     row_process.set_defaults(handler=command_row_process)
 
     row_finalize = subparsers.add_parser("row-finalize", help="Write a new enriched spreadsheet after all rows are disposed.")

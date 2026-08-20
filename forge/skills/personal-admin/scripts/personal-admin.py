@@ -903,7 +903,7 @@ def verify_extractions(args, run_directory, run):
             items,
             journal_path=run_directory / "verified.jsonl",
             packet_size=args.verify_packet_size,
-            background=True,
+            background=getattr(args, "background", False),
             timeout=args.request_timeout,
             progress=progress,
         )
@@ -1255,6 +1255,12 @@ def parser():
     process.add_argument("--verify-packet-size", type=int, default=15)
     process.add_argument("--no-cache-prompt", action="store_true")
     process.add_argument("--request-timeout", type=float, default=600)
+    process.add_argument(
+        "--background",
+        action="store_true",
+        help="run model calls as preemptible background inference; the default is foreground, because a "
+        "backgrounded run is preempted by the very interactive session that usually launches it",
+    )
     process.set_defaults(handler=command_process)
 
     build = subparsers.add_parser("build", help="Assemble facts, deadline, and contact tables from staged facts.")

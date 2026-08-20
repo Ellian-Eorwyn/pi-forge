@@ -1239,7 +1239,7 @@ def verify_records(args, schema, system, items_by_id, records, run_dir):
             VERIFY_NOTES_SYSTEM,
             note_items,
             journal_path=run_dir / "verified.jsonl",
-            background=True,
+            background=getattr(args, "background", False),
             timeout=args.request_timeout,
             progress=progress,
         )
@@ -1248,7 +1248,7 @@ def verify_records(args, schema, system, items_by_id, records, run_dir):
             VERIFY_COVERAGE_SYSTEM,
             coverage_items,
             journal_path=run_dir / "verified-coverage.jsonl",
-            background=True,
+            background=getattr(args, "background", False),
             timeout=args.request_timeout,
             progress=progress,
             # Coverage asks whether these notes account for the braindump, which
@@ -1294,7 +1294,7 @@ def verify_records(args, schema, system, items_by_id, records, run_dir):
                 outside_sources=record.get("outside_sources"),
             ),
             "redraft-note",
-            background=True,
+            background=getattr(args, "background", False),
             extra={"reviewerObjection": reason, "previousTitle": record["title"]},
         )
         title, body = validate_draft(value)
@@ -2277,6 +2277,12 @@ def parse_args(argv):
     parser.add_argument("--model", action=TrackingAction)
     parser.add_argument("--api-key")
     parser.add_argument("--request-timeout", type=float, default=600)
+    parser.add_argument(
+        "--background",
+        action="store_true",
+        help="run model calls as preemptible background inference; the default is foreground, because a "
+        "backgrounded run is preempted by the very interactive session that usually launches it",
+    )
     parser.add_argument("--no-cache-prompt", action="store_true")
     parser.add_argument("--no-verify", action="store_true", help="skip the thinking-model review")
     parser.add_argument("--think-url", help="thinking service used for verification (default: connectedServices.think)")

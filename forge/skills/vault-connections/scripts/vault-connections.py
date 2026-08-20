@@ -1967,7 +1967,7 @@ def verify_subtopic_notes(args, notes, run_dir):
             VERIFY_NOTES_SYSTEM,
             items,
             journal_path=run_dir / "verified-notes.jsonl",
-            background=True,
+            background=getattr(args, "background", False),
             timeout=args.request_timeout,
         )
     except forge_verify.VerificationError as error:
@@ -2554,7 +2554,7 @@ def annotate_proposals(args, proposals, run_dir, warnings):
             ANNOTATE_SYSTEM,
             items,
             journal_path=run_dir / "verified.jsonl",
-            background=True,
+            background=getattr(args, "background", False),
             timeout=args.request_timeout,
             progress=progress,
         )
@@ -3335,6 +3335,12 @@ def parse_args(argv):
     parser.add_argument("--model")
     parser.add_argument("--api-key")
     parser.add_argument("--request-timeout", type=float, default=120)
+    parser.add_argument(
+        "--background",
+        action="store_true",
+        help="run model calls as preemptible background inference; the default is foreground, because a "
+        "backgrounded run is preempted by the very interactive session that usually launches it",
+    )
     parser.add_argument("--embeddings-url")
     parser.add_argument("--embeddings-model")
     parser.add_argument("--no-cache-prompt", action="store_true")

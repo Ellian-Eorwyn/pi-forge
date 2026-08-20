@@ -1063,7 +1063,7 @@ def verify(args, comments, blocks, run_dir):
         VERIFY_SYSTEM,
         items,
         journal_path=run_dir / "verified.jsonl",
-        background=True,
+        background=getattr(args, "background", False),
         timeout=args.request_timeout,
         progress=progress if args.verbose else None,
     )
@@ -1790,6 +1790,12 @@ def parse_args(argv):
     parser.add_argument("--think-url", help="thinking service used for review (default: connectedServices.think)")
     parser.add_argument("--think-model")
     parser.add_argument("--request-timeout", type=float, default=600)
+    parser.add_argument(
+        "--background",
+        action="store_true",
+        help="run model calls as preemptible background inference; the default is foreground, because a "
+        "backgrounded run is preempted by the very interactive session that usually launches it",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
     for key in RESUMABLE_OPTION_FLAGS:

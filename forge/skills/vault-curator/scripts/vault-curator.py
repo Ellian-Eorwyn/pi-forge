@@ -386,7 +386,7 @@ def resolve_services(args):
     return chat, think
 
 
-def call_json(service, system, payload, warnings, label, background=True):
+def call_json(service, system, payload, warnings, label, background=False):
     """One bounded call returning parsed JSON, or None with a warning."""
     messages = [
         {"role": "system", "content": system},

@@ -1168,7 +1168,7 @@ def verify_classifications(args, vault, schema, records, run_dir):
             VERIFY_SYSTEM,
             items,
             journal_path=journal,
-            background=True,
+            background=getattr(args, "background", False),
             timeout=args.request_timeout,
             progress=progress,
         )
@@ -4380,6 +4380,12 @@ def parse_args(argv):
     parser.add_argument("--model", action=TrackingAction)
     parser.add_argument("--api-key")
     parser.add_argument("--request-timeout", type=float, default=120)
+    parser.add_argument(
+        "--background",
+        action="store_true",
+        help="run model calls as preemptible background inference; the default is foreground, because a "
+        "backgrounded run is preempted by the very interactive session that usually launches it",
+    )
     parser.add_argument("--embeddings-url", action=TrackingAction)
     parser.add_argument("--embeddings-model", action=TrackingAction)
     parser.add_argument("--no-embeddings", action="store_true")

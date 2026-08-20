@@ -305,6 +305,10 @@ class StubChatHandler(BaseHTTPRequestHandler):
             return "verify-fidelity"
         if '{"verdicts"' in system or "verdicts" in system.split("\n\n")[-1]:
             return "verify"
+        if system.startswith("You process one voice recording"):
+            return "write"
+        if system.startswith("You review one processed voice-recording note"):
+            return "review"
         if system.startswith("You read one voice recording"):
             return "classify"
         # The repair prompt is a transcript editor too, so it must be told apart
@@ -349,7 +353,50 @@ class StubChatHandler(BaseHTTPRequestHandler):
             return {"summary": "The speaker works through a short list of practical repairs and next steps."}
         if stage in ("verify", "verify-fidelity"):
             return {"verdicts": [{"id": item["id"], "verdict": "ok"} for item in user["items"]]}
+        if stage == "review":
+            return {"verdict": "ok"}
+        if stage == "write":
+            return self.compose_write(payload)
         return {}
+
+    def compose_write(self, payload):
+        """A writer response assembled from legacy per-stage scripts.
+
+        The one-pass writer answers classification, cleaned body, and summary in
+        one response; composing it from the old "classify"/"clean"/"summarize"
+        script queues lets a test keep steering exactly the knob it always did.
+        A scripted non-dict part (a malformed-response test) becomes the whole
+        response, so the writer's corrective re-ask sees what the stage's did."""
+        if len(payload["messages"]) < 2:
+            return "ready"  # the doctor probe
+        scripted = self.__class__.scripted
+        user = json.loads(payload["messages"][1]["content"])
+        merged = dict(self.default_for("classify", payload))
+        part = scripted.get("classify")
+        if part:
+            value = part.pop(0)
+            if not isinstance(value, dict):
+                return value
+            merged.update(value)
+        part = scripted.get("clean")
+        if part:
+            value = part.pop(0)
+            if not isinstance(value, dict):
+                return value
+            merged["cleaned"] = value.get("cleaned")
+        else:
+            merged["cleaned"] = user.get("transcript", "")
+        part = scripted.get("summarize")
+        if part:
+            value = part.pop(0)
+            if not isinstance(value, dict):
+                return value
+            merged["summary"] = value.get("summary")
+        elif user.get("tiny"):
+            merged["summary"] = None
+        else:
+            merged["summary"] = self.default_for("summarize", payload).get("summary")
+        return merged
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
@@ -359,6 +406,8 @@ class StubChatHandler(BaseHTTPRequestHandler):
         queue = self.__class__.scripted.get(stage)
         if queue:
             response = queue.pop(0)
+        elif stage == "write" and any(self.__class__.scripted.get(name) for name in ("classify", "clean", "summarize")):
+            response = self.compose_write(payload)
         elif self.__class__.responses:
             response = self.__class__.responses.pop(0)
         else:
@@ -381,32 +430,6 @@ class SecondStubChatHandler(StubChatHandler):
     responses = []
     requests = []
     scripted = {}
-
-
-class FlagFidelityHandler(SecondStubChatHandler):
-    """A thinking service whose fidelity meaning-judge flags every utterance.
-
-    The note-level review still runs on the base ``ok`` default. Flagging the
-    whole packet — rather than one scripted id — frees the test from knowing how
-    many utterances the provisional review sampled or how they were batched; a
-    verdict is still returned for every id, so no repair round-trip is provoked.
-    """
-
-    responses = []
-    requests = []
-    scripted = {}
-    FIDELITY_REASON = "the pantry shelving and the warranty discussion are gone entirely"
-
-    def default_for(self, stage, payload):
-        if stage == "verify-fidelity":
-            user = json.loads(payload["messages"][1]["content"])
-            return {
-                "verdicts": [
-                    {"id": item["id"], "verdict": "flag", "reason": self.FIDELITY_REASON}
-                    for item in user["items"]
-                ]
-            }
-        return super().default_for(stage, payload)
 
 
 class QuietServer(ThreadingHTTPServer):
@@ -457,6 +480,8 @@ class StubServer:
             elif stage == "verify" and "verdicts" in system and not system.startswith(
                 "You are checking whether a cleaned-up transcript"
             ):
+                counted.append(payload)
+            elif stage == "write" and system.startswith("You process one voice recording"):
                 counted.append(payload)
             elif stage == "classify" and system.startswith("You read one voice recording"):
                 counted.append(payload)
@@ -1506,7 +1531,7 @@ class PipelineTests(unittest.TestCase):
         self.write("20260612 093818-7FE5D769 (1).md", body)
         with StubServer() as server:
             result = self.result_of(self.process(server.url, "--apply"))
-            self.assertEqual(len(server.stage_requests("classify")), 1)
+            self.assertEqual(len(server.stage_requests("write")), 1)
         self.assertEqual(result["data"]["counts"]["duplicates_exact"], 1)
         self.assertProcessed("2026-06-12 - Memo - Espresso Machine Repairs.md")
         quarantined = self.vault / ".vault-transcripts" / "duplicates" / "20260612 093818-7FE5D769 (1).md"
@@ -1542,7 +1567,7 @@ class PipelineTests(unittest.TestCase):
         with StubServer() as server:
             result = self.result_of(self.process(server.url, "--apply"))
             self.assertEqual(server.stage_requests("summarize"), [])
-            self.assertTrue(json.loads(server.stage_requests("clean")[0]["messages"][1]["content"])["tiny"])
+            self.assertTrue(json.loads(server.stage_requests("write")[0]["messages"][1]["content"])["tiny"])
         self.assertEqual(result["data"]["counts"]["tiny"], 1)
         note = (self.vault / "00 Inbox" / "2026-07-24 - Memo - Espresso Machine Repairs.md").read_text(encoding="utf-8")
         self.assertNotIn("[!summary]", note)
@@ -1576,16 +1601,17 @@ class PipelineTests(unittest.TestCase):
         self.write("20260724 131748-9788991C.md", transcript(SPLIT_LABEL_BLOCKS))
         with StubServer(scripted={"classify": [SPLIT_BY_ROSTER, classified("memo", 1)]}) as server:
             result = self.result_of(self.process(server.url, "--apply"))
+            written = server.stage_requests("write")
             asked = server.stage_requests("classify")
         self.assertEqual(result["data"]["counts"]["review_required"], 0)
         self.assertEqual(result["data"]["counts"]["processed"], 1)
         self.assertProcessed("2026-07-24 - Memo - Espresso Machine Repairs.md")
-        self.assertEqual(len(asked), 2)
-        # The roster is present the first time and withheld the second: that
-        # difference is the entire mechanism.
-        payloads = [json.loads(request["messages"][1]["content"]) for request in asked]
-        self.assertIn("knownSpeakers", payloads[0])
-        self.assertNotIn("knownSpeakers", payloads[1])
+        # The roster is present in the writer call and withheld in the re-read:
+        # that difference is the entire mechanism.
+        self.assertEqual(len(written), 1)
+        self.assertEqual(len(asked), 1)
+        self.assertIn("knownSpeakers", json.loads(written[0]["messages"][1]["content"]))
+        self.assertNotIn("knownSpeakers", json.loads(asked[0]["messages"][1]["content"]))
 
     def test_a_second_voice_found_without_the_roster_keeps_the_note_held(self):
         # Nothing prompted this one, so the disagreement is real and the safety
@@ -1597,7 +1623,7 @@ class PipelineTests(unittest.TestCase):
             asked = server.stage_requests("classify")
         self.assertEqual(self.inbox(), ["20260724 131748-9788991C.md"])
         self.assertEqual(result["data"]["counts"]["review_required"], 1)
-        self.assertEqual(len(asked), 2)
+        self.assertEqual(len(asked), 1)
         queue = [
             json.loads(line)
             for line in (run_dir_of(result) / "review-queue.jsonl").read_text(encoding="utf-8").splitlines()
@@ -1613,8 +1639,8 @@ class PipelineTests(unittest.TestCase):
         self.write("20260724 131748-9788991C.md", transcript(SPLIT_LABEL_BLOCKS))
         with StubServer(scripted={"classify": [classified("memo", 2)]}) as server:
             result = self.result_of(self.process(server.url, "--no-lexicon", "--apply"))
-            asked = server.stage_requests("classify")
-        self.assertEqual(len(asked), 1)
+            self.assertEqual(len(server.stage_requests("write")), 1)
+            self.assertEqual(server.stage_requests("classify"), [])
         self.assertEqual(result["data"]["counts"]["review_required"], 1)
         self.assertEqual(self.inbox(), ["20260724 131748-9788991C.md"])
 
@@ -1633,7 +1659,7 @@ class PipelineTests(unittest.TestCase):
         second = {**first, "title": "Espresso Repairs"}
         with StubServer(scripted={"classify": [first, second]}) as server:
             self.result_of(self.process(server.url, "--apply"))
-            self.assertEqual(len(server.stage_requests("classify")), 2)
+            self.assertEqual(len(server.stage_requests("write")), 2)
         self.assertProcessed("2026-07-24 - Memo - Espresso Repairs.md")
 
     def test_two_recordings_with_the_same_title_both_survive(self):
@@ -1657,8 +1683,8 @@ class PipelineTests(unittest.TestCase):
         scripted = {"summarize": [{"summary": overlong}, {"summary": "A tight paragraph about espresso repairs."}]}
         with StubServer(scripted=scripted) as server:
             self.result_of(self.process(server.url, "--apply"))
-            self.assertEqual(len(server.stage_requests("summarize")), 2)
-            repair = server.stage_requests("summarize")[1]["messages"][-1]["content"]
+            self.assertEqual(len(server.stage_requests("write")), 2)
+            repair = server.stage_requests("write")[1]["messages"][-1]["content"]
             self.assertIn("over the", repair)
         note = (self.vault / "00 Inbox" / "2026-07-24 - Memo - Espresso Machine Repairs.md").read_text(encoding="utf-8")
         self.assertIn("> [!summary]\n> A tight paragraph about espresso repairs.", note)
@@ -1699,43 +1725,6 @@ class PipelineTests(unittest.TestCase):
         self.assertProcessed("Memo - Espresso Repairs.md")
         report = (run_dir_of(result) / "report.md").read_text(encoding="utf-8")
         self.assertIn("ignored spoken date 2019-01-01", report)
-
-    def test_verification_flag_is_redone_on_the_thinking_service(self):
-        self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
-        better = {
-            "recording_type": "memo",
-            "title": "Espresso Machine Maintenance",
-            "speakers": {},
-            "effective_speakers": 1,
-            "spoken_date": None,
-            "evidence": None,
-            "needs_review": False,
-            "review_reason": None,
-        }
-        with StubServer() as chat, StubServer(handler_cls=SecondStubChatHandler) as think:
-            SecondStubChatHandler.scripted = {
-                "verify": [{"verdicts": [{"id": "00 Inbox/20260724 131748-9788991C.md", "verdict": "flag", "reason": "title is vague"}]}],
-                "classify": [better],
-                "summarize": [{"summary": "The speaker lists espresso machine maintenance tasks and next steps."}],
-            }
-            result = self.result_of(self.process(chat.url, "--apply", "--think-url", think.url, "--think-model", "code"))
-        self.assertProcessed("2026-07-24 - Memo - Espresso Machine Maintenance.md")
-        self.assertEqual(result["data"]["verification"]["escalated"], 1)
-        report = (run_dir_of(result) / "report.md").read_text(encoding="utf-8")
-        self.assertIn("re-done with reasoning", report)
-        self.assertIn("title is vague", report)
-
-    def test_a_failed_escalation_leaves_the_note_untouched(self):
-        self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
-        with StubServer() as chat, StubServer(handler_cls=SecondStubChatHandler) as think:
-            SecondStubChatHandler.scripted = {
-                "verify": [{"verdicts": [{"id": "00 Inbox/20260724 131748-9788991C.md", "verdict": "flag", "reason": "wrong type"}]}],
-                "classify": ["this is not json at all"],
-            }
-            result = self.result_of(self.process(chat.url, "--apply", "--think-url", think.url, "--think-model", "code"))
-        self.assertEqual(self.inbox(), ["20260724 131748-9788991C.md"])
-        self.assertEqual(result["data"]["verification"]["needsReview"], 1)
-        self.assertIn("needs your review", (run_dir_of(result) / "report.md").read_text(encoding="utf-8"))
 
     def test_an_unreachable_verifier_never_reads_as_approval(self):
         self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
@@ -1834,22 +1823,29 @@ class PipelineTests(unittest.TestCase):
         }
         with StubServer(scripted=scripted) as server:
             self.result_of(self.process(server.url, "--apply"))
-            payload = json.loads(server.stage_requests("clean")[0]["messages"][1]["content"])
-        self.assertEqual(payload["speakers"], {"Speaker 1": "Ellie", "Speaker 2": "Gillian"})
-        self.assertIn("**Ellie**", payload["chunk"])
-        self.assertProcessed("2026-07-24 - Conversation - Deployment Window Review.md")
+            payload = json.loads(server.stage_requests("write")[0]["messages"][1]["content"])
+        # The writer names speakers in its own response; the payload carries the
+        # raw labels, and the derived map is reconciled into the body afterwards.
+        self.assertEqual(payload["labels"], ["Speaker 1", "Speaker 2"])
+        note = (self.vault / "00 Inbox" / "2026-07-24 - Conversation - Deployment Window Review.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("**Ellie**", note)
+        self.assertIn("**Gillian**", note)
+        self.assertNotIn("**Speaker 1**", note.split("# Transcript")[0])
 
     def test_long_transcripts_are_chunked_with_context(self):
-        self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS * 60))
+        # Enough repeats to clear WRITE_BUDGET_CHARS, so the writer takes its
+        # oversize path: per-chunk calls with continuity, classification from the
+        # first chunk, summary from the last.
+        self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS * 130))
         with StubServer() as server:
             self.result_of(self.process(server.url))
-            payloads = [json.loads(entry["messages"][1]["content"]) for entry in server.stage_requests("clean")]
+            payloads = [json.loads(entry["messages"][1]["content"]) for entry in server.stage_requests("write")]
         self.assertGreater(len(payloads), 1)
         self.assertEqual(payloads[0]["chunkIndex"], 1)
         self.assertEqual(payloads[1]["chunkCount"], len(payloads))
         self.assertIn("previousTail", payloads[1])
-        summarize = json.loads(server.stage_requests("summarize")[0]["messages"][1]["content"])
-        self.assertIn("sectionSummaries", summarize)
 
     def test_status_and_doctor(self):
         self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
@@ -1858,8 +1854,7 @@ class PipelineTests(unittest.TestCase):
             status = self.result_of(run_script("status", "--run", str(run_dir_of(first))))
             self.assertEqual(status["data"]["phase"], "planned")
             self.assertEqual(status["data"]["transcripts"], 1)
-            self.assertEqual(status["data"]["classified"], 1)
-            self.assertEqual(status["data"]["cleaned_chunks"], 1)
+            self.assertEqual(status["data"]["written"], 1)
             doctor = self.result_of(
                 run_script(
                     "doctor",
@@ -2075,332 +2070,6 @@ def run_dir_of(result):
     return Path(result["data"]["run_directory"])
 
 
-class FidelityProvisionalTests(unittest.TestCase):
-    """The deterministic fidelity floor defers to the thinking meaning-judge.
-
-    A note the word-overlap floor flags but that is otherwise sound is written
-    *provisionally* and sent to the judge; the judge's verdict — not the floor's
-    score — decides whether it finishes or holds. Its own harness (rather than a
-    `PipelineTests` subclass) keeps the 34 inherited pipeline tests from running a
-    fifth time. See `verify_records` and `assemble_items`.
-    """
-
-    NAME = "20260724 131748-9788991C.md"
-    DESTINATION = "2026-07-24 - Memo - Espresso Machine Repairs.md"
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.vault = Path(self.tmp.name).resolve() / "vault"
-        (self.vault / "99 Meta" / "99.02 Schemas").mkdir(parents=True)
-        (self.vault / "00 Inbox").mkdir()
-        (self.vault / "99 Meta" / "99.02 Schemas" / "0.00 Vault Schema.md").write_text(SCHEMA, encoding="utf-8")
-
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    def gutted_cleanup(self):
-        """A rich solo memo whose scripted cleanup keeps only its first two
-        utterances.
-
-        Over 400 words with many distinctive terms, so the rare-word floor has
-        something to measure; keeping two of forty-four utterances trips the
-        length-ratio, rare-word, and utterance-locator floors at once while every
-        structural check still passes — exactly the provisional case. The kept
-        text is a verbatim subset, so no invented word makes cleanup fail first.
-        """
-        source = transcript(SOLO_BLOCKS * 4)
-        blocks = vt.parse_transcript(source)["blocks"]
-        self.assertGreater(len(source.split()), vt.RARE_WORD_MIN_SOURCE_WORDS)
-        # One chunk, so a single scripted cleanup response covers the whole file.
-        self.assertEqual(len(vt.chunk_blocks(blocks)), 1)
-        kept = " ".join(entry["text"] for entry in blocks[:2])
-        return source, {"cleaned": kept, "chunk_summary": "The opening of the memo."}
-
-    def write_source(self, source):
-        (self.vault / "00 Inbox" / self.NAME).write_text(source, encoding="utf-8")
-
-    def process(self, chat_url, think_url, *extra):
-        return run_script(
-            "process", "--vault", str(self.vault), "--base-url", chat_url, "--model", "chat",
-            "--think-url", think_url, "--think-model", "code", *extra,
-        )
-
-    def result_of(self, completed):
-        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-        return json.loads(completed.stdout)
-
-    def inbox(self):
-        return sorted(
-            path.name
-            for path in (self.vault / "00 Inbox").glob("*.md")
-            if path.name != vt.vault_review.REVIEW_NOTE_NAME
-        )
-
-    def review_queue(self, run_dir):
-        path = run_dir / "review-queue.jsonl"
-        if not path.is_file() or not path.read_text(encoding="utf-8").strip():
-            return []
-        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-
-    def record_for(self, run_dir):
-        plan = json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
-        return next(record for record in plan["records"] if record["source"].endswith(self.NAME))
-
-    def fidelity_requests(self, think):
-        return [
-            payload
-            for payload in think.requests
-            if payload["messages"][0]["content"].startswith("You are checking whether a cleaned-up transcript")
-        ]
-
-    def repair_requests(self, chat):
-        return [
-            payload
-            for payload in chat.requests
-            if payload["messages"][0]["content"].startswith("You are a meticulous transcript editor fixing")
-        ]
-
-    def test_a_fidelity_only_fail_becomes_provisional_and_finishes_when_the_judge_is_ok(self):
-        source, cleanup = self.gutted_cleanup()
-        self.write_source(source)
-        with StubServer(scripted={"clean": [cleanup]}) as chat, \
-                StubServer(handler_cls=SecondStubChatHandler) as think:
-            result = self.result_of(self.process(chat.url, think.url, "--apply"))
-        # The floor flagged it, the meaning-judge (default: all ok) cleared it, so
-        # it finished as an ordinary processed pair instead of landing in review.
-        self.assertCountEqual(self.inbox(), [self.DESTINATION, f"{self.DESTINATION[:-3]} - Transcript.md"])
-        verification = result["data"]["verification"]
-        self.assertEqual(verification["provisionalCleared"], 1)
-        self.assertEqual(verification["provisionalHeld"], 0)
-        record = self.record_for(run_dir_of(result))
-        self.assertEqual(record["action"], "process")
-        self.assertEqual(record["verified"], "fidelity-cleared")
-        self.assertFalse(record["needs_review"])
-        self.assertEqual(self.review_queue(run_dir_of(result)), [])
-
-    def test_a_flagged_note_the_repair_cannot_fix_is_held(self):
-        # The judge flags, chat is asked to restore, and every re-review still
-        # flags — so after the bounded repair rounds (each handed the re-review's
-        # sharper objection) it holds, carrying the judge's objection, not the
-        # floor's word-overlap score.
-        source, cleanup = self.gutted_cleanup()
-        self.write_source(source)
-        objection = FlagFidelityHandler.FIDELITY_REASON
-        with StubServer(scripted={"clean": [cleanup]}) as chat, \
-                StubServer(handler_cls=FlagFidelityHandler) as think:
-            result = self.result_of(self.process(chat.url, think.url, "--apply"))
-        self.assertEqual(self.inbox(), [self.NAME])
-        verification = result["data"]["verification"]
-        self.assertEqual(verification["provisionalCleared"], 0)
-        self.assertEqual(verification["provisionalRepaired"], 0)
-        self.assertEqual(verification["provisionalHeld"], 1)
-        # A repair was attempted on chat each round before the note was held.
-        self.assertEqual(len(self.repair_requests(chat)), vt.FIDELITY_REPAIR_ROUNDS)
-        queued = self.review_queue(run_dir_of(result))
-        self.assertEqual(len(queued), 1)
-        self.assertIn("cleaned transcript may not be faithful", queued[0]["reason"])
-        self.assertIn(objection, queued[0]["reason"])
-        self.assertNotIn("distinctive source words survived", queued[0]["reason"])
-        self.assertNotIn("could not be located in the cleaned text", queued[0]["reason"])
-        report = (run_dir_of(result) / "report.md").read_text(encoding="utf-8")
-        self.assertIn(f"cleaned transcript may not be faithful: {objection}", report)
-
-    def test_a_flagged_note_is_repaired_on_chat_and_finishes_when_the_second_look_passes(self):
-        # The judge flags a real loss; chat restores it (a fuller cleanup drawn
-        # from the source); the second, independent look passes; the note finishes
-        # as fidelity-repaired rather than landing in review.
-        source, cleanup = self.gutted_cleanup()
-        self.write_source(source)
-        note_id = f"00 Inbox/{self.NAME}"
-        blocks = vt.parse_transcript(source)["blocks"]
-        # The restored cleanup is a larger verbatim subset of the source, so it is
-        # grounded (no invented words) and structurally clean.
-        restored = " ".join(entry["text"] for entry in blocks[:8])
-        think_script = {
-            "verify-fidelity": [
-                {"verdicts": [{"id": note_id, "verdict": "flag", "reason": "the pantry shelving point is gone"}]},
-                {"verdicts": [{"id": note_id, "verdict": "ok"}]},
-            ],
-        }
-        chat_script = {"clean": [cleanup], "repair": [{"cleaned": restored}]}
-        with StubServer(scripted=chat_script) as chat, \
-                StubServer(handler_cls=SecondStubChatHandler, scripted=think_script) as think:
-            result = self.result_of(self.process(chat.url, think.url, "--apply"))
-        # Finished: the processed pair is in the inbox, not the review queue.
-        self.assertCountEqual(self.inbox(), [self.DESTINATION, f"{self.DESTINATION[:-3]} - Transcript.md"])
-        verification = result["data"]["verification"]
-        self.assertEqual(verification["provisionalRepaired"], 1)
-        self.assertEqual(verification["provisionalHeld"], 0)
-        self.assertEqual(len(self.repair_requests(chat)), 1)
-        record = self.record_for(run_dir_of(result))
-        self.assertEqual(record["action"], "process")
-        self.assertEqual(record["verified"], "fidelity-repaired")
-        self.assertFalse(record["needs_review"])
-        # The applied note carries the restored body, not the gutted one.
-        applied = (self.vault / "00 Inbox" / self.DESTINATION).read_text(encoding="utf-8")
-        self.assertIn("shelving unit in the pantry", applied)
-
-    def test_a_non_fidelity_fault_holds_immediately_and_never_reaches_the_judge(self):
-        # The deferral is only for the fidelity floors. A note that fails a
-        # non-fidelity gate — here a summary that stays two paragraphs through its
-        # one retry — is held before the fidelity check even runs, so it is never
-        # made provisional and the meaning-judge never sees it. (check_note's own
-        # structural branches are build-note invariants that cannot be reached with
-        # a valid note; the structural/fidelity split itself is unit-tested in
-        # NoteBuildingTests.) The cleanup is still lossy, to prove the immediate
-        # hold wins even when the fidelity floor would also have fired.
-        source, cleanup = self.gutted_cleanup()
-        self.write_source(source)
-        two_paragraphs = {"summary": "First paragraph of the summary.\n\nSecond paragraph of the summary."}
-        chat_script = {"clean": [cleanup], "summarize": [two_paragraphs, two_paragraphs]}
-        with StubServer(scripted=chat_script) as chat, \
-                StubServer(handler_cls=SecondStubChatHandler) as think:
-            result = self.result_of(self.process(chat.url, think.url, "--apply"))
-        self.assertEqual(self.inbox(), [self.NAME])
-        record = self.record_for(run_dir_of(result))
-        self.assertTrue(record["needs_review"])
-        self.assertIn("summary is more than one paragraph", record["review_reason"])
-        self.assertNotIn("fidelity_provisional", record)
-        verification = result["data"]["verification"]
-        # Held before the fidelity check, so it is not a verify candidate: the
-        # meaning-judge never ran and nothing was marked provisional.
-        self.assertEqual(verification.get("provisionalCleared", 0), 0)
-        self.assertEqual(self.fidelity_requests(think), [])
-
-    def test_the_meaning_judge_runs_at_medium(self):
-        source, cleanup = self.gutted_cleanup()
-        self.write_source(source)
-        with StubServer(scripted={"clean": [cleanup]}) as chat, \
-                StubServer(handler_cls=SecondStubChatHandler) as think:
-            self.result_of(self.process(chat.url, think.url))
-        fidelity = self.fidelity_requests(think)
-        self.assertTrue(fidelity, "the provisional note should have reached the fidelity judge")
-        # Ellie's call: medium is enough for a yes/no meaning judgment; xhigh (the
-        # note-redo budget) is not spent here.
-        for payload in fidelity:
-            self.assertEqual(payload.get("reasoning_effort"), "medium")
-        # The note-level review is a different pass and is not forced to medium.
-        note_level = [
-            payload for payload in think.requests
-            if payload["messages"][0]["content"].startswith("You are reviewing how voice recordings")
-        ]
-        self.assertTrue(note_level)
-        for payload in note_level:
-            self.assertNotEqual(payload.get("reasoning_effort"), "medium")
-
-    def test_the_judge_sees_the_whole_note_not_windowed_utterances(self):
-        # The provisional review is whole-note: one item carrying the full source
-        # and the full cleaned body, so content that only moved reads as present.
-        # This is what the per-utterance window could not do.
-        source, cleanup = self.gutted_cleanup()
-        self.write_source(source)
-        with StubServer(scripted={"clean": [cleanup]}) as chat, \
-                StubServer(handler_cls=SecondStubChatHandler) as think:
-            self.result_of(self.process(chat.url, think.url))
-        fidelity = self.fidelity_requests(think)
-        self.assertEqual(len(fidelity), 1, "one whole-note judge call, not a packet of utterances")
-        items = json.loads(fidelity[0]["messages"][1]["content"])["items"]
-        self.assertEqual(len(items), 1)
-        item = items[0]
-        self.assertEqual(item["id"], f"00 Inbox/{self.NAME}")
-        # The whole source and the whole cleaned body, not a 160-word window.
-        self.assertIn("rawTranscript", item)
-        self.assertIn("cleanedNote", item)
-        self.assertIn("shelving unit in the pantry", item["rawTranscript"])
-        self.assertNotIn("#s", item["id"])
-
-    def test_no_verify_holds_a_fidelity_fail_since_there_is_no_judge(self):
-        # With --no-verify there is no meaning-judge to defer to, so the floor must
-        # hold the note rather than let an unjudged note read as approved.
-        source, cleanup = self.gutted_cleanup()
-        self.write_source(source)
-        with StubServer(scripted={"clean": [cleanup]}) as chat:
-            completed = run_script(
-                "process", "--vault", str(self.vault), "--base-url", chat.url, "--model", "chat", "--no-verify"
-            )
-            result = self.result_of(completed)
-        record = self.record_for(run_dir_of(result))
-        self.assertTrue(record["needs_review"])
-        # The floor's own words, exactly as before the deferral existed.
-        self.assertIn("could not be located in the cleaned text", record["review_reason"])
-        self.assertNotIn("fidelity_provisional", record)
-
-    def test_an_unreachable_judge_holds_the_provisional_note(self):
-        # The note was written provisionally, but the judge could not be reached.
-        # An unreachable reviewer must never read as approval, so it is held.
-        source, cleanup = self.gutted_cleanup()
-        self.write_source(source)
-        with StubServer(scripted={"clean": [cleanup]}) as chat:
-            result = self.result_of(
-                self.process(chat.url, "http://127.0.0.1:1/v1/chat/completions")
-            )
-        self.assertEqual(self.inbox(), [self.NAME])
-        record = self.record_for(run_dir_of(result))
-        self.assertTrue(record["needs_review"])
-        self.assertIn("could not be located in the cleaned text", record["review_reason"])
-
-    def test_autonomous_files_a_routine_note_without_a_tick(self):
-        # A faithful cleanup (the default echo) clears every gate, so an autonomous
-        # run files the note with no human tick and leaves a receipt, not a staged
-        # proposal to approve.
-        source, _gutted = self.gutted_cleanup()
-        self.write_source(source)
-        with StubServer() as chat, StubServer(handler_cls=SecondStubChatHandler) as think:
-            result = self.result_of(self.process(chat.url, think.url, "--autonomous"))
-        self.assertCountEqual(self.inbox(), [self.DESTINATION, f"{self.DESTINATION[:-3]} - Transcript.md"])
-        self.assertFalse(result["data"]["dry_run"])
-        review = (self.vault / "00 Inbox" / vt.vault_review.REVIEW_NOTE_NAME).read_text(encoding="utf-8")
-        self.assertIn("## Filed automatically", review)
-        self.assertIn("Nothing needs you", review)
-        self.assertNotIn("- [x]", review)  # a receipt, nothing to tick
-        self.assertNotIn("## Apply", review)
-        self.assertFalse((self.vault / "00 Inbox" / vt.vault_review.PENDING_DIRNAME).exists())
-
-    def test_autonomous_still_holds_a_serious_failure_and_surfaces_it(self):
-        # Autonomy stops for a genuinely serious hold: an unfixable fidelity failure
-        # stays in the inbox and is listed for a person rather than filed.
-        source, cleanup = self.gutted_cleanup()
-        self.write_source(source)
-        with StubServer(scripted={"clean": [cleanup]}) as chat, \
-                StubServer(handler_cls=FlagFidelityHandler) as think:
-            result = self.result_of(self.process(chat.url, think.url, "--autonomous"))
-        self.assertEqual(self.inbox(), [self.NAME])  # not filed
-        self.assertFalse(result["data"]["dry_run"])
-        self.assertEqual(result["data"]["verification"]["provisionalHeld"], 1)
-        review = (self.vault / "00 Inbox" / vt.vault_review.REVIEW_NOTE_NAME).read_text(encoding="utf-8")
-        self.assertIn("## Needs a decision", review)
-        self.assertIn("still needs you", review)
-        self.assertIn("cleaned transcript may not be faithful", review)
-
-    def test_a_scoped_run_processes_only_the_named_note(self):
-        # --note scopes the run to one export: only it appears in the plan and only
-        # it is cleaned; the other raw note in the inbox is never read.
-        source, _ = self.gutted_cleanup()
-        (self.vault / "00 Inbox" / "20260724 131748-AAAA0001.md").write_text(source, encoding="utf-8")
-        (self.vault / "00 Inbox" / "20260724 131748-BBBB0002.md").write_text(source, encoding="utf-8")
-        with StubServer() as chat, StubServer(handler_cls=SecondStubChatHandler) as think:
-            result = self.result_of(
-                self.process(chat.url, think.url, "--note", "20260724 131748-AAAA0001.md")
-            )
-        plan = json.loads((run_dir_of(result) / "plan.json").read_text(encoding="utf-8"))
-        self.assertEqual(
-            {record["source"] for record in plan["records"]}, {"00 Inbox/20260724 131748-AAAA0001.md"}
-        )
-        # --note implies autonomous, so the scoped note is filed (not just planned)
-        # and its resulting inbox paths are reported for the organizer to pick up.
-        self.assertFalse(result["data"]["dry_run"])
-        self.assertEqual(result["data"]["held"], [])
-        self.assertTrue(result["data"]["filed"])
-        self.assertTrue(all(path.startswith("00 Inbox/") for path in result["data"]["filed"]))
-
-    def test_a_scope_selector_that_matches_nothing_fails_loudly(self):
-        # A typo must not silently widen to the whole inbox.
-        source, _ = self.gutted_cleanup()
-        self.write_source(source)
-        completed = self.process("http://127.0.0.1:1/x", "http://127.0.0.1:1/x", "--note", "Missing.md")
-        self.assertIn("no note matched", completed.stdout + completed.stderr)
-
-
 PROFILE_CARD = {
     "order": 0,
     "name": "People in My Life",
@@ -2424,6 +2093,7 @@ ALWAYS_CARD = {
     "facts": ["Sociologist of knowledge."],
 }
 PROFILE = {"cards": [PROFILE_CARD, ALWAYS_CARD]}
+
 
 
 class PersonalContextSiteTests(unittest.TestCase):
@@ -2497,20 +2167,6 @@ class CleanupFidelityTests(unittest.TestCase):
     def test_stripping_callouts_leaves_ordinary_prose_alone(self):
         text = "A paragraph.\n\n## A heading\n\n- a bullet\n"
         self.assertEqual(vt.strip_callout_lines(text), text.rstrip("\n"))
-
-
-class SummarySystemTests(unittest.TestCase):
-    def test_the_always_tier_reaches_the_summary_system_prompt(self):
-        site = vault_transcripts.vault_profile.profile_site(
-            vault_transcripts.vault_voice.CONTEXT_OWNER, routes=["personal/journal"]
-        )
-        system = vault_transcripts.summary_system(None, vault_transcripts.vault_voice.CONTEXT_OWNER, PROFILE, site)
-        self.assertIn("Sociologist of knowledge.", system)
-        self.assertNotIn("Gillian", system)
-
-    def test_without_a_site_the_summary_system_prompt_is_unchanged(self):
-        system = vault_transcripts.summary_system(None, vault_transcripts.vault_voice.CONTEXT_NONE)
-        self.assertEqual(system, vault_transcripts.SUMMARY_SYSTEM)
 
 
 class ReflectionTests(unittest.TestCase):
@@ -3017,7 +2673,7 @@ class ReprocessTests(unittest.TestCase):
             result = self.reprocess(server.url, "--apply")
             asked = server.stage_requests("classify")
         self.assertEqual(result["data"]["counts"]["reprocessed"], 1)
-        self.assertEqual(len(asked), 2)
+        self.assertEqual(len(asked), 1, "the writer classifies; only the roster re-read is a classify call")
 
     def test_the_head_is_regenerated_and_the_recording_is_untouched(self):
         note = self.filed()
@@ -3434,52 +3090,6 @@ class DailyNoteBuildingTests(unittest.TestCase):
         )
 
 
-class CleanupRepairTurnTests(unittest.TestCase):
-    """The corrective retry has to show the model the answer it is correcting."""
-
-    def calls_for(self, first_response):
-        seen = []
-
-        def fake_once(args, service, messages, source, speaker_map, drop_labels, tiny, task, glossary=()):
-            seen.append(messages)
-            if len(seen) == 1:
-                return first_response, "x", ["these words are not in the chunk: espresso, machine"], ["espresso", "machine"]
-            return "The machine leaks.", "x", [], []
-
-        original = vt.clean_chunk_once
-        vt.clean_chunk_once = fake_once
-        try:
-            vt.clean_one_chunk(
-                SimpleNamespace(cache_prompt=True, request_timeout=60, routing={}),
-                {"name": "chat", "model": "chat", "url": "http://127.0.0.1:1/v1/chat/completions"},
-                {"chunk": "The machine leaks."},
-                "The machine leaks.",
-                {},
-                True,
-                False,
-            )
-        finally:
-            vt.clean_chunk_once = original
-        return seen
-
-    def test_the_rejected_answer_goes_back_as_the_assistant_turn(self):
-        seen = self.calls_for("The espresso machine leaks badly.")
-        self.assertEqual(len(seen), 2)
-        repair = seen[1]
-        assistants = [message for message in repair if message["role"] == "assistant"]
-        self.assertEqual(len(assistants), 1)
-        self.assertIn("The espresso machine leaks badly.", assistants[0]["content"])
-        # The correction itself still has to be the last thing the model reads.
-        self.assertEqual(repair[-1]["role"], "user")
-        self.assertIn("not in the chunk", repair[-1]["content"])
-
-    def test_an_empty_first_answer_adds_no_assistant_turn(self):
-        # There is nothing to correct, so inventing an empty assistant turn
-        # would only teach the model that an empty answer is a shape it may use.
-        seen = self.calls_for("")
-        self.assertEqual([message for message in seen[1] if message["role"] == "assistant"], [])
-
-
 class CleanupConcurrencyTests(PipelineTests):
     """Files are independent; chunks inside a file are not."""
 
@@ -3529,12 +3139,12 @@ class CleanupRetryFailedTests(PipelineTests):
     """A recorded failure is inherited, so it needs a deliberate way out."""
 
     def journal_rows(self, run_dir):
-        return [json.loads(line) for line in (run_dir / "cleaned.jsonl").read_text(encoding="utf-8").splitlines()]
+        return [json.loads(line) for line in (run_dir / "written.jsonl").read_text(encoding="utf-8").splitlines()]
 
-    def test_a_failed_chunk_is_inherited_on_a_plain_resume(self):
+    def test_a_failed_note_is_inherited_on_a_plain_resume(self):
         self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
-        # Empty cleaned text is a structural failure that survives the corrective
-        # retry, so the chunk is recorded as failed and the file stays failed.
+        # Empty cleaned text is a contract failure that survives the corrective
+        # re-ask, so the note is recorded as failed and stays failed.
         empty = {"cleaned": "", "chunk_summary": "x"}
         with StubServer(scripted={"clean": [empty, empty]}) as server:
             first = self.result_of(self.process(server.url))
@@ -3547,8 +3157,8 @@ class CleanupRetryFailedTests(PipelineTests):
                     "--run", str(run_dir), "--no-verify",
                 )
             )
-            # The resume inherited the failed chunk rather than asking again.
-            self.assertEqual(server.stage_requests("clean"), [])
+            # The resume inherited the failed note rather than asking again.
+            self.assertEqual(server.stage_requests("write"), [])
 
     def test_retry_failed_asks_again_and_can_succeed(self):
         self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
@@ -3566,12 +3176,187 @@ class CleanupRetryFailedTests(PipelineTests):
                     "--run", str(run_dir), "--retry-failed", "--apply", "--no-verify",
                 )
             )
-            self.assertTrue(server.stage_requests("clean"))
+            self.assertTrue(server.stage_requests("write"))
         self.assertEqual(retried["data"]["counts"]["processed"], 1)
         rows = self.journal_rows(run_dir)
         # The failed row stays on the record; a later ok row supersedes it.
         self.assertTrue(any(row.get("status") == "failed" for row in rows))
         self.assertEqual(rows[-1]["status"], "ok")
+
+
+class HoldReviewHandler(SecondStubChatHandler):
+    """A thinking reviewer that holds every note as a source defect."""
+
+    responses = []
+    requests = []
+    scripted = {}
+    HOLD_REASON = "the export mislabels the therapist's lines as the client's throughout"
+
+    def default_for(self, stage, payload):
+        if stage == "review":
+            return {"verdict": "hold", "reason_code": "source_defect", "reason": self.HOLD_REASON}
+        return super().default_for(stage, payload)
+
+
+class ReviewFixTests(unittest.TestCase):
+    """The whole-note review that fixes in place — the replacement for the
+    batched verify, the utterance spot-check, the meaning-judge, and the
+    repair/escalation loops. Its own harness (rather than a `PipelineTests`
+    subclass) keeps the 34 inherited pipeline tests from running again."""
+
+    NAME = "20260724 131748-9788991C.md"
+    DESTINATION = "2026-07-24 - Memo - Espresso Machine Repairs.md"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.vault = Path(self.tmp.name).resolve() / "vault"
+        (self.vault / "99 Meta" / "99.02 Schemas").mkdir(parents=True)
+        (self.vault / "00 Inbox").mkdir()
+        (self.vault / "99 Meta" / "99.02 Schemas" / "0.00 Vault Schema.md").write_text(SCHEMA, encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write(self, name, body):
+        (self.vault / "00 Inbox" / name).write_text(body, encoding="utf-8")
+
+    def inbox(self):
+        return sorted(
+            path.name
+            for path in (self.vault / "00 Inbox").glob("*.md")
+            if path.name != vt.vault_review.REVIEW_NOTE_NAME
+        )
+
+    def result_of(self, completed):
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        return json.loads(completed.stdout)
+
+    def think_process(self, chat_url, think_url, *extra):
+        return run_script(
+            "process", "--vault", str(self.vault), "--base-url", chat_url, "--model", "chat",
+            "--think-url", think_url, "--think-model", "code", *extra,
+        )
+
+    def gutted_cleanup(self):
+        source = transcript(SOLO_BLOCKS * 4)
+        blocks = vt.parse_transcript(source)["blocks"]
+        kept = " ".join(entry["text"] for entry in blocks[:2])
+        return source, {"cleaned": kept, "chunk_summary": "The opening of the memo."}
+
+    def review_rows(self, run_dir):
+        path = run_dir / "review.jsonl"
+        if not path.is_file():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def record_for(self, result):
+        plan = json.loads((run_dir_of(result) / "plan.json").read_text(encoding="utf-8"))
+        return next(record for record in plan["records"] if record["source"].endswith(self.NAME))
+
+    def test_a_sound_note_is_reviewed_ok_and_filed(self):
+        self.write(self.NAME, transcript(SOLO_BLOCKS))
+        with StubServer() as chat, StubServer(handler_cls=SecondStubChatHandler) as think:
+            result = self.result_of(self.think_process(chat.url, think.url, "--apply"))
+        self.assertIn(self.DESTINATION, self.inbox())
+        verification = result["data"]["verification"]
+        self.assertEqual(verification["reviewed"], 1)
+        self.assertEqual(verification["ok"], 1)
+        self.assertEqual(verification["held"], 0)
+        record = self.record_for(result)
+        self.assertEqual(record["verified"], "reviewed-ok")
+        rows = self.review_rows(run_dir_of(result))
+        self.assertEqual([row["verdict"] for row in rows], ["ok"])
+
+    def test_the_reviewer_fixes_a_gutted_note_in_place(self):
+        source, cleanup = self.gutted_cleanup()
+        self.write(self.NAME, source)
+        blocks = vt.parse_transcript(source)["blocks"]
+        restored = " ".join(entry["text"] for entry in blocks)
+        fixed = {"verdict": "fixed", "body": restored, "reason": "restored the dropped errands and warranty question"}
+        with StubServer(scripted={"clean": [cleanup]}) as chat, \
+                StubServer(handler_cls=SecondStubChatHandler, scripted={"review": [fixed]}) as think:
+            result = self.result_of(self.think_process(chat.url, think.url, "--apply"))
+        self.assertIn(self.DESTINATION, self.inbox())
+        note_text = (self.vault / "00 Inbox" / self.DESTINATION).read_text(encoding="utf-8")
+        self.assertIn("stud spacing", note_text)  # from the restored tail
+        verification = result["data"]["verification"]
+        self.assertEqual(verification["fixed"], 1)
+        record = self.record_for(result)
+        self.assertEqual(record["verified"], "reviewed-fixed")
+        self.assertNotIn("fidelity_provisional", record)
+        rows = self.review_rows(run_dir_of(result))
+        self.assertEqual(rows[-1]["verdict"], "fixed")
+        self.assertTrue(rows[-1]["fixed_hash"])
+
+    def test_a_fix_that_breaks_structure_gets_one_deep_retry(self):
+        source, cleanup = self.gutted_cleanup()
+        self.write(self.NAME, source)
+        blocks = vt.parse_transcript(source)["blocks"]
+        restored = " ".join(entry["text"] for entry in blocks)
+        reviews = [
+            {"verdict": "fixed", "body": f"# A Level-One Heading\n\n{restored}", "reason": "restored"},
+            {"verdict": "fixed", "body": restored, "reason": "restored, structure respected"},
+        ]
+        with StubServer(scripted={"clean": [cleanup]}) as chat, \
+                StubServer(handler_cls=SecondStubChatHandler, scripted={"review": reviews}) as think:
+            result = self.result_of(self.think_process(chat.url, think.url, "--apply"))
+        self.assertIn(self.DESTINATION, self.inbox())
+        self.assertEqual(result["data"]["verification"]["fixed"], 1)
+        review_requests = [
+            payload for payload in SecondStubChatHandler.requests
+            if payload["messages"][0]["content"].startswith("You review one processed")
+        ]
+        self.assertEqual(len(review_requests), 2)
+        self.assertEqual(review_requests[-1].get("reasoning_effort"), vt.ESCALATION_EFFORT)
+
+    def test_a_source_defect_hold_carries_its_code(self):
+        self.write(self.NAME, transcript(SOLO_BLOCKS))
+        with StubServer() as chat, StubServer(handler_cls=HoldReviewHandler) as think:
+            result = self.result_of(self.think_process(chat.url, think.url, "--apply"))
+        self.assertEqual(self.inbox(), [self.NAME])
+        record = self.record_for(result)
+        self.assertTrue(record["needs_review"])
+        self.assertEqual(record["reason_code"], "source_defect")
+        self.assertIn(HoldReviewHandler.HOLD_REASON, record["review_reason"])
+        run_dir = run_dir_of(result)
+        queued = [json.loads(line) for line in (run_dir / "review-queue.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(queued[0]["reason_code"], "source_defect")
+        report = (run_dir / "report.md").read_text(encoding="utf-8")
+        self.assertIn("source_defect", report)
+
+    def test_an_unreachable_reviewer_rearms_the_floors(self):
+        source, cleanup = self.gutted_cleanup()
+        self.write(self.NAME, source)
+        with StubServer(scripted={"clean": [cleanup]}) as chat:
+            result = self.result_of(
+                self.think_process(chat.url, "http://127.0.0.1:9/v1/chat/completions", "--apply")
+            )
+        self.assertEqual(self.inbox(), [self.NAME])
+        record = self.record_for(result)
+        self.assertTrue(record["needs_review"])
+        report = (run_dir_of(result) / "report.md").read_text(encoding="utf-8")
+        self.assertIn("Not verified", report)
+
+    def test_a_settled_verdict_is_not_re_reviewed_on_resume(self):
+        self.write(self.NAME, transcript(SOLO_BLOCKS))
+        with StubServer() as chat, StubServer(handler_cls=SecondStubChatHandler) as think:
+            first = self.result_of(self.think_process(chat.url, think.url))
+            reviews = len([
+                payload for payload in SecondStubChatHandler.requests
+                if payload["messages"][0]["content"].startswith("You review one processed")
+            ])
+            self.assertEqual(reviews, 1)
+            self.result_of(
+                run_script(
+                    "process", "--vault", str(self.vault), "--base-url", chat.url, "--model", "chat",
+                    "--think-url", think.url, "--think-model", "code", "--run", str(run_dir_of(first)),
+                )
+            )
+            reviews_after = len([
+                payload for payload in SecondStubChatHandler.requests
+                if payload["messages"][0]["content"].startswith("You review one processed")
+            ])
+        self.assertEqual(reviews_after, 1, "the settled verdict was journaled; nothing is reviewed twice")
 
 
 class ReviewNoteRenderParseTests(unittest.TestCase):
@@ -3837,26 +3622,29 @@ class InboxReviewTests(PipelineTests):
         self.assertNotIn(f"00 Inbox/{vt.vault_review.REVIEW_NOTE_NAME}", paths)
         self.assertFalse(any(vt.vault_review.PENDING_DIRNAME in path for path in paths))
 
-    def test_an_edit_that_fabricates_beyond_the_ceiling_is_held_at_apply(self):
-        # The apply step recomputes the meaning-first gate on the reviewed bytes.
-        # A light paraphrase edit applies; a wholesale fabrication does not.
+    def test_an_edit_that_fabricates_is_applied_with_a_warning(self):
+        # Word overlap is advisory at apply time: a person reviewed and ticked
+        # this note, so a distinctive addition is logged, never re-held. The
+        # transcript tail stays the hard gate (see the identity tests).
         self.write("20260724 131748-9788991C.md", transcript(SOLO_BLOCKS))
         with StubServer() as server:  # faithful default cleanup, stages normally
             self.result_of(self.process(server.url, "--no-verify"))
             staged = self.pending_dir() / f"{self.NAME}.md"
-            # Sixty distinct words the recording never contained, dropped in above
-            # the transcript — far past the fraction ceiling paraphrase is given.
             fabricated = " ".join(f"zz{chr(97 + i // 20)}{chr(97 + i % 20)}" for i in range(60))
             staged.write_text(
                 staged.read_text(encoding="utf-8").replace("# Transcript", fabricated + "\n\n# Transcript", 1),
                 encoding="utf-8",
             )
             self.set_tick(self.NAME, checked=True)
-            self.result_of(self.process(server.url, "--from-review", "--no-verify"))
-        # The fabrication cleared the ceiling, so the note was not applied and the
-        # recording is still in the inbox.
-        self.assertIn("20260724 131748-9788991C.md", self.inbox())
-        self.assertNotIn(f"{self.NAME}.md", self.inbox())
+            result = self.result_of(self.process(server.url, "--from-review", "--no-verify"))
+        self.assertIn(f"{self.NAME}.md", self.inbox())
+        self.assertNotIn("20260724 131748-9788991C.md", self.inbox())
+        plan = json.loads((run_dir_of(result) / "plan.json").read_text(encoding="utf-8"))
+        record = next(row for row in plan["records"] if row["source"].endswith("9788991C.md"))
+        self.assertTrue(
+            any("reviewer approval" in warning for warning in record.get("warnings", [])),
+            record.get("warnings"),
+        )
 
     def test_from_review_recording_note_keeps_a_basename_parent(self):
         # The link-safe rename fires while the processed note is still ambiguous
@@ -4037,6 +3825,79 @@ class ParentBasenameTests(unittest.TestCase):
         self.assertIn('parent: "[[2026-07-24 - Memo - Espresso Machine Repairs]]"', rewritten.decode("utf-8"))
 
 
+class ScanAdmissionTests(unittest.TestCase):
+    """What the inbox scan admits, holds, and distrusts — decided once, at scan."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.vault = Path(self.tmp.name).resolve() / "vault"
+        (self.vault / "00 Inbox").mkdir(parents=True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write_inbox(self, name, body):
+        (self.vault / "00 Inbox" / name).write_text(body, encoding="utf-8")
+
+    def scan_one(self):
+        items = vt.scan_inbox(self.vault)
+        self.assertEqual(len(items), 1)
+        return items[0]
+
+    def test_an_untimestamped_labelled_export_is_admitted_automatically(self):
+        speakers = ["Ellian", "Sopagna"]
+        utterance = " ".join(["word"] * 30)
+        self.write_inbox(
+            "Export.md", "".join(f"{speakers[index % 2]}\n{utterance}\n\n" for index in range(8))
+        )
+        item = self.scan_one()
+        self.assertTrue(item["is_transcript"])
+        self.assertTrue(item["unlabeled"])
+        self.assertTrue(item["no_timestamps"])
+        self.assertIsNone(item["skip_reason"])
+        self.assertEqual(item["stats"]["timestamp_style"], "unlabeled")
+
+    def test_a_broken_clock_export_keeps_its_words_and_distrusts_the_clock(self):
+        # Three-part stamps block the HH:MM rescale, and 6000 words over 57
+        # seconds is no speaking rate a human reaches — the clock is corrupt, not
+        # the words. The note processes with the clock ignored instead of being
+        # held for re-recording.
+        body = "*0:00:05*\nhello there\n\n*0:00:57*\n" + " ".join(["word"] * 6000) + "\n"
+        self.write_inbox("Broken Clock.md", body)
+        item = self.scan_one()
+        self.assertTrue(item["is_transcript"])
+        self.assertTrue(item["clock_broken"])
+        self.assertIn("words per second", item["clock_broken"])
+        self.assertEqual(item["stats"]["duration_seconds"], 0)
+        self.assertFalse(item.get("unlabeled"))
+        record = vt.base_record(item)
+        self.assertTrue(any("timestamps ignored" in warning for warning in record["warnings"]))
+
+    def test_prose_is_still_left_alone(self):
+        self.write_inbox(
+            "Essay.md",
+            "# Heading\n\n" + " ".join(["The meeting went well and we made real progress today."] * 40),
+        )
+        item = self.scan_one()
+        self.assertFalse(item["is_transcript"])
+        self.assertEqual(item["skip_reason"], "no timestamped transcript blocks")
+
+    def test_the_record_carries_the_parse_mode(self):
+        # parse_for_item must read the same transcript from an item and from the
+        # plan record derived from it — that identity is what retired the
+        # allow_unlabeled threading bug class.
+        speakers = ["Ellian", "Sopagna"]
+        utterance = " ".join(["word"] * 30)
+        body = "".join(f"{speakers[index % 2]}\n{utterance}\n\n" for index in range(8))
+        self.write_inbox("Export.md", body)
+        item = self.scan_one()
+        record = vt.base_record(item)
+        self.assertTrue(record["unlabeled"])
+        for owner in (item, record):
+            parsed = vt.parse_for_item(owner, body)
+            self.assertEqual(len(parsed["blocks"]), 8)
+
+
 class UnlabeledPayloadRegressionTests(unittest.TestCase):
     """The verify/judge/floor/repair payload builders must parse an unlabeled
     export the way cleanup did.
@@ -4082,6 +3943,9 @@ class UnlabeledPayloadRegressionTests(unittest.TestCase):
         (self.run_dir / "assembled" / "artifact.md").write_text(note_text, encoding="utf-8")
         self.record = {
             "source": self.SOURCE,
+            # The parse mode travels on the record (parse_for_item); without it
+            # every payload below would read the export as zero blocks.
+            "unlabeled": True,
             "destination": "00 Inbox/2026-07-24 - Memo - Espresso Machine Repairs.md",
             "recording_type": "memo",
             "title": "Espresso Machine Repairs",
@@ -4103,20 +3967,11 @@ class UnlabeledPayloadRegressionTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_the_note_verifier_sees_the_transcript(self):
-        payload = vt.verify_note_payload(self.vault, self.record, self.item)
-        self.assertIn("replacement gasket", payload["rawHead"])
-
-    def test_the_meaning_judge_sees_the_raw_transcript(self):
-        payload = vt.whole_note_fidelity_payload(self.vault, self.record, self.run_dir, self.args)
+    def test_the_reviewer_sees_the_raw_transcript(self):
+        payload = vt.review_payload(self.vault, self.record, self.run_dir, self.args)
         self.assertIsNotNone(payload)
         self.assertIn("replacement gasket", payload["rawTranscript"])
-
-    def test_the_utterance_floor_has_utterances_to_locate(self):
-        items = vt.fidelity_payloads(self.vault, self.record, self.run_dir)
-        self.assertEqual(len(items), vt.FIDELITY_SAMPLES)
-        for entry in items:
-            self.assertTrue(entry["sourceUtterance"].strip())
+        self.assertNotIn("rawTruncated", payload)
 
     def test_a_verbatim_repair_is_not_read_as_invented(self):
         revised = " ".join(SOLO_TEXTS[:8])

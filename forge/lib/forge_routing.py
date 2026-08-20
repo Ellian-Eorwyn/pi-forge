@@ -52,6 +52,15 @@ STAGE_SERVICES = {
 # override written against one of those names would have parsed, validated, and
 # done nothing, because `service_name_for` looks up the call site's string.
 STAGES_HELD_ON_CHAT = {
+    "write-transcript-note": (
+        "the one-pass writer that replaced classify → chunked clean → summarize in vault-transcripts "
+        "(2026-08-19 overhaul). It is bulk generation — one call emits the classification, the whole "
+        "cleaned body, and the summary — so it belongs on the bulk tier for the same reason each of "
+        "the stages it merged did, with the thinking review pass as the escalation net. Nothing here "
+        "has measured it against `think`; if that measurement ever happens, this is the entry to "
+        "revisit."
+    ),
+    "write-transcript-note-repair": "the corrective retry of the one-pass writer, and it goes where that goes",
     "clean-transcript-chunk-single": (
         "was on `think` (8/8 against 2/8, invented words 4.38 → 0.00) while the cleanup gate scored "
         "verbatim voice rather than meaning. Under the meaning-first gate the non-thinking bulk tier "
@@ -98,7 +107,6 @@ STAGES_HELD_ON_CHAT = {
         "`needsReview` flag no model ever sets) is fixable in the prompt on either model. Run those "
         "first; if they do not close it, revisit this with the pipeline in view rather than the stage."
     ),
-    "summarize-transcript": "thinking ties on gates (8/8) and carries 2 silent failures; the small model 3",
     "draft-note": (
         "measured as the `grounding-draft` case: every candidate either gate-blocked or unstable "
         "across repeats. Note that case's scorer raised on every item before commit 1d0eac08f, so "

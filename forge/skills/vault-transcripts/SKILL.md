@@ -39,8 +39,8 @@ conversations.
    and defines the vocabulary this skill writes, the optional voice note parses
    and which stages select owner/source/no voice, and both endpoints answer. The
    `chat` check also reports whether that endpoint is actually non-thinking:
-   cleanup is one call per chunk, so a thinking endpoint there wastes hundreds of
-   hidden tokens on every chunk.
+   the writer is one bulk call per note, so a thinking endpoint there wastes
+   hundreds of hidden tokens on every note.
 3. Dry run first — dry run is always the default:
 
    ```bash
@@ -53,10 +53,10 @@ conversations.
    (`! Inbox Review.md`) and stages each proposed note into
    `00 Inbox/_Pending Review/`. This is the review surface the user works in
    (see "Reviewing and approving in the vault" below). Read `report.md` and tell
-   the user what it holds — proposed renames, summaries, notes held for invented
-   words and which words, duplicate pairs, the Verification section, the run
-   directory — and point them at the review note to open the proposals, tick what
-   to keep, and apply.
+   the user what it holds — proposed renames, summaries, held notes with their
+   reason codes, duplicate pairs, the Verification section, the run directory —
+   and point them at the review note to open the proposals, tick what to keep,
+   and apply.
 5. Get explicit approval, then apply. The user's own click on the review note's
    apply link is approval; from the chat, apply the reviewed run:
 
@@ -65,7 +65,7 @@ conversations.
    ```
 
    `--from-review` reads the run and the approvals from the review note. To apply
-   a whole run unreviewed instead (every passing note, no waivers), resume it
+   a whole run unreviewed instead (every passing note), resume it
    directly with `--apply --run <run-directory>`. "Process my voice notes and
    apply it" is approval; a vague "sort out my inbox" is not.
 6. Offer to run `vault-organizer inbox` next, which files the cleaned notes —
@@ -129,10 +129,11 @@ A dry run leaves a control note the user reviews in Obsidian rather than reading
 report back to them:
 
 - **`00 Inbox/! Inbox Review.md`** sorts to the top of the inbox and lists the run.
-  Notes that cleared every gate are under **To process**, ticked by default. Notes
-  the gate **held for invented words** are under **Held**, unticked, each showing
-  the exact words added. Structural holds and duplicate pairs are under **Needs a
-  decision**, for information.
+  Notes the reviewer signed off (or fixed in place) are under **To process**,
+  ticked by default. Notes held by the review are under **Held**, unticked, each
+  carrying its reason code (`source_defect`, `structural_after_fix`, …) and the
+  reviewer's own sentence on what a human should look at. Duplicate pairs are
+  under **Needs a decision**, for information.
 - **`00 Inbox/_Pending Review/`** holds each proposed note under its real name, so
   the review note's `[[wikilinks]]` open them and the user can **edit them in
   place**. Both folders are skipped by this skill's scan and by `vault-organizer`,
@@ -142,17 +143,16 @@ The user opens a proposal, and then, per note:
 
 - **keep it** — leave it ticked (passed notes) or tick it (held notes);
 - **approve with a small change** — edit the staged note, then tick it;
-- **waive a few invented words** — tick a held note as-is; the applied note keeps
-  a collapsed `> [!provenance]-` stamp of exactly what was let through;
 - **reject** — untick it. It is not applied and its recording stays in the inbox
-  for a later run. To re-clean a held chunk with the thinking-model retry instead,
-  rerun the dry run with `--retry-failed`.
+  for a later run. To re-attempt a note a previous run recorded as failed, rerun
+  with `--retry-failed`.
 
-Applying (`--from-review`) **recomputes the gate from the bytes on disk**, never a
-stored verdict — the same safety property as `vault-compose apply`. A waiver only
-ever green-lights the words the gate held for that note; a word an edit introduced
-is not covered and re-holds the note. On apply the staged folder is cleared and the
-control note resets to its empty state.
+Applying (`--from-review`) **recomputes the structural contract from the bytes on
+disk**, never a stored verdict — the transcript section must still be byte-identical
+to the recording, the same safety property as `vault-compose apply`. Word-overlap
+measurements are advisory by then: a human just reviewed the note, so they are
+logged as warnings rather than re-holding it. On apply the staged folder is cleared
+and the control note resets to its empty state.
 
 ### One-time setup for the apply link
 
@@ -268,6 +268,10 @@ Read `reprocess-report.md` — it shows each summary before and after, which is 
 thing worth judging — then **get approval and rerun with `--apply --run
 <run-directory>`**. Every rewritten note is backed up first.
 
+One limit: a note whose recording carries no timestamps (an auto-admitted
+unlabeled export) is not yet reprocessable — `reprocess` selects by timestamped
+recordings. Re-run `process` on the raw export instead if it is still in an inbox.
+
 ## Splitting notes processed before the pair existed
 
 Processing writes two notes: the note made from the recording, and the recording
@@ -311,62 +315,53 @@ fingerprinted into a run, so a resumed run refuses to change them.
 `--owner <name>` is only consulted by `--speaker-policy roles`, where it lets the
 recorder's own name through while other names stay generic.
 
-## How long a run takes, and the two knobs that matter
+## How long a run takes, and the rules that keep it short
 
-Cleanup is generation-bound. The model emits roughly as much text as it reads, so
-a run costs about `output tokens / tokens per second` and nothing else — chunk
-size does not change the total. On a backend serving ~55 tokens/second, a
-34-file inbox is around an hour, and an 18,000-word recording is about five
-minutes on its own. That is the floor, not a symptom. Before treating a slow run
-as a defect, divide the words by the rate; if they match, the run is working.
-
-The one thing that changes the total is **which service a chunk is routed to**.
-Single-speaker cleanup goes to `think`, which was measured far more faithful on
-this stage (a 1.000 pass rate against 0.250 for the non-thinking profile) and
-costs about 7x the wall time for it: on one real run, 30.4s per multi-speaker
-chunk on `chat` against 219.8s per single-speaker chunk on `think`, because
-`think` spends roughly ten tokens reasoning for every token it answers with. Solo
-voice notes are therefore the slow ones by design. That trade is a routing
-decision, not a defect, and it belongs in `forge_routing` rather than here.
-
-Do not add a `max_tokens` ceiling to cleanup to bound this. It reads as an
-obvious win and is not: a ceiling sized for the visible answer truncates
-`think`'s reasoning into a hard failure, and the runaway it appears to prevent
-does not exist — failed chunks average *less* time than successful ones on the
-same service.
+The pipeline is two model calls per note: one **writer** call on `chat` that
+classifies the recording and writes the cleaned body and summary together, and
+one **review** call on `think` that reads the raw and the note side by side and
+signs off, **fixes the note in place**, or holds it with a reason code. An
+owner-authored memo or journal adds one reflection call. Both passes are
+generation-bound — the model emits roughly as much text as the note holds — so a
+run costs about `output tokens / tokens per second` and little else. On a
+backend serving ~55 tokens/second a dozen ordinary notes are well under an hour
+end to end; an 18,000-word recording is a few minutes on its own. Before
+treating a slow run as a defect, divide the words by the rate; if they match,
+the run is working.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--jobs <n>` | `1` | Clean `n` files at once. Chunks inside a file stay serial — each is written against the tail of the last — so this only helps when several files are queued. The chat backend serves 2 slots, so `2` is the ceiling that helps, and it competes with interactive turns on the same server. |
-| `--retry-failed` | off | Re-attempt chunks a previous run recorded as failed or held. A plain resume inherits them so it does not pay for the same derail twice, which also means the file can never change until this flag is passed. |
-| `--auto-retry` | off | On an invented-words failure, spend the corrective retry on the thinking model straight away instead of holding the chunk for review (the pre-review-lane behaviour). |
+| `--jobs <n>` | `1` | Write `n` notes at once. The chat backend serves 2 slots, so `2` is the ceiling that helps, and it competes with interactive turns on the same server. |
+| `--retry-failed` | off | Re-attempt notes a previous run recorded as failed. A plain resume inherits failures so it does not pay for the same derail twice, which also means the note can never change until this flag is passed. |
+| `--background` | off | Run model calls as preemptible background inference. Only for a machine whose interactive session is genuinely idle; see the rules below. |
 
-A chunk is **held** when the cleaned text carries more content words the source
-does not than the budget allows — the fabrication gate doing its job, the model
-having reached for a better word than the speaker's. By default `process` does
-**not** spend a corrective retry on it: that retry runs on the thinking model and
-costs ~90–220s on a solo note, and a few invented words are usually a
-mis-transcription fixed or a stutter smoothed. So the chunk keeps its best-effort
-text, the note assembles, and it waits in the review lane below for you to waive,
-edit, or reject. `--retry-failed` re-cleans a held chunk with the retry;
-`--auto-retry` restores the old spend-it-immediately behaviour. A *structural*
-defect (a kept timestamp, a stray heading, a speaker label on a solo note) is not
-waivable and still gets its automatic retry.
+**Rules for running, learned the expensive way (2026-08-19 session):**
 
-When a run's thinking-model review shares the endpoint an interactive session is
-using, a turn there can preempt the review ("background inference preempted by
-interactive activity"). The run retries past brief bursts on its own; if it still
-cannot proceed it exits with its state intact and the exact resume command in the
-error — resume with `--run <run-directory>`, in the foreground or with the session
-idle so the two do not compete for the endpoint.
+- **Never background a transcript run from an interactive agent session.** The
+  agent's own model calls count as "interactive activity" to the scheduler, so a
+  backgrounded run is preempted by the very session that launched it. Runs are
+  foreground by default; leave them that way.
+- **Never run two transcript runs at once against one model service.** They
+  preempt each other. Strictly sequential; queue the second until the first
+  completes.
+- **When notes are held, root-cause before asking.** Read the run directory
+  first — `report.md` lists every held note with its reason code, `review.jsonl`
+  holds the reviewer's verdicts, the staged note is in `_Pending Review/` —
+  and bring the user a per-note diagnosis and a proposed fix, not a count and a
+  question.
+- **In autonomous mode, process every transcript candidate the scan admits**
+  unless the user names a subset. Do not stop to ask which files were meant.
 
-Two input shapes worth knowing about. An export whose two-part timestamps are
-really elapsed **minutes** (`*01:03*` = 63 minutes, which reads as 63 seconds under
-`MM:SS`) is detected by its impossible speaking rate and read as `HH:MM` instead of
-being held as corrupt; the report says it made that assumption. A speaker-labelled
-export that carries **no timestamps** is reported in its own lane ("Looks Like A
-Transcript — No Timestamps") and left alone rather than filed as a raw note;
-`--unlabeled` cleans these verbatim, with no clock markers since there are none.
+Two input shapes are handled automatically. An export whose two-part timestamps
+are really elapsed **minutes** (`*01:03*` = 63 minutes, which reads as 63 seconds
+under `MM:SS`) is detected by its impossible speaking rate and read as `HH:MM`;
+the report says it made that assumption. An export whose clock is simply
+**garbage** (thousands of words against a few seconds) keeps its words and
+distrusts its clock — the note processes, timestamps ignored, with a warning
+saying so. A speaker-labelled export with **no timestamps at all** is admitted
+automatically when it clearly reads as a transcript (a small roster of recurring
+labels covering most turns) and cleaned verbatim with no clock markers;
+`--unlabeled` forces that lane for exports below the detection thresholds.
 
 ## Terms and speakers
 
@@ -417,6 +412,16 @@ note — either lands where the next run will find it.
   says so. `--link-rewrite {auto,off,require}` chooses; see `docs/obsidian-cli.md`.
 - The original transcription is always preserved verbatim under `# Transcript`.
   If a check cannot prove that, the note is held rather than written.
+- Every hold carries a reason code from a fixed set — `source_defect`,
+  `structural_after_fix`, `oversize`, `unusable_input`, `dedupe_conflict`,
+  `writer_invalid`, `review_unavailable` — in the plan, the review queue, the
+  report, and the review note. A source defect is the user's to settle; the rest
+  are the pipeline's, and each is worth root-causing from the run artifacts
+  before asking anything.
+- The deterministic fidelity floors (length ratio, rare-word retention, the
+  utterance locator, the invented-words ceiling) are **advisory**: they travel
+  to the reviewer as signals, and only re-arm as holds when no reviewer runs
+  (`--no-verify`, or the thinking service is unreachable).
 - The register is spoken-to-written: filler, false starts, repeated phrases, and
   unambiguous circumlocutions come out, and the speaker's voice, meaning, and
   meaningful hedges stay. **Therapy is the exception** and keeps the older,
@@ -425,11 +430,9 @@ note — either lands where the next run will find it.
   is preserved and linked as its own source note, so the minutes may paraphrase
   and compress. Meetings are therefore exempt from the verbatim gate (added
   words, length ratio, rare-word retention, utterance-locatable) and from the
-  verbatim fidelity review; only the structural checks and the note-level
-  thinking review (title, summary, speaker names, no fabrication) apply. Only
-  `meeting` summarizes — conversation and therapy stay verbatim, lecture keeps
-  structured full content. `--auto-retry` / the invented-words review lane below
-  concern the verbatim types; a meeting never lands in the held-for-invented lane.
+  verbatim fidelity review; the reviewer judges its minutes on coverage of
+  decisions and action items, never word overlap. Only `meeting` summarizes —
+  conversation and therapy stay verbatim, lecture keeps structured full content.
 - Everything the pipeline generates is a callout, above the speaker's words: the
   summary open, reflections and connections collapsed. `references/loom-notes.css`
   styles them; without it notes still read correctly.
@@ -438,8 +441,11 @@ note — either lands where the next run will find it.
 - Never touch a pair that shares a recording id but differs in content. One is
   usually a truncated re-export, and sometimes the truncated one is the copy
   carrying the user's handwritten notes. Neither contains the other.
-- Leave verification on. `--no-verify` is for when the thinking backend is down,
-  and the report then says plainly that nothing was reviewed.
+- Leave the review on. It is one thinking call per note, it fixes most problems
+  itself instead of holding them, and it is the pass that catches a real
+  omission or invention. `--no-verify` is for when the thinking backend is down;
+  the floors then re-arm as holds and the report says plainly that nothing was
+  reviewed.
 - Re-running is safe: a processed note has frontmatter, so it is skipped rather
   than cleaned twice.
 - Apply owner-authored policy only to a single-speaker `memo` or `journal`.
@@ -472,10 +478,18 @@ note — either lands where the next run will find it.
 ## Reference
 
 `references/transcript-note-format.md` — the note layout, the fidelity
-invariants, the per-type cleanup style, the speaker rules, and what each
-deterministic check catches. Read it before changing a prompt in
-`scripts/vault-transcripts.py`; the cleanup prompt is a copy of that contract and
-the two have to agree.
+invariants, the per-type cleanup style, the speaker rules, and what each check
+catches. Read it before changing a prompt in `scripts/vault-transcripts.py`; the
+writer and cleanup prompts embed that contract and the two have to agree.
+
+Run-directory journals: `written.jsonl` (one row per note from the writer, with
+the classification and the cleaned artifact), `review.jsonl` (one verdict per
+note — ok / fixed / hold with reason code), `assembled/`, `apply-log.jsonl`
+(including each recording note's `raw_destination`), `renames.jsonl`,
+`review-queue.jsonl`. A run directory from the staged pipeline (`classified.jsonl`
+/ `cleaned.jsonl` / `summaries.jsonl`) is pipeline v1: it cannot resume into this
+code, and the resume refusal naming the `pipeline` option is that guard doing its
+job — finish it with the package version that started it, or re-run.
 
 ## Personal context
 
@@ -497,12 +511,12 @@ This skill asserts a route only for `journal` and `therapy` recordings, via
 every route-gated card is refused there with no per-card configuration — which is
 how clinical and life-history material stays out of a work meeting.
 
-The layer reaches the **summary** and **journal reflection** calls only. It is
-deliberately absent from cleanup and classification: cleanup runs behind
-`check_chunk`, which rejects a chunk containing words the source did not, so a
-card naming someone would invite the model to write that name and the gate would
-then discard the chunk. Classification is the call that *decides* the recording
-type and material role, so nothing is established yet.
+The layer reaches the **reflection** call only. It is deliberately absent from
+the writer call — the one prompt that writes the note body, summary, and
+classification together — because the boundary is structural, not instructional:
+a prompt that writes the body must never see a card, or "never state a card fact
+as something the recording said" would rest on the model's obedience alone. The
+reflection stays its own call for exactly this reason.
 
 A missing, malformed, or unresolvable register never fails a run — it warns and
 the run proceeds without the layer. Report the profile warnings when `doctor` or

@@ -360,62 +360,62 @@ out of the passage the fidelity reviewer sees, along with the summary — both a
 callouts, and cleanup never writes one — so a summary paraphrasing an utterance
 can never answer for a cleanup that dropped it.
 
-## What the checks enforce before a model ever reviews the result
+## What the checks enforce, and what the reviewer judges
 
-Deterministic, exact, and free, so the thinking model's budget goes to judgment
-instead of catching malformed output. They fall into two kinds, and a note that
-fails them is not treated the same way in each.
+Deterministic checks are exact and free, so the thinking model's budget goes to
+judgment instead of catching malformed output. Since the 2026-08 overhaul they
+split into hard structure and advisory measurement.
 
-**Structural** faults are contract violations the meaning-judge has no say over,
-so any one of them holds the note back with its original name and body and puts it
-in the review queue:
+**Structural** faults are contract violations no judgment can waive. Any one of
+them holds the note back with its original name and body — including a note the
+reviewer itself revised, which gets exactly one corrective re-ask at deep
+reasoning before holding (`structural_after_fix`):
 
 | Check | Catches |
 | --- | --- |
-| Added words, on prose lines only | Invention. A word was either spoken or it was not; heading text is exempt because the editor authors structure. |
-| Exactly one `# ` heading, and it is `# Transcript` | A cleanup that wrote a document title. |
+| Exactly one `# ` heading, and it is `# Transcript` | A body that wrote a document title. |
 | Raw section byte-identical to the source body | Any drift in the thing that must not drift. |
 | Preamble present in the generated section | Handwritten notes quietly eaten by the pipeline. |
-| Surviving `*MM:SS*` lines | Timestamps left in the cleaned text. |
+| Summary shape: one paragraph, at most 120 words | A summary that grew into a second note. |
 | Frontmatter keys and values against the schema note | Metadata the organizer would strip or reject. |
 | Title charset, length, reserved names, and medium-words | Filenames that break Obsidian links or say nothing. |
 
-**Fidelity** floors are word-overlap proxies for lost content. They are not a
-verdict, because a source or lecture told to remove filler and regroup trips them
-without losing anything a reader would miss:
+Two former gates are now silent normalizers on the writer's output: a surviving
+`*MM:SS*` line is dropped (the raw transcript keeps the clock) and a stray
+level-one heading is demoted — neither is worth a model turn.
 
-| Check | Catches |
+**Advisory measurements** are word-overlap proxies for lost content. They are
+computed at assembly and travel to the reviewer as named suspicions, never as
+holds — a lecture told to remove filler and regroup trips all of them without
+losing anything a reader would miss:
+
+| Measurement | Suspects |
 | --- | --- |
+| Added words, on prose lines only | Invention past the ceiling — or a synonym the editor reached for. |
 | Rare-word retention | A dropped passage. Long infrequent words are content; filler is short and common. |
-| Cleaned/source length ratio, `0.4`–`1.1` (`0.3` floor under the tiny threshold) | A cleanup that summarized instead of cleaning, or padded. The floor allows for a register that legitimately compresses. |
-| Sampled utterance containment | Passages that vanished, located by sliding window rather than by re-reading the whole file. |
+| Cleaned/source length ratio, `0.4`–`1.1` (`0.3` floor under the tiny threshold) | A cleanup that summarized instead of cleaning, or padded. |
+| Sampled utterance containment | Passages that vanished, located by sliding window. |
 
-A note whose *only* failures are fidelity ones is not held. It is written and
-marked **provisional**, then judged for meaning by the thinking model, which reads
-the *whole* cleaned note against the *whole* source at `medium` reasoning — so a
-point that only *moved* when the note was regrouped reads as present, which the
-per-passage window could not tell. The verdict decides it:
+**The review pass** is where judgment lives: one thinking call per note reads
+the *whole* raw transcript beside the *whole* assembled note (advisories
+attached), in the note's own register — verbatim for therapy, minutes for
+meetings, spoken-to-written for the rest — and answers one of three ways:
 
-- meaning preserved → it finishes;
-- a point dropped, misstated, or misattributed → the judge names exactly what was
-  lost, and that objection is handed to the cleanup tier (`chat`), which restores
-  it from the source (gated for fabrication like any cleanup). The thinking model
-  then validates the rebuilt note a second time. Because `chat` produced the fix
-  and `think` checks it, that second verdict is a real independent approval, not
-  the judge signing off on its own edit. Restored → it finishes (`fidelity-repaired`);
-  still lost, or nothing usable came back → it holds, carrying the objection instead
-  of "52% of distinctive words survived". One repair round, then a human.
+- **ok** — the note tells the transcript's truth; it finishes.
+- **fixed** — something real was dropped, invented, or misstated, and the
+  transcript itself supplies the repair: the reviewer returns the complete
+  corrected body (and summary when that was the fault), which is rebuilt through
+  the structural checks above and finishes as `reviewed-fixed`.
+- **hold** — the defect is in the source (garbled audio, wrong attribution in
+  the export itself): the note holds with reason code `source_defect` and the
+  reviewer's own sentence on what a human should look at.
 
-This is the principle the whole skill rests on made uniform: no information lost,
-not every word kept. The one exception is a run with no judge to defer to
-(`--no-verify`, or an unreachable thinking service): there the floor holds the note
-as before, because an unjudged note must never read as approved. A meeting, being
-minutes rather than verbatim cleanup, is exempt from the fidelity floors entirely.
-
-After the structural checks pass, the thinking model reviews every note's type,
-title, summary, and speaker naming against excerpts of the raw transcript, plus a
-sample of utterances checked against the cleaned text (and, for a provisional note,
-the whole-note meaning review above). It can flag, and a flag is either redone with
-reasoning, repaired on `chat` and re-verified, or handed to a human — it never
-silently drops a result, and an unreachable reviewer is reported as "not verified"
-rather than treated as approval.
+This is the principle the whole skill rests on made uniform: no information
+lost, not every word kept — and the entity that judges meaning is also allowed
+to repair it, because holding a note over a fixable omission was the single
+largest cost of the staged pipeline this replaced. The one exception is a run
+with no reviewer (`--no-verify`, or an unreachable thinking service): there the
+advisory floors re-arm as holds, because an unreviewed note must never read as
+approved. A meeting, being minutes rather than verbatim cleanup, is exempt from
+the overlap measurements entirely; its review judges coverage of decisions and
+action items instead.

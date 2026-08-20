@@ -20,7 +20,6 @@ invariant is worth more than a model's opinion and costs nothing.
 """
 
 import argparse
-import concurrent.futures
 import datetime
 import json
 import os
@@ -78,7 +77,11 @@ from vault_schema import (
 )
 
 WORKFLOW = "vault-transcripts"
-PROMPT_VERSION = "vault-transcripts-v5"
+PROMPT_VERSION = "vault-transcripts-v6"
+# The pipeline's shape, not its prompts: v2 is the one-pass writer. A v1 run
+# directory (classify/clean/summarize journals) cannot resume into this code,
+# and the fingerprint mismatch this produces is the intended refusal.
+PIPELINE_VERSION = 2
 # What a processed note keeps where the recording used to be, and what the
 # recording's own note is called: "<processed name> - Transcript".
 RAW_NOTE_SUFFIX = " - Transcript"
@@ -212,8 +215,6 @@ CHUNK_BUDGET_CHARS = 12000
 SUMMARY_INPUT_CHARS = 24000
 CLASSIFY_HEAD_CHARS = 3500
 CLASSIFY_TAIL_CHARS = 600
-VERIFY_HEAD_CHARS = 500
-VERIFY_TAIL_CHARS = 300
 SUMMARY_TARGET_WORDS = 90
 # The point at which a summary has stopped being a summary, with enough slack
 # that a good one at the target length is never rejected.
@@ -280,17 +281,6 @@ UNLABELED_MIN_TURNS = 6
 FIDELITY_SAMPLES = 4
 FIDELITY_MIN_CONTAINMENT = 0.5
 FIDELITY_MIN_WORDS = 4
-FIDELITY_SAMPLE_RATE = 3
-# The deterministic fidelity floors (length ratio, rare-word retention, the
-# utterance locator) are word-overlap proxies. A source or lecture the prompt
-# told to remove filler and regroup trips them without losing any meaning, so a
-# note held by them alone is not a verdict — it is a reason to think harder. Such
-# a note is marked provisional and sent to the thinking meaning-judge, which is
-# the authority the principle names: no information lost, not every word kept.
-# The judge reads the whole cleaned note against the whole source (so content that
-# only moved reads as present) and can hand a real loss to `chat` to restore; both
-# the judgment and the re-check run at `medium` — enough for a yes/no meaning call,
-# where `xhigh` (the note-redo budget) buys nothing on this task.
 FIDELITY_REVIEW_EFFORT = "medium"
 WORD_RE = re.compile(r"[a-z][a-z-]{2,}")
 # Words a transcript editor inserts to turn fragments into sentences. They say
@@ -943,6 +933,19 @@ def _is_label_like(name):
     return name[-1] not in ".?!"
 
 
+def parse_for_item(item, body):
+    """Parse a raw body the way the scan decided this item reads.
+
+    The parse mode is a property of the note, decided once at scan and recorded
+    on the item (and carried onto its record), not a flag threaded through every
+    call site. An unlabeled export must parse identically in cleanup, the
+    verifier payloads, the fidelity floor, and the repair gate — the 2026-08-19
+    inbox session held four notes precisely because one of those parsed the raw
+    a different way and reviewed an empty transcript.
+    """
+    return parse_transcript(body, allow_unlabeled=bool(item.get("unlabeled")))
+
+
 # --------------------------------------------------------------------------
 # Scan and dedupe
 # --------------------------------------------------------------------------
@@ -1037,14 +1040,30 @@ def scan_inbox(vault, limit=None, select=None, allow_unlabeled=False):
             item["unlabeled"] = transcript and parsed.get("timestamp_style") == "unlabeled"
             if transcript:
                 item["stats"] = transcript_stats(parsed)
+                broken = unusable_input_reason(item["stats"])
+                if broken:
+                    # An impossible speaking rate means the clock is corrupt, not
+                    # the words: the app wrote garbage timestamps (the 2026-08-19
+                    # inbox had ten such exports, all coherent text). The words are
+                    # what gets cleaned and the clock is only derived data — so
+                    # distrust the clock and keep the note, rather than holding
+                    # readable text for re-recording. The model never sees
+                    # timestamps either way (render_turns drops them).
+                    item["clock_broken"] = broken
+                    item["stats"] = {**item["stats"], "duration_seconds": 0}
             elif reason == "no timestamped transcript blocks" and looks_like_untimestamped_transcript(split, body):
-                # A speaker-labelled transcript the transcriber never timestamped: named
-                # as its own lane so the deliberate skip is visible, not filed silently
-                # as a raw note. --unlabeled processes it.
+                # A speaker-labelled transcript the transcriber never timestamped.
+                # The roster/coverage thresholds above are the admission boundary
+                # between a transcript and prose, so a file that clears them is
+                # processed verbatim rather than parked behind a flag nobody
+                # remembers to pass. --unlabeled still forces admission for
+                # exports below those thresholds.
+                parsed = parse_transcript(body, allow_unlabeled=True)
+                item["is_transcript"] = True
+                item["skip_reason"] = None
                 item["no_timestamps"] = True
-                item["skip_reason"] = (
-                    "looks like a transcript but has no timestamps — pass --unlabeled to process it verbatim"
-                )
+                item["unlabeled"] = True
+                item["stats"] = transcript_stats(parsed)
         except (OSError, UnicodeDecodeError) as error:
             item["error"] = str(error)
             item["skip_reason"] = f"unreadable: {error}"
@@ -1581,10 +1600,7 @@ def classify_items(args, vault, items, run_dir, skip):
         started = time.time()
         try:
             data = (vault / item["path"]).read_bytes()
-            parsed = parse_transcript(
-                transcript_source(split_frontmatter(data)["body"], vault),
-                allow_unlabeled=item.get("unlabeled", False),
-            )
+            parsed = parse_for_item(item, transcript_source(split_frontmatter(data)["body"], vault))
             payload = classify_payload(item, parsed, getattr(args, "compiled_lexicon", None))
             roster_names = [offer["name"] for offer in payload.get("knownSpeakers", [])]
             messages = [
@@ -1663,13 +1679,6 @@ def classify_items(args, vault, items, run_dir, skip):
                 f"checkpointed — resume it with `process --vault {vault} --run {run_dir}`, or run the "
                 "resume in the foreground so its review does not compete with the interactive session"
             ) from error
-        unusable = unusable_input_reason(item.get("stats"))
-        if unusable:
-            # Corrupt input can't be cleaned; hold it, but mark it so the report
-            # files it as re-record rather than as something to review and fix.
-            record["needs_review"] = True
-            record["unusable_reason"] = unusable
-            record["review_reason"] = record.get("review_reason") or unusable
         record["seconds"] = round(time.time() - started, 3)
         records[item["path"]] = record
         run_state.append_jsonl_fsync(journal_path, record)
@@ -2192,222 +2201,6 @@ def accepted_corrections(source, cleaned, glossary):
     return accepted
 
 
-def clean_items(args, vault, items, class_records, run_dir, skip):
-    """Clean every chunk of every transcript, one call per chunk.
-
-    The call does not always go to the same service: single-speaker chunks are
-    routed to the thinking profile and diarized ones to the small model, because
-    the two directions were measured to want opposite things. ``clean_one_chunk``
-    makes that choice per chunk.
-    """
-    journal_path = run_dir / "cleaned.jsonl"
-    prior, _ = run_state.read_jsonl_recover_tail(journal_path, repair=True)
-    journal = {}
-    for row in prior:
-        if row.get("path") and row.get("sha256") and row.get("chunk") is not None:
-            journal[(row["path"], row["sha256"], row["chunk"])] = row
-    service = chat_service(args)
-    artifacts = run_dir / "cleaned"
-    artifacts.mkdir(exist_ok=True)
-    # Cleanup is routed off the bulk service, so a dead target has to be found
-    # here rather than at the first chunk: one probe per service, and the run
-    # continues on `chat` with the substitution stated.
-    warnings = list(
-        forge_routing.disable_unreachable(
-            args,
-            ["clean-transcript-chunk-single", "clean-transcript-chunk-multi"],
-            timeout=min(args.request_timeout, 60),
-        )
-    )
-    results = {}
-    plans = []
-    for item in items:
-        record = class_records.get(item["path"])
-        if not item["is_transcript"] or item["path"] in skip or record is None:
-            continue
-        if record["needs_review"] or record["source"] == "failed":
-            continue
-        plans.append((item, record))
-    total_chunks = 0
-    prepared = []
-    for item, record in plans:
-        try:
-            data = (vault / item["path"]).read_bytes()
-            parsed = parse_transcript(
-                transcript_source(split_frontmatter(data)["body"], vault),
-                allow_unlabeled=item.get("unlabeled", False),
-            )
-        except (OSError, UnicodeDecodeError) as error:
-            warnings.append(f"{item['path']}: could not re-read for cleanup ({error})")
-            results[item["path"]] = {"error": str(error)}
-            continue
-        lexicon = getattr(args, "compiled_lexicon", None)
-        labels = ordered_labels(parsed["blocks"])
-        speaker_map, drop_labels = derive_speaker_map(
-            labels, record["speakers"], record["effective_speakers"], args.speaker_policy, args.owner, lexicon
-        )
-        tiny = item["stats"]["words"] < args.tiny_words
-        # Corrections land before chunking, so the model reads the right
-        # spelling and the added-words gate compares against the same text.
-        blocks, corrections = correct_blocks(parsed["blocks"], (lexicon or {}).get("terms", []))
-        chunks = chunk_blocks(blocks)
-        prepared.append((item, record, parsed, speaker_map, drop_labels, tiny, chunks, corrections))
-        total_chunks += len(chunks)
-    done = 0
-    durations = []
-    # Cleanup is generation-bound: the backend emits roughly as many tokens as
-    # the chunk contains, so wall time is token count over tokens per second and
-    # chunk size buys nothing. The one lever left is using more than one slot.
-    # Files are independent -- nothing crosses from one to the next -- while
-    # chunks inside a file chain through `previous_tail` and `headings`, so the
-    # split is per file and the chunk order inside each file is untouched.
-    progress_lock = threading.Lock()
-
-    def clean_one_file(prepared_entry):
-        item, record, parsed, speaker_map, drop_labels, tiny, chunks, corrections = prepared_entry
-        nonlocal done
-        cleaned_chunks = []
-        summaries = []
-        headings = []
-        proposals = []
-        previous_tail = ""
-        failure = None
-        for index, chunk in enumerate(chunks, start=1):
-            with progress_lock:
-                done += 1
-            key = (item["path"], item["sha256"], index)
-            row = journal.get(key)
-            if row is not None and row.get("status") == "ok":
-                cleaned = (artifacts / row["artifact"]).read_text(encoding="utf-8")
-                cleaned_chunks.append(cleaned)
-                summaries.append(row.get("chunk_summary", ""))
-                headings.extend(heading_lines(cleaned))
-                proposals.extend(row.get("proposals") or [])
-                previous_tail = cleaned[-300:]
-                continue
-            # A recorded failure is inherited rather than retried, so a resume
-            # does not spend minutes reproducing a refusal it already has. That
-            # also makes it sticky: the file can never succeed until the row is
-            # retried deliberately, which is what `--retry-failed` is for. A
-            # later ok row supersedes this one, since the journal is last-wins.
-            if row is not None and row.get("status") == "failed" and not getattr(args, "retry_failed", False):
-                failure = row.get("error", "cleanup failed")
-                break
-            started = time.time()
-            payload, source = cleanup_payload(
-                record,
-                chunk,
-                index,
-                len(chunks),
-                headings,
-                previous_tail,
-                speaker_map,
-                drop_labels,
-                tiny,
-                getattr(args, "compiled_voice", None),
-                getattr(args, "compiled_lexicon", None),
-            )
-            try:
-                cleaned, chunk_summary = clean_one_chunk(
-                    args,
-                    None,
-                    payload,
-                    source,
-                    speaker_map,
-                    drop_labels,
-                    tiny,
-                    system=cleanup_system(getattr(args, "compiled_voice", None), voice_context_for(record)),
-                    summarized=is_summarized(record["recording_type"]),
-                )
-            except InterruptedError as error:
-                raise UserError(
-                    f"cleanup was preempted by interactive activity: {error}. The run is checkpointed "
-                    f"— resume it with `process --vault {vault} --run {run_dir}`, or run the resume in "
-                    "the foreground so its review does not compete with the interactive session"
-                ) from error
-            except (forge_llm.ChatError, UserError, ValueError) as error:
-                failure = f"{type(error).__name__}: {error}"
-                with progress_lock:
-                    run_state.append_jsonl_fsync(
-                        journal_path,
-                        {
-                            "path": item["path"],
-                            "sha256": item["sha256"],
-                            "chunk": index,
-                            "status": "failed",
-                            "error": failure,
-                            "seconds": round(time.time() - started, 3),
-                        },
-                    )
-                    warnings.append(f"{item['path']} chunk {index}: cleanup failed ({failure})")
-                    progress(f"[clean {done}/{total_chunks}] {item['path']} chunk {index}/{len(chunks)} FAILED: {failure}")
-                break
-            name = f"{sha256_text(item['path'])[:12]}-{index:04d}.md"
-            (artifacts / name).write_text(cleaned, encoding="utf-8")
-            elapsed = round(time.time() - started, 3)
-            accepted = accepted_corrections(source, cleaned, payload.get("glossary", []))
-            proposals.extend(accepted)
-            routing = forge_routing.routing_record(
-                # Which model actually cleaned this chunk. The two cleanup
-                # directions go to different services, so a run whose meeting
-                # reads like a rewrite and whose memo reads like a transcript is
-                # diagnosable from the journal rather than by re-deriving the
-                # split months later.
-                forge_routing.service_for(cleanup_stage(speaker_map, drop_labels), args)
-            )
-            entry = {
-                "path": item["path"],
-                "sha256": item["sha256"],
-                "chunk": index,
-                "chunks": len(chunks),
-                "status": "ok",
-                "artifact": name,
-                "cleaned_sha256": sha256_text(cleaned),
-                "chunk_summary": chunk_summary,
-                "proposals": accepted,
-                "routing": routing,
-                "seconds": elapsed,
-            }
-            with progress_lock:
-                run_state.append_jsonl_fsync(journal_path, entry)
-                durations.append(elapsed)
-                # Chunks now finish on `workers` fronts at once, so the mean
-                # duration has to be divided by that to mean anything.
-                remaining = (sum(durations) / len(durations)) * (total_chunks - done) / workers
-                eta = format_duration(remaining) if durations else "-"
-                progress(
-                    f"[clean {done}/{total_chunks}] {item['path']} chunk {index}/{len(chunks)} ({elapsed:.1f}s, eta {eta})"
-                )
-            cleaned_chunks.append(cleaned)
-            summaries.append(chunk_summary)
-            headings.extend(heading_lines(cleaned))
-            previous_tail = cleaned[-300:]
-        return item["path"], {
-            "cleaned": "\n\n".join(part.strip() for part in cleaned_chunks).strip() if not failure else None,
-            "chunk_summaries": summaries,
-            "chunks": len(chunks),
-            "speaker_map": speaker_map,
-            "drop_labels": drop_labels,
-            "tiny": tiny,
-            "corrections": corrections,
-            "proposals": proposals,
-            "error": failure,
-        }
-
-    workers = max(1, min(int(getattr(args, "jobs", 1) or 1), len(prepared) or 1))
-    if workers == 1:
-        for entry in prepared:
-            path, result = clean_one_file(entry)
-            results[path] = result
-    else:
-        # A preemption inside a worker still has to stop the whole stage, so the
-        # UserError it raises is re-raised here rather than left in a future.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-            for path, result in pool.map(clean_one_file, prepared):
-                results[path] = result
-    return results, warnings
-
-
 # --------------------------------------------------------------------------
 # Chat stage 3: the summary paragraph
 # --------------------------------------------------------------------------
@@ -2535,18 +2328,6 @@ REFLECTION_SECTIONS = {
 }
 
 REFLECTION_SYSTEMS = {"journal": JOURNAL_REFLECTION_SYSTEM, "memo": MEMO_REFLECTION_SYSTEM}
-
-
-def summary_system(voice, context_mode, profile=None, site=None):
-    parts = [SUMMARY_SYSTEM]
-    prefix = vault_voice.prompt_prefix(voice, context_mode)
-    if prefix:
-        parts.append(prefix)
-    if site is not None:
-        background = vault_profile.profile_prefix(profile, site)
-        if background:
-            parts.append(background)
-    return "\n\n".join(parts)
 
 
 def connections_script():
@@ -2740,7 +2521,265 @@ def check_summary(summary):
     return problems
 
 
-def summarize_once(args, service, messages, task):
+# --------------------------------------------------------------------------
+# Chat stage: the one-pass writer
+# --------------------------------------------------------------------------
+
+# One call per note replaces the classify → per-chunk clean → summarize chain.
+# The 2026-08-19 inbox session paid three to four bulk calls per note plus a
+# retry economy around per-chunk gates; on the current model a whole recording
+# fits one prompt and the register rules transfer intact, so the pipeline's
+# structure was the cost, not the work. Whole-note context also removes the
+# chunk-boundary failure modes (headings drifting, a turn split mid-sentence)
+# that several gates existed to police. Files past WRITE_BUDGET_CHARS still
+# chunk (write_one_oversize); everything else is a single call.
+WRITE_BUDGET_CHARS = 100_000
+
+
+def _rules_between(text, start, end=None):
+    """A slice of an existing prompt, anchored on its own opening words.
+
+    The writer prompt reuses the classify/cleanup/summary rule bodies verbatim
+    rather than keeping a fourth synchronized copy; slicing them out of the
+    stage prompts keeps one authoritative text per rule set."""
+    index = text.index(start)
+    return text[index : text.index(end)].rstrip() if end else text[index:].rstrip()
+
+
+def writer_system():
+    classify_rules = _rules_between(CLASSIFY_SYSTEM, "recording_type - check these in order")
+    cleanup_rules = _rules_between(CLEANUP_SYSTEM, "Fidelity rules,", "\n\nChunk context:")
+    summary_rules = _rules_between(SUMMARY_SYSTEM, "The reader is the person")
+    return f"""You process one voice recording's transcript into its vault note in a single pass: you classify the recording, write its cleaned body, and write its summary, all from one reading.
+
+Return exactly one JSON object and nothing else:
+{{"recording_type": "...", "material_role": "...", "title": "...",
+ "speakers": {{"<label exactly as given>": {{"who": "...", "kind": "name" | "role" | "unknown", "confidence": "high" | "medium" | "low", "source": "transcript" | "roster", "evidence": "<quote or null>"}}}},
+ "effective_speakers": <n>, "spoken_date": "<YYYY-MM-DD or null>", "evidence": "<quote or null>",
+ "needs_review": <true | false>, "review_reason": "<why, only when needs_review is true>",
+ "cleaned": "<the whole cleaned note body as Markdown>",
+ "summary": "<one paragraph, or null when \\"tiny\\" is true>"}}
+
+"transcript" is the complete recording, rendered as speaker turns. There are no
+chunks: where the rules below mention a chunk, they mean this whole transcript,
+and "chunk_summary" does not exist — the note's summary belongs in "summary".
+"settledType" (when given) is the recording type a person already settled for
+this note: classify as it says and write "cleaned" in its register, unless the
+transcript plainly shows it wrong — then keep your own reading and say why in
+"review_reason" with needs_review true.
+(The one exception: an oversized recording arrives in parts, marked by
+"chunkIndex"/"chunkCount"; then "cleaned" is that part's cleanup, the first part
+also carries the classification, and only the final part carries "summary".)
+
+How to classify — recording_type, material_role, title, speakers,
+effective_speakers, spoken_date, evidence, needs_review, review_reason:
+
+{classify_rules}
+
+How to write "cleaned". Use "**Name:**" turn labels only for multi-speaker
+types, with the names your own "speakers" answer identifies confidently
+(otherwise "Speaker 1", "Speaker 2" in order of first appearance); when
+effective_speakers is 1, write plain prose with no labels at all. Treat
+"structuredFullContent" as true when your material_role is external-source.
+"styleByKind" (when given) maps recording_type to the vault owner's own style
+rule for that kind — apply the entry for the type you chose. "ownerVoice" (when
+given) describes the owner's written register — apply it only when the note is
+the owner's own voice (an owner-authored memo or journal):
+
+{cleanup_rules}
+
+How to write "summary" (null when "tiny" is true — the title carries a tiny
+note):
+
+{summary_rules}"""
+
+
+WRITER_SYSTEM = writer_system()
+
+
+def strip_solo_labels_inline(text):
+    """Remove line-leading bold speaker labels from a single-speaker body.
+
+    ``strip_solo_labels`` drops label-only lines; a writer given the whole note
+    can also open a paragraph "**Ellian:** the words" — same spurious marker,
+    inline form. The label is dropped and the words keep their line."""
+    if not isinstance(text, str) or "**" not in text:
+        return text
+    stripped = strip_solo_labels(text)
+    return re.sub(r"^\s*\*\*[^*\n]{1,60}\*\*:?[ \t]*", "", stripped, flags=re.MULTILINE)
+
+
+def reconcile_written_labels(cleaned, speaker_map, drop_labels):
+    """Deterministically align the written body's speaker labels with the map.
+
+    The writer names speakers in the same response that writes the body, so the
+    canonical map (policy, roster spelling, duplicate suffixes) is only derivable
+    afterwards. Raw labels echoed verbatim are renamed in place — they are
+    structurally anchored at line starts, so the rename cannot touch speech.
+    Anything else is left for the reviewer rather than re-generated."""
+    if not isinstance(cleaned, str):
+        return cleaned
+    if drop_labels:
+        return strip_solo_labels_inline(cleaned)
+    for label, display in (speaker_map or {}).items():
+        if not display or label == display:
+            continue
+        pattern = re.compile(rf"^(\s*)\*\*{re.escape(label)}\*\*", re.MULTILINE)
+        cleaned = pattern.sub(lambda match: f"{match.group(1)}**{display}**", cleaned)
+    return cleaned
+
+
+def normalize_written(cleaned):
+    """Deterministic cleanups the old chunk gate used to hold notes over.
+
+    A kept timestamp line and a level-one heading are never wanted in a cleaned
+    body — the raw transcript keeps the clock, and assembly owns the single
+    ``# Transcript`` heading — so both are normalized silently instead of
+    burning a corrective model turn."""
+    if not isinstance(cleaned, str):
+        return cleaned
+    lines = [line for line in cleaned.split("\n") if not TIMESTAMP_RE.match(line.strip())]
+    return "\n".join(f"#{line}" if re.match(r"^#\s", line) else line for line in lines).strip()
+
+
+def written_advisories(source_text, cleaned, speaker_map, drop_labels, glossary, tiny, summarized):
+    """What the old chunk gate measured, kept as signals for the review pass.
+
+    These stopped holding notes: the reviewer reads them next to the raw and the
+    note and judges meaning directly. They still get computed because a named
+    suspicion ("31 invented words", "labels survived a solo strip") is exactly
+    what makes a single review pass sharp."""
+    advisories = []
+    if not summarized:
+        allowed = [] if drop_labels else [value for value in (speaker_map or {}).values() if value]
+        allowed = allowed + [offer["term"] for offer in glossary]
+        invented = invented_over_ceiling(source_text, cleaned, allowed)
+        if invented:
+            advisories.append(f"{INVENTED_PROBLEM_PREFIX}: {', '.join(invented[:8])}")
+    if tiny and heading_lines(cleaned):
+        advisories.append("added headings to a note too short to need them")
+    if drop_labels and re.search(r"^\*\*[^*]{1,60}\*\*", cleaned or "", re.MULTILINE):
+        advisories.append("speaker labels survived the solo-label strip")
+    return advisories
+
+
+def writer_payload(args, item, parsed, lexicon=None, voice=None):
+    """Everything the one-pass writer needs, from one parse.
+
+    Deliberately absent: the personal-context profile. Cards reach only the
+    summary's *reading* and the reflection, and those boundaries are structural
+    — a prompt that also writes the body must never see them, or "never state a
+    card fact as something the recording said" would rest on instruction alone.
+    The reflection call (which may see cards) stays separate for that reason."""
+    blocks, corrections = correct_blocks(parsed["blocks"], (lexicon or {}).get("terms", []))
+    labels = ordered_labels(blocks)
+    rendered = render_turns(collapse_turns(blocks, {label: label for label in labels}))
+    tiny = item["stats"]["words"] < args.tiny_words
+    payload = {
+        "filename": Path(item["path"]).name,
+        "labels": labels,
+        "stats": {
+            "blocks": item["stats"]["blocks"],
+            "words": item["stats"]["words"],
+            "durationSeconds": item["stats"]["duration_seconds"],
+        },
+        "transcript": rendered,
+    }
+    if tiny:
+        payload["tiny"] = True
+    if item["filename_hint"]:
+        payload["filenameTitle"] = item["filename_hint"]
+    if item.get("label_type"):
+        # Reprocessing a filed note: its `date-type-topic` name was settled by a
+        # person, and the body must be written in that register.
+        payload["settledType"] = item["label_type"]
+    if parsed["preamble"].strip():
+        payload["handwrittenPreamble"] = parsed["preamble"].strip()[:1000]
+    roster = vault_lexicon.candidate_speakers(rendered, (lexicon or {}).get("speakers", []))
+    if roster:
+        payload["knownSpeakers"] = vault_lexicon.speaker_offers(roster)
+    glossary = vault_lexicon.near_miss_terms(rendered, vault_lexicon.term_candidates(lexicon))
+    if glossary:
+        payload["glossary"] = glossary
+    if voice:
+        owner_prefix = vault_voice.prompt_prefix(voice, vault_voice.CONTEXT_OWNER)
+        if owner_prefix:
+            payload["ownerVoice"] = owner_prefix
+        style_by_kind = {}
+        vocabulary = []
+        for recording_type in RECORDING_TYPES:
+            if recording_type == "other":
+                continue
+            context = vault_voice.CONTEXT_SOURCE if recording_type == "lecture" else vault_voice.CONTEXT_OWNER
+            compiled = vault_voice.compile_voice(
+                voice, context, note_type=TYPE_TO_NOTE_TYPE[recording_type], material=rendered
+            )
+            if compiled["per_type_rule"]:
+                style_by_kind[recording_type] = compiled["per_type_rule"]
+            vocabulary = compiled["vocabulary"] or vocabulary
+        if style_by_kind:
+            payload["styleByKind"] = style_by_kind
+        if vocabulary:
+            payload["relevantVocabulary"] = vocabulary
+    return payload, corrections, tiny, blocks, rendered, glossary
+
+
+def written_problems(value, item, parsed, tiny, args, roster_names):
+    """Contract problems with a writer response, and the validated classification.
+
+    Returns ``(classification, class_warnings, problems)``; validation errors on
+    the classification half surface as problems rather than exceptions so one
+    corrective re-ask can name everything at once."""
+    problems = []
+    classification = None
+    class_warnings = []
+    try:
+        classification, class_warnings = validate_classification(value, item, parsed, roster_names)
+    except UserError as error:
+        problems.append(str(error))
+    problems.extend(body_problems(value, tiny, args, classification))
+    return classification, class_warnings, problems
+
+
+def body_problems(value, tiny, args, classification):
+    """Contract problems with the cleaned/summary half of a writer response.
+
+    A needs_review classification is a complete answer — the note holds without
+    a body — so nothing further is owed. Separated from the classification half
+    because the roster-withheld re-read can clear that hold after the fact, and
+    the body contract must then be re-judged on its own.
+    """
+    if classification is not None and classification["needs_review"]:
+        return []
+    problems = []
+    cleaned = value.get("cleaned") if isinstance(value, dict) else None
+    if not isinstance(cleaned, str) or not cleaned.strip():
+        problems.append("response had no non-blank cleaned text")
+    if not (tiny and args.tiny_summary == "omit"):
+        problems.extend(check_summary(value.get("summary") if isinstance(value, dict) else None))
+    return problems
+
+
+def write_one(args, vault, item, run_dir, service, lexicon, voice):
+    """One note through the writer: call, validate, one corrective re-ask,
+    deterministic label/structure normalization, advisory metrics.
+
+    Returns ``(class_record, clean_result, summary_row, warnings)`` in exactly
+    the shapes the old three stages produced, so assembly, the review lane, and
+    reprocess consume the writer without knowing it exists."""
+    warnings = []
+    data = (vault / item["path"]).read_bytes()
+    parsed = parse_for_item(item, transcript_source(split_frontmatter(data)["body"], vault))
+    payload, corrections, tiny, blocks, rendered, glossary = writer_payload(args, item, parsed, lexicon, voice)
+    roster_names = [offer["name"] for offer in payload.get("knownSpeakers", [])]
+    if len(rendered) > WRITE_BUDGET_CHARS:
+        return write_one_oversize(
+            args, vault, item, run_dir, service, parsed, payload, corrections, tiny, blocks, roster_names, glossary
+        )
+    messages = [
+        {"role": "system", "content": WRITER_SYSTEM},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
     value, _call = forge_llm.call_json_with_retry(
         service,
         messages,
@@ -2749,154 +2788,394 @@ def summarize_once(args, service, messages, task):
         response_format={"type": "json_object"},
         timeout=args.request_timeout,
         api_key=args.api_key,
-        task=task,
+        task="write-transcript-note",
     )
-    summary = value.get("summary") if isinstance(value, dict) else None
-    return summary, check_summary(summary)
-
-
-def summarize_one(args, service, messages):
-    """One summary, with a single corrective retry that shows the model its own
-    violation. A summary that runs long is worth asking again for; it is not
-    worth holding back the whole note over."""
-    summary, problems = summarize_once(args, service, messages, "summarize-transcript")
-    if not problems:
-        return re.sub(r"\s+", " ", summary).strip()
-    # A retry that only says "unusable" gets the same length back. Name the target.
-    repair = messages + [
-        {
-            "role": "user",
-            "content": f"That response was unusable: {problems[0]}. Return corrected JSON only, "
-            f"with the summary rewritten as one paragraph of at most {SUMMARY_TARGET_WORDS} words, "
-            "keeping only what the recording was most about.",
+    classification, class_warnings, problems = written_problems(value, item, parsed, tiny, args, roster_names)
+    if problems:
+        # One corrective turn naming every violation at once; a second failure
+        # is a hold, not a loop.
+        repair = messages + [
+            {"role": "assistant", "content": json.dumps(value, ensure_ascii=False) if isinstance(value, dict) else str(value)},
+            {
+                "role": "user",
+                "content": "That response was unusable: "
+                + "; ".join(problems)
+                + ". Return the corrected JSON object only, complete, following the contract exactly.",
+            },
+        ]
+        value, _call = forge_llm.call_json_with_retry(
+            service,
+            repair,
+            temperature=0,
+            cache_prompt=args.cache_prompt,
+            response_format={"type": "json_object"},
+            timeout=args.request_timeout,
+            api_key=args.api_key,
+            task="write-transcript-note-repair",
+        )
+        classification, class_warnings, problems = written_problems(value, item, parsed, tiny, args, roster_names)
+        if problems:
+            raise UserError(f"the writer response stayed unusable: {problems[0]}")
+    warnings.extend(f"{item['path']}: {warning}" for warning in class_warnings)
+    if roster_names and roster_may_have_split_one_voice(classification):
+        # The one hold the writer can clear itself: a roster promise split a solo
+        # voice in two. Re-read with the roster withheld — before the hold below,
+        # because the second answer usually un-holds the note.
+        second = classify_without_roster(service, args, item, parsed)
+        if second is not None:
+            second_classification, second_warnings = second
+            warnings.append(
+                f"{item['path']}: re-read without the roster answered one speaker; the roster reading was dropped"
+            )
+            warnings.extend(f"{item['path']}: {warning}" for warning in second_warnings)
+            classification = {**classification, **second_classification}
+            problems = body_problems(value, tiny, args, classification)
+            if problems:
+                raise UserError(f"the writer response stayed unusable: {problems[0]}")
+    if classification["needs_review"]:
+        record = {
+            "path": item["path"],
+            "sha256": item["sha256"],
+            "source": "model",
+            "warnings": list(class_warnings),
+            **classification,
         }
-    ]
-    summary, retry_problems = summarize_once(args, service, repair, "summarize-transcript-repair")
-    if retry_problems:
-        raise UserError(retry_problems[0])
-    return re.sub(r"\s+", " ", summary).strip()
+        return record, None, None, warnings
+    labels = ordered_labels(blocks)
+    speaker_map, drop_labels = derive_speaker_map(
+        labels, classification["speakers"], classification["effective_speakers"], args.speaker_policy, args.owner, lexicon
+    )
+    cleaned = normalize_written(reconcile_written_labels(value["cleaned"], speaker_map, drop_labels))
+    summarized = is_summarized(classification["recording_type"])
+    source_text = corrected_source_text(parsed, args, [])
+    advisories = written_advisories(source_text, cleaned, speaker_map, drop_labels, glossary, tiny, summarized)
+    proposals = accepted_corrections(source_text, cleaned, glossary)
+    summary = value.get("summary")
+    if summary is not None:
+        summary = re.sub(r"\s+", " ", str(summary)).strip() or None
+    if tiny and args.tiny_summary == "omit":
+        summary = None
+    record = {
+        "path": item["path"],
+        "sha256": item["sha256"],
+        "source": "model",
+        "warnings": list(class_warnings),
+        **classification,
+    }
+    clean_result = {
+        "cleaned": cleaned,
+        "chunk_summaries": [],
+        "chunks": 1,
+        "speaker_map": speaker_map,
+        "drop_labels": drop_labels,
+        "tiny": tiny,
+        "corrections": corrections,
+        "proposals": proposals,
+        "advisories": advisories,
+        "error": None,
+    }
+    summary_row = {"path": item["path"], "sha256": item["sha256"], "summary": summary, "reflection": None, "skipped": None}
+    reflect_warnings = write_reflection(args, vault, service, record, clean_result, summary_row)
+    warnings.extend(reflect_warnings)
+    return record, clean_result, summary_row, warnings
 
 
-def summarize_items(args, vault, items, class_records, clean_results, run_dir, skip):
-    journal_path = run_dir / "summaries.jsonl"
+def write_reflection(args, vault, service, record, clean_result, summary_row):
+    """The reflection call for an owner-voiced memo or journal, unchanged from
+    the staged pipeline: it is the one prompt allowed to see personal-context
+    cards, so it stays its own call rather than joining the writer's."""
+    warnings = []
+    if voice_context_for(record) != vault_voice.CONTEXT_OWNER or record["recording_type"] not in REFLECTION_SECTIONS:
+        return warnings
+    body = clean_result["cleaned"]
+    candidates, warning = connection_candidates(vault, f"{record['title']} {summary_row['summary'] or ''}".strip())
+    if warning:
+        warnings.append(f"{record['path']}: {warning}")
+    material = (
+        transcript_source(source_body(vault, record["path"], body), vault)
+        if getattr(args, "reprocessing", False)
+        else source_body(vault, record["path"], body)
+    )
+    sources = outside_sources(material, vault, candidates)
+    try:
+        reflection, dropped = reflect_note(args, service, record, body, candidates, sources)
+    except (forge_llm.ChatError, UserError, ValueError) as error:
+        # The reflection is additive; losing it is a warning, never a hold.
+        warnings.append(f"{record['path']}: reflection failed and was omitted ({type(error).__name__}: {error})")
+        return warnings
+    for detail in dropped:
+        warnings.append(f"{record['path']}: dropped a connection — {detail}")
+    summary_row["reflection"] = reflection
+    return warnings
+
+
+def write_one_oversize(args, vault, item, run_dir, service, parsed, payload, corrections, tiny, blocks, roster_names, glossary):
+    """A recording too large for one call: the writer runs per chunk with the
+    continuity fields the chunked cleaner used. The first chunk's response
+    supplies the classification, every chunk supplies cleaned text, and the
+    final chunk supplies the summary."""
+    warnings = []
+    chunks = chunk_blocks(blocks)
+    classification = None
+    class_warnings = []
+    cleaned_parts = []
+    headings = []
+    previous_tail = ""
+    summary = None
+    for index, chunk in enumerate(chunks, start=1):
+        labels = ordered_labels(chunk)
+        rendered = render_turns(collapse_turns(chunk, {label: label for label in labels}))
+        chunk_payload = {
+            **payload,
+            "transcript": rendered,
+            "labels": ordered_labels(blocks),
+            "chunkIndex": index,
+            "chunkCount": len(chunks),
+        }
+        if headings:
+            chunk_payload["headingsSoFar"] = headings[-12:]
+        if previous_tail:
+            chunk_payload["previousTail"] = previous_tail[-300:]
+        messages = [
+            {"role": "system", "content": WRITER_SYSTEM},
+            {"role": "user", "content": json.dumps(chunk_payload, ensure_ascii=False)},
+        ]
+        value, _call = forge_llm.call_json_with_retry(
+            service,
+            messages,
+            temperature=0,
+            cache_prompt=args.cache_prompt,
+            response_format={"type": "json_object"},
+            timeout=args.request_timeout,
+            api_key=args.api_key,
+            task="write-transcript-note",
+        )
+        if index == 1:
+            classification, class_warnings, problems = written_problems(value, item, parsed, tiny, args, roster_names)
+            summary_problems = [problem for problem in problems if "summary" in problem]
+            problems = [problem for problem in problems if problem not in summary_problems]
+            if problems:
+                raise UserError(f"the writer response was unusable on chunk 1: {problems[0]}")
+            if classification["needs_review"]:
+                record = {
+                    "path": item["path"],
+                    "sha256": item["sha256"],
+                    "source": "model",
+                    "warnings": list(class_warnings),
+                    **classification,
+                }
+                return record, None, None, warnings
+        cleaned = value.get("cleaned") if isinstance(value, dict) else None
+        if not isinstance(cleaned, str) or not cleaned.strip():
+            raise UserError(f"chunk {index} returned no cleaned text")
+        cleaned_parts.append(cleaned)
+        headings.extend(heading_lines(cleaned))
+        previous_tail = cleaned[-300:]
+        if index == len(chunks):
+            summary = value.get("summary")
+    warnings.extend(f"{item['path']}: {warning}" for warning in class_warnings)
+    labels = ordered_labels(blocks)
+    lexicon = getattr(args, "compiled_lexicon", None)
+    speaker_map, drop_labels = derive_speaker_map(
+        labels, classification["speakers"], classification["effective_speakers"], args.speaker_policy, args.owner, lexicon
+    )
+    body = "\n\n".join(part.strip() for part in cleaned_parts).strip()
+    cleaned = normalize_written(reconcile_written_labels(body, speaker_map, drop_labels))
+    summarized = is_summarized(classification["recording_type"])
+    source_text = corrected_source_text(parsed, args, [])
+    advisories = written_advisories(source_text, cleaned, speaker_map, drop_labels, glossary, tiny, summarized)
+    advisories.append(f"oversize: written in {len(chunks)} chunks")
+    if summary is not None:
+        summary = re.sub(r"\s+", " ", str(summary)).strip() or None
+    if not summary and not (tiny and args.tiny_summary == "omit"):
+        problems = check_summary(summary)
+        warnings.append(f"{item['path']}: the final chunk's summary was unusable ({problems[0]}); left for the reviewer")
+    record = {
+        "path": item["path"],
+        "sha256": item["sha256"],
+        "source": "model",
+        "warnings": list(class_warnings),
+        **classification,
+    }
+    clean_result = {
+        "cleaned": cleaned,
+        "chunk_summaries": [],
+        "chunks": len(chunks),
+        "speaker_map": speaker_map,
+        "drop_labels": drop_labels,
+        "tiny": tiny,
+        "corrections": corrections,
+        "proposals": accepted_corrections(source_text, cleaned, glossary),
+        "advisories": advisories,
+        "error": None,
+    }
+    summary_row = {"path": item["path"], "sha256": item["sha256"], "summary": summary, "reflection": None, "skipped": None}
+    reflect_warnings = write_reflection(args, vault, service, record, clean_result, summary_row)
+    warnings.extend(reflect_warnings)
+    return record, clean_result, summary_row, warnings
+
+
+def write_notes(args, vault, items, run_dir, skip):
+    """Every transcript through the one-pass writer, journaled per note.
+
+    Returns ``(class_records, clean_results, summaries, warnings)`` — the same
+    three dicts the classify/clean/summarize stages produced."""
+    journal_path = run_dir / "written.jsonl"
     prior, _ = run_state.read_jsonl_recover_tail(journal_path, repair=True)
     journal = {(row["path"], row["sha256"]): row for row in prior if row.get("path") and row.get("sha256")}
+    artifacts = run_dir / "written"
+    artifacts.mkdir(exist_ok=True)
     service = chat_service(args)
+    lexicon = getattr(args, "compiled_lexicon", None)
+    voice = getattr(args, "compiled_voice", None)
     warnings = []
-    results = {}
-    pending = []
-    for item in items:
-        record = class_records.get(item["path"])
-        cleaned = clean_results.get(item["path"])
-        if record is None or cleaned is None or cleaned.get("error") or not cleaned.get("cleaned"):
-            continue
-        if item["path"] in skip:
-            continue
-        if cleaned["tiny"] and args.tiny_summary == "omit":
-            results[item["path"]] = {"summary": None, "skipped": "tiny"}
-            continue
-        pending.append((item, record, cleaned))
+    class_records = {}
+    clean_results = {}
+    summaries = {}
+    pending = [item for item in items if item["is_transcript"] and item["path"] not in skip]
     total = len(pending)
     durations = []
-    for position, (item, record, cleaned) in enumerate(pending, start=1):
+    progress_lock = threading.Lock()
+    done = 0
+
+    def restore(row):
+        record = dict(row["record"])
+        clean_result = None
+        summary_row = None
+        if row.get("clean") is not None:
+            clean_result = dict(row["clean"])
+            clean_result["cleaned"] = (artifacts / row["artifact"]).read_text(encoding="utf-8")
+        if row.get("summary_row") is not None:
+            summary_row = dict(row["summary_row"])
+        return record, clean_result, summary_row
+
+    def write_and_journal(item):
+        nonlocal done
         key = (item["path"], item["sha256"])
-        if key in journal:
-            results[item["path"]] = journal[key]
-            continue
+        row = journal.get(key)
+        if row is not None and row.get("status") == "ok":
+            with progress_lock:
+                done += 1
+            return item["path"], restore(row)
+        if row is not None and row.get("status") == "failed" and not getattr(args, "retry_failed", False):
+            # Inherited rather than retried, exactly as the chunked cleaner
+            # journaled failures: a resume must not silently re-pay a refusal.
+            # --retry-failed re-attempts it deliberately.
+            with progress_lock:
+                done += 1
+                warnings.append(f"{item['path']}: writing failed on a previous attempt ({row.get('error')}); "
+                                "pass --retry-failed to try again")
+            failed = dict(row.get("record") or {})
+            return item["path"], (failed or None, None, None)
         started = time.time()
-        body = cleaned["cleaned"]
-        payload = {
-            "recordingType": record["recording_type"],
-            "materialRole": record.get("material_role", "unknown"),
-            "title": record["title"],
-            "durationSeconds": item["stats"]["duration_seconds"],
-        }
-        context_mode = voice_context_for(record)
-        site = profile_site_for(record)
-        compiled = vault_voice.compile_voice(
-            getattr(args, "compiled_voice", None),
-            context_mode,
-            note_type=voice_note_type_for(record),
-            material=body,
-        )
-        if compiled["per_type_rule"]:
-            payload["styleForThisKind"] = compiled["per_type_rule"]
-        if compiled["vocabulary"]:
-            payload["relevantVocabulary"] = compiled["vocabulary"]
-        selected = [
-            card
-            for card in vault_profile.select_cards(getattr(args, "compiled_profile", None), body, site)
-            if card["tier"] != vault_profile.TIER_ALWAYS
-        ]
-        if selected:
-            payload["personalContext"] = vault_profile.profile_offers(selected)
-        if cleaned["speaker_map"] and not cleaned["drop_labels"]:
-            payload["speakers"] = sorted({value for value in cleaned["speaker_map"].values() if value})
-        if cleaned["tiny"]:
-            payload["oneSentence"] = True
-        if cleaned["chunks"] > 1 or len(body) > SUMMARY_INPUT_CHARS:
-            # A recording that needed several cleanup calls is summarized from
-            # those sections rather than by pushing the whole thing back through.
-            payload["sectionSummaries"] = [text for text in cleaned["chunk_summaries"] if text]
-            payload["cleanedHead"] = body[:6000]
-        else:
-            payload["cleaned"] = body
-        messages = [
-            {
-                "role": "system",
-                "content": summary_system(
-                    getattr(args, "compiled_voice", None),
-                    context_mode,
-                    getattr(args, "compiled_profile", None),
-                    site,
-                ),
-            },
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-        ]
         try:
-            summary = summarize_one(args, service, messages)
-            reflection = None
-            if context_mode == vault_voice.CONTEXT_OWNER and record["recording_type"] in REFLECTION_SECTIONS:
-                candidates, warning = connection_candidates(vault, f"{record['title']} {summary}")
-                if warning:
-                    warnings.append(f"{item['path']}: {warning}")
-                # Reprocessing reads the recording, never the note on disk: the
-                # head there is a previous run's output, and its own
-                # `Outside vault:` lines would launder URLs this run never read
-                # back into admissibility.
-                material = (
-                    transcript_source(source_body(vault, item["path"], body), vault)
-                    if getattr(args, "reprocessing", False)
-                    else source_body(vault, item["path"], body)
-                )
-                sources = outside_sources(material, vault, candidates)
-                reflection, dropped = reflect_note(args, service, record, body, candidates, sources)
-                for detail in dropped:
-                    warnings.append(f"{item['path']}: dropped a connection — {detail}")
-            row = {
-                "path": item["path"],
-                "sha256": item["sha256"],
-                "summary": summary,
-                "reflection": reflection,
-                "skipped": None,
-            }
+            record, clean_result, summary_row, note_warnings = write_one(
+                args, vault, item, run_dir, service, lexicon, voice
+            )
         except InterruptedError as error:
             raise UserError(
-                f"summarizing was preempted by interactive activity: {error}. The run is checkpointed "
-                f"— resume it with `process --vault {vault} --run {run_dir}`, or run the resume in the "
-                "foreground so its review does not compete with the interactive session"
+                f"writing was preempted by interactive activity: {error}. The run is checkpointed "
+                f"— resume it with `process --vault {vault} --run {run_dir}`, or run the resume in "
+                "the foreground so its review does not compete with the interactive session"
             ) from error
-        except (forge_llm.ChatError, UserError, ValueError) as error:
+        except (forge_llm.ChatError, UserError, OSError, UnicodeDecodeError, ValueError) as error:
             message = f"{type(error).__name__}: {error}"
-            warnings.append(f"{item['path']}: summary failed ({message})")
-            row = {"path": item["path"], "sha256": item["sha256"], "summary": None, "skipped": message}
-        row["seconds"] = round(time.time() - started, 3)
-        results[item["path"]] = row
-        run_state.append_jsonl_fsync(journal_path, row)
-        durations.append(row["seconds"])
-        eta = format_duration(sum(durations) / len(durations) * (total - position)) if durations else "-"
-        progress(f"[summarize {position}/{total}] {item['path']} ({row['seconds']:.1f}s, eta {eta})")
-    return results, warnings
+            failed_record = {
+                "path": item["path"],
+                "sha256": item["sha256"],
+                "source": "failed",
+                "warnings": [message],
+                "recording_type": "other",
+                "material_role": "unknown",
+                "title": None,
+                "speakers": {},
+                "effective_speakers": 1,
+                "spoken_date": None,
+                "needs_review": True,
+                "review_reason": f"writing failed: {message}",
+            }
+            elapsed = round(time.time() - started, 3)
+            with progress_lock:
+                done += 1
+                warnings.append(f"{item['path']}: writing failed ({message})")
+                run_state.append_jsonl_fsync(
+                    journal_path,
+                    {"path": item["path"], "sha256": item["sha256"], "status": "failed", "error": message,
+                     "record": failed_record, "seconds": elapsed},
+                )
+                progress(f"[write {done}/{total}] {item['path']} FAILED: {message}")
+            return item["path"], (failed_record, None, None)
+        elapsed = round(time.time() - started, 3)
+        entry = {
+            "path": item["path"],
+            "sha256": item["sha256"],
+            "status": "ok",
+            "record": record,
+            "seconds": elapsed,
+            "routing": forge_routing.routing_record(service),
+        }
+        if clean_result is not None:
+            name = f"{sha256_text(item['path'])[:12]}.md"
+            (artifacts / name).write_text(clean_result["cleaned"], encoding="utf-8")
+            entry["artifact"] = name
+            entry["clean"] = {key: value for key, value in clean_result.items() if key != "cleaned"}
+            entry["clean"]["cleaned_sha256"] = sha256_text(clean_result["cleaned"])
+        if summary_row is not None:
+            entry["summary_row"] = summary_row
+        with progress_lock:
+            done += 1
+            warnings.extend(note_warnings)
+            run_state.append_jsonl_fsync(journal_path, entry)
+            durations.append(elapsed)
+            remaining = (sum(durations) / len(durations)) * (total - done) / max(1, workers)
+            eta = format_duration(remaining) if durations else "-"
+            progress(f"[write {done}/{total}] {item['path']} → {record.get('recording_type')} ({elapsed:.1f}s, eta {eta})")
+        return item["path"], (record, clean_result, summary_row)
+
+    workers = max(1, min(int(getattr(args, "jobs", 1) or 1), total or 1))
+    results = {}
+    if workers == 1:
+        for item in pending:
+            path, produced = write_and_journal(item)
+            results[path] = produced
+    else:
+        queue = list(enumerate(pending))
+        queue_lock = threading.Lock()
+        failures = []
+
+        def worker():
+            while True:
+                with queue_lock:
+                    if not queue or failures:
+                        return
+                    _index, item = queue.pop(0)
+                try:
+                    path, produced = write_and_journal(item)
+                except BaseException as error:  # noqa: BLE001 - carried to the main thread
+                    failures.append(error)
+                    return
+                with queue_lock:
+                    results[path] = produced
+        threads = [threading.Thread(target=worker, daemon=True) for _ in range(workers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        if failures:
+            raise failures[0]
+    for path, (record, clean_result, summary_row) in results.items():
+        if record:
+            class_records[path] = record
+        if clean_result is not None:
+            clean_results[path] = clean_result
+        if summary_row is not None:
+            # A tiny note whose summary was omitted keeps the row shape the old
+            # summarize stage produced.
+            if summary_row["summary"] is None and clean_result and clean_result["tiny"] and args.tiny_summary == "omit":
+                summaries[path] = {**summary_row, "skipped": "tiny"}
+            else:
+                summaries[path] = summary_row
+    return class_records, clean_results, summaries, warnings
 
 
 # --------------------------------------------------------------------------
@@ -3270,7 +3549,15 @@ def base_record(item):
             "timestamps read as HH:MM (elapsed minutes), not MM:SS — the seconds reading "
             "implied an impossible speaking rate"
         )
+    if item.get("clock_broken"):
+        warnings.append(f"timestamps ignored — {item['clock_broken']}")
     return {
+        # The parse mode travels with the record so every later stage — including
+        # a --from-review apply reading plan.json — parses the raw the way the
+        # scan did (see parse_for_item).
+        "unlabeled": bool(item.get("unlabeled")),
+        "no_timestamps": bool(item.get("no_timestamps")),
+        "clock_broken": item.get("clock_broken"),
         "source": item["path"],
         "source_hash": item["sha256"],
         "destination": None,
@@ -3286,11 +3573,15 @@ def base_record(item):
     }
 
 
-def review_record(item, reason, status="review", warning=None):
+def review_record(item, reason, status="review", warning=None, reason_code=None):
     record = base_record(item)
     record["status"] = status
     record["needs_review"] = True
     record["review_reason"] = reason
+    if reason_code:
+        # One of REVIEW_REASON_CODES: a hold a model or person can triage
+        # without re-deriving what kind of problem it is.
+        record["reason_code"] = reason_code
     if warning:
         record["warnings"].append(warning)
     return record
@@ -3352,7 +3643,6 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
             record = base_record(item)
             record["status"] = "skipped"
             record["review_reason"] = item["skip_reason"]
-            record["no_timestamps"] = item.get("no_timestamps", False)
             records.append(record)
             continue
         planned.append(item)
@@ -3365,15 +3655,7 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
             records.append(review_record(item, "no classification record"))
             continue
         if record["needs_review"] or record["source"] == "failed":
-            unusable = record.get("unusable_reason")
-            held = review_record(
-                item,
-                unusable or record["review_reason"] or "classification asked for review",
-                status="unusable" if unusable else "review",
-            )
-            if unusable:
-                held["unusable_reason"] = unusable
-            records.append(held)
+            records.append(review_record(item, record["review_reason"] or "classification asked for review"))
             continue
         if cleaned_result is None or cleaned_result.get("error") or not cleaned_result.get("cleaned"):
             reason = (cleaned_result or {}).get("error") or "cleanup produced nothing"
@@ -3401,7 +3683,7 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
                 records.append(review_record(item, "note changed on disk during this run"))
                 continue
             raw_body = transcript_source(split_frontmatter(data)["body"], vault)
-            parsed = parse_transcript(raw_body, allow_unlabeled=item.get("unlabeled", False))
+            parsed = parse_for_item(item, raw_body)
             metadata = frontmatter_metadata(schema, record["recording_type"], date)
             note_text, head = build_note(
                 schema,
@@ -3459,6 +3741,7 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
         )
         assembled["speaker_map"] = cleaned_result["speaker_map"]
         assembled["corrections"] = cleaned_result.get("corrections") or []
+        assembled["advisories"] = cleaned_result.get("advisories") or []
         assembled["proposals"] = cleaned_result.get("proposals") or []
         assembled["roster_speakers"] = sorted(
             {
@@ -3482,7 +3765,7 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
         # A structural problem is a hard hold. Fidelity problems alone are not a
         # verdict — they are a word-overlap proxy that a restructured note trips
         # without losing meaning — so the note is written and marked provisional
-        # for the thinking meaning-judge (`verify_records`) to clear or hold. The
+        # for the thinking review pass (`review_and_fix_notes`) to clear, fix, or hold. The
         # one exception is `--no-verify`: with no judge to defer to, an unjudged
         # note must never read as approved, so the floor holds it as before.
         if structural or (fidelity and not args.verify):
@@ -3915,7 +4198,7 @@ def validate_daily_composition(value, sources):
 def clean_daily_group(args, group, merged, run_dir, journal_key):
     """Clean a day's merged transcript as one document, one chunk per chat call.
 
-    Mirrors `clean_items`, but over blocks that belong to no single file. The
+    Mirrors the per-file chunked cleaner, but over blocks that belong to no single file. The
     tiny threshold is measured on the merged day rather than per recording, which
     is the whole point of merging first: a 61-word fragment gets no summary and
     the lightest possible touch on its own, and a real edit as part of a day.
@@ -4177,206 +4460,364 @@ def apply_daily(vault, run_dir, plan):
 
 
 # --------------------------------------------------------------------------
-# Think verification
+# Thinking stage: whole-note review that fixes in place
 # --------------------------------------------------------------------------
 
-VERIFY_NOTES_SYSTEM = """You are reviewing how voice recordings were titled and summarized for one person's Obsidian vault.
+# One think call per note replaces the batched note-verify packets, the
+# utterance spot-check, the whole-note meaning-judge, the chat-repair /
+# think-re-verify loop, and the xhigh escalation redo. The reviewer reads the
+# raw and the note together and either signs off, returns the corrected body
+# itself, or holds with a reason code — fixing directly is what all five stages
+# were approximating. The deterministic floors still run at assembly, but as
+# advisories in this payload rather than holds; the byte-identity of the
+# transcript section stays a hard structural gate on whatever the reviewer
+# returns.
+REVIEW_REASON_CODES = (
+    "source_defect",
+    "structural_after_fix",
+    "oversize",
+    "unusable_input",
+    "dedupe_conflict",
+    "writer_invalid",
+    "review_unavailable",
+)
 
-A faster model without reasoning read each transcript and proposed a recording
-type, a filename, a one-paragraph summary, and speaker names. You get the head
-and tail of the original transcript as evidence.
+REVIEW_FIX_SYSTEM = """You review one processed voice-recording note against its raw transcript, and you fix what you can.
 
-Flag an item only when it is actually wrong on that evidence:
-- the recording type does not match what the transcript plainly is,
-- the title does not describe this recording, or names the medium instead of the content,
-- the summary states something the transcript does not support, or is too vague
-  to tell the reader what the recording was,
-- a speaker is given a real name that neither the transcript nor the roster justifies.
+Return exactly one JSON object and nothing else:
+{"verdict": "ok" | "fixed" | "hold",
+ "body": "<the complete corrected note body — only when verdict is fixed>",
+ "summary": "<the corrected one-paragraph summary — only when fixed AND the summary itself needed correcting>",
+ "reason_code": "source_defect",
+ "reason": "<one or two sentences: what you fixed, or what a human must look at>"}
+("reason_code" only when verdict is hold; "reason" always except a plain ok.)
 
-Names in "rosterSpeakers" come from the vault owner's own roster of people they
-record. The roster settles that this person may be in the recording, so do not
-flag such a name merely because the excerpt never says it aloud — that is what
-the roster is for, and it is not a contradiction.
+What you are given:
+- "rawTranscript": the recording, verbatim. The only source of truth.
+- "note": the cleaned note body as assembled, without frontmatter or the verbatim transcript section.
+- "summary": the one-paragraph summary that sits at the top of the note (null when the note is too short to need one).
+- "classification": what the pipeline decided this recording is.
+- "register": the fidelity contract that applies — judge against it, not against word overlap.
+- "advisories": deterministic measurements (length ratio, rare-word retention, invented-word candidates, sampled utterances). Signals only, often false alarms; judge meaning yourself.
+- "rawTruncated": when true, "rawTranscript" is only the head and tail of a recording too large to review whole. You cannot responsibly fix what you cannot fully read: verdict is then "ok" or "hold" only.
 
-The roster settles nothing about **which** speaker they are. Check that
-attribution against the excerpt like any other claim: whose work, whose meeting,
-whose title, who is addressed about what. Flag it when the excerpt shows the
-name is on the wrong voice, and say which voice it belongs to.
+The registers:
+- verbatim (therapy): the note keeps the speaker's exact words; only pure filler was removed. Any condensing, synonym swaps, or added clinical language is a defect.
+- minutes (meeting): the note is concise minutes; paraphrase and compression are its job. Judge whether every decision, action item, and materially discussed topic is captured and attributed truly — never word overlap.
+- spoken-to-written (everything else): meaning-first cleanup. Every claim, point, name, number, quote-worthy line, and shade of the speaker's intent must survive; rephrasing is fine, inventing or dropping substance is not.
 
-A defensible title or summary is 'ok' even if you would have written it
-differently; taste is not an error. You are seeing excerpts, so do not flag a
-summary merely for covering material outside them."""
+Your verdict:
+- "ok": the note tells the transcript's truth in its register — nothing material missing, nothing invented, names right, summary faithful. Wording differences alone are never a flag.
+- "fixed": something is wrong that the transcript lets you repair — a dropped point, verse, term, or closing line; an invented claim or number; a wrong speaker name the transcript itself states; a summary that misstates the recording. Return the COMPLETE corrected body (never a fragment or a diff), leaving everything that was right untouched, and restore missing material in the note's own register — never paste raw transcript into cleaned prose. Include "summary" only if you corrected it.
+- "hold": the defect is in the source, not the note — audio garbled past reconstruction, speaker attribution the transcript itself has wrong, content too corrupt to trust. reason_code "source_defect"; say plainly what a human should look at. Prefer fixing over holding: hold only what the transcript cannot settle.
 
-VERIFY_FIDELITY_SYSTEM = """You are checking whether a cleaned-up transcript still says what was actually said.
-
-For each item you get one verbatim utterance from the raw transcript and the
-passage of the cleaned version that best matches it.
-
-The source is raw speech-to-text of one person talking. It is full of false
-starts, repeated words, mid-sentence restarts, and outright transcription errors
-that are not English. Reading it as if it were written prose will make you flag
-good work.
-
-Flag the item only when the cleaned passage misstates what the person meant,
-drops a point they made, or attributes it to the wrong speaker.
-
-These are never errors:
-- removing filler, stutters, false starts, and repetition,
-- rewording, re-punctuating, or joining fragments into a sentence,
-- condensing a roundabout phrasing into the plain statement it was reaching for,
-  in the speaker's own words,
-- resolving a garbled or ungrammatical fragment into the reading it plainly had,
-- a missing word that does not change the meaning,
-- small talk or a fragment whose substance is present in the passage."""
-
-
-VERIFY_FIDELITY_NOTE_SYSTEM = """You are checking whether a cleaned-up transcript still says everything the recording said.
-
-For each item you get the full raw transcript of one recording and the full
-cleaned version made from it. The cleaning is allowed — and meant — to remove
-filler and false starts, and to reorder and regroup the material: a point that
-MOVED is not a point that was LOST. Read the whole cleaned version before you
-decide, because a point may appear anywhere in it, not where it stood in the raw.
-
-The raw is speech-to-text of one person talking, full of restarts, repetition,
-and transcription errors that are not English. Reading it as written prose will
-make you flag good work.
-
-Approve the item when every substantive point, fact, figure, name, and
-distinction the speaker made is present somewhere in the cleaned version, in
-their meaning.
-
-Flag the item only when the cleaned version drops a point the speaker made,
-misstates what they meant — including turning a question or a condition into a
-flat statement, or a hedge into a certainty — or attributes something to the
-wrong person. When you flag, your reason must name each dropped or altered point
-specifically and quote the raw transcript, so that exactly those points can be
-put back and nothing else is disturbed.
-
-These are never grounds to flag:
-- removing filler, stutters, false starts, and repetition,
-- rewording, re-punctuating, or joining fragments into sentences,
-- condensing a roundabout phrasing into the plain statement it was reaching for,
-  in the speaker's own words,
-- resolving a garbled or ungrammatical fragment into the reading it plainly had,
-- a missing word that does not change the meaning,
-- reordering or regrouping where the substance is still somewhere in the note."""
+Structure rules for a fixed body: headings "##" or deeper (never "#"), no transcript timestamps, speaker labels only for multi-speaker registers, exactly as the note already uses them."""
 
 
-REPAIR_CLEANUP_SYSTEM = """You are a meticulous transcript editor fixing one specific problem in an already-cleaned transcript.
-
-A reviewer compared the cleaned version against the raw recording and found that
-something the speaker said was dropped or changed. You are given the raw
-transcript, the current cleaned version, and the reviewer's note of what is
-missing or wrong.
-
-Return the full cleaned version with the reviewer's point restored or corrected —
-and nothing else touched. Draw the restored wording only from what the raw
-transcript actually says, in the speaker's own voice. Keep every other part of
-the current cleaned version exactly as it is. Do not add anything the speaker did
-not say, and do not state anything more certainly than they did.
-
-Return exactly one JSON object and nothing else: {"cleaned": "<the full corrected cleaned version>"}"""
+def review_register(record):
+    if is_summarized(record["recording_type"]):
+        return "minutes"
+    if record["recording_type"] == "therapy":
+        return "verbatim"
+    return "spoken-to-written"
 
 
-def verify_note_payload(vault, record, item):
-    raw = ""
+def review_payload(vault, record, run_dir, args):
+    """One reviewer item: the whole source and the whole assembled body.
+
+    ``None`` only when the artifact or source cannot be read — the caller turns
+    that into a hold rather than a silent pass. A recording too large to review
+    whole is sent head-and-tail with ``rawTruncated`` set, and the prompt
+    forbids fixing in that state."""
     try:
-        raw = split_frontmatter((vault / record["source"]).read_bytes())["body"]
-    except OSError:
-        pass
-    # allow_unlabeled: an --unlabeled export parses to zero blocks by default,
-    # which would render an empty transcript into the verifier payload.
-    parsed = parse_transcript(raw, allow_unlabeled=True)
-    rendered = render_turns(collapse_turns(parsed["blocks"], {label: label for label in ordered_labels(parsed["blocks"])}))
-    payload = {
-        "id": record["source"],
-        "proposedName": Path(record["destination"]).name,
-        "recordingType": record["recording_type"],
-        "title": record["title"],
-        "summary": record["summary"] or "(none: too short to summarize)",
-        "stats": {
-            "durationSeconds": (item["stats"] or {}).get("duration_seconds"),
-            "words": (item["stats"] or {}).get("words"),
-            "labels": len((item["stats"] or {}).get("speaker_labels") or {}),
-        },
-        "speakers": {key: value for key, value in (record.get("speaker_map") or {}).items() if value},
-        "rawHead": rendered[:VERIFY_HEAD_CHARS],
-    }
-    if record.get("roster_speakers"):
-        payload["rosterSpeakers"] = record["roster_speakers"]
-    if len(rendered) > VERIFY_HEAD_CHARS:
-        payload["rawTail"] = rendered[-VERIFY_TAIL_CHARS:]
-    return payload
-
-
-def fidelity_producers(fidelity_items, run_dir):
-    """Which service cleaned the file each sampled utterance came from.
-
-    The two cleanup directions go to different services, so this cannot be one
-    answer for the run. `cleaned.jsonl` records the routing decision per chunk;
-    fidelity items are keyed `<source>#s<n>`, so the lookup is by the source they
-    were sampled from.
-    """
-    by_path = {}
-    rows, _warnings = run_state.read_jsonl_recover_tail(run_dir / "cleaned.jsonl", repair=True)
-    for row in rows:
-        routing = row.get("routing")
-        if row.get("path") and isinstance(routing, dict) and routing.get("url"):
-            by_path[row["path"]] = {"url": routing["url"], "model": routing.get("model")}
-    return {
-        item["id"]: by_path[item["id"].split("#s", 1)[0]]
-        for item in fidelity_items
-        if item["id"].split("#s", 1)[0] in by_path
-    }
-
-
-def fidelity_payloads(vault, record, run_dir, lexicon=None):
-    """One packet item per sampled utterance, paired with the cleaned window it
-    should appear in. Long files are sampled rather than re-read whole.
-
-    Samples are corrected the same way the cleaned copy was. Comparing a
-    corrected passage against the mistranscription it came from would read every
-    successful correction as the cleanup drifting from the source.
-    """
-    entries = (lexicon or {}).get("terms", [])
-    try:
-        cleaned_note = (run_dir / "assembled" / record["artifact"]).read_text(encoding="utf-8")
+        note_text = (run_dir / "assembled" / record["artifact"]).read_text(encoding="utf-8")
     except (OSError, KeyError, TypeError):
-        return []
-    cleaned = strip_callout_lines(cleaned_note.split("\n# Transcript\n", 1)[0])
+        return None
+    body = strip_callout_lines(note_text.split("\n# Transcript\n", 1)[0]).strip()
     try:
         raw = transcript_source(split_frontmatter((vault / record["source"]).read_bytes())["body"], vault)
     except OSError:
-        return []
-    # allow_unlabeled: without it the floor samples an unlabeled export as zero
-    # blocks and the utterance-locator check has nothing to locate.
-    parsed = parse_transcript(raw, allow_unlabeled=True)
-    words = content_words(cleaned)
-    items = []
-    for position, block in enumerate(fidelity_samples(record["source"], parsed["blocks"]), start=1):
-        utterance = vault_lexicon.apply_corrections(block["text"], entries)[0] if entries else block["text"]
-        score, at = best_containment(utterance, words)
-        window = " ".join(words[max(0, at - 40) : at + 120])
-        items.append(
+        return None
+    parsed = parse_for_item(record, raw)
+    # Corrected the same way the cleanup saw it, so a successful term correction
+    # does not read to the reviewer as drift from the source.
+    source = corrected_source_text(parsed, args, record.get("proposals") or [])
+    truncated = False
+    if len(source) + len(body) > WHOLE_NOTE_REVIEW_MAX_CHARS:
+        budget = max(WHOLE_NOTE_REVIEW_MAX_CHARS - len(body), 20_000)
+        head = source[: budget // 2]
+        tail = source[-(budget - len(head)):]
+        source = f"{head}\n\n[... middle of the recording elided ...]\n\n{tail}"
+        truncated = True
+    advisories = list(record.get("fidelity_provisional") or [])
+    advisories.extend(record.get("advisories") or [])
+    measurements = record.get("measurements") or {}
+    payload = {
+        "id": record["source"],
+        "rawTranscript": source,
+        "note": body,
+        "summary": record.get("summary"),
+        "classification": {
+            "recordingType": record["recording_type"],
+            "title": record["title"],
+            "speakers": {key: value for key, value in (record.get("speaker_map") or {}).items() if value},
+        },
+        "register": review_register(record),
+    }
+    if truncated:
+        payload["rawTruncated"] = True
+    if advisories:
+        payload["advisories"] = advisories
+    if measurements:
+        payload["measurements"] = measurements
+    return payload
+
+
+def review_verdict_problems(value):
+    if not isinstance(value, dict):
+        return ["response was not a JSON object"]
+    verdict = value.get("verdict")
+    if verdict not in {"ok", "fixed", "hold"}:
+        return [f'verdict must be "ok", "fixed", or "hold" (got {verdict!r})']
+    if verdict == "fixed":
+        body = value.get("body")
+        if not isinstance(body, str) or not body.strip():
+            return ['verdict "fixed" must carry the complete corrected body in "body"']
+    if verdict == "hold" and not isinstance(value.get("reason"), str):
+        return ['verdict "hold" must say why in "reason"']
+    return []
+
+
+def hold_reviewed(record, warnings, reason, reason_code):
+    """Send one reviewed note to a human, with its taxonomy code."""
+    record.pop("fidelity_provisional", None)
+    record["needs_review"] = True
+    record["status"] = "review"
+    record["verified"] = "reviewed-hold"
+    record["reason_code"] = reason_code if reason_code in REVIEW_REASON_CODES else "source_defect"
+    record["review_reason"] = reason
+    record["destination"] = None
+    record["action"] = "none"
+    warnings.append(f"{record['source']}: held by review ({record['reason_code']}) — {reason}")
+
+
+def apply_review_fix(args, vault, schema, record, item, value, think, run_dir, warnings):
+    """Rebuild the note with the reviewer's corrected body, structurally gated.
+
+    The reviewer just read the whole raw; its fix is the meaning authority here,
+    so the old invented-words ceiling does not gate it — but the structural
+    contract (single transcript heading, byte-identical tail, summary shape)
+    still does, and a fix that breaks structure gets exactly one corrective
+    re-ask at ESCALATION_EFFORT before the note holds."""
+    fixed_summary = value.get("summary")
+    if isinstance(fixed_summary, str) and fixed_summary.strip():
+        record["summary"] = re.sub(r"\s+", " ", fixed_summary).strip()
+    body = value["body"].strip()
+    problems = rebuild_note_with_cleaned(vault, schema, record, item, body, args, run_dir)
+    if problems:
+        retry = [
+            {"role": "system", "content": REVIEW_FIX_SYSTEM},
+            {"role": "user", "content": json.dumps(review_payload(vault, record, run_dir, args), ensure_ascii=False)},
+            {"role": "assistant", "content": json.dumps(value, ensure_ascii=False)},
             {
-                "id": f"{record['source']}#s{position}",
-                "sourceUtterance": utterance,
-                "cleanedPassage": window,
-                "containment": round(score, 3),
-            }
+                "role": "user",
+                "content": "Your fixed body broke the note's structural contract: "
+                + "; ".join(problems[:4])
+                + '. Return the corrected JSON again — same verdict "fixed", complete "body", structure rules respected.',
+            },
+        ]
+        retried, _call = forge_llm.call_json_with_retry(
+            think,
+            retry,
+            temperature=0,
+            cache_prompt=args.cache_prompt,
+            response_format={"type": "json_object"},
+            timeout=args.request_timeout,
+            api_key=args.api_key,
+            task="review-transcript-note-repair",
+            reasoning_effort=ESCALATION_EFFORT,
+            background=getattr(args, "background", False),
         )
-    return items
+        if review_verdict_problems(retried) or retried.get("verdict") != "fixed":
+            hold_reviewed(record, warnings, f"the review's fix kept breaking structure: {problems[0]}", "structural_after_fix")
+            return False
+        body = retried["body"].strip()
+        fixed_summary = retried.get("summary")
+        if isinstance(fixed_summary, str) and fixed_summary.strip():
+            record["summary"] = re.sub(r"\s+", " ", fixed_summary).strip()
+        problems = rebuild_note_with_cleaned(vault, schema, record, item, body, args, run_dir)
+        if problems:
+            hold_reviewed(record, warnings, f"the review's fix kept breaking structure: {problems[0]}", "structural_after_fix")
+            return False
+    record.pop("fidelity_provisional", None)
+    record["verified"] = "reviewed-fixed"
+    return True
+
+
+def review_and_fix_notes(args, vault, schema, items_by_path, records, run_dir):
+    """Review every processed note whole against its raw, fixing in place.
+
+    Returns ``(summary, warnings)``. Journaled per note to ``review.jsonl``,
+    keyed by the assembled artifact's hash, so a resume re-reviews nothing and a
+    re-written note is re-reviewed."""
+    warnings = []
+    candidates = [record for record in records if record["action"] == "process" and not record["needs_review"]]
+    summary = {"reviewed": 0, "ok": 0, "fixed": 0, "held": 0, "flaggedIds": []}
+    if not candidates:
+        return summary, warnings
+    think = forge_llm.resolve_think_or_chat(base_url=args.think_url, model=args.think_model)
+    if not think["enabled"]:
+        warnings.append("review skipped: no thinking service is configured")
+        summary["skipped"] = "disabled"
+        summary["provisionalHeld"] = hold_provisional_unjudged(candidates, warnings, "no thinking service")
+        return summary, warnings
+    journal_path = run_dir / "review.jsonl"
+    prior, _ = run_state.read_jsonl_recover_tail(journal_path, repair=True)
+    journal = {(row.get("path"), row.get("note_sha256")): row for row in prior}
+    produced_by = note_producers([record["source"] for record in candidates], run_dir)
+    same = [path for path, producer in produced_by.items() if forge_verify.same_backend(think, producer)]
+    if same:
+        # The same split forge_verify documents: a clean verdict from the model
+        # that wrote the note is not independent evidence; fixes and holds still act.
+        warnings.append(
+            f"{len(same)} note(s) are reviewed by the same backend that wrote them, so a clean "
+            "verdict is not independent evidence. Route the writer off the reviewer's service to "
+            "restore the split."
+        )
+    log(args, f"reviewing {len(candidates)} notes against their recordings on {think['url']}")
+    total = len(candidates)
+    durations = []
+    for position, record in enumerate(candidates, start=1):
+        item = items_by_path.get(record["source"]) or {}
+        key = (record["source"], record.get("final_hash"))
+        row = journal.get(key)
+        if row is not None:
+            # A settled verdict for these exact bytes; adopt it without a call.
+            summary["reviewed"] += 1
+            outcome = row.get("verdict")
+            if outcome == "ok":
+                summary["ok"] += 1
+                record.pop("fidelity_provisional", None)
+                record["verified"] = "reviewed-ok"
+            elif outcome == "fixed":
+                summary["fixed"] += 1
+                record.pop("fidelity_provisional", None)
+                record["verified"] = "reviewed-fixed"
+                record["review_fix_reason"] = row.get("reason")
+                if row.get("summary"):
+                    record["summary"] = row["summary"]
+                if row.get("fixed_hash") and record.get("final_hash") != row["fixed_hash"]:
+                    # The journal's fix superseded these bytes; rebuild from it.
+                    body = (run_dir / "assembled" / record["artifact"]).read_text(encoding="utf-8")
+                    record["final_hash"] = sha256_text(body)
+            else:
+                summary["held"] += 1
+                summary["flaggedIds"].append(record["source"])
+                hold_reviewed(record, warnings, row.get("reason") or "held by review", row.get("reason_code"))
+            continue
+        started = time.time()
+        payload = review_payload(vault, record, run_dir, args)
+        if payload is None:
+            summary["reviewed"] += 1
+            summary["held"] += 1
+            summary["flaggedIds"].append(record["source"])
+            hold_reviewed(record, warnings, "the note or its recording could not be read for review", "review_unavailable")
+            run_state.append_jsonl_fsync(
+                journal_path,
+                {"path": record["source"], "note_sha256": record.get("final_hash"), "verdict": "hold",
+                 "reason_code": "review_unavailable", "reason": "unreadable payload"},
+            )
+            continue
+        messages = [
+            {"role": "system", "content": REVIEW_FIX_SYSTEM},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ]
+        try:
+            value, _call = forge_llm.call_json_with_retry(
+                think,
+                messages,
+                temperature=0,
+                cache_prompt=args.cache_prompt,
+                response_format={"type": "json_object"},
+                timeout=args.request_timeout,
+                api_key=args.api_key,
+                task="review-transcript-note",
+                reasoning_effort=FIDELITY_REVIEW_EFFORT,
+                background=getattr(args, "background", False),
+            )
+            problems = review_verdict_problems(value)
+            if problems:
+                repair = messages + [
+                    {"role": "assistant", "content": json.dumps(value, ensure_ascii=False) if isinstance(value, dict) else str(value)},
+                    {"role": "user", "content": f"That response was unusable: {problems[0]}. Return corrected JSON only, following the contract exactly."},
+                ]
+                value, _call = forge_llm.call_json_with_retry(
+                    think,
+                    repair,
+                    temperature=0,
+                    cache_prompt=args.cache_prompt,
+                    response_format={"type": "json_object"},
+                    timeout=args.request_timeout,
+                    api_key=args.api_key,
+                    task="review-transcript-note-repair",
+                    background=getattr(args, "background", False),
+                )
+                problems = review_verdict_problems(value)
+        except InterruptedError as error:
+            raise UserError(
+                f"the review was preempted by interactive activity: {error}. The run is checkpointed "
+                f"— resume it with `process --vault {vault} --run {run_dir}`, or run the resume in "
+                "the foreground so its review does not compete with the interactive session"
+            ) from error
+        except (forge_llm.ChatError, ValueError) as error:
+            # An unreachable reviewer must not read as approval: the floors
+            # re-arm for provisional notes, everything else is held rather than
+            # silently shipped unreviewed.
+            warnings.append(f"review failed: {type(error).__name__}: {error}")
+            summary["skipped"] = str(error)
+            summary["provisionalHeld"] = hold_provisional_unjudged(candidates[position - 1 :], warnings, "the review failed")
+            break
+        elapsed = round(time.time() - started, 3)
+        summary["reviewed"] += 1
+        if problems:
+            summary["held"] += 1
+            summary["flaggedIds"].append(record["source"])
+            hold_reviewed(record, warnings, f"the review returned no usable verdict: {problems[0]}", "review_unavailable")
+            entry = {"path": record["source"], "note_sha256": record.get("final_hash"), "verdict": "hold",
+                     "reason_code": "review_unavailable", "reason": problems[0], "seconds": elapsed}
+        elif value["verdict"] == "ok":
+            summary["ok"] += 1
+            record.pop("fidelity_provisional", None)
+            record["verified"] = "reviewed-ok"
+            entry = {"path": record["source"], "note_sha256": record.get("final_hash"), "verdict": "ok", "seconds": elapsed}
+        elif value["verdict"] == "fixed":
+            before_hash = record.get("final_hash")
+            if apply_review_fix(args, vault, schema, record, item, value, think, run_dir, warnings):
+                summary["fixed"] += 1
+                record["review_fix_reason"] = value.get("reason")
+                entry = {"path": record["source"], "note_sha256": before_hash, "verdict": "fixed",
+                         "reason": value.get("reason"), "fixed_hash": record.get("final_hash"),
+                         "summary": record.get("summary"), "seconds": elapsed}
+            else:
+                summary["held"] += 1
+                summary["flaggedIds"].append(record["source"])
+                entry = {"path": record["source"], "note_sha256": before_hash, "verdict": "hold",
+                         "reason_code": "structural_after_fix", "reason": record.get("review_reason"), "seconds": elapsed}
+        else:
+            summary["held"] += 1
+            summary["flaggedIds"].append(record["source"])
+            hold_reviewed(record, warnings, value.get("reason") or "held by review", value.get("reason_code"))
+            entry = {"path": record["source"], "note_sha256": record.get("final_hash"), "verdict": "hold",
+                     "reason_code": record.get("reason_code"), "reason": record.get("review_reason"), "seconds": elapsed}
+        run_state.append_jsonl_fsync(journal_path, entry)
+        durations.append(elapsed)
+        eta = format_duration(sum(durations) / len(durations) * (total - position)) if durations else "-"
+        progress(f"[review {position}/{total}] {record['source']} → {entry['verdict']} ({elapsed:.1f}s, eta {eta})")
+    return summary, warnings
+
 
 
 ESCALATION_EFFORT = "xhigh"
-
-# How many chat-repair → think-revalidate rounds a provisional note gets before it
-# is held for a human. Two covers the measured cases (a first restore, then one more
-# against the re-review's sharper objection); the no-progress guard in
-# ``forge_verify.repair_until_verified`` ends it sooner when a round changes nothing.
-FIDELITY_REPAIR_ROUNDS = 2
-
 
 def hold_provisional_unjudged(candidates, warnings, why):
     """Fall a provisional note back onto its deterministic hold.
@@ -4413,113 +4854,32 @@ def hold_provisional_unjudged(candidates, warnings, why):
 WHOLE_NOTE_REVIEW_MAX_CHARS = 120_000
 
 
-def whole_note_fidelity_payload(vault, record, run_dir, args):
-    """One judge item for a provisional note: its whole source and whole cleaned
-    body, so the meaning-judge sees everything at once. ``None`` when the note
-    cannot be assembled into a payload (no artifact, unreadable source, or too
-    large to review whole), which the caller turns into a hold."""
-    try:
-        cleaned_note = (run_dir / "assembled" / record["artifact"]).read_text(encoding="utf-8")
-    except (OSError, KeyError, TypeError):
-        return None
-    cleaned = strip_callout_lines(cleaned_note.split("\n# Transcript\n", 1)[0]).strip()
-    try:
-        raw = transcript_source(split_frontmatter((vault / record["source"]).read_bytes())["body"], vault)
-    except OSError:
-        return None
-    # allow_unlabeled: without it a --unlabeled export (speaker-labelled, no
-    # timestamps) parses to zero blocks and the judge reviews the cleaned note
-    # against an empty raw, holding every provisional note for "no source".
-    parsed = parse_transcript(raw, allow_unlabeled=True)
-    # Corrected the same way the cleanup saw it, so a successful term correction
-    # does not read to the judge as the cleanup drifting from the source.
-    source = corrected_source_text(parsed, args, record.get("proposals") or [])
-    if len(source) + len(cleaned) > WHOLE_NOTE_REVIEW_MAX_CHARS:
-        return None
-    return {"id": record["source"], "rawTranscript": source, "cleanedNote": cleaned}
-
-
 def note_producers(sources, run_dir):
     """Which service cleaned each note, keyed by source path, for the judge's
     independence check. A note the thinking service both cleaned and now judges
     is not independently reviewed; a flag from it still acts, an ``ok`` does not
     read as approval."""
     by_path = {}
-    rows, _warnings = run_state.read_jsonl_recover_tail(run_dir / "cleaned.jsonl", repair=True)
-    for row in rows:
-        routing = row.get("routing")
-        if row.get("path") and isinstance(routing, dict) and routing.get("url"):
-            by_path[row["path"]] = {"url": routing["url"], "model": routing.get("model")}
+    for journal in ("cleaned.jsonl", "written.jsonl"):
+        rows, _warnings = run_state.read_jsonl_recover_tail(run_dir / journal, repair=True)
+        for row in rows:
+            routing = row.get("routing")
+            if row.get("path") and isinstance(routing, dict) and routing.get("url"):
+                by_path[row["path"]] = {"url": routing["url"], "model": routing.get("model")}
     return {source: by_path[source] for source in sources if source in by_path}
 
 
-def judge_notes_whole(think, items, journal_path, produced_by, timeout, reasoning_effort):
-    """Run the whole-note meaning-judge, one note per call (each note is large, so
-    batching buys nothing and one-per-call keeps a resume clean)."""
-    if not items:
-        return {}
-    return forge_verify.verify_packets(
-        think,
-        VERIFY_FIDELITY_NOTE_SYSTEM,
-        items,
-        journal_path=journal_path,
-        packet_size=1,
-        background=True,
-        timeout=timeout,
-        progress=progress,
-        produced_by=produced_by,
-        reasoning_effort=reasoning_effort,
-    )
-
-
-def repair_cleaned_note(args, service, record, source_text, current_cleaned, objection):
-    """Ask the cleanup tier to restore exactly what the judge said was lost.
-
-    The repair is produced on ``chat`` and re-checked on ``think`` (the caller),
-    so the second verdict is the ordinary producer≠verifier split rather than the
-    judge blessing its own edit. Returns the revised cleaned body, or ``None`` if
-    the model gave nothing usable."""
-    messages = [
-        {"role": "system", "content": REPAIR_CLEANUP_SYSTEM},
-        {
-            "role": "user",
-            "content": json.dumps(
-                {"rawTranscript": source_text, "currentCleaned": current_cleaned, "missing": objection},
-                ensure_ascii=False,
-            ),
-        },
-    ]
-    try:
-        value, _record = forge_llm.call_json_with_retry(
-            service,
-            messages,
-            temperature=0,
-            cache_prompt=args.cache_prompt,
-            response_format={"type": "json_object"},
-            background=True,
-            timeout=args.request_timeout,
-            api_key=args.api_key,
-            task="repair-cleanup",
-        )
-    except forge_llm.ChatError:  # includes ContextBudgetError
-        return None
-    revised = value.get("cleaned") if isinstance(value, dict) else None
-    if not isinstance(revised, str) or not revised.strip():
-        return None
-    return revised.strip()
-
-
 def rebuild_note_with_cleaned(vault, schema, record, item, revised_cleaned, args, run_dir):
-    """Rebuild a note's artifact with a repaired cleaned body, gated the way a
-    cleanup is: structure must hold and nothing may be fabricated past the ceiling.
-    The fidelity *floors* are not gated here — the thinking judge re-validates
-    those. Returns ``[]`` on success (artifact and hashes updated on the record),
-    or a list of problems, in which case nothing is written and the repair is
-    treated as failed."""
+    """Rebuild a note's artifact with a revised cleaned body, structurally gated.
+
+    The reviewer that produced the revision just read the whole raw transcript,
+    so it — not a word counter — is the meaning authority; the old invented-words
+    ceiling here is what silently failed every repair in the 2026-08-19 session.
+    Structure still gates absolutely: one transcript heading, the verbatim tail,
+    the summary shape. Returns ``[]`` on success (artifact and hashes updated on
+    the record), or the structural problems, in which case nothing is written."""
     raw_body = transcript_source(split_frontmatter((vault / record["source"]).read_bytes())["body"], vault)
-    # allow_unlabeled: an empty parse marks every distinctive word in the repair
-    # as invented past the ceiling, failing every repair attempt.
-    parsed = parse_transcript(raw_body, allow_unlabeled=True)
+    parsed = parse_for_item(record, raw_body)
     metadata = frontmatter_metadata(schema, record["recording_type"], record.get("date"))
     raw_stem = raw_note_stem(Path(record["destination"]).name) if record.get("raw_artifact") else None
     note_text, head = build_note(
@@ -4538,13 +4898,7 @@ def rebuild_note_with_cleaned(vault, schema, record, item, revised_cleaned, args
         record.get("proposals") or [], raw_text=raw_text, raw_stem=raw_stem,
         summarized=is_summarized(record["recording_type"]),
     )
-    source_text = corrected_source_text(parsed, args, record.get("proposals") or [])
-    allowed = [value for value in (record.get("speaker_map") or {}).values() if value]
-    allowed += [row.get("correct") for row in (record.get("proposals") or []) if row.get("correct")]
     problems = list(structural)
-    invented = invented_over_ceiling(source_text, revised_cleaned, allowed)
-    if invented:
-        problems.append(f"{INVENTED_PROBLEM_PREFIX}: {', '.join(invented[:8])}")
     if problems:
         return problems
     (run_dir / "assembled" / record["artifact"]).write_text(note_text, encoding="utf-8")
@@ -4554,471 +4908,6 @@ def rebuild_note_with_cleaned(vault, schema, record, item, revised_cleaned, args
         (run_dir / "assembled" / record["raw_artifact"]).write_text(raw_text, encoding="utf-8")
         record["raw_final_hash"] = sha256_text(raw_text)
     return []
-
-
-def hold_provisional(record, warnings, reason, verify_reason=None):
-    """Send one provisional note to human review, consuming its marker."""
-    record.pop("fidelity_provisional", None)
-    record["verified"] = "needs-review"
-    record["needs_review"] = True
-    record["review_reason"] = reason
-    if verify_reason:
-        record["verify_reason"] = verify_reason  # the objection row in the report
-    record["status"] = "review"
-    record["action"] = "none"
-    record["destination"] = None
-    warnings.append(f"{record['source']}: {reason}")
-
-
-def judge_and_repair_provisional(args, vault, schema, think, provisional_records, items_by_path, clean_results, run_dir, warnings):
-    """The meaning-judge, and the fix-and-re-verify loop the floor defers to.
-
-    For each provisional note the thinking model reviews the *whole* cleaned note
-    against the *whole* source (so content that only moved reads as present, not
-    lost). A clean verdict finishes the note. A flag does not end it: the judge's
-    objection is handed to the cleanup tier (`chat`), which restores exactly what
-    was named — grounded in the source, gated for fabrication — and the thinking
-    model validates the rebuilt note again. Because `chat` produced the fix and
-    `think` checks it, that verdict is a real independent approval, not the judge
-    blessing its own edit. Clean → finish (``fidelity-repaired``); still flagged
-    after ``FIDELITY_REPAIR_ROUNDS`` rounds, or nothing usable came back → hold
-    with the objection. The bounded loop itself is
-    ``forge_verify.repair_until_verified``; this wires the whole-note judge, the
-    chat repair, and the record bookkeeping into it. Returns
-    ``(cleared, repaired, held)``.
-    """
-    if not provisional_records:
-        return 0, 0, 0
-    chat = chat_service(args)
-    chat_producer = forge_routing.routing_record(chat)
-    record_by_source = {record["source"]: record for record in provisional_records}
-    items = []
-    for record in provisional_records:
-        payload = whole_note_fidelity_payload(vault, record, run_dir, args)
-        if payload is None:
-            hold_provisional(record, warnings, "held by the fidelity floor: too long or unreadable to review whole")
-            continue
-        items.append(payload)
-    held = sum(1 for record in provisional_records if record["needs_review"])
-    if not items:
-        return 0, 0, held
-
-    # First pass: the whole-note meaning-judge, resumable on its own journal.
-    try:
-        verdicts = judge_notes_whole(
-            think, items, run_dir / "verified-fidelity-provisional.jsonl",
-            note_producers([item["id"] for item in items], run_dir), args.request_timeout, FIDELITY_REVIEW_EFFORT,
-        )
-    except forge_verify.VerificationError as error:
-        for record in provisional_records:
-            if record.get("fidelity_provisional"):
-                hold_provisional(record, warnings, f"held by the fidelity floor: the meaning review failed ({error})")
-                held += 1
-        return 0, 0, held
-    independence = forge_verify.independence_warning(verdicts)
-    if independence:
-        warnings.append(f"fidelity check: {independence}")
-
-    def fix(payload, objection, round_idx):
-        # chat restores exactly what the judge named; the rebuild re-gates
-        # structure and fabrication (not the fidelity floors — think re-validates
-        # those). A repair that gave nothing, failed a gate, or grew past the
-        # review size returns None, which the loop reads as a failed fix → held.
-        record = record_by_source[payload["id"]]
-        revised = repair_cleaned_note(args, chat, record, payload["rawTranscript"], payload["cleanedNote"], objection)
-        if revised is None:
-            return None
-        if rebuild_note_with_cleaned(vault, schema, record, items_by_path[payload["id"]], revised, args, run_dir):
-            return None
-        # The repaired body is now the canonical cleaned text, so a note whose
-        # title was also escalated reassembles from the fix, not the original.
-        if payload["id"] in clean_results:
-            clean_results[payload["id"]]["cleaned"] = revised
-        return whole_note_fidelity_payload(vault, record, run_dir, args)
-
-    def reverify(fixed_items, round_idx):
-        # A per-round journal keeps round k's verdict from being read back as
-        # round k+1's when a resume replays the repair.
-        return judge_notes_whole(
-            think, fixed_items, run_dir / f"verified-fidelity-repaired-{round_idx}.jsonl",
-            {item["id"]: chat_producer for item in fixed_items}, args.request_timeout, FIDELITY_REVIEW_EFFORT,
-        )
-
-    outcomes = forge_verify.repair_until_verified(
-        items, verdicts, fix=fix, reverify=reverify,
-        fingerprint=lambda payload: payload["cleanedNote"],
-        max_rounds=FIDELITY_REPAIR_ROUNDS, progress=progress,
-    )
-
-    cleared = repaired = 0
-    for payload in items:
-        record = record_by_source[payload["id"]]
-        outcome = outcomes[payload["id"]]
-        if outcome["status"] == "passed":
-            record.pop("fidelity_provisional", None)
-            if outcome["rounds"] == 0:
-                if not record.get("verified"):
-                    record["verified"] = "fidelity-cleared"
-                cleared += 1
-            else:
-                # An escalated title keeps that headline; the body was still mended.
-                if not record.get("verified") or record["verified"] == "needs-review":
-                    record["verified"] = "fidelity-repaired"
-                repaired += 1
-        else:
-            reason = outcome["reason"] or "the repair did not restore the missing content"
-            hold_provisional(record, warnings, f"cleaned transcript may not be faithful: {reason}", verify_reason=reason)
-            held += 1
-    return cleared, repaired, held
-
-
-def verify_records(args, vault, schema, clean_results, items_by_path, records, run_dir):
-    """Have the thinking model review the batch, and redo what it flags.
-
-    Bulk work runs without reasoning because it is usually right; this is what
-    makes "usually" safe. Full coverage costs a handful of batched calls, and the
-    reasoning budget goes to the items that turn out to need it — the redo below
-    runs at ``ESCALATION_EFFORT`` (`xhigh`), which is where that budget is spent:
-    medium clears the cleanup case only 4/8, xhigh 8/8. The batched review itself
-    runs at the thinking service's own default, since it is a yes/no judgment
-    rather than a from-scratch redo.
-
-    A *provisional* note — one the deterministic fidelity floor flagged but that
-    is otherwise sound — is not a candidate for the redo. It goes to
-    ``judge_and_repair_provisional``: the thinking model reviews the whole note
-    against the whole source at ``FIDELITY_REVIEW_EFFORT`` (`medium`), and that
-    verdict, not the word-overlap floor, decides it — clean → finish, flagged →
-    `chat` restores what was named and `think` re-validates (repaired → finish,
-    still-lost → hold with the objection). If the judge cannot run, the floor holds
-    it after all (never a silent finish).
-    """
-    warnings = []
-    candidates = [record for record in records if record["action"] == "process" and not record["needs_review"]]
-    summary = {"verified": 0, "ok": 0, "flagged": 0, "escalated": 0, "needsReview": 0, "flaggedIds": []}
-    if not candidates:
-        return summary, warnings
-    think = forge_llm.resolve_think_or_chat(base_url=args.think_url, model=args.think_model)
-    if not think["enabled"]:
-        warnings.append("verification skipped: no thinking service is configured")
-        summary["skipped"] = "disabled"
-        summary["provisionalHeld"] = hold_provisional_unjudged(candidates, warnings, "no thinking service")
-        return summary, warnings
-
-    by_path = {record["source"]: record for record in candidates}
-    note_items = [verify_note_payload(vault, record, items_by_path[record["source"]]) for record in candidates]
-    provisional_records = [
-        record for record in candidates
-        if record.get("fidelity_provisional") and not is_summarized(record["recording_type"])
-    ]
-    provisional_paths = {record["source"] for record in provisional_records}
-    fidelity_items = []
-    for position, record in enumerate(candidates):
-        # A meeting is minutes, not verbatim cleanup, so its utterances are not
-        # meant to appear in the note; the utterance-locator review does not apply.
-        # A provisional note goes to the whole-note judge below, not this spot check.
-        if is_summarized(record["recording_type"]) or record["source"] in provisional_paths:
-            continue
-        # Every chunked file, plus a sample of the single-chunk ones: a file the
-        # model read in one pass has already passed the deterministic locator.
-        if record.get("chunks", 1) > 1 or position % FIDELITY_SAMPLE_RATE == 0:
-            fidelity_items.extend(
-                fidelity_payloads(vault, record, run_dir, getattr(args, "compiled_lexicon", None))
-            )
-
-    journal = run_dir / "verified.jsonl"
-    fidelity_journal = run_dir / "verified-fidelity.jsonl"
-    log(
-        args,
-        f"verifying {len(note_items)} notes, {len(fidelity_items)} spot-check utterances, and "
-        f"{len(provisional_records)} provisional notes on {think['url']}",
-    )
-    try:
-        verdicts = forge_verify.verify_packets(
-            think,
-            VERIFY_NOTES_SYSTEM,
-            note_items,
-            journal_path=journal,
-            background=True,
-            timeout=args.request_timeout,
-            progress=progress,
-        )
-        # Fidelity compares cleaned text against the raw transcript, so it reviews
-        # the cleanup — and single-speaker cleanup is routed to the thinking
-        # service, the same one verifying here. Naming the producer per item is
-        # what lets those verdicts be recorded as non-independent instead of
-        # reading as a clean bill.
-        fidelity_verdicts = (
-            forge_verify.verify_packets(
-                think,
-                VERIFY_FIDELITY_SYSTEM,
-                fidelity_items,
-                journal_path=fidelity_journal,
-                background=True,
-                timeout=args.request_timeout,
-                progress=progress,
-                produced_by=fidelity_producers(fidelity_items, run_dir),
-            )
-            if fidelity_items
-            else {}
-        )
-    except forge_verify.VerificationError as error:
-        # An unreachable reviewer must not read as approval.
-        warnings.append(f"verification skipped: {error}")
-        summary["skipped"] = str(error)
-        summary["provisionalHeld"] = hold_provisional_unjudged(candidates, warnings, "the review failed")
-        return summary, warnings
-
-    # A clean verdict from the model that produced the item is not evidence, and
-    # the report must not let it read as one.
-    fidelity_independence = forge_verify.independence_warning(fidelity_verdicts)
-    if fidelity_independence:
-        warnings.append(f"fidelity check: {fidelity_independence}")
-        summary["notIndependentlyVerified"] = sum(
-            1 for verdict in fidelity_verdicts.values() if not verdict.get("independent", True)
-        )
-
-    flagged = [
-        (next(entry for entry in note_items if entry["id"] == path), verdict["reason"])
-        for path, verdict in verdicts.items()
-        if verdict["verdict"] == forge_verify.VERDICT_FLAG and path in by_path
-    ]
-
-    def redo(payload, reason):
-        path = payload["id"]
-        record = by_path[path]
-        item = items_by_path[path]
-        parsed = parse_transcript(transcript_source(split_frontmatter((vault / path).read_bytes())["body"], vault))
-        messages = [
-            {"role": "system", "content": CLASSIFY_SYSTEM},
-            {"role": "user", "content": json.dumps(classify_payload(item, parsed), ensure_ascii=False)},
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "reviewerObjection": reason,
-                        "previous": {"recording_type": record["recording_type"], "title": record["title"]},
-                    },
-                    ensure_ascii=False,
-                ),
-            },
-        ]
-        value, _call = forge_llm.call_json_with_retry(
-            think,
-            messages,
-            temperature=0,
-            cache_prompt=args.cache_prompt,
-            response_format={"type": "json_object"},
-            background=True,
-            timeout=args.request_timeout,
-            api_key=args.api_key,
-            task="reclassify-transcript",
-            reasoning_effort=ESCALATION_EFFORT,
-        )
-        classification, _warnings = validate_classification(value, item, parsed)
-        if classification["needs_review"] or not classification["title"]:
-            raise UserError(classification["review_reason"] or "re-classification asked for review")
-        summary_value, _record = forge_llm.call_json_with_retry(
-            think,
-            [
-                {"role": "system", "content": SUMMARY_SYSTEM},
-                {
-                    "role": "user",
-                    "content": json.dumps(
-                        {
-                            "recordingType": classification["recording_type"],
-                            "title": classification["title"],
-                            "reviewerObjection": reason,
-                            # Its own predecessor's summary is not evidence for
-                            # the replacement, so the callouts come out first.
-                            "cleaned": strip_callout_lines(
-                                (run_dir / "assembled" / record["artifact"])
-                                .read_text(encoding="utf-8")
-                                .split("\n# Transcript\n", 1)[0]
-                            )[:SUMMARY_INPUT_CHARS],
-                        },
-                        ensure_ascii=False,
-                    ),
-                },
-            ],
-            temperature=0,
-            cache_prompt=args.cache_prompt,
-            response_format={"type": "json_object"},
-            background=True,
-            timeout=args.request_timeout,
-            api_key=args.api_key,
-            task="resummarize-transcript",
-            reasoning_effort=ESCALATION_EFFORT,
-        )
-        new_summary = summary_value.get("summary") if isinstance(summary_value, dict) else None
-        if record["summary"] is not None:
-            problems = check_summary(new_summary)
-            if problems:
-                raise UserError(f"re-summarizing produced an unusable summary: {problems[0]}")
-        return {
-            "recording_type": classification["recording_type"],
-            "title": classification["title"],
-            "summary": re.sub(r"\s+", " ", new_summary).strip() if record["summary"] is not None else None,
-        }
-
-    escalations = forge_verify.escalate(flagged, redo, journal_path=journal, progress=progress)
-    for path, outcome in escalations.items():
-        record = by_path[path]
-        record["verify_reason"] = next(reason for payload, reason in flagged if payload["id"] == path)
-        if outcome.get("resumed"):
-            continue  # committed when it was first escalated
-        if outcome["ok"]:
-            record.update(outcome["value"])
-            record["classification_source"] = "model-think"
-            record["verified"] = "escalated"
-            record["needs_reassembly"] = True
-        else:
-            record["verified"] = "needs-review"
-            record["needs_review"] = True
-            record["review_reason"] = f"verification flagged this and redoing it failed: {outcome['detail']}"
-            record["status"] = "review"
-            record["action"] = "none"
-            record["destination"] = None
-            warnings.append(f"{path}: {record['review_reason']}")
-
-    # The spot check runs on notes that already passed the floor, so a flag here is
-    # a genuine surprise: cleanup fidelity is not something a title rewrite fixes,
-    # so the note keeps its name and body and a human looks at it. (Provisional
-    # notes are not in this set — they go to the whole-note judge and repair below.)
-    for identifier, verdict in fidelity_verdicts.items():
-        if verdict["verdict"] != forge_verify.VERDICT_FLAG:
-            continue
-        path = identifier.split("#s", 1)[0]
-        record = by_path.get(path)
-        if record is None or record["needs_review"]:
-            continue
-        record["verified"] = "needs-review"
-        record["needs_review"] = True
-        record["review_reason"] = f"cleaned transcript may not be faithful: {verdict['reason']}"
-        record["verify_reason"] = verdict["reason"]
-        record["status"] = "review"
-        record["action"] = "none"
-        record["destination"] = None
-        warnings.append(f"{path}: {record['review_reason']}")
-
-    # The floor deferred these to the meaning-judge; it (and a repair round on
-    # chat) decides them now.
-    provisional_cleared, provisional_repaired, provisional_held = judge_and_repair_provisional(
-        args, vault, schema, think, provisional_records, items_by_path, clean_results, run_dir, warnings
-    )
-
-    for path, verdict in verdicts.items():
-        if verdict["verdict"] == forge_verify.VERDICT_OK and path in by_path and not by_path[path].get("verified"):
-            by_path[path]["verified"] = "ok"
-    summary = forge_verify.summarize(verdicts, escalations)
-    summary["fidelityChecked"] = len(fidelity_verdicts)
-    summary["fidelityFlagged"] = sum(
-        1 for verdict in fidelity_verdicts.values() if verdict["verdict"] == forge_verify.VERDICT_FLAG
-    )
-    summary["provisionalCleared"] = provisional_cleared
-    summary["provisionalRepaired"] = provisional_repaired
-    summary["provisionalHeld"] = provisional_held
-    return summary, warnings
-
-
-def reassemble_escalated(args, vault, schema, items_by_path, clean_results, records, run_dir):
-    """Rebuild the notes whose type, title, or summary the reviewer replaced.
-
-    The cleaned transcript itself is reused unchanged — the reviewer objected to
-    how the recording was described, not to the cleanup — so this rebuilds from
-    the same cleaned text rather than re-reading its own output.
-    """
-    warnings = []
-    artifacts = run_dir / "assembled"
-    taken = set(scan_existing_names(vault))
-    for record in records:
-        if not record.pop("needs_reassembly", False):
-            continue
-        if record["needs_review"]:
-            # Something else rejected this note after its title was redone — a
-            # flagged utterance, say. Rebuilding it would put a destination back
-            # in the plan for a note that is being held.
-            continue
-        path = record["source"]
-        item = items_by_path[path]
-        cleaned = (clean_results.get(path) or {}).get("cleaned")
-        try:
-            if not cleaned:
-                raise UserError("cleaned transcript is no longer available in this run")
-            # A new title renames the note, and the recording's note is named
-            # after it, so both halves are renamed together or the link breaks.
-            destination = assign_unique_name(
-                vault,
-                INBOX_DIR,
-                args,
-                record.get("date"),
-                item["time_hhmm"],
-                record["recording_type"],
-                record["title"],
-                taken,
-                path,
-            )
-            raw_stem = raw_note_stem(Path(destination).name) if record.get("raw_artifact") else None
-            raw_destination = assign_raw_name(vault, INBOX_DIR, raw_stem, taken) if raw_stem else None
-            raw_body = transcript_source(split_frontmatter((vault / path).read_bytes())["body"], vault)
-            parsed = parse_transcript(raw_body)
-            metadata = frontmatter_metadata(schema, record["recording_type"], record.get("date"))
-            note_text, head = build_note(
-                schema,
-                metadata,
-                record["summary"],
-                args.summary_style,
-                parsed["preamble"],
-                cleaned,
-                raw_body,
-                reflection=record.get("reflection"),
-                raw_stem=raw_stem,
-            )
-            raw_text = (
-                build_raw_note(
-                    schema,
-                    raw_metadata(schema, record["recording_type"], Path(destination).stem, record.get("date")),
-                    raw_body,
-                )
-                if raw_stem
-                else None
-            )
-            structural, fidelity, measurements = check_note(
-                {**item, "raw_body": raw_body},
-                cleaned,
-                record["summary"],
-                note_text,
-                head,
-                parsed,
-                args,
-                record.get("proposals") or [],
-                raw_text=raw_text,
-                raw_stem=raw_stem,
-                summarized=is_summarized(record["recording_type"]),
-            )
-            record["measurements"] = measurements
-            record["checks"] = structural + fidelity
-            # Reassembly reuses the same cleaned text, so any fidelity finding here
-            # is the one the meaning-judge already cleared for this note — a title
-            # rewrite cannot change it. Only a new structural fault (a malformed
-            # replacement summary, say) is grounds to hold.
-            if structural:
-                raise UserError("; ".join(structural))
-            (artifacts / record["artifact"]).write_text(note_text, encoding="utf-8")
-            record["final_hash"] = sha256_text(note_text)
-            record["destination"] = destination
-            if raw_text is not None:
-                (artifacts / record["raw_artifact"]).write_text(raw_text, encoding="utf-8")
-                record["raw_final_hash"] = sha256_text(raw_text)
-                record["raw_destination"] = raw_destination
-        except (OSError, UnicodeDecodeError, UserError, ValueError) as error:
-            message = f"{type(error).__name__}: {error}"
-            warnings.append(f"{path}: rebuilding after verification failed ({message})")
-            record["status"] = "review"
-            record["needs_review"] = True
-            record["review_reason"] = f"rebuilding after verification failed: {message}"
-            record["action"] = "none"
-            record["destination"] = None
-    return warnings
 
 
 # --------------------------------------------------------------------------
@@ -5048,16 +4937,14 @@ def recompute_counts(records, dedupe, items):
     counts = initial_counts()
     counts["selected"] = len(items)
     counts["transcripts"] = sum(1 for item in items if item["is_transcript"])
+    counts["untimestamped_transcript"] = sum(1 for record in records if record.get("no_timestamps"))
     counts["duplicate_review"] = sum(len(pair["members"]) for pair in dedupe.get("review_pairs", []))
     counts["duplicates_exact"] = sum(len(group["losers"]) for group in dedupe.get("groups", []))
     for record in records:
         if record["action"] == "quarantine":
             continue
         if record["status"] == "skipped":
-            if record.get("no_timestamps"):
-                counts["untimestamped_transcript"] += 1
-            else:
-                counts["skipped_non_transcript"] += 1
+            counts["skipped_non_transcript"] += 1
             continue
         if record["action"] == "process":
             counts["processed"] += 1
@@ -5083,6 +4970,7 @@ def write_review_queue(run_dir, records):
                         {
                             "source": record["source"],
                             "reason": record["review_reason"],
+                            "reason_code": record.get("reason_code"),
                             "status": record["status"],
                             "recording_type": record["recording_type"],
                             "warnings": record["warnings"],
@@ -5152,12 +5040,17 @@ def review_facts(record):
 
 def review_item(record):
     name = Path(record["destination"]).stem if record.get("destination") else Path(record["source"]).stem
+    reason = record.get("review_reason") or ""
+    if record.get("reason_code"):
+        # The taxonomy code up front, so a person (or a model) can triage the
+        # held set without re-deriving what kind of problem each row is.
+        reason = f"[{record['reason_code']}] {reason}" if reason else f"[{record['reason_code']}]"
     return vault_review.ReviewItem(
         name=name,
         source=Path(record["source"]).name,
         summary=record.get("summary") or "",
         facts=review_facts(record),
-        reason=record.get("review_reason") or "",
+        reason=reason,
     )
 
 
@@ -5318,21 +5211,21 @@ def recheck_reviewed_note(vault, record, note_text, args):
     """
     data = (vault / record["source"]).read_bytes()
     raw_body = transcript_source(split_frontmatter(data)["body"], vault)
-    parsed = parse_transcript(raw_body)
+    parsed = parse_for_item(record, raw_body)
     source_text = corrected_source_text(parsed, args, record.get("proposals") or [])
     allowed = [value for value in (record.get("speaker_map") or {}).values() if value]
     allowed += [row.get("correct") for row in (record.get("proposals") or []) if row.get("correct")]
     cleaned = extract_cleaned_prose(note_text, parsed.get("preamble", ""))
     problems = []
-    # A meeting is minutes, not verbatim cleanup, so the invented-words check does
-    # not apply to it — the same exemption cleanup and check_note make. Without
-    # this a reviewed meeting would re-hold on apply for paraphrasing, which is its
-    # whole job. The chunk gate's ceiling is what keeps ordinary paraphrase from
-    # re-holding either: only fabrication beyond it fails here.
+    # Word overlap is advisory at apply time: a person just reviewed and ticked
+    # this note, so a distinctive word is logged, never a re-hold. Meetings are
+    # minutes and skip even the log.
     if not is_summarized(record.get("recording_type")):
         invented = invented_over_ceiling(source_text, cleaned, allowed)
         if invented:
-            problems.append(f"{INVENTED_PROBLEM_PREFIX}: {', '.join(invented[:8])}")
+            record.setdefault("warnings", []).append(
+                f"applied with reviewer approval; {INVENTED_PROBLEM_PREFIX}: {', '.join(invented[:8])}"
+            )
     # The verbatim recording must survive an edit untouched. This is the one
     # invariant an edit is never allowed to break.
     if record.get("raw_destination"):
@@ -5435,29 +5328,15 @@ def verification_report(verification, records):
         return lines
     lines.extend(
         [
-            f"- Notes reviewed by the thinking model: {verification['verified']}",
-            f"- Agreed: {verification['ok']}",
-            f"- Flagged: {verification['flagged']}",
-            f"- Re-done with reasoning: {verification['escalated']}",
-            f"- Left for you to decide: {verification['needsReview']}",
+            f"- Notes reviewed whole against their recordings: {verification['reviewed']}",
+            f"- Sound as written: {verification['ok']}",
+            f"- Fixed in place by the reviewer: {verification['fixed']}",
+            f"- Held for you, with a reason code: {verification['held']}",
         ]
     )
-    if verification.get("fidelityChecked"):
+    if verification.get("provisionalHeld"):
         lines.append(
-            f"- Utterances spot-checked against the cleaned text: {verification['fidelityChecked']}"
-            f" ({verification.get('fidelityFlagged', 0)} flagged)"
-        )
-    cleared = verification.get("provisionalCleared", 0)
-    repaired = verification.get("provisionalRepaired", 0)
-    provisional_held = verification.get("provisionalHeld", 0)
-    if cleared or repaired or provisional_held:
-        # These are notes the deterministic fidelity floor flagged and then
-        # deferred to the meaning-judge. Reporting the outcome, not the floor's
-        # word-overlap score, is the whole point of the deferral; each held note's
-        # own row below carries the judge's objection.
-        lines.append(
-            f"- Deterministic fidelity floor deferred to the meaning-judge: {cleared + repaired + provisional_held}"
-            f" ({cleared} cleared, {repaired} repaired on chat and re-verified, {provisional_held} held)"
+            f"- Deterministic fidelity floors re-armed as holds (no reviewer ran): {verification['provisionalHeld']}"
         )
     lines.append("")
     flagged = [record for record in records if record.get("verify_reason")]
@@ -5550,10 +5429,7 @@ def write_plan(run_dir, records, counts, dedupe, dry_run, vault, schema_hash, op
     )
     processed = [record for record in records if record["action"] == "process"]
     held_all = [record for record in records if record["needs_review"] or record["status"] == "failed"]
-    unusable_records = [
-        record for record in held_all if record.get("status") == "unusable" or record.get("unusable_reason")
-    ]
-    review = [record for record in held_all if record not in unusable_records]
+    review = held_all
     no_timestamps = [record for record in records if record.get("no_timestamps")]
     report = [
         "# Vault Transcripts Report",
@@ -5571,7 +5447,7 @@ def write_plan(run_dir, records, counts, dedupe, dry_run, vault, schema_hash, op
         f"- Exact duplicates to quarantine: {counts['duplicates_exact']}",
         f"- Duplicate pairs needing your decision: {counts['duplicate_review']}",
         f"- Not transcripts (left alone): {counts['skipped_non_transcript']}",
-        f"- Untimestamped transcripts (skipped — pass --unlabeled): {counts['untimestamped_transcript']}",
+        f"- Untimestamped transcripts (processed verbatim): {counts['untimestamped_transcript']}",
         f"- Without a date in the filename: {counts['undated']}",
         "",
     ]
@@ -5613,30 +5489,14 @@ def write_plan(run_dir, records, counts, dedupe, dry_run, vault, schema_hash, op
         report.extend(["- None", ""])
     report.extend(["## Renames", ""])
     append_listing(report, processed, lambda record: f"- `{record['source']}` → `{record['destination']}`")
-    if unusable_records:
-        report.extend(
-            [
-                "",
-                "## Unusable — Needs Re-recording",
-                "",
-                "The transcription itself is corrupt, so cleanup cannot recover these. "
-                "Re-record or re-transcribe rather than reviewing them.",
-                "",
-            ]
-        )
-        append_listing(
-            report,
-            unusable_records,
-            lambda record: f"- `{record['source']}`: {record.get('unusable_reason') or record['review_reason']}",
-        )
     if no_timestamps:
         report.extend(
             [
                 "",
-                "## Looks Like A Transcript — No Timestamps",
+                "## Untimestamped Transcripts",
                 "",
-                "Speaker-labelled but with no timestamps, so the pipeline left them alone rather than "
-                "filing them as raw notes. Re-run with `--unlabeled` to clean them verbatim (no clock markers).",
+                "Speaker-labelled exports with no timestamps, admitted automatically and "
+                "cleaned verbatim (there were no clock markers to drop).",
                 "",
             ]
         )
@@ -5933,6 +5793,7 @@ def resolved_options(args):
         "tiny_summary": args.tiny_summary,
         "limit": args.limit,
         "prompt_version": PROMPT_VERSION,
+        "pipeline": PIPELINE_VERSION,
         "cache_prompt": args.cache_prompt,
         "schema": args.schema,
         "voice": args.voice,
@@ -6409,20 +6270,12 @@ def process(args):
             if entry.get("status") == "ok" and entry.get("source") and entry.get("destination")
         }
         skip = set(losers) | held | set(applied)
-        # All chat work first, one stage at a time: each stage has its own stable
-        # system prompt, and interleaving them would invalidate the prefix cache
-        # this split exists to keep warm.
-        class_records, stage_warnings = classify_items(args, vault, items, run_dir, skip)
+        # One writer call per note does what classify → chunked clean → summarize
+        # did in three to four; the shared WRITER_SYSTEM keeps the prefix cache
+        # warm across notes the same way the per-stage prompts did.
+        class_records, clean_results, summaries, stage_warnings = write_notes(args, vault, items, run_dir, skip)
         warnings.extend(stage_warnings)
-        phase(run_dir, "clean", event={"type": "phase", "phase": "classify", "records": len(class_records)})
-
-        clean_results, stage_warnings = clean_items(args, vault, items, class_records, run_dir, skip)
-        warnings.extend(stage_warnings)
-        phase(run_dir, "summarize", event={"type": "phase", "phase": "clean", "notes": len(clean_results)})
-
-        summaries, stage_warnings = summarize_items(args, vault, items, class_records, clean_results, run_dir, skip)
-        warnings.extend(stage_warnings)
-        phase(run_dir, "assemble", event={"type": "phase", "phase": "summarize", "notes": len(summaries)})
+        phase(run_dir, "assemble", event={"type": "phase", "phase": "write", "notes": len(class_records)})
 
         records, stage_warnings = assemble_items(
             args, vault, schema, items, class_records, clean_results, summaries, losers, held, applied, run_dir
@@ -6433,13 +6286,10 @@ def process(args):
         items_by_path = {item["path"]: item for item in items}
         verification = None
         if args.verify:
-            verification, stage_warnings = verify_records(
-                args, vault, schema, clean_results, items_by_path, records, run_dir
+            verification, stage_warnings = review_and_fix_notes(
+                args, vault, schema, items_by_path, records, run_dir
             )
             warnings.extend(stage_warnings)
-            warnings.extend(
-                reassemble_escalated(args, vault, schema, items_by_path, clean_results, records, run_dir)
-            )
         phase(
             run_dir,
             "plan",
@@ -6738,6 +6588,7 @@ def assemble_reprocessed(args, vault, schema, items, class_records, clean_result
         assembled["voice_context_mode"] = voice_context_for(record)
         assembled["speaker_map"] = cleaned_result["speaker_map"]
         assembled["corrections"] = cleaned_result.get("corrections") or []
+        assembled["advisories"] = cleaned_result.get("advisories") or []
         assembled["proposals"] = cleaned_result.get("proposals") or []
         assembled["chunks"] = cleaned_result["chunks"]
         assembled["tiny"] = cleaned_result["tiny"]
@@ -6846,11 +6697,14 @@ def reprocess_notes(args):
         applied_log, _ = run_state.read_jsonl_recover_tail(run_dir / "apply-log.jsonl", repair=True)
         applied = {entry["source"] for entry in applied_log if entry.get("status") == "ok"}
 
-        class_records, stage_warnings = classify_items(args, vault, selected, run_dir, set())
+        class_records, clean_results, summaries, stage_warnings = write_notes(args, vault, selected, run_dir, set())
         warnings.extend(stage_warnings)
         # The name has been reviewed by a person and is what the rest of the
         # vault links to; a fresh classification does not get to overrule it. A
         # therapy reading is the exception: it is a stop, never an override.
+        # (The writer was already told the settled type — see "settledType" —
+        # so a disagreement here is the exception, and the register drift it
+        # leaves in an overridden body is an advisory for review.)
         held = set()
         for item in selected:
             record = class_records.get(item["path"])
@@ -6866,15 +6720,7 @@ def reprocess_notes(args):
                 )
                 record["recording_type"] = item["label_type"]
         selected = [item for item in selected if item["path"] not in held]
-        phase(run_dir, "clean", event={"type": "phase", "phase": "classify", "notes": len(class_records)})
-
-        clean_results, stage_warnings = clean_items(args, vault, selected, class_records, run_dir, set())
-        warnings.extend(stage_warnings)
-        phase(run_dir, "summarize", event={"type": "phase", "phase": "clean", "notes": len(clean_results)})
-
-        summaries, stage_warnings = summarize_items(args, vault, selected, class_records, clean_results, run_dir, set())
-        warnings.extend(stage_warnings)
-        phase(run_dir, "assemble", event={"type": "phase", "phase": "summarize", "notes": len(summaries)})
+        phase(run_dir, "assemble", event={"type": "phase", "phase": "write", "notes": len(class_records)})
 
         for item in selected:
             item["previous_summary"] = previous_summary(vault, item["path"])
@@ -6890,8 +6736,8 @@ def reprocess_notes(args):
         items_by_path = {item["path"]: item for item in selected}
         verification = None
         if args.verify:
-            verification, stage_warnings = verify_records(
-                args, vault, schema, clean_results, items_by_path, records, run_dir
+            verification, stage_warnings = review_and_fix_notes(
+                args, vault, schema, items_by_path, records, run_dir
             )
             warnings.extend(stage_warnings)
         phase(
@@ -7293,12 +7139,16 @@ def status(args):
             total = sum(1 for item in items if item.get("is_transcript"))
         except (OSError, json.JSONDecodeError, KeyError):
             total = None
+    written, _ = run_state.read_jsonl_recover_tail(run_dir / "written.jsonl", repair=False)
     classified, _ = run_state.read_jsonl_recover_tail(run_dir / "classified.jsonl", repair=False)
     cleaned, _ = run_state.read_jsonl_recover_tail(run_dir / "cleaned.jsonl", repair=False)
     summarized, _ = run_state.read_jsonl_recover_tail(run_dir / "summaries.jsonl", repair=False)
     applied, _ = run_state.read_jsonl_recover_tail(run_dir / "apply-log.jsonl", repair=False)
-    durations = [row.get("seconds", 0.0) for row in classified if row.get("seconds")]
-    remaining = max(total - len(classified), 0) if total is not None else None
+    # A v2 run journals one written.jsonl row per note; a v1 run directory
+    # still answers from its per-stage journals.
+    progressed = written or classified
+    durations = [row.get("seconds", 0.0) for row in progressed if row.get("seconds")]
+    remaining = max(total - len(progressed), 0) if total is not None else None
     return structured(
         "ok",
         data={
@@ -7306,6 +7156,7 @@ def status(args):
             "phase": state.get("phase"),
             "status": state.get("status"),
             "transcripts": total,
+            "written": sum(1 for row in written if row.get("status") == "ok"),
             "classified": len(classified),
             "cleaned_chunks": sum(1 for row in cleaned if row.get("status") == "ok"),
             "summarized": len(summarized),
@@ -7566,8 +7417,9 @@ def parse_args(argv):
     parser.add_argument(
         "--unlabeled",
         action="store_true",
-        help="process speaker-labelled exports that carry no timestamps (otherwise they are reported as a "
-        "skipped lane rather than filed as raw notes); no clock markers are written, since there are none to read",
+        help="force unlabeled parsing for exports below the automatic-detection thresholds (a clearly "
+        "speaker-labelled export with no timestamps is admitted without this flag); no clock markers are "
+        "written, since there are none to read",
     )
     parser.add_argument(
         "--link-rewrite",
@@ -7611,6 +7463,12 @@ def parse_args(argv):
     parser.add_argument("--model", action=TrackingAction)
     parser.add_argument("--api-key")
     parser.add_argument("--request-timeout", type=float, default=600)
+    parser.add_argument(
+        "--background",
+        action="store_true",
+        help="run model calls as preemptible background inference; the default is foreground, because a "
+        "backgrounded run is preempted by the very interactive session that usually launches it",
+    )
     parser.add_argument("--no-cache-prompt", action="store_true")
     parser.add_argument(
         "--retry-failed",

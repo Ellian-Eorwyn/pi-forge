@@ -46,16 +46,27 @@ section.
    one stderr line per note with an ETA; stdout stays one JSON result.
 
    Classifications are then reviewed by the thinking model in batches of ~20,
-   and anything it flags is re-classified individually with reasoning. That
-   review is what makes fast bulk classification safe, so leave it on;
-   `--no-verify` exists for when the thinking backend is down and the report
-   will then say plainly that nothing was reviewed.
+   and anything it flags is re-classified individually at `xhigh` reasoning.
+   A redo that answers the same destination the reviewer objected to is held
+   for a person instead of filed — the same answer after an objection is not
+   confirmation. That review is what makes fast bulk classification safe, so
+   leave it on; `--no-verify` exists for when the thinking backend is down and
+   the report will then say plainly that nothing was reviewed.
 5. Read the structured JSON result and generated `report.md`. Report to the
    user: selected notes, duplicate groups (exact and near), duplicate pairs
    held for review, the Verification section (how many were reviewed, what was
-   flagged and why, what was re-done and what needs their decision), proposed
-   metadata updates and moves, notes routed to `00 Inbox` for review, schema
-   suggestions, and the run directory.
+   flagged and why, what was re-done and what needs their decision), the
+   **Held For Review** list (every held note by name with its reason — never
+   just the count) and the **Filed Notes** list (each note's landing path),
+   proposed metadata updates and moves, notes routed to `00 Inbox` for review,
+   schema suggestions, and the run directory. When notes are held, root-cause
+   them from the run artifacts and propose a per-note fix before asking the
+   user what to do.
+   A run that dies mid-flight exits with a structured error carrying
+   `"run_directory"` and `"resumable": true` — resume it with `--run <dir>`
+   rather than restarting. Model calls run in the foreground by default;
+   `--background` opts into preemptible background inference and is only for a
+   machine whose interactive session is genuinely idle.
 6. Obtain explicit approval before any whole-vault `--apply`. For inbox mode,
    a direct instruction such as "process my inbox and apply it" is approval;
    otherwise present the dry run first.
