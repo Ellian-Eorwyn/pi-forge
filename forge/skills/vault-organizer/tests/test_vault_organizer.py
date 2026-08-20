@@ -947,6 +947,81 @@ class VaultOrganizerV2Tests(unittest.TestCase):
         self.assertEqual(record["classification_source"], "cache")
         self.assertEqual(len(chat.requests), chat_calls, "no re-classification on the warm cache")
 
+    def test_a_redo_that_repeats_the_objected_destination_is_held(self):
+        # "Same answer after the objection" is not confirmation. The reviewer
+        # objected to exactly this filing, so an identical redo goes to a human
+        # instead of being filed as if the objection had been answered.
+        self.write_note("00 Inbox/Stubborn.md", "# Stubborn\n\nBody.\n")
+        result, _chat, _think = self.verify_run(
+            [ok_response()],
+            flags={"00 Inbox/Stubborn.md": "no therapeutic framing"},
+            escalations=[ok_response()],
+        )
+        record = self.record_for(result, "00 Inbox/Stubborn.md")
+        self.assertTrue(record["needs_review"])
+        self.assertIsNone(record["destination"])
+        self.assertIn("same destination", record["review_reason"])
+        report = (Path(result["data"]["run_directory"]) / "report.md").read_text(encoding="utf-8")
+        held_section = report.split("## Held For Review")[1].split("## Filed Notes")[0]
+        self.assertIn("Stubborn.md", held_section)
+
+    def test_a_guard_held_note_stays_held_on_no_verify(self):
+        # The cache must reflect the guard's hold, or a --no-verify rebuild reads
+        # the confident entry and ships the very filing the reviewer objected to.
+        self.write_note("00 Inbox/Stubborn.md", "# Stubborn\n\nBody.\n")
+        VerdictHandler.flags = {"00 Inbox/Stubborn.md": "no therapeutic framing"}
+        with StubServer([ok_response()]) as chat, StubServer([ok_response()], handler_cls=VerdictHandler) as think:
+            common = ("inbox", "--vault", str(self.vault), "--base-url", chat.url, "--no-embeddings")
+            verified = self.run_ok(*common, "--think-url", think.url)
+            self.assertTrue(self.record_for(verified, "00 Inbox/Stubborn.md")["needs_review"])
+            chat_calls = len(chat.requests)
+
+            rebuilt = self.run_ok(*common, "--no-verify")
+        record = self.record_for(rebuilt, "00 Inbox/Stubborn.md")
+        self.assertTrue(record["needs_review"], "the guard's hold must survive a cache rebuild")
+        self.assertEqual(record["classification_source"], "cache")
+        self.assertEqual(len(chat.requests), chat_calls, "no re-classification on the warm cache")
+
+    def test_the_redo_requests_deep_reasoning(self):
+        # The bulk pass runs without reasoning on purpose; the redo is a handful
+        # of notes the reviewer showed the cheap answer wrong on, so each asks
+        # for the deepest setting explicitly rather than the endpoint default.
+        self.write_note("00 Inbox/Misfiled.md", "# Misfiled\n\nBody.\n")
+        corrected = ok_response(metadata={**ok_response()["metadata"], "subdomain": "software-development"})
+        _result, _chat, think = self.verify_run(
+            [ok_response()],
+            flags={"00 Inbox/Misfiled.md": "filed under the wrong subdomain"},
+            escalations=[corrected],
+        )
+        self.assertEqual(think.requests[-1].get("reasoning_effort"), "xhigh")
+
+    def test_the_report_lists_filed_destinations(self):
+        self.write_note("00 Inbox/Landed.md", "# Landed\n\nBody.\n")
+        result, _chat, _think = self.verify_run([ok_response()])
+        report = (Path(result["data"]["run_directory"]) / "report.md").read_text(encoding="utf-8")
+        filed_section = report.split("## Filed Notes")[1].split("## Destination Counts")[0]
+        self.assertIn("`00 Inbox/Landed.md` → `", filed_section)
+
+    def test_a_resumable_error_reports_the_run_directory(self):
+        # ResumableError is raised where journaled work survives (a preempted
+        # verification batch, a mid-batch model failure); the structured error
+        # must name the run directory and say it is resumable, so recovery is a
+        # --run resume rather than filesystem exploration.
+        import contextlib
+        import io
+        from unittest import mock
+
+        error = vault_organizer.ResumableError("preempted mid-verify", Path("/tmp/run-xyz"))
+        with mock.patch.object(vault_organizer, "run", side_effect=error):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = vault_organizer.main(["inbox", "--vault", str(self.vault)])
+        self.assertEqual(code, 1)
+        payload = json.loads(out.getvalue())
+        self.assertTrue(payload["data"]["resumable"])
+        self.assertEqual(payload["data"]["run_directory"], "/tmp/run-xyz")
+        self.assertIn("preempted mid-verify", payload["errors"][0]["message"])
+
     def test_an_unreachable_verifier_does_not_read_as_approval(self):
         self.write_note("00 Inbox/Unverified.md", "# Unverified\n\nBody.\n")
         with StubServer([ok_response()]) as chat:

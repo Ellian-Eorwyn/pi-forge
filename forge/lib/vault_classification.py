@@ -153,12 +153,13 @@ def chat_service(args):
     return forge_llm.service_from_args(args, "chat")
 
 
-def request_json_with_retry(args, messages, service=None, stage="classify-note"):
+def request_json_with_retry(args, messages, service=None, stage="classify-note", reasoning_effort=None):
     try:
         value, _record = forge_llm.call_json_with_retry(
             service or forge_routing.service_for(stage, args),
             messages,
             attempts=MAX_TRANSIENT_ATTEMPTS,
+            reasoning_effort=reasoning_effort,
             response_format={"type": "json_object"},
             cache_prompt=args.cache_prompt,
             timeout=args.request_timeout,

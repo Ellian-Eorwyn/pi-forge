@@ -156,6 +156,16 @@ TEMP_NAME_RE = re.compile(
 STEM_SUFFIX_RE = re.compile(r"(?:\s+\d+|\s*\(\d+\)|\s+copy)$", re.IGNORECASE)
 
 
+class ResumableError(UserError):
+    """A mid-run failure whose finished work is journaled in the run directory:
+    the fix is a resume, not a restart. Carries the run directory so the
+    structured error can say so without the caller exploring the filesystem."""
+
+    def __init__(self, message, run_dir):
+        super().__init__(message)
+        self.run_dir = run_dir
+
+
 def structured(status, artifacts=None, warnings=None, errors=None, data=None):
     return {
         "status": status,
@@ -1074,6 +1084,12 @@ def classify_items(args, vault, schema, schema_hash, items, losers, run_dir):
     return records, warnings
 
 
+# Effort for the per-note re-classification of reviewer-flagged notes. The bulk
+# pass runs without reasoning on purpose; the redo is the opposite trade — a
+# handful of notes the reviewer has already shown the cheap answer wrong on, so
+# each gets the deepest setting rather than the endpoint's silent default.
+REDO_EFFORT = "xhigh"
+
 VERIFY_SYSTEM = (
     "You are reviewing where notes were filed in one person's Obsidian vault.\n"
     "A faster model without reasoning proposed a destination and frontmatter for each note.\n"
@@ -1185,7 +1201,7 @@ def verify_classifications(args, vault, schema, records, run_dir):
             think_prefill=False,
             profile_prefix=classification_profile_prefix(args),
         )
-        response = request_json_with_retry(args, messages, service=think)
+        response = request_json_with_retry(args, messages, service=think, reasoning_effort=REDO_EFFORT)
         validated, _warnings, errors = validate_classification(response, schema)
         if errors:
             raise UserError("; ".join(errors))
@@ -1204,6 +1220,7 @@ def verify_classifications(args, vault, schema, records, run_dir):
     # per item next to the journal append, so an interrupted run keeps what it did.
     # Loaded lazily: nothing to write when nothing was flagged.
     cache = cache_path = None
+    guard_held = 0
     for rel, outcome in escalations.items():
         if outcome.get("resumed"):
             continue  # recorded, and cached, when it was first escalated
@@ -1215,6 +1232,13 @@ def verify_classifications(args, vault, schema, records, run_dir):
         verified_response = None
         if outcome["ok"]:
             validated = outcome["value"]["validated"]
+            # Where the objected-to classification was headed, computed before the
+            # redo's metadata replaces it. Unfilable metadata had no destination to
+            # repeat, so the same-destination guard below cannot fire.
+            try:
+                objected_dir = compile_destination(schema, record["metadata"]).as_posix()
+            except Exception:
+                objected_dir = None
             record["metadata"] = validated["metadata"]
             record["classification_source"] = "model-think"
             record["verified"] = "escalated"
@@ -1225,12 +1249,34 @@ def verify_classifications(args, vault, schema, records, run_dir):
                 record["destination"] = None
             else:
                 destination_dir = compile_destination(schema, record["metadata"])
-                filed_name = filing_name(record, (vault / rel).name, record.setdefault("warnings", []))
-                record["destination"] = (destination_dir / filed_name).as_posix()
-                record["move_required"] = record["destination"] != rel
+                if objected_dir is not None and destination_dir.as_posix() == objected_dir:
+                    # The same answer after the objection is not confirmation: the
+                    # reviewer objected to exactly this filing, so a human decides
+                    # rather than the redo silently outvoting the review.
+                    guard_held += 1
+                    record["verified"] = "needs-review"
+                    record["needs_review"] = True
+                    record["review_reason"] = (
+                        "reviewer objected but re-classification chose the same "
+                        f"destination ({objected_dir}): {record['verify_reason']}"
+                    )
+                    record["status"] = "review"
+                    record["destination"] = None
+                else:
+                    filed_name = filing_name(record, (vault / rel).name, record.setdefault("warnings", []))
+                    record["destination"] = (destination_dir / filed_name).as_posix()
+                    record["move_required"] = record["destination"] != rel
             # The raw escalated response, stored the same shape a first-pass
             # classification caches so the read path validates it identically.
             verified_response = outcome["value"]["response"]
+            if record["needs_review"]:
+                # Flip the cached copy too, or a --no-verify rebuild reads the
+                # confident entry and ships the filing the reviewer objected to.
+                verified_response = {
+                    **verified_response,
+                    "needs_review": True,
+                    "review_reason": record["review_reason"],
+                }
         else:
             # Could not be redone, so a human decides rather than shipping a
             # filing the reviewer already objected to.
@@ -1254,6 +1300,11 @@ def verify_classifications(args, vault, schema, records, run_dir):
         if entry["verdict"] == forge_verify.VERDICT_OK and rel in by_path:
             by_path[rel]["verified"] = "ok"
     summary = forge_verify.summarize(verdicts, escalations)
+    if guard_held:
+        # Guard-held notes were redone "ok" but the identical answer was not
+        # accepted; count them where they actually landed.
+        summary["escalated"] -= guard_held
+        summary["needsReview"] += guard_held
     return summary, warnings
 
 
@@ -1936,7 +1987,33 @@ def write_plan(
     report.extend(created_report_lines(records))
     report.extend(routed_report_lines(records))
     report.extend(verification_report(verification, records))
-    report.extend(["## Destination Counts", ""])
+    # Every held note by name: a bare "review required: 11" forces a plan.json
+    # scan to learn which eleven, and a model reading the report cannot triage a
+    # count. One line per note, with the reason it is waiting.
+    held = [record for record in records if record.get("needs_review")]
+    report.extend(["## Held For Review", ""])
+    append_report_listing(
+        report,
+        sorted(held, key=lambda entry: entry["source"]),
+        lambda entry: f"- `{entry['source']}` — {entry.get('review_reason') or 'needs review'}",
+    )
+    # And every filed note's landing path, so a later session can reconcile a
+    # stale scan against the vault without filesystem archaeology.
+    filed = [
+        record
+        for record in records
+        if record["status"] == "ok"
+        and not record["needs_review"]
+        and record.get("destination")
+        and record["action"] not in {"quarantine", "route_vault"}
+    ]
+    report.extend(["", "## Filed Notes", ""])
+    append_report_listing(
+        report,
+        sorted(filed, key=lambda entry: entry["source"]),
+        lambda entry: f"- `{entry['source']}` → `{entry['destination']}`",
+    )
+    report.extend(["", "## Destination Counts", ""])
     if destination_counts:
         for key in sorted(destination_counts):
             report.append(f"- {key}: {destination_counts[key]}")
@@ -2442,7 +2519,18 @@ def organize(args):
                 },
             )
 
-        class_records, classify_warnings = classify_items(args, vault, schema, schema_hash, items, losers, run_dir)
+        try:
+            class_records, classify_warnings = classify_items(args, vault, schema, schema_hash, items, losers, run_dir)
+        except ResumableError:
+            raise
+        except UserError as error:
+            # Classification journals per note, so a model failure mid-batch loses
+            # nothing but the note in flight.
+            raise ResumableError(
+                f"{error}. The run is checkpointed — resume it with "
+                f"`{args.mode} --vault {vault} --run {run_dir}`",
+                run_dir,
+            ) from error
         warnings.extend(classify_warnings)
         run_state.update_run_state(
             run_dir,
@@ -2459,10 +2547,11 @@ def organize(args):
                 # uses, and forge_llm already retried past a few interactive bursts. The
                 # run state is journaled and intact, so the fix is a resume, not a
                 # restart — and it keeps its filing mode and scope.
-                raise UserError(
+                raise ResumableError(
                     f"{error}. The run is checkpointed — resume it with "
                     f"`{args.mode} --vault {vault} --run {run_dir}`, or run the resume in the "
-                    "foreground so its review does not compete with the interactive session"
+                    "foreground so its review does not compete with the interactive session",
+                    run_dir,
                 ) from error
             warnings.extend(verify_warnings)
         run_state.update_run_state(
@@ -4419,6 +4508,13 @@ def run(argv):
 def main(argv=None):
     try:
         return run(sys.argv[1:] if argv is None else argv)
+    except ResumableError as error:
+        print_json(structured(
+            "error",
+            errors=[error_entry("user_error", str(error))],
+            data={"run_directory": str(error.run_dir), "resumable": True},
+        ))
+        return 1
     except UserError as error:
         print_json(structured("error", errors=[error_entry("user_error", str(error))], data=None))
         return 1
