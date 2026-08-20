@@ -4037,5 +4037,95 @@ class ParentBasenameTests(unittest.TestCase):
         self.assertIn('parent: "[[2026-07-24 - Memo - Espresso Machine Repairs]]"', rewritten.decode("utf-8"))
 
 
+class UnlabeledPayloadRegressionTests(unittest.TestCase):
+    """The verify/judge/floor/repair payload builders must parse an unlabeled
+    export the way cleanup did.
+
+    With the default parse a speaker-labelled, timestamp-less export reads as
+    zero blocks, so the meaning-judge reviews against an empty raw ("no source
+    material"), the note verifier renders an empty transcript, the utterance
+    floor has nothing to locate, and every repair word reads as invented — the
+    unresolvable holds of the 2026-08-19 inbox session.
+    """
+
+    SOURCE = "00 Inbox/Unlabeled Export.md"
+
+    def setUp(self):
+        import vault_schema
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.vault = Path(self.tmp.name).resolve() / "vault"
+        (self.vault / "00 Inbox").mkdir(parents=True)
+        self.run_dir = Path(self.tmp.name).resolve() / "run"
+        (self.run_dir / "assembled").mkdir(parents=True)
+        self.schema = vault_schema.parse_schema_note(SCHEMA)
+        self.args = type(
+            "Args",
+            (),
+            {
+                "summary_style": "callout",
+                "tiny_words": 120,
+                "filename_pattern": "date-type-topic",
+                "speaker_policy": "names",
+                "compiled_lexicon": None,
+            },
+        )()
+        # A speaker-labelled export with no timestamps: the --unlabeled shape.
+        speakers = ["Ellian", "Sopagna"]
+        self.body = "".join(
+            f"{speakers[index % 2]}\n{text}\n\n" for index, text in enumerate(SOLO_TEXTS)
+        )
+        (self.vault / self.SOURCE).write_text(self.body, encoding="utf-8")
+        self.summary = "Espresso machine errands and pantry repairs."
+        self.cleaned = " ".join(SOLO_TEXTS)
+        note_text = f"> [!summary]\n> {self.summary}\n\n{self.cleaned}\n\n# Transcript\n\n{self.body}"
+        (self.run_dir / "assembled" / "artifact.md").write_text(note_text, encoding="utf-8")
+        self.record = {
+            "source": self.SOURCE,
+            "destination": "00 Inbox/2026-07-24 - Memo - Espresso Machine Repairs.md",
+            "recording_type": "memo",
+            "title": "Espresso Machine Repairs",
+            "summary": self.summary,
+            "artifact": "artifact.md",
+            "speaker_map": {"Ellian": None, "Sopagna": None},
+            "proposals": [],
+        }
+        self.item = {
+            "path": self.SOURCE,
+            "raw_body": self.body,
+            "stats": {
+                "duration_seconds": 0,
+                "words": len(self.body.split()),
+                "speaker_labels": {"Ellian": 6, "Sopagna": 5},
+            },
+        }
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_the_note_verifier_sees_the_transcript(self):
+        payload = vt.verify_note_payload(self.vault, self.record, self.item)
+        self.assertIn("replacement gasket", payload["rawHead"])
+
+    def test_the_meaning_judge_sees_the_raw_transcript(self):
+        payload = vt.whole_note_fidelity_payload(self.vault, self.record, self.run_dir, self.args)
+        self.assertIsNotNone(payload)
+        self.assertIn("replacement gasket", payload["rawTranscript"])
+
+    def test_the_utterance_floor_has_utterances_to_locate(self):
+        items = vt.fidelity_payloads(self.vault, self.record, self.run_dir)
+        self.assertEqual(len(items), vt.FIDELITY_SAMPLES)
+        for entry in items:
+            self.assertTrue(entry["sourceUtterance"].strip())
+
+    def test_a_verbatim_repair_is_not_read_as_invented(self):
+        revised = " ".join(SOLO_TEXTS[:8])
+        problems = vt.rebuild_note_with_cleaned(
+            self.vault, self.schema, self.record, self.item, revised, self.args, self.run_dir
+        )
+        self.assertEqual(problems, [])
+        self.assertTrue(self.record.get("final_hash"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -10,12 +10,12 @@
 
 | Launch context block | Tokens |
 |---|---:|
-| Base system prompt (intro, tools list, guidelines, connected services) | 775 |
+| Base system prompt (intro, tools list, guidelines, connected services) | 785 |
 | Tool JSON schemas (17 tools) | 4142 |
 | Managed instructions (`AGENTS.md` with its `<project_context>` wrapper) | 2429 |
 | Skills menu (metadata for all model-visible skills) | 4070 |
-| **Total launch context (always processed)** | **11416** |
-| Maximum if every `SKILL.md` body is also loaded at once | 84304 |
+| **Total launch context (always processed)** | **11426** |
+| Maximum if every `SKILL.md` body is also loaded at once | 84314 |
 
 Of that total, the forge profile itself owns 6499 tokens (`AGENTS.md` plus the skills menu); the rest is the harness skeleton and the tool schemas, which this repository also controls.
 

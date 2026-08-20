@@ -4285,7 +4285,9 @@ def verify_note_payload(vault, record, item):
         raw = split_frontmatter((vault / record["source"]).read_bytes())["body"]
     except OSError:
         pass
-    parsed = parse_transcript(raw)
+    # allow_unlabeled: an --unlabeled export parses to zero blocks by default,
+    # which would render an empty transcript into the verifier payload.
+    parsed = parse_transcript(raw, allow_unlabeled=True)
     rendered = render_turns(collapse_turns(parsed["blocks"], {label: label for label in ordered_labels(parsed["blocks"])}))
     payload = {
         "id": record["source"],
@@ -4347,7 +4349,9 @@ def fidelity_payloads(vault, record, run_dir, lexicon=None):
         raw = transcript_source(split_frontmatter((vault / record["source"]).read_bytes())["body"], vault)
     except OSError:
         return []
-    parsed = parse_transcript(raw)
+    # allow_unlabeled: without it the floor samples an unlabeled export as zero
+    # blocks and the utterance-locator check has nothing to locate.
+    parsed = parse_transcript(raw, allow_unlabeled=True)
     words = content_words(cleaned)
     items = []
     for position, block in enumerate(fidelity_samples(record["source"], parsed["blocks"]), start=1):
@@ -4423,7 +4427,10 @@ def whole_note_fidelity_payload(vault, record, run_dir, args):
         raw = transcript_source(split_frontmatter((vault / record["source"]).read_bytes())["body"], vault)
     except OSError:
         return None
-    parsed = parse_transcript(raw)
+    # allow_unlabeled: without it a --unlabeled export (speaker-labelled, no
+    # timestamps) parses to zero blocks and the judge reviews the cleaned note
+    # against an empty raw, holding every provisional note for "no source".
+    parsed = parse_transcript(raw, allow_unlabeled=True)
     # Corrected the same way the cleanup saw it, so a successful term correction
     # does not read to the judge as the cleanup drifting from the source.
     source = corrected_source_text(parsed, args, record.get("proposals") or [])
@@ -4510,7 +4517,9 @@ def rebuild_note_with_cleaned(vault, schema, record, item, revised_cleaned, args
     or a list of problems, in which case nothing is written and the repair is
     treated as failed."""
     raw_body = transcript_source(split_frontmatter((vault / record["source"]).read_bytes())["body"], vault)
-    parsed = parse_transcript(raw_body)
+    # allow_unlabeled: an empty parse marks every distinctive word in the repair
+    # as invented past the ceiling, failing every repair attempt.
+    parsed = parse_transcript(raw_body, allow_unlabeled=True)
     metadata = frontmatter_metadata(schema, record["recording_type"], record.get("date"))
     raw_stem = raw_note_stem(Path(record["destination"]).name) if record.get("raw_artifact") else None
     note_text, head = build_note(
