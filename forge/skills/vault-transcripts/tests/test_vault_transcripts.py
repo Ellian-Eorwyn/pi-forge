@@ -790,6 +790,26 @@ class NamingTests(unittest.TestCase):
         )
         self.assertEqual(vt.format_filename("date-topic", None, None, "memo", "Gasket Order"), "Gasket Order.md")
 
+    def test_a_meeting_with_a_project_drops_the_generic_label(self):
+        # The project codename is the better label, and the title already leads
+        # with it, so the "Meeting" word would only be redundant.
+        self.assertEqual(
+            vt.format_filename(
+                "date-type-topic", "2026-08-20", "1430", "meeting", "FORGE - Q3 Timeline", project="FORGE"
+            ),
+            "2026-08-20 - FORGE - Q3 Timeline.md",
+        )
+        # No project identified: the note keeps the shape it has always had.
+        self.assertEqual(
+            vt.format_filename("date-type-topic", "2026-08-20", "1430", "meeting", "Deployment Window Review"),
+            "2026-08-20 - Meeting - Deployment Window Review.md",
+        )
+        # The project label-drop is a meeting-only affordance.
+        self.assertEqual(
+            vt.format_filename("date-type-topic", "2026-08-20", None, "memo", "Gasket Order", project="FORGE"),
+            "2026-08-20 - Memo - Gasket Order.md",
+        )
+
     def test_collision_ladder_prefers_the_time_over_a_counter(self):
         with tempfile.TemporaryDirectory() as raw:
             vault = Path(raw)
@@ -834,6 +854,81 @@ class NamingTests(unittest.TestCase):
         self.assertLessEqual(len(title), vt.MAX_TITLE_CHARS)
         self.assertFalse(title.endswith(" "))
         self.assertTrue(title.startswith("Thinking Through The Entire Kitchen"))
+
+
+def meeting_value(title="FORGE - Q3 Timeline", project="FORGE", **extra):
+    """A meeting classify response that validation accepts without holding it."""
+    return {
+        "recording_type": "meeting",
+        "material_role": "personal-exchange",
+        "title": title,
+        "project": project,
+        "speakers": {},
+        "effective_speakers": 2,
+        "spoken_date": None,
+        "evidence": None,
+        "needs_review": False,
+        "review_reason": None,
+        **extra,
+    }
+
+
+class MeetingBriefTests(unittest.TestCase):
+    def test_topics_are_the_headings_minus_the_fixed_sections(self):
+        cleaned = (
+            "## Staging Cutover\n\nprose\n\n## QA Sign-off\n\nprose\n\n"
+            "## Decisions\n\n- ship\n\n## Action Items\n\n- Marcus: rollback plan"
+        )
+        self.assertEqual(vt.meeting_topics(cleaned), ["Staging Cutover", "QA Sign-off"])
+
+    def test_attendees_drop_the_unnamed_voices(self):
+        speaker_map = {"Speaker 1": "Priya Shah", "Speaker 2": "Speaker 2", "Speaker 3": "Marcus Feld"}
+        self.assertEqual(vt.meeting_attendees(speaker_map), ["Priya Shah", "Marcus Feld"])
+        self.assertEqual(vt.meeting_attendees({"A": None}), [])
+
+    def test_brief_is_block_first_and_omits_the_lines_it_cannot_fill(self):
+        cleaned = "## Staging Cutover\n\nprose\n\n## Decisions\n\n- ship"
+        block = vt.meeting_brief({"project": "FORGE"}, "2026-08-20", "1430", cleaned, {"Speaker 1": "Priya Shah"})
+        self.assertEqual(
+            block,
+            "> [!info] Meeting\n"
+            "> **Project:** FORGE\n"
+            "> **Date:** 2026-08-20\n"
+            "> **Time:** 14:30\n"
+            "> **Attendees:** Priya Shah\n"
+            "> **Topics:** Staging Cutover",
+        )
+
+    def test_an_empty_brief_is_no_brief(self):
+        # No project, no date, no time, no named attendees, no topic headings.
+        self.assertIsNone(vt.meeting_brief({}, None, None, "just prose with no headings", {"A": None}))
+
+    def test_the_brief_leads_the_assembled_head_above_the_summary(self):
+        block = "> [!info] Meeting\n> **Project:** FORGE"
+        head = vt.assemble_head("A summary.", "callout", "", "## Topic\n\nbody", brief=block)
+        self.assertTrue(head.startswith(block))
+        self.assertLess(head.index("[!info]"), head.index("[!summary]"))
+
+
+class ClassificationProjectTests(unittest.TestCase):
+    def _validate(self, value):
+        parsed = vt.parse_transcript(transcript(DIALOGUE_BLOCKS))
+        return vt.validate_classification(value, {"path": "00 Inbox/x.md"}, parsed)[0]
+
+    def test_a_meeting_keeps_its_project(self):
+        self.assertEqual(self._validate(meeting_value())["project"], "FORGE")
+
+    def test_a_non_meeting_drops_the_project(self):
+        record = self._validate(classified("memo", 1, title="Gasket Order") | {"project": "FORGE"})
+        self.assertIsNone(record["project"])
+
+    def test_a_reviewed_meeting_carries_no_project(self):
+        value = meeting_value(needs_review=True, review_reason="too garbled to title")
+        self.assertIsNone(self._validate(value)["project"])
+
+    def test_a_nonsense_project_is_dropped_not_raised(self):
+        self.assertIsNone(self._validate(meeting_value(project=42))["project"])
+        self.assertIsNone(self._validate(meeting_value(project="   "))["project"])
 
 
 class SpeakerPolicyTests(unittest.TestCase):

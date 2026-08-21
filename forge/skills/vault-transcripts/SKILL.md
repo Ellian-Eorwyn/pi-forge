@@ -433,6 +433,16 @@ note — either lands where the next run will find it.
   verbatim fidelity review; the reviewer judges its minutes on coverage of
   decisions and action items, never word overlap. Only `meeting` summarizes —
   conversation and therapy stay verbatim, lecture keeps structured full content.
+- **A meeting opens with an at-a-glance block and leads its title with the
+  project.** Above the summary sits a small `> [!info] Meeting` callout holding
+  whichever of project, date, time, attendees, and topics the recording supports —
+  assembled by code from what the pipeline already settled (attendees from the
+  identified speakers, topics from the minutes' `##` headings), so every line is
+  optional and an empty block is simply omitted. When the meeting is clearly about
+  one named project or codename, the title leads with it and the filename drops the
+  redundant `Meeting` label (`2026-08-20 - FORGE - Q3 Timeline.md`); a project-less
+  meeting keeps `2026-08-20 - Meeting - <Topic>.md`. None of this is a gate: a
+  meeting with no project, no named attendees, or no clear topics still processes.
 - Everything the pipeline generates is a callout, above the speaker's words: the
   summary open, reflections and connections collapsed. `references/loom-notes.css`
   styles them; without it notes still read correctly.

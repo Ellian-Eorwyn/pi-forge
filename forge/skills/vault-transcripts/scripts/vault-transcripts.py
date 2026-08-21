@@ -77,11 +77,12 @@ from vault_schema import (
 )
 
 WORKFLOW = "vault-transcripts"
-PROMPT_VERSION = "vault-transcripts-v6"
+PROMPT_VERSION = "vault-transcripts-v7"
 # The pipeline's shape, not its prompts: v2 is the one-pass writer. A v1 run
 # directory (classify/clean/summarize journals) cannot resume into this code,
-# and the fingerprint mismatch this produces is the intended refusal.
-PIPELINE_VERSION = 2
+# and the fingerprint mismatch this produces is the intended refusal. v3 adds the
+# project-led meeting title and the at-a-glance meeting brief.
+PIPELINE_VERSION = 3
 # What a processed note keeps where the recording used to be, and what the
 # recording's own note is called: "<processed name> - Transcript".
 RAW_NOTE_SUFFIX = " - Transcript"
@@ -471,12 +472,19 @@ def filename_title_hint(name):
     return stem
 
 
-def format_filename(pattern, date, time_hhmm, recording_type, title, include_time=False):
+def format_filename(pattern, date, time_hhmm, recording_type, title, include_time=False, project=None):
     """The one place the note-naming convention lives."""
     prefix = date or ""
     if prefix and time_hhmm and (include_time or pattern == "date-time-topic"):
         prefix = f"{prefix} {time_hhmm}"
     if pattern == "date-type-topic":
+        # A meeting whose title already leads with its project codename does not
+        # also want the generic "Meeting" label in front of it: the project is the
+        # better label, and `type: meeting` in the frontmatter still records the
+        # kind. Drop the label only when a project was identified; a project-less
+        # meeting keeps the `<date> - Meeting - <title>` shape it has always had.
+        if recording_type == "meeting" and project:
+            return " - ".join(part for part in (prefix, title) if part) + ".md"
         label = TYPE_LABELS.get(recording_type, TYPE_LABELS["other"])
         return " - ".join(part for part in (prefix, label, title) if part) + ".md"
     return (f"{prefix} {title}" if prefix else title) + ".md"
@@ -506,14 +514,14 @@ def assign_raw_name(vault, directory, stem, taken_casefold):
         suffix += 1
 
 
-def assign_unique_name(vault, directory, args, date, time_hhmm, recording_type, title, taken_casefold, source_rel):
+def assign_unique_name(vault, directory, args, date, time_hhmm, recording_type, title, taken_casefold, source_rel, project=None):
     """Pick a free filename, preferring the configured pattern.
 
     A same-day second recording on the same topic gets the recording time before
     it gets a numeric suffix: the time is information, ``(2)`` is not.
     """
-    candidates = [format_filename(args.filename_pattern, date, time_hhmm, recording_type, title)]
-    with_time = format_filename(args.filename_pattern, date, time_hhmm, recording_type, title, include_time=True)
+    candidates = [format_filename(args.filename_pattern, date, time_hhmm, recording_type, title, project=project)]
+    with_time = format_filename(args.filename_pattern, date, time_hhmm, recording_type, title, include_time=True, project=project)
     if with_time != candidates[0]:
         candidates.append(with_time)
     for candidate in candidates:
@@ -1252,6 +1260,7 @@ Return exactly one JSON object and nothing else:
 {"recording_type": "memo" | "journal" | "conversation" | "meeting" | "therapy" | "lecture" | "other",
  "material_role": "owner-authored" | "personal-exchange" | "external-source" | "unknown",
  "title": "<short descriptive title>",
+ "project": "<codename for a meeting clearly about one, else null>",
  "speakers": {"<label exactly as given>": {"who": "<name, role, or unknown>", "kind": "name" | "role" | "unknown", "confidence": "high" | "medium" | "low", "source": "transcript" | "roster", "evidence": "<the words that identify them, or null>"}},
  "effective_speakers": <how many people are actually speaking>,
  "spoken_date": "<YYYY-MM-DD or null>",
@@ -1282,7 +1291,17 @@ subject the way the person would look for it later. Never name the medium:
 not open with "Discussing", "Talking About", "Thoughts On", "Notes On", or any
 other wrapper for the act of recording — go straight to the subject. If
 "filenameTitle" is given it is a real title someone already chose; prefer it,
-lightly normalized, unless the transcript shows it is wrong.
+lightly normalized, unless the transcript shows it is wrong. For a meeting
+clearly about one named project, product, client, or codename, lead the title
+with that name and then the subject — "FORGE - Sprint Review", not "Sprint
+Review" — so the note sorts and reads under the project. When no single project
+dominates, name the subject normally.
+
+project - for a meeting only, the one project, product, client, or codename the
+meeting is about, written exactly as you led the title with it. null for every
+other recording type, and null for a meeting when no single project clearly
+dominates. Advisory: it only shapes the filename and is never invented — when in
+doubt, use null.
 
 speakers - one entry for every label in "labels", using the label text exactly.
 Name a person only from evidence: someone is addressed by name, introduces
@@ -1387,6 +1406,15 @@ def validate_classification(value, item, parsed, roster_names=()):
     if not needs_review:
         title = validate_title(value.get("title"))
 
+    # A meeting may lead its title with a project codename; the field records that
+    # codename so the filename can drop the redundant "Meeting" label. It only ever
+    # shapes the name, is never written to frontmatter, and is dropped on anything
+    # unexpected so it can never raise or invent a project.
+    project = None
+    raw_project = value.get("project")
+    if recording_type == "meeting" and not needs_review and isinstance(raw_project, str) and raw_project.strip():
+        project = safe_title(raw_project)[:MAX_TITLE_CHARS] or None
+
     labels = ordered_labels(parsed["blocks"])
     offered = {vault_lexicon.fold(name): name for name in roster_names}
     spoken = normalize_body_text(" ".join(block["text"] for block in parsed["blocks"]))
@@ -1477,6 +1505,7 @@ def validate_classification(value, item, parsed, roster_names=()):
         "recording_type": recording_type,
         "material_role": material_role,
         "title": title,
+        "project": project,
         "speakers": speakers,
         "effective_speakers": effective,
         "spoken_date": spoken_date,
@@ -1754,13 +1783,17 @@ Style by "recordingType":
   clinical language, interpretation, or diagnosis that was not spoken.
 - meeting: concise minutes, not a transcript — this is the exception to the
   fidelity rules above, so paraphrase and compress freely. Write what was
-  discussed, decided, and assigned as brief prose under "##" topic headings,
-  attributing points to the speaker who made them where it matters. Capture every
-  decision and action item; where the chunk contains explicit ones, end it with
-  "## Decisions" and "## Action Items" bullets, writing "Unassigned" or "Not
-  stated" rather than inferring an owner or a deadline. Do not invent facts,
-  names, numbers, or decisions that were not said. Do not reproduce the dialogue
-  turn by turn — the verbatim recording is kept and linked separately.
+  discussed, decided, and assigned as brief prose under "##" topic headings — one
+  heading per subject covered, which is also what the note's at-a-glance block is
+  built from — attributing points to the speaker who made them where it matters.
+  The note already opens with a small project/date/attendees/topics block added
+  around your minutes; do not write one yourself, and do not add a title or an
+  overview heading. Capture every decision and action item; where the chunk
+  contains explicit ones, end it with "## Decisions" and "## Action Items"
+  bullets, writing "Unassigned" or "Not stated" rather than inferring an owner or
+  a deadline. Do not invent facts, names, numbers, or decisions that were not
+  said. Do not reproduce the dialogue turn by turn — the verbatim recording is
+  kept and linked separately.
 - lecture: "##" and "###" headings following the material, with the lecturer's
   own examples kept. Audience questions as dialogue.
 - external source (when "structuredFullContent" is true): remove filler and
@@ -2554,6 +2587,7 @@ def writer_system():
 
 Return exactly one JSON object and nothing else:
 {{"recording_type": "...", "material_role": "...", "title": "...",
+ "project": "<codename for a meeting clearly about one, else null>",
  "speakers": {{"<label exactly as given>": {{"who": "...", "kind": "name" | "role" | "unknown", "confidence": "high" | "medium" | "low", "source": "transcript" | "roster", "evidence": "<quote or null>"}}}},
  "effective_speakers": <n>, "spoken_date": "<YYYY-MM-DD or null>", "evidence": "<quote or null>",
  "needs_review": <true | false>, "review_reason": "<why, only when needs_review is true>",
@@ -3367,17 +3401,87 @@ def parent_basename_bytes(data):
 
 TRANSCRIPT_MARKER = "\n\n# Transcript\n\n"
 
+# The fixed minutes sections a meeting always ends with -- they are structure,
+# not a subject the meeting covered, so the at-a-glance "Topics" line skips them.
+MEETING_FIXED_HEADINGS = frozenset({"decisions", "action items"})
+GENERIC_SPEAKER_DISPLAY_RE = re.compile(r"^Speaker \d+(?: \(\d+\))?$")
 
-def assemble_head(summary, style, preamble, cleaned, reflection=None):
+
+def meeting_topics(cleaned):
+    """The minutes' own ``##`` topic headings, in order, minus the fixed sections.
+
+    Read from the body the model just wrote rather than asked for separately, so
+    the at-a-glance block can never name a topic the note does not actually cover.
+    """
+    topics = []
+    for line in cleaned.splitlines():
+        match = re.match(r"^##\s+(.+?)\s*$", line)
+        if not match:
+            continue
+        heading = match.group(1).strip()
+        if heading.casefold() in MEETING_FIXED_HEADINGS or heading in topics:
+            continue
+        topics.append(heading)
+    return topics
+
+
+def meeting_attendees(speaker_map):
+    """Distinct named attendees from the speaker map, dropping the unnamed voices.
+
+    The same names the body uses, so the block agrees with the minutes. A voice
+    the pipeline could only call "Speaker 2" is not an attendance record, so it is
+    left out rather than listed as an unknown.
+    """
+    names = []
+    for display in (speaker_map or {}).values():
+        if not display or GENERIC_SPEAKER_DISPLAY_RE.match(display):
+            continue
+        if display not in names:
+            names.append(display)
+    return names
+
+
+def meeting_brief(record, date, time_hhmm, cleaned, speaker_map):
+    """A compact at-a-glance callout for a meeting note, or ``None`` for nothing.
+
+    Assembled from what the pipeline already settled -- the project it named, the
+    recording's date and time, the speakers it identified, and the minutes' own
+    topic headings -- so it never disagrees with the note it sits above and never
+    needs a field the model was made to invent. Every line is optional; when none
+    survive there is no block at all, never an empty one.
+    """
+    lines = []
+    project = record.get("project")
+    if project:
+        lines.append(f"**Project:** {project}")
+    if date:
+        lines.append(f"**Date:** {date}")
+    if time_hhmm and len(time_hhmm) >= 4 and time_hhmm[:4].isdigit():
+        lines.append(f"**Time:** {time_hhmm[:2]}:{time_hhmm[2:4]}")
+    attendees = meeting_attendees(speaker_map)
+    if attendees:
+        lines.append(f"**Attendees:** {', '.join(attendees)}")
+    topics = meeting_topics(cleaned)
+    if topics:
+        lines.append(f"**Topics:** {', '.join(topics)}")
+    if not lines:
+        return None
+    return render_callout("info", "Meeting", lines, collapsed=False)
+
+
+def assemble_head(summary, style, preamble, cleaned, reflection=None, brief=None):
     """The generated section of a note, ending at the ``# Transcript`` marker.
 
     Generated material sits at the top, together and in callouts, and the
     speaker's own words below it: what the machine made of a recording is worth
     a glance before the recording itself, and it should never be mistaken for
     the recording. The handwritten preamble stays next to the cleaned text
-    because it is the owner's writing too, not apparatus.
+    because it is the owner's writing too, not apparatus. A meeting's at-a-glance
+    ``brief`` leads even the summary, because it is the fastest read of all.
     """
     sections = []
+    if brief:
+        sections.append(brief.strip())
     if summary:
         sections.append(render_summary(summary, style))
     if reflection:
@@ -3388,7 +3492,7 @@ def assemble_head(summary, style, preamble, cleaned, reflection=None):
     return "\n\n".join(sections) + TRANSCRIPT_MARKER
 
 
-def build_note(schema, metadata, summary, style, preamble, cleaned, raw_body, reflection=None, raw_stem=None):
+def build_note(schema, metadata, summary, style, preamble, cleaned, raw_body, reflection=None, raw_stem=None, brief=None):
     """Assemble the final note.
 
     Everything above the ``# Transcript`` marker is generated. Below it goes
@@ -3398,7 +3502,7 @@ def build_note(schema, metadata, summary, style, preamble, cleaned, raw_body, re
     of what was said, and lets the recording be filed as the source it is instead
     of riding along inside a note about it.
     """
-    head = serialize_frontmatter(metadata, schema) + "\n" + assemble_head(summary, style, preamble, cleaned, reflection)
+    head = serialize_frontmatter(metadata, schema) + "\n" + assemble_head(summary, style, preamble, cleaned, reflection, brief)
     if raw_stem is None:
         return head + raw_body, head
     return head + f"[[{raw_stem}]]\n", head
@@ -3673,7 +3777,8 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
         # a later recording of the same day, type, and topic.
         date = recording_date(record, item)
         destination = assign_unique_name(
-            vault, INBOX_DIR, args, date, item["time_hhmm"], record["recording_type"], record["title"], taken, rel
+            vault, INBOX_DIR, args, date, item["time_hhmm"], record["recording_type"], record["title"], taken, rel,
+            project=record.get("project"),
         )
         raw_stem = raw_note_stem(Path(destination).name) if split_raw else None
         raw_destination = assign_raw_name(vault, INBOX_DIR, raw_stem, taken) if raw_stem else None
@@ -3685,6 +3790,11 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
             raw_body = transcript_source(split_frontmatter(data)["body"], vault)
             parsed = parse_for_item(item, raw_body)
             metadata = frontmatter_metadata(schema, record["recording_type"], date)
+            brief = (
+                meeting_brief(record, date, item["time_hhmm"], cleaned_result["cleaned"], cleaned_result.get("speaker_map"))
+                if record["recording_type"] == "meeting"
+                else None
+            )
             note_text, head = build_note(
                 schema,
                 metadata,
@@ -3695,6 +3805,7 @@ def assemble_items(args, vault, schema, items, class_records, clean_results, sum
                 raw_body,
                 reflection=summary_row.get("reflection"),
                 raw_stem=raw_stem,
+                brief=brief,
             )
             raw_text = (
                 build_raw_note(
@@ -6539,12 +6650,24 @@ def assemble_reprocessed(args, vault, schema, items, class_records, clean_result
                 continue
             raw_body = transcript_source(split_frontmatter(data)["body"], vault)
             parsed = parse_transcript(raw_body)
+            brief = (
+                meeting_brief(
+                    record,
+                    record.get("spoken_date"),
+                    item.get("time_hhmm"),
+                    cleaned_result["cleaned"],
+                    cleaned_result.get("speaker_map"),
+                )
+                if record.get("recording_type") == "meeting"
+                else None
+            )
             head = assemble_head(
                 summary,
                 args.summary_style,
                 parsed["preamble"],
                 cleaned_result["cleaned"],
                 summary_row.get("reflection"),
+                brief,
             )
             # The blank line after the frontmatter is part of the body, so it is
             # re-added here exactly as `build_note` does. The head's own marker

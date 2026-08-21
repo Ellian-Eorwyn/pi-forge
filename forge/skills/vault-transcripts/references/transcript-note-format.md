@@ -28,6 +28,13 @@ processed_by:
   - "vault-transcripts"
 ---
 
+> [!info] Meeting
+> **Project:** FORGE
+> **Date:** 2026-08-20
+> **Time:** 14:30
+> **Attendees:** Priya Shah, Marcus Feld
+> **Topics:** Staging cutover, QA sign-off, rollback plan
+
 > [!summary]
 > One paragraph on what this recording was and what mattered in it.
 
@@ -85,13 +92,25 @@ Rules the script enforces, not suggestions:
   owner's writing and not apparatus. `forge/lib/vault-format/loom-notes.css`
   styles these callout types; a vault without it still reads correctly, since
   folding is Markdown rather than CSS.
-- **The callout types come from the vault's registry**, declared in
+- **The registered callout types come from the vault's registry**, declared in
   `99 Meta/99.02 Schemas/0.04 Note Format.md` and checked by
-  `forge/lib/vault_format.py`. This skill writes three of the nine — `summary`,
-  `reflection`, `connections` — and a fourth would need a row there first, since
-  an unregistered callout renders as stock blue with a pencil icon. The registry
-  is not injected into the cleanup prompt; `render_callout` in
-  `forge/lib/vault_reflection.py` applies the syntax after the checks pass.
+  `forge/lib/vault_format.py`. This skill writes three of them — `summary`,
+  `reflection`, `connections` — and a fourth registered type would need a row
+  there first, since an unregistered *semantic* callout renders as stock blue with
+  a pencil icon. The registry is not injected into the cleanup prompt;
+  `render_callout` in `forge/lib/vault_reflection.py` applies the syntax after the
+  checks pass. A meeting note additionally opens with a stock `> [!info]`
+  at-a-glance block (see the next rule); `info` is a stock Obsidian callout the
+  vault leaves as-is, so it needs no registry row.
+- **A meeting note opens with an at-a-glance block**, a single `> [!info] Meeting`
+  callout above the summary, holding whichever of `Project`, `Date`, `Time`,
+  `Attendees`, and `Topics` the recording supports — every line optional, an empty
+  block omitted entirely. It is assembled by code, not written by the cleanup
+  model: `Project` is the codename the classifier named (the same one the filename
+  leads with), `Date`/`Time` are the recording's, `Attendees` are the identified
+  speakers, and `Topics` are the minutes' own `##` headings minus `## Decisions`
+  and `## Action Items`. Because it is code-assembled apparatus, it always matches
+  the note and never trips the one-`# `-heading structural check.
 - When a note is applied through the inbox review with invented words **waived**,
   a collapsed `> [!provenance]-` callout is added just above `# Transcript`,
   naming the words let through and that the owner approved them. `provenance` is
@@ -203,7 +222,7 @@ that is not delivery to be reshaped.
 | `journal` | Chronological first-person paragraphs in the writer's own register. Voice, emotion, and meaningful self-correction preserved; the filler and false starts a written entry would never have contained removed. |
 | `conversation` | Dialogue as `**Name:** what they said` paragraphs, one per turn, each turn in readable written form. |
 | `therapy` | As `conversation`, at the highest fidelity of all. Hesitation and repetition that carries weight is kept. No clinical language, interpretation, or diagnosis that was not spoken. |
-| `meeting` | **Concise minutes, not a transcript** — the exception to the verbatim contract. Brief prose under `##` topic headings, paraphrased and compressed, attributing points to who made them where it matters; not turn-by-turn dialogue. Closing `## Decisions` and `## Action Items` bullets **only** when the recording contains explicit decisions or assignments; `Unassigned` and `Not stated` rather than an inferred owner or deadline. The verbatim recording is preserved and linked as its own source note. |
+| `meeting` | **Concise minutes, not a transcript** — the exception to the verbatim contract. The note opens with a code-assembled `> [!info] Meeting` at-a-glance block (project, date, time, attendees, topics) above the summary; the cleanup writes only the minutes, not that block. Brief prose under `##` topic headings — one heading per subject, which is also what the block's `Topics` line reads — paraphrased and compressed, attributing points to who made them where it matters; not turn-by-turn dialogue. Closing `## Decisions` and `## Action Items` bullets **only** when the recording contains explicit decisions or assignments; `Unassigned` and `Not stated` rather than an inferred owner or deadline. The verbatim recording is preserved and linked as its own source note. Where the meeting is clearly about one project, product, client, or codename, the title leads with that name and the filename drops the redundant `Meeting` label. |
 | `lecture` | `##` and `###` headings following the material, the lecturer's own examples kept, audience questions as dialogue. |
 | `other` | Treat as `memo` if one voice, `conversation` if several. |
 
