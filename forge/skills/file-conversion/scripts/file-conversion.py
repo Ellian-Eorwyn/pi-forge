@@ -27,6 +27,7 @@ from xml.etree import ElementTree
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 from vault_schema import ensure_workspace_marker  # noqa: E402
 import eml_parser
+import pymupdf_compat
 import run_state
 
 
@@ -131,20 +132,8 @@ def openpyxl_available():
     return importlib.util.find_spec("openpyxl") is not None
 
 
-def pymupdf_available():
-    return importlib.util.find_spec("fitz") is not None
-
-
 def pymupdf_version():
-    if not pymupdf_available():
-        return None
-    import fitz
-
-    version = getattr(fitz, "__version__", None)
-    if version:
-        return version
-    bind = getattr(fitz, "VersionBind", None)
-    return bind or "available"
+    return pymupdf_compat.version()
 
 
 def tool_version(command, args):
@@ -1142,15 +1131,14 @@ def pdf_render_chapter(chapter, chapter_index, body_size, stats):
 
 
 def run_pdf_to_markdown_structured(source, output):
-    if importlib.util.find_spec("fitz") is None:
+    pymupdf = pymupdf_compat.load()
+    if pymupdf is None:
         raise RuntimeError(
-            "PyMuPDF (fitz) is required for PDF->Markdown (pip install pymupdf); PDF->txt still works via pdftotext"
+            "PyMuPDF is required for PDF->Markdown (pip install pymupdf); PDF->txt still works via pdftotext"
         )
-    import fitz
-
     try:
-        doc = fitz.open(source)
-    except Exception as error:  # fitz raises library-specific errors on malformed input
+        doc = pymupdf.open(source)
+    except Exception as error:  # PyMuPDF raises library-specific errors on malformed input
         raise RuntimeError(f"PDF could not be opened: {error}")
     try:
         if doc.is_encrypted and doc.authenticate("") == 0:

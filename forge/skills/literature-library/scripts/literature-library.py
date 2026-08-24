@@ -22,6 +22,7 @@ from vault_schema import ensure_workspace_marker  # noqa: E402
 
 import citation_naming
 import citation_parse
+import pymupdf_compat
 import run_state
 from vault_schema import UserError, sha256_file
 
@@ -74,13 +75,7 @@ def record_id(index, stem):
 
 def command_doctor(args):
     """Report what this skill can do here, without touching the network."""
-    capabilities = {"pymupdf": False, "pdftotext": False, "node": False}
-    try:
-        import fitz  # noqa: F401
-
-        capabilities["pymupdf"] = True
-    except ImportError:
-        pass
+    capabilities = {"pymupdf": pymupdf_compat.available(), "pdftotext": False, "node": False}
 
     import shutil
 
@@ -314,12 +309,11 @@ def verify_pdf(path):
         head = handle.read(1024)
     if b"%PDF-" not in head:
         return False, "does not begin with the %PDF magic number"
-    try:
-        import fitz
-    except ImportError:
+    pymupdf = pymupdf_compat.load()
+    if pymupdf is None:
         return True, "PyMuPDF is unavailable, so only the magic number was checked"
     try:
-        with fitz.open(path) as document:
+        with pymupdf.open(path) as document:
             if document.is_encrypted:
                 return False, "the PDF is encrypted"
             if document.page_count < 1:
@@ -717,12 +711,11 @@ def probe_pdf(path):
     Routes on measurement rather than on another skill's warning text, so a
     change to file-conversion's wording cannot silently reroute every document.
     """
-    try:
-        import fitz
-    except ImportError:
+    pymupdf = pymupdf_compat.load()
+    if pymupdf is None:
         return {"pages": None, "alnumPerPage": None, "emptyRatio": None, "needsOcr": False, "reason": "PyMuPDF unavailable"}
     try:
-        with fitz.open(path) as document:
+        with pymupdf.open(path) as document:
             if document.is_encrypted:
                 return {"pages": None, "alnumPerPage": 0, "emptyRatio": 1.0, "needsOcr": True, "reason": "encrypted"}
             pages = document.page_count

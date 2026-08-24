@@ -19,6 +19,7 @@ sys.path.insert(0, str(LIB))
 
 import citation_naming  # noqa: E402
 import citation_parse  # noqa: E402
+import pymupdf_compat  # noqa: E402
 
 spec = importlib.util.spec_from_file_location("literature_library", SCRIPT)
 literature_library = importlib.util.module_from_spec(spec)
@@ -28,14 +29,9 @@ spec.loader.exec_module(literature_library)
 # that need a genuine PDF — one that opens, paginates, and yields text — skip
 # rather than fail where it is absent. A fake fixture would not exercise the
 # probe at all, which is the whole point of those cases.
-try:
-    import fitz  # noqa: F401
+HAVE_PYMUPDF = pymupdf_compat.available()
 
-    HAVE_FITZ = True
-except ImportError:
-    HAVE_FITZ = False
-
-NEEDS_FITZ = "PyMuPDF is not installed; real-PDF fixtures are unavailable"
+NEEDS_PYMUPDF = "PyMuPDF is not installed; real-PDF fixtures are unavailable"
 
 
 # Derived from a real Consensus.app export. Every oddity here is one the real
@@ -505,11 +501,10 @@ def _minimal_pdf():
     point of `verify_pdf` is that a file carrying a `%PDF-` header can still be
     unusable, so a fake fixture would test the wrong thing.
     """
-    try:
-        import fitz
-    except ImportError:
+    pymupdf = pymupdf_compat.load()
+    if pymupdf is None:
         return b"%PDF-1.4\n% minimal fixture; PyMuPDF unavailable so structure is unchecked\n%%EOF\n"
-    document = fitz.open()
+    document = pymupdf.open()
     document.new_page()
     body = document.tobytes()
     document.close()
@@ -823,9 +818,8 @@ class PublishTests(unittest.TestCase):
 
 def _text_pdf(path, pages=2, line="Epistemic injustice is a wrong done to someone in their capacity as a knower. "):
     """A born-digital PDF with enough real text to route away from OCR."""
-    import fitz
-
-    document = fitz.open()
+    pymupdf = pymupdf_compat.load()
+    document = pymupdf.open()
     for _ in range(pages):
         page = document.new_page()
         for row in range(30):
@@ -836,10 +830,9 @@ def _text_pdf(path, pages=2, line="Epistemic injustice is a wrong done to someon
 
 def _image_only_pdf(path, source):
     """A rasterized PDF: real pages, zero extractable text. The OCR case."""
-    import fitz
-
-    original = fitz.open(source)
-    scanned = fitz.open()
+    pymupdf = pymupdf_compat.load()
+    original = pymupdf.open(source)
+    scanned = pymupdf.open()
     for index in range(original.page_count):
         pixmap = original[index].get_pixmap(dpi=110)
         page = scanned.new_page(width=pixmap.width * 0.75, height=pixmap.height * 0.75)
@@ -857,7 +850,7 @@ class ProbeTests(unittest.TestCase):
     def tearDown(self):
         self._directory.cleanup()
 
-    @unittest.skipUnless(HAVE_FITZ, NEEDS_FITZ)
+    @unittest.skipUnless(HAVE_PYMUPDF, NEEDS_PYMUPDF)
     def test_born_digital_pdf_does_not_escalate_to_ocr(self):
         path = self.root / "digital.pdf"
         _text_pdf(path)
@@ -866,7 +859,7 @@ class ProbeTests(unittest.TestCase):
         self.assertGreater(probe["alnumPerPage"], literature_library.MIN_ALNUM_CHARS_PER_PAGE)
         self.assertEqual(probe["emptyRatio"], 0.0)
 
-    @unittest.skipUnless(HAVE_FITZ, NEEDS_FITZ)
+    @unittest.skipUnless(HAVE_PYMUPDF, NEEDS_PYMUPDF)
     def test_image_only_pdf_escalates_to_ocr(self):
         digital = self.root / "digital.pdf"
         _text_pdf(digital)
@@ -879,7 +872,7 @@ class ProbeTests(unittest.TestCase):
     # Without PyMuPDF `probe_pdf` reports that it cannot tell rather than
     # routing to an OCR pass it also could not run, so the escalation this
     # asserts only exists when the library is installed.
-    @unittest.skipUnless(HAVE_FITZ, NEEDS_FITZ)
+    @unittest.skipUnless(HAVE_PYMUPDF, NEEDS_PYMUPDF)
     def test_unreadable_file_is_an_ocr_candidate_rather_than_a_crash(self):
         path = self.root / "broken.pdf"
         path.write_bytes(b"%PDF-1.4 truncated and invalid")
@@ -970,7 +963,7 @@ class MarkdownDocumentTests(unittest.TestCase):
         self.assertIn("First line of the article.", document)
 
 
-@unittest.skipUnless(HAVE_FITZ, NEEDS_FITZ)
+@unittest.skipUnless(HAVE_PYMUPDF, NEEDS_PYMUPDF)
 class ConvertCommandTests(unittest.TestCase):
     def setUp(self):
         self._directory = tempfile.TemporaryDirectory()

@@ -4564,6 +4564,55 @@ for (const skill of skillPythonSuites) {
 	});
 }
 
+// Every `--json` mode contracts to put a JSON document and nothing else on
+// stdout, and what breaks that is never the script's own printing. PyMuPDF
+// 1.24.3 renamed `fitz` to `pymupdf` and left behind a shim that announces the
+// deprecation on stdout rather than stderr, so two skills began emitting a line
+// of prose ahead of their payload and every caller doing `JSON.parse(stdout)`
+// died on the first byte. Nothing here noticed until an unrelated EPUBCheck
+// case failed with `Unexpected token 'w'`, naming neither the skill at fault
+// nor the library.
+//
+// Stated once for every entrypoint, the invariant costs one subprocess each:
+// run `doctor --json` and require stdout to be either empty -- the script does
+// not accept `--json`, and argparse's complaint about that belongs on stderr --
+// or parseable as JSON. Both halves are load-bearing, and neither needs to know
+// which library prints next.
+const skillEntrypoints = readdirSync(skillsRoot, { withFileTypes: true })
+	.filter((entry) => entry.isDirectory() && !entry.name.startsWith(".") && entry.name !== "node_modules")
+	.map((entry) => entry.name)
+	.sort((left, right) => left.localeCompare(right))
+	.map((name) => ({ name, pythonPath: script(name, `${name}.py`), nodePath: script(name, `${name}.mjs`) }))
+	.map((skill) => ({
+		name: skill.name,
+		command: existsSync(skill.pythonPath) ? python : process.execPath,
+		entrypoint: existsSync(skill.pythonPath) ? skill.pythonPath : skill.nodePath,
+	}))
+	.filter((skill) => existsSync(skill.entrypoint));
+
+test("skill --json modes write nothing but JSON to stdout", () => {
+	assert.ok(skillEntrypoints.length > 20, `discovered only ${skillEntrypoints.length} skill entrypoints`);
+	for (const skill of skillEntrypoints) {
+		const result = spawnSync(skill.command, [skill.entrypoint, "doctor", "--json"], {
+			cwd: repositoryRoot,
+			encoding: "utf8",
+			env: environment,
+			maxBuffer: 64 * 1024 * 1024,
+		});
+		const stdout = result.stdout ?? "";
+		if (stdout.trim() === "") {
+			continue;
+		}
+		try {
+			JSON.parse(stdout);
+		} catch (error) {
+			assert.fail(
+				`${skill.name} doctor --json wrote non-JSON to stdout (${error.message})\nstdout:\n${stdout.slice(0, 400)}`,
+			);
+		}
+	}
+});
+
 function startChunkWorkerFixture(workspace, options = {}) {
 	const serverPath = join(workspace, "chunk-worker-server.mjs");
 	const requestsPath = join(workspace, "chunk-worker-requests.jsonl");

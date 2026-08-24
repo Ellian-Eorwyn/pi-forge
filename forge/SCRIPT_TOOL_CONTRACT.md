@@ -70,3 +70,16 @@ prints one summary per processed file spends the agent's window on material it
 can read back on demand, and a large batch can exhaust that window before the
 agent gets to act on any of it. Where a caller genuinely needs the whole set,
 give it an explicit flag rather than making it the default.
+
+## Keep stdout to the payload
+
+In `--json` mode nothing may precede the JSON document on stdout -- not a
+progress line, not a banner, not a warning. Callers parse the whole stream, so a
+single extra byte is a crash rather than noise, and the traceback names the
+caller rather than whatever printed.
+
+An import counts. PyMuPDF's `fitz` shim prints its deprecation notice to stdout,
+not stderr, which put a line of prose in front of two skills' payloads simply
+because they imported it; `forge/lib/pymupdf_compat.py` exists to import that
+library under a name that stays quiet. Progress and diagnostics go to stderr --
+`literature-library.py` has the pattern as a one-line `progress()` helper.
