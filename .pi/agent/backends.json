@@ -2,11 +2,11 @@
 	"active": "single",
 	"profiles": {
 		"single": {
-			"description": "One image-capable model at 131k on llms; no delegation; embedding/transcription on llms.",
+			"description": "One image-capable model on llms with the full window it serves; no delegation; embedding/transcription on llms.",
 			"primary": {
 				"host": "http://llms",
 				"images": true,
-				"contextTokens": 131072
+				"contextTokens": "auto"
 			},
 			"delegation": {
 				"enabled": false
@@ -28,7 +28,7 @@
 			"primary": {
 				"host": "http://llms",
 				"images": true,
-				"contextTokens": 131072
+				"contextTokens": "auto"
 			},
 			"delegation": {
 				"enabled": true,
@@ -59,7 +59,7 @@
 			"primary": {
 				"host": "http://llms",
 				"images": true,
-				"contextTokens": 131072
+				"contextTokens": "auto"
 			},
 			"secondary": {
 				"host": "http://llms",
@@ -85,7 +85,10 @@
 				}
 			},
 			"bulk": {
-				"lanes": ["chat", "chat2"]
+				"lanes": [
+					"chat",
+					"chat2"
+				]
 			},
 			"verify": {
 				"service": "think2"

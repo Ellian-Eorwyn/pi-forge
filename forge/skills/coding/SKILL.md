@@ -38,8 +38,9 @@ user's existing work. Inspect before editing and record what was done.
 4. Make small targeted edits. Reuse existing utilities and match the project's
    conventions rather than introducing new patterns or broad rewrites. When
    finding an existing utility or its call sites would take several greps and
-   file reads, hand that lookup to `forge_delegate` (`want_evidence: true` for the
-   `file:line` locators) instead of pulling the search into your context. Append
+   file reads, and `forge_delegate` is available, hand that lookup to it
+   (`want_evidence: true` for the `file:line` locators) instead of pulling the
+   search into your context; without it, run the searches yourself. Append
    every command you run to `run_log.md` in the output directory.
 5. Run the project's tests, linters, and type checks using the commands from the
    profile. Record every result, including failures, in `run_log.md`. Never

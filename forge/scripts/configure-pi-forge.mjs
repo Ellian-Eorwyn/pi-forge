@@ -3,7 +3,7 @@
 import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
-import { seedBackends } from "../lib/backends.mjs";
+import { clampBackgroundSlot, seedBackends } from "../lib/backends.mjs";
 import {
 	LEGACY_CHAT_SCHEDULING,
 	LEGACY_CHAT_SERVICE,
@@ -317,29 +317,6 @@ function adoptServedContext(service, persisted, capacity, label) {
 		`${label}: read ${capacity.contextTokens} context tokens per slot from the stack (was ${service.contextTokens}).\n`,
 	);
 	service.contextTokens = capacity.contextTokens;
-}
-
-/**
- * Keep the pinned background slot inside the range the backend actually has.
- *
- * Background work pins a slot so bulk calls cannot evict the interactive
- * session's prefix cache. A backend running one slot has no slot 1, so the pin
- * names something that does not exist — and nothing else in forge would ever
- * notice, because the number is only ever sent, never checked.
- */
-function clampBackgroundSlot(service, capacity, label) {
-	const total = capacity?.totalSlots;
-	if (!Number.isInteger(total) || total < 1) return;
-	const scheduling = service.scheduling;
-	if (!scheduling?.enabled || !Number.isInteger(scheduling.backgroundSlot) || scheduling.backgroundSlot < total)
-		return;
-	const clamped = total - 1;
-	process.stderr.write(
-		`${label}: the backend runs ${total} slot${total === 1 ? "" : "s"}, so background work cannot pin slot ` +
-			`${scheduling.backgroundSlot}; using slot ${clamped}.\n`,
-	);
-	scheduling.backgroundSlot = clamped;
-	if (scheduling.interactiveSlot >= total) scheduling.interactiveSlot = clamped;
 }
 
 /** One `forgeUser` field, collapsed to a single line, or "" if unusable. */

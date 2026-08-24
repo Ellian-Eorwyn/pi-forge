@@ -6,6 +6,9 @@
  *   /backend use <name>      make <name> active and apply it (also `/backend <name>`)
  *   /backend on | off        toggle delegation on the active setup
  *
+ * `/single` and `/multi` are the two one-word modes: one model with the whole
+ * window it serves, or several models with `forge_delegate` enabled.
+ *
  * The heavy lifting is the `backends.mjs` library (pure Node, loads under the
  * extension sandbox), which writes settings.json + models.json in place. Skills and
  * `forge_delegate` read settings.json fresh on their next call, so those switch
@@ -29,6 +32,8 @@ interface ApplyResult {
 	description: string;
 	delegation: string;
 	missingProviders: string[];
+	contextWindow: number;
+	contextProbed: boolean;
 }
 
 function statusLines(): string[] {
@@ -62,7 +67,7 @@ function statusLines(): string[] {
 	lines.push(
 		services.delegate.enabled
 			? `  delegation    on → ${services.delegate.baseUrl} (${services.delegate.model})`
-			: "  delegation    off (forge_delegate runs on primary chat)",
+			: "  delegation    off (forge_delegate is not registered — /multi to enable)",
 		taskModel.enabled && contextBudget.useTaskModel
 			? `  compaction    offload → ${taskModel.baseUrl}`
 			: "  compaction    on primary (no offload)",
@@ -90,15 +95,16 @@ function ensureShippedProfile(name: string): void {
 }
 
 function announce(ctx: ExtensionContext, result: ApplyResult): void {
+	const window = `${result.contextWindow} ctx (${result.contextProbed ? "read from the stack" : "declared by the setup"}).`;
 	const detail =
 		result.delegation === "on"
-			? "Delegation on (parallel secondary)."
-			: "Delegation off (forge_delegate runs on the primary).";
+			? "Delegation on (secondary backend); forge_delegate returns next session."
+			: "Delegation off; forge_delegate is not registered next session.";
 	const interactive =
 		result.missingProviders.length > 0
-			? " Skills and forge_delegate switch now."
-			: " Skills and forge_delegate switch now; the interactive model updates on your next session.";
-	ctx.ui.notify(`Backend setup: ${result.profile}. ${detail}${interactive}`, "info");
+			? " Skills switch now."
+			: " Skills switch now; the interactive model and its window update on your next session.";
+	ctx.ui.notify(`Backend setup: ${result.profile}. ${window} ${detail}${interactive}`, "info");
 }
 
 export default function backendsExtension(pi: ExtensionAPI): void {
@@ -139,7 +145,7 @@ export default function backendsExtension(pi: ExtensionAPI): void {
 					return;
 				}
 				if (verb === "on" || verb === "off") {
-					announce(ctx, setDelegation({ enabled: verb === "on" }) as ApplyResult);
+					announce(ctx, (await setDelegation({ enabled: verb === "on" })) as ApplyResult);
 					return;
 				}
 				// `use <name>` or a bare `<name>` that matches a setup.
@@ -154,39 +160,46 @@ export default function backendsExtension(pi: ExtensionAPI): void {
 					ctx.ui.notify(`Unknown setup "${target}". Known: ${known}`, "error");
 					return;
 				}
-				announce(ctx, applyProfile({ name: target }) as ApplyResult);
+				announce(ctx, (await applyProfile({ name: target })) as ApplyResult);
 			} catch (error) {
 				ctx.ui.notify(`/backend failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 			}
 		},
 	});
 
-	// One-word failsafe: drop back to the single-model setup when the backend
-	// hardware changes (GPU 2 off / re-cabled). This reverts EVERY dual-GPU knob —
-	// verify lane, bulk fan-out, delegation, and compaction offload — so nothing
-	// keeps pointing skills at an absent GPU 2 (the revert lives in applyProfile).
+	// The default mode, and the one word that gets back to it when the hardware
+	// changes (GPU 2 off / re-cabled). This reverts EVERY multi-model knob — verify
+	// lane, bulk fan-out, delegation, and compaction offload — so nothing keeps
+	// pointing skills at an absent second backend (the revert lives in applyProfile).
 	pi.registerCommand("single", {
-		description: "Failsafe: switch to the single-model setup (revert all dual-GPU routing)",
+		description: "One model with the full window it serves, no delegation (the default)",
 		handler: async (_args, ctx) => {
 			try {
-				announce(ctx, applyProfile({ name: "single" }) as ApplyResult);
+				announce(ctx, (await applyProfile({ name: "single" })) as ApplyResult);
 			} catch (error) {
 				ctx.ui.notify(`/single failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 			}
 		},
 	});
 
-	// Counterpart: switch to the two-GPU setup. Seeds the shipped profile first so
-	// it works even on an install whose backends.json predates it.
+	// The counterpart: several models with forge_delegate enabled. `/parallel` is
+	// kept as an alias so what was already typed keeps working; `/multi` is the name
+	// because what it turns on is more models, not more GPUs. Seeds the shipped
+	// profile first so it works on an install whose backends.json predates it.
+	const switchToMulti = async (label: string, ctx: ExtensionContext): Promise<void> => {
+		try {
+			ensureShippedProfile("distributed-parallel");
+			announce(ctx, (await applyProfile({ name: "distributed-parallel" })) as ApplyResult);
+		} catch (error) {
+			ctx.ui.notify(`${label} failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+		}
+	};
+	pi.registerCommand("multi", {
+		description: "Multiple models with forge_delegate enabled (second backend: bulk, verify, compaction)",
+		handler: async (_args, ctx) => switchToMulti("/multi", ctx),
+	});
 	pi.registerCommand("parallel", {
-		description: "Switch to the two-GPU distributed-parallel setup (both GPUs at once)",
-		handler: async (_args, ctx) => {
-			try {
-				ensureShippedProfile("distributed-parallel");
-				announce(ctx, applyProfile({ name: "distributed-parallel" }) as ApplyResult);
-			} catch (error) {
-				ctx.ui.notify(`/parallel failed: ${error instanceof Error ? error.message : String(error)}`, "error");
-			}
-		},
+		description: "Alias for /multi (the multi-model setup)",
+		handler: async (_args, ctx) => switchToMulti("/parallel", ctx),
 	});
 }

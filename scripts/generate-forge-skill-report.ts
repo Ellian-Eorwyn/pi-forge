@@ -212,6 +212,12 @@ async function measureTools(): Promise<{
 
 	// Extensions register their tools through the ExtensionAPI; a stub captures the
 	// registrations without starting a session.
+	//
+	// `forge_delegate` only registers itself when the machine's active backend setup
+	// has delegation on, so without this pin the report would list it on a multi-model
+	// machine and omit it on a single-model one — and `--check` would fail depending
+	// on who ran it. The report measures what a tool costs WHEN PRESENT, so force it.
+	process.env.FORGE_DELEGATE_TOOL = "on";
 	const noop = (): void => {};
 	const captured: Array<Record<string, unknown>> = [];
 	const stub = new Proxy(

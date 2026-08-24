@@ -45,8 +45,9 @@ function printSummary(result) {
 	process.stdout.write(`Active setup: ${result.profile}\n`);
 	if (result.description) process.stdout.write(`  ${result.description}\n`);
 	const cs = result.connectedServices;
+	const ctxSource = result.contextProbed ? "read from the stack" : "declared by the setup";
 	process.stdout.write(
-		`  primary chat  : ${cs.chat.baseUrl} (model ${cs.chat.model}, ${cs.chat.contextTokens} ctx)\n`,
+		`  primary chat  : ${cs.chat.baseUrl} (model ${cs.chat.model}, ${cs.chat.contextTokens} ctx, ${ctxSource})\n`,
 	);
 	process.stdout.write(`  primary think : ${cs.think.baseUrl} (model ${cs.think.model})\n`);
 	if (cs.bulk?.lanes) {
@@ -64,7 +65,7 @@ function printSummary(result) {
 	process.stdout.write(
 		result.delegation === "on"
 			? `  delegation    : on → ${cs.delegate.baseUrl} (model ${cs.delegate.model ?? "?"})\n`
-			: "  delegation    : off (falls back to primary chat)\n",
+			: "  delegation    : off (forge_delegate is not registered — `multi` to enable)\n",
 	);
 	if (cs.embeddings?.url) process.stdout.write(`  embedding     : ${cs.embeddings.url}\n`);
 	if (cs.transcription?.baseUrl) process.stdout.write(`  transcription : ${cs.transcription.baseUrl}\n`);
@@ -119,7 +120,7 @@ function cmdShow() {
 	process.stdout.write(
 		services.delegate.enabled
 			? `  delegate      : ${services.delegate.baseUrl} (model ${services.delegate.model})\n`
-			: "  delegate      : off (forge_delegate runs on primary chat)\n",
+			: "  delegate      : off (forge_delegate is not registered — `multi` to enable)\n",
 	);
 	process.stdout.write(
 		taskModel.enabled && contextBudget.useTaskModel
@@ -133,7 +134,7 @@ function cmdShow() {
 	process.stdout.write(`  ocr           : ${services.ocr.url}\n`);
 }
 
-function main() {
+async function main() {
 	const [command, argument] = process.argv.slice(2);
 	switch (command) {
 		case undefined:
@@ -152,35 +153,36 @@ function main() {
 				fail(`unknown setup ${JSON.stringify(argument)}; known: ${Object.keys(config.profiles ?? {}).join(", ")}`);
 			}
 			projectProfile(config.profiles[argument]);
-			printSummary(applyProfile({ name: argument }));
+			printSummary(await applyProfile({ name: argument }));
 			return;
 		}
 		case "single":
-			// Failsafe revert; `single` always exists as the shipped baseline.
-			printSummary(applyProfile({ name: "single" }));
+			// The default, and the one-word revert; `single` always exists as shipped.
+			printSummary(await applyProfile({ name: "single" }));
 			return;
+		case "multi":
 		case "parallel":
 			ensureShippedProfile("distributed-parallel");
-			printSummary(applyProfile({ name: "distributed-parallel" }));
+			printSummary(await applyProfile({ name: "distributed-parallel" }));
 			return;
 		case "apply":
-			printSummary(applyProfile({}));
+			printSummary(await applyProfile({}));
 			return;
 		case "delegation": {
 			if (argument !== "on" && argument !== "off") fail("usage: backends.mjs delegation on|off");
-			printSummary(setDelegation({ enabled: argument === "on" }));
+			printSummary(await setDelegation({ enabled: argument === "on" }));
 			return;
 		}
 		default:
 			fail(
 				`unknown command: ${command}\n` +
-					"usage: backends.mjs [list|show|use <name>|single|parallel|apply|delegation on|off]",
+					"usage: backends.mjs [list|show|use <name>|single|multi|apply|delegation on|off]",
 			);
 	}
 }
 
 try {
-	main();
+	await main();
 } catch (error) {
 	fail(error instanceof Error ? error.message : String(error));
 }

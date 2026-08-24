@@ -1,12 +1,15 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createReadOnlyTools } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+// Also pure Node, and already the sandbox-safe way `backends.ts` reads the same file.
+import { resolveConnectedServices } from "../lib/connected-services.mjs";
 // forge-llm.mjs is pure Node (no @earendil-works imports), so it loads under the
 // extension sandbox where the pi-ai provider layer does not. `resolveDelegateService`
-// returns the secondary backend when one is configured — a separate llama-server on
-// another GPU, so the investigation runs in parallel — and otherwise `chat`, where
-// `callWithTools` pins the background slot (slot 1) via a cooperative lease so the
-// delegate never touches the interactive slot-0 prefix cache. See connected-services.mjs.
+// returns the secondary backend — a separate llama-server on another GPU, so the
+// investigation runs in parallel. Its `chat` fallback is not reached from here:
+// `delegationToolEnabled` below refuses to register the tool at all without a
+// secondary, precisely so a delegate call can never land on the interactive
+// session's own slot. See connected-services.mjs.
 import { callWithTools, resolveDelegateService } from "../lib/forge-llm.mjs";
 
 // Budgets. A read-only investigation that cannot answer within these returns its
@@ -177,7 +180,38 @@ export async function runDelegate(cwd: string, params: DelegateParams, signal?: 
 	return { answer: "", toolTurns, hitBudget: true };
 }
 
+/**
+ * Whether this setup has a second backend for the delegate to run on.
+ *
+ * Without one, `resolveDelegateService` falls back to the primary `chat` — which
+ * on a single-backend install is the very model holding the interactive session.
+ * A delegate call there evicts that session's prefix cache and forces a full
+ * re-prefill of the whole window on the next turn, so the tool costs far more
+ * than the context it saves. Better not to offer it at all: the schema stops
+ * being paid for on every session, and the model cannot spend a turn on it.
+ *
+ * `FORGE_DELEGATE_TOOL=on|off` overrides, matching the `FORGE_OBSIDIAN_CLI=off`
+ * escape hatch in vault-context.ts. `on` is also what the skill-report generator
+ * sets, so the report measures the tool's cost regardless of the machine's setup.
+ *
+ * Read once at load: extensions load at launch, so a setup switch lands on the
+ * next session — the same timing `/backend` already announces for the model.
+ */
+function delegationToolEnabled(): boolean {
+	const override = (process.env.FORGE_DELEGATE_TOOL || "").trim().toLowerCase();
+	if (override === "on") return true;
+	if (override === "off") return false;
+	try {
+		return resolveConnectedServices({}).delegate.enabled === true;
+	} catch {
+		// An unreadable settings.json is not a reason to offer a lane we cannot
+		// confirm exists; single-backend is the safe assumption and the default.
+		return false;
+	}
+}
+
 export default function delegationExtension(pi: ExtensionAPI) {
+	if (!delegationToolEnabled()) return;
 	pi.registerTool({
 		name: "forge_delegate",
 		label: "Delegate to non-thinking model",
@@ -189,10 +223,9 @@ export default function delegationExtension(pi: ExtensionAPI) {
 			"several search/read steps (e.g. 'where is X defined and used', 'which of these files does Y', 'distill " +
 			"this large output down to the facts I need'). Do NOT use it for a single trivial grep you can run " +
 			"yourself, for open-ended reasoning, or for anything needing the conversation's context — pass everything " +
-			"it needs in task/context. It is read-only: it cannot edit files or run mutating commands. When a " +
-			"secondary backend is configured it runs there on another GPU, in parallel with your session; otherwise " +
-			"it runs on the same weights as you while you wait. Either way its searches and reasoning stay out of " +
-			"your context.",
+			"it needs in task/context. It is read-only: it cannot edit files or run mutating commands. It runs on a " +
+			"secondary backend on another GPU, in parallel with your session, so its searches and reasoning stay out " +
+			"of your context.",
 		promptSnippet: "Offload a bounded read-only investigation to the fast non-thinking model",
 		promptGuidelines: [
 			"Delegate a bounded, read-only investigation to forge_delegate when its intermediate output would be large or multi-step, to keep your own context clean; run a single trivial lookup yourself.",

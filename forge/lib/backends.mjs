@@ -24,6 +24,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DEFAULT_CONNECTED_SERVICES, getForgeAgentDir, SLOT_CONTEXT_TOKENS } from "./connected-services.mjs";
+import { capacityForUrl, readSnapshot } from "./stack-state.mjs";
 
 // The standard forge port layout in front of the primary llama-server. The three
 // interactive providers and the two skill services all front one backend today;
@@ -44,26 +45,33 @@ export const SECONDARY_PORTS = Object.freeze({ chat2: 8104, think2: 8103, code2:
 const COMPACTION_TRIGGER_RATIO = 0.75;
 
 /**
- * The setups shipped by default. `single` is the safe baseline and the active one:
- * one image-capable model on llms doing everything, delegation off — byte-for-byte
- * the behavior a fresh install had before setups existed, so seeding this file and
- * applying the active setup changes nothing until someone switches. `distributed`
- * is the two-GPU split — embedding and transcription on the local laptop, a vision
- * primary and a vision-free delegation backend on the two `llms` GPUs in parallel.
- * Both are templates: the one file is meant to be edited, and this is only where a
- * fresh install starts. `single` is listed first so it is the fallback when
- * `active` names a setup that no longer exists.
+ * The setups shipped by default. `single` is the default and the active one: one
+ * image-capable model on llms doing everything, with the whole window that model
+ * serves and no delegation — the simplest thing that works, and what an install
+ * with one backend should be. `distributed` and `distributed-parallel` are the
+ * multi-model setups, where a second backend earns its keep as a delegation target,
+ * a second bulk lane, and an independent verify lane. All are templates: the one
+ * file is meant to be edited, and this is only where a fresh install starts.
+ * `single` is listed first so it is the fallback when `active` names a setup that
+ * no longer exists.
+ *
+ * `primary.contextTokens: "auto"` reads the per-slot window from the deployment at
+ * apply time rather than hardcoding one, so a setup declares exactly what its
+ * backend serves and follows a backend that is later given a bigger one. It falls
+ * back to SLOT_CONTEXT_TOKENS when the stack cannot be read.
  */
 export const DEFAULT_BACKENDS = Object.freeze({
 	active: "single",
 	profiles: Object.freeze({
 		single: Object.freeze({
-			// One image-capable model, no delegation, everything on llms. contextTokens
-			// is the safe per-slot ceiling of the current primary; raise it to 262144
-			// only against a backend actually serving that per slot (one slot, not two),
-			// or the agent over-declares its window and the server refuses long prompts.
-			description: "One image-capable model at 131k on llms; no delegation; embedding/transcription on llms.",
-			primary: Object.freeze({ host: "http://llms", images: true, contextTokens: SLOT_CONTEXT_TOKENS }),
+			// One image-capable model doing everything on llms, delegation off. The
+			// window is whatever that backend serves per slot: declaring more than it
+			// serves means the agent sends prompts it believes fit and reads the
+			// server's rejection as the model failing, and declaring less wastes the
+			// window on every call — so this asks rather than guesses.
+			description:
+				"One image-capable model on llms with the full window it serves; no delegation; embedding/transcription on llms.",
+			primary: Object.freeze({ host: "http://llms", images: true, contextTokens: "auto" }),
 			delegation: Object.freeze({ enabled: false }),
 			embedding: Object.freeze({ url: "http://llms:8005/v1/embeddings", model: "embed" }),
 			transcription: Object.freeze({ baseUrl: "http://llms:8014", engine: "parakeet-v3" }),
@@ -73,7 +81,7 @@ export const DEFAULT_BACKENDS = Object.freeze({
 			description:
 				"Embedding + transcription on this laptop; a vision primary and a vision-free delegation backend " +
 				"split across the two llms GPUs, running in parallel.",
-			primary: Object.freeze({ host: "http://llms", images: true, contextTokens: SLOT_CONTEXT_TOKENS }),
+			primary: Object.freeze({ host: "http://llms", images: true, contextTokens: "auto" }),
 			delegation: Object.freeze({
 				enabled: true,
 				baseUrl: "http://llms:8104/v1/chat/completions",
@@ -103,7 +111,9 @@ export const DEFAULT_BACKENDS = Object.freeze({
 			description:
 				"Two GPUs at once: interactive + a bulk lane on GPU1; a second bulk lane, independent verify, " +
 				"compaction, and delegation on GPU2. Skill batch work fans across both.",
-			primary: Object.freeze({ host: "http://llms", images: true, contextTokens: SLOT_CONTEXT_TOKENS }),
+			primary: Object.freeze({ host: "http://llms", images: true, contextTokens: "auto" }),
+			// The secondary keeps a literal: the probe below reads the primary's chat
+			// endpoint only, so "auto" here would silently mean the fallback constant.
 			secondary: Object.freeze({
 				host: "http://llms",
 				images: false,
@@ -412,6 +422,106 @@ function projectDelegate(delegation, enabled) {
 	return block;
 }
 
+/**
+ * Keep the pinned background slot inside the range the backend actually has.
+ *
+ * Background work pins a slot so bulk calls cannot evict the interactive
+ * session's prefix cache. A backend running one slot has no slot 1, so the pin
+ * names something that does not exist — and nothing else in forge would ever
+ * notice, because the number is only ever sent, never checked. Shared with
+ * `configure-pi-forge.mjs`: an install and a setup switch must land on the same
+ * pin, or one would write a slot the other has already ruled out.
+ *
+ * Mutates `service.scheduling` in place. Returns the slot it moved to, or null
+ * when the pin was already in range (or there was nothing to check).
+ */
+export function clampBackgroundSlot(service, capacity, label) {
+	const total = capacity?.totalSlots;
+	if (!Number.isInteger(total) || total < 1) return null;
+	const scheduling = service?.scheduling;
+	if (!scheduling?.enabled || !Number.isInteger(scheduling.backgroundSlot) || scheduling.backgroundSlot < total)
+		return null;
+	const clamped = total - 1;
+	process.stderr.write(
+		`${label}: the backend runs ${total} slot${total === 1 ? "" : "s"}, so background work cannot pin slot ` +
+			`${scheduling.backgroundSlot}; using slot ${clamped}.\n`,
+	);
+	scheduling.backgroundSlot = clamped;
+	if (scheduling.interactiveSlot >= total) scheduling.interactiveSlot = clamped;
+	return clamped;
+}
+
+// Descriptions this repo used to ship, superseded because they name a window that
+// is no longer fixed. Replaced only when byte-equal, so an edited one survives.
+const SUPERSEDED_DESCRIPTIONS = Object.freeze({
+	"One image-capable model at 131k on llms; no delegation; embedding/transcription on llms.":
+		DEFAULT_BACKENDS.profiles.single.description,
+});
+
+/**
+ * Upgrade setups still carrying the old built-in literal to `"auto"`.
+ *
+ * `seedBackends` only writes when the file is absent, so an install made before
+ * `"auto"` existed keeps its literal forever and never learns what its backend
+ * grew into. Byte-equal to SLOT_CONTEXT_TOKENS means an installer put it there;
+ * any other number was typed by someone aiming a setup at a specific backend and
+ * is left alone. Same rule, and the same reasoning, as `adoptServedContext` in
+ * configure-pi-forge.mjs — and the same rule again for the description, which on
+ * those installs states the very number that just stopped being fixed.
+ *
+ * Mutates `config`. Returns true when something changed, so the caller can save.
+ */
+function migrateAutoContext(config) {
+	let changed = false;
+	for (const profile of Object.values(config.profiles ?? {})) {
+		if (!profile || typeof profile !== "object" || Array.isArray(profile)) continue;
+		const replacement = SUPERSEDED_DESCRIPTIONS[profile.description];
+		if (replacement) {
+			profile.description = replacement;
+			changed = true;
+		}
+		const primary = profile.primary;
+		if (!primary || typeof primary !== "object" || Array.isArray(primary)) continue;
+		if (primary.contextTokens !== SLOT_CONTEXT_TOKENS) continue;
+		primary.contextTokens = "auto";
+		changed = true;
+	}
+	return changed;
+}
+
+/** Does this setup want its window read from the deployment rather than declared? */
+function wantsAutoContext(profile) {
+	return profile?.primary?.contextTokens === "auto";
+}
+
+/**
+ * What the primary's chat endpoint actually serves, or null.
+ *
+ * The URL is taken from a throwaway projection rather than re-derived here, so
+ * the endpoint probed is by construction the endpoint written. Strictly optional
+ * in both directions: an unreachable stack returns null from `readSnapshot`, and
+ * a URL the snapshot cannot place returns null from `capacityForUrl`.
+ */
+async function probePrimaryCapacity(profile, env, connectedServices) {
+	const chatUrl = projectProfile(profile).connectedServices.chat.baseUrl;
+	const snapshot = await readSnapshot({ env, settings: connectedServices });
+	return capacityForUrl(snapshot, chatUrl);
+}
+
+/**
+ * Replace an `"auto"` window with the one the deployment reports.
+ *
+ * Left as `"auto"` when nothing was read, which `positiveInt` resolves to
+ * SLOT_CONTEXT_TOKENS — the same fallback every install without a stack API
+ * takes. Returns a copy: the shipped profiles are frozen.
+ */
+function resolveAutoContext(profile, capacity) {
+	if (!wantsAutoContext(profile)) return profile;
+	const served = capacity?.contextTokens;
+	if (!Number.isInteger(served) || served <= 0) return profile;
+	return { ...profile, primary: { ...profile.primary, contextTokens: served } };
+}
+
 function readJsonObject(path, label) {
 	if (!existsSync(path)) return {};
 	let parsed;
@@ -476,20 +586,30 @@ function taskLocalProvider(spec) {
  * saves. `active` is recorded in backends.json when a name is given. Returns a
  * summary for the caller to print.
  *
+ * Async because it reads the deployment once first, the same way the installer
+ * does: an `"auto"` window and the background-slot clamp both come from that one
+ * read, and a stack that cannot be reached leaves both at what the setup already
+ * says. Every caller already sits in an async context.
+ *
  * @param {{ env?: NodeJS.ProcessEnv, agentDir?: string, name?: string }} [options]
  */
-export function applyProfile({ env = process.env, agentDir, name } = {}) {
+export async function applyProfile({ env = process.env, agentDir, name } = {}) {
 	const options = { env, agentDir };
 	const config = loadBackends(options);
+	// Before anything is projected, so an install predating "auto" adopts it here
+	// rather than staying pinned to a number its backend may have outgrown.
+	const migrated = migrateAutoContext(config);
 	const selected = name ?? activeProfileName(config);
 	const profile = requireProfile(config, selected);
-	const patch = projectProfile(profile);
 
 	const dir = resolveAgentDir(options);
 	const settingsPath = join(dir, "settings.json");
 	const modelsPath = join(dir, "models.json");
 	const settings = readJsonObject(settingsPath, "settings.json");
 	const models = readJsonObject(modelsPath, "models.json");
+
+	const capacity = await probePrimaryCapacity(profile, env, settings.connectedServices);
+	const patch = projectProfile(resolveAutoContext(profile, capacity));
 
 	if (
 		!settings.connectedServices ||
@@ -500,6 +620,13 @@ export function applyProfile({ env = process.env, agentDir, name } = {}) {
 	}
 	for (const [service, fields] of Object.entries(patch.connectedServices)) {
 		mergeInto(settings.connectedServices, service, fields);
+	}
+
+	// A pin carried over from a multi-slot backend names a slot this one does not
+	// have. Done after the merge so it corrects what is about to be written, and
+	// only against a slot count actually read — an unreachable stack changes nothing.
+	for (const service of ["chat", "think"]) {
+		clampBackgroundSlot(settings.connectedServices[service], capacity, `connectedServices.${service}`);
 	}
 
 	// Keep the agent's compaction reserve consistent with the window this setup
@@ -564,8 +691,8 @@ export function applyProfile({ env = process.env, agentDir, name } = {}) {
 	writeJsonObject(settingsPath, settings);
 	writeJsonObject(modelsPath, models);
 
-	if (name && config.active !== name) {
-		config.active = name;
+	if ((name && config.active !== name) || migrated) {
+		if (name) config.active = name;
 		saveBackends(config, options);
 	} else if (!existsSync(getBackendsPath(options))) {
 		// First apply with no runtime file yet: persist the defaults so the file the
@@ -579,6 +706,10 @@ export function applyProfile({ env = process.env, agentDir, name } = {}) {
 		delegation: patch.connectedServices.delegate.enabled ? "on" : "off",
 		connectedServices: patch.connectedServices,
 		missingProviders,
+		contextWindow: patch.contextWindow,
+		// True when the number above was read from the deployment rather than
+		// declared by the setup, so a caller can say which it is.
+		contextProbed: wantsAutoContext(profile) && Number.isInteger(capacity?.contextTokens),
 	};
 }
 
@@ -588,7 +719,7 @@ export function applyProfile({ env = process.env, agentDir, name } = {}) {
  *
  * @param {{ env?: NodeJS.ProcessEnv, agentDir?: string, enabled?: boolean }} [options]
  */
-export function setDelegation({ env = process.env, agentDir, enabled } = {}) {
+export async function setDelegation({ env = process.env, agentDir, enabled } = {}) {
 	const options = { env, agentDir };
 	const config = loadBackends(options);
 	const name = activeProfileName(config);
@@ -608,5 +739,5 @@ export function setDelegation({ env = process.env, agentDir, enabled } = {}) {
 		};
 	}
 	saveBackends(config, options);
-	return applyProfile({ env, agentDir, name });
+	return await applyProfile({ env, agentDir, name });
 }

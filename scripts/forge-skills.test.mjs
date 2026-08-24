@@ -53,6 +53,12 @@ const environment = {
 	// the tests: a developer whose install has been migrated (or not) would other-
 	// wise see different results than CI.
 	PI_FORGE_AGENT_DIR: "/nonexistent-agent-directory",
+	// Nor from the deployment. `configure-pi-forge` and `applyProfile` both read
+	// the stack's per-slot window and size their context and compaction reserve
+	// from it, so on a machine that can reach a live stack these tests measured
+	// that stack rather than the code — and silently changed answer whenever
+	// someone resized a backend. Same isolation rule as the line above.
+	PI_FORGE_SKIP_STACK_DISCOVERY: "1",
 };
 
 test("shared run state is atomic, compatible, and recovers a malformed journal tail", () => {
