@@ -34,8 +34,10 @@ client talks to the server:
   note is single-speaker (the same as the sidecar unless `--speaker` is passed), and
   the doctor accepts their `status: "healthy"` health reply.
 
-The `distributed` backend setup (`/backend use distributed`) sets `api: "openai"` to
-reach a laptop-local mlx-audio server.
+No shipped backend setup selects this route: `single`, `distributed`, and
+`distributed-parallel` all reach the transcription service on the llms box, which
+speaks the sidecar API. It is there for a server of your own — set
+`connectedServices.transcription.api` (or `FORGE_TRANSCRIPTION_API=openai`) yourself.
 
 ### Residency, and why the timeout is 900 s
 

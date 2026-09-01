@@ -45,7 +45,11 @@ function printSummary(result) {
 	process.stdout.write(`Active setup: ${result.profile}\n`);
 	if (result.description) process.stdout.write(`  ${result.description}\n`);
 	const cs = result.connectedServices;
-	const ctxSource = result.contextProbed ? "read from the stack" : "declared by the setup";
+	const ctxSource = result.contextProbed
+		? "read from the stack"
+		: result.contextKept
+			? "kept from the last read — the stack state API is unreachable"
+			: "declared by the setup";
 	process.stdout.write(
 		`  primary chat  : ${cs.chat.baseUrl} (model ${cs.chat.model}, ${cs.chat.contextTokens} ctx, ${ctxSource})\n`,
 	);

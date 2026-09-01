@@ -68,10 +68,11 @@ test("projectProfile maps the distributed setup onto both registries", async () 
 	assert.equal(patch.connectedServices.delegate.baseUrl, "http://llms:8104/v1/chat/completions");
 	assert.equal(patch.connectedServices.delegate.model, "chat");
 	assert.equal(patch.connectedServices.delegate.scheduling.enabled, false);
-	assert.equal(patch.connectedServices.embeddings.url, "http://laptop:8005/v1/embeddings");
-	assert.equal(patch.connectedServices.transcription.baseUrl, "http://laptop:8014");
-	assert.equal(patch.connectedServices.transcription.api, "openai");
-	assert.equal(patch.connectedServices.transcription.model, "parakeet-v3-en");
+	assert.equal(patch.connectedServices.embeddings.url, "http://llms:8005/v1/embeddings");
+	assert.equal(patch.connectedServices.transcription.baseUrl, "http://llms:8014");
+	// Stated by the setup, not inherited: a machine previously on an OpenAI-ASR
+	// server must be moved back off it rather than keeping that protocol.
+	assert.equal(patch.connectedServices.transcription.api, "sidecar");
 	assert.equal(patch.connectedServices.ocr.url, "http://llms:5002/glmocr/parse");
 	assert.deepEqual(patch.providers["forge-local-think"].input, ["text", "image"]);
 	assert.equal(patch.providers["forge-local-think"].baseUrl, "http://llms:8003/v1");
@@ -123,6 +124,105 @@ test("enabling delegation without a baseUrl is a clear error", async () => {
 	);
 });
 
+test("an install still naming the old laptop endpoints is moved onto llms", async () => {
+	const dir = seedAgentDir();
+	// backends.json exactly as an older install left it: both services on a second
+	// machine, the `distributed` one on the mlx-audio OpenAI ASR route.
+	writeFileSync(
+		join(dir, "backends.json"),
+		`${JSON.stringify({
+			active: "distributed",
+			profiles: {
+				distributed: {
+					primary: { host: "http://llms", images: true, contextTokens: "auto" },
+					delegation: { enabled: false },
+					embedding: { url: "http://laptop:8005/v1/embeddings", model: "embed" },
+					transcription: {
+						baseUrl: "http://laptop:8014",
+						engine: "parakeet-v3",
+						api: "openai",
+						model: "parakeet-v3-en",
+					},
+				},
+			},
+		})}\n`,
+	);
+
+	const services = (await applyProfile({ env: OFFLINE, agentDir: dir })).connectedServices;
+	assert.equal(services.embeddings.url, "http://llms:8005/v1/embeddings");
+	assert.equal(services.transcription.baseUrl, "http://llms:8014");
+	// The decisive one: the OpenAI request shape must not survive onto a sidecar URL.
+	assert.equal(services.transcription.api, "sidecar");
+
+	// Rewritten on disk too, so the next apply starts from the new endpoints and
+	// the file a human opens says what is actually running.
+	const migrated = loadBackends({ env: {}, agentDir: dir }).profiles.distributed;
+	assert.equal(migrated.embedding.url, "http://llms:8005/v1/embeddings");
+	assert.equal(migrated.transcription.baseUrl, "http://llms:8014");
+});
+
+test("a setup aimed at a host of someone's own is left alone", async () => {
+	const dir = seedAgentDir();
+	// Not byte-equal to anything this repo shipped: a deliberate choice, not an
+	// installer's leftover, so the migration must not touch it.
+	writeFileSync(
+		join(dir, "backends.json"),
+		`${JSON.stringify({
+			active: "mine",
+			profiles: {
+				mine: {
+					primary: { host: "http://llms", images: true, contextTokens: "auto" },
+					delegation: { enabled: false },
+					embedding: { url: "http://workstation:8005/v1/embeddings", model: "embed" },
+					transcription: { baseUrl: "http://workstation:8014", engine: "faster-whisper" },
+				},
+			},
+		})}\n`,
+	);
+
+	const services = (await applyProfile({ env: OFFLINE, agentDir: dir })).connectedServices;
+	assert.equal(services.embeddings.url, "http://workstation:8005/v1/embeddings");
+	assert.equal(services.transcription.baseUrl, "http://workstation:8014");
+	assert.equal(services.transcription.engine, "faster-whisper");
+});
+
+test("an unreachable stack keeps the window a previous apply read", async () => {
+	const dir = seedAgentDir();
+	// What a machine looks like after an apply that DID reach the deployment: a
+	// window bigger than the fallback constant, sitting in settings.json.
+	const seeded = readJson(dir, "settings.json");
+	seeded.connectedServices.chat.contextTokens = 262144;
+	seeded.connectedServices.think.contextTokens = 262144;
+	writeFileSync(join(dir, "settings.json"), `${JSON.stringify(seeded)}\n`);
+
+	// Now apply with the state API unreachable — a token it was not given, a host
+	// that is down, a network it cannot see; the profile still says "auto".
+	const result = await applyProfile({ env: OFFLINE, agentDir: dir, name: "single" });
+	const services = readJson(dir, "settings.json").connectedServices;
+
+	// The reading is kept. Replacing it with SLOT_CONTEXT_TOKENS would halve a real
+	// window, and every later call would send half the context the backend serves.
+	assert.equal(services.chat.contextTokens, 262144);
+	assert.equal(services.think.contextTokens, 262144);
+	assert.equal(result.contextWindow, 262144);
+	// Reported as what it is: not freshly probed, not declared by the setup.
+	assert.equal(result.contextProbed, false);
+	assert.equal(result.contextKept, true);
+	// The compaction reserve follows the window that was actually kept.
+	assert.equal(readJson(dir, "settings.json").compaction.reserveTokens, 262144 - Math.floor(262144 * 0.75));
+});
+
+test("a machine that has never had a window still falls back to the constant", async () => {
+	const dir = seedAgentDir();
+	const seeded = readJson(dir, "settings.json");
+	delete seeded.connectedServices.chat.contextTokens;
+	writeFileSync(join(dir, "settings.json"), `${JSON.stringify(seeded)}\n`);
+
+	const result = await applyProfile({ env: OFFLINE, agentDir: dir, name: "single" });
+	assert.equal(result.contextWindow, SLOT_CONTEXT_TOKENS);
+	assert.equal(result.contextKept, false);
+});
+
 test("a setup without a primary host is a clear error", async () => {
 	assert.throws(() => projectProfile({ primary: {} }), /host/);
 });
@@ -136,8 +236,8 @@ test("applyProfile writes settings and models and records the active setup", asy
 	const services = readJson(dir, "settings.json").connectedServices;
 	assert.equal(services.delegate.enabled, true);
 	assert.equal(services.delegate.baseUrl, "http://llms:8104/v1/chat/completions");
-	assert.equal(services.embeddings.url, "http://laptop:8005/v1/embeddings");
-	assert.equal(services.transcription.baseUrl, "http://laptop:8014");
+	assert.equal(services.embeddings.url, "http://llms:8005/v1/embeddings");
+	assert.equal(services.transcription.baseUrl, "http://llms:8014");
 	assert.equal(services.ocr.url, "http://llms:5002/glmocr/parse");
 	// Scheduling on chat is untouched (its slot pinning must survive a switch).
 	assert.equal(services.chat.scheduling.enabled, true);

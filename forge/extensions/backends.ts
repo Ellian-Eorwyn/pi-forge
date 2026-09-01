@@ -34,6 +34,7 @@ interface ApplyResult {
 	missingProviders: string[];
 	contextWindow: number;
 	contextProbed: boolean;
+	contextKept: boolean;
 }
 
 function statusLines(): string[] {
@@ -95,7 +96,12 @@ function ensureShippedProfile(name: string): void {
 }
 
 function announce(ctx: ExtensionContext, result: ApplyResult): void {
-	const window = `${result.contextWindow} ctx (${result.contextProbed ? "read from the stack" : "declared by the setup"}).`;
+	const source = result.contextProbed
+		? "read from the stack"
+		: result.contextKept
+			? "kept from the last read — the stack state API is unreachable"
+			: "declared by the setup";
+	const window = `${result.contextWindow} ctx (${source}).`;
 	const detail =
 		result.delegation === "on"
 			? "Delegation on (secondary backend); forge_delegate returns next session."

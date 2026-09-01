@@ -17,14 +17,15 @@
 			},
 			"transcription": {
 				"baseUrl": "http://llms:8014",
-				"engine": "parakeet-v3"
+				"engine": "parakeet-v3",
+				"api": "sidecar"
 			},
 			"ocr": {
 				"url": "http://llms:5002/glmocr/parse"
 			}
 		},
 		"distributed": {
-			"description": "Embedding + transcription on this laptop; a vision primary and a vision-free delegation backend split across the two llms GPUs, running in parallel.",
+			"description": "A vision primary and a vision-free delegation backend split across the two llms GPUs, running in parallel; embedding/transcription/OCR on llms.",
 			"primary": {
 				"host": "http://llms",
 				"images": true,
@@ -41,14 +42,13 @@
 				}
 			},
 			"embedding": {
-				"url": "http://laptop:8005/v1/embeddings",
+				"url": "http://llms:8005/v1/embeddings",
 				"model": "embed"
 			},
 			"transcription": {
-				"baseUrl": "http://laptop:8014",
+				"baseUrl": "http://llms:8014",
 				"engine": "parakeet-v3",
-				"api": "openai",
-				"model": "parakeet-v3-en"
+				"api": "sidecar"
 			},
 			"ocr": {
 				"url": "http://llms:5002/glmocr/parse"
@@ -98,12 +98,13 @@
 				"service": "chat2"
 			},
 			"embedding": {
-				"url": "http://laptop:8005/v1/embeddings",
+				"url": "http://llms:8005/v1/embeddings",
 				"model": "embed"
 			},
 			"transcription": {
-				"baseUrl": "http://laptop:8014",
-				"engine": "parakeet-v3"
+				"baseUrl": "http://llms:8014",
+				"engine": "parakeet-v3",
+				"api": "sidecar"
 			},
 			"ocr": {
 				"url": "http://llms:5002/glmocr/parse"

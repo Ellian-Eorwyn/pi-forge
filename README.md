@@ -181,7 +181,7 @@ A setup's `primary.contextTokens` may be the literal number of tokens or `"auto"
 
 Delegation, OCR, and the two GPU-2 lanes have their own `connectedServices` entries (`delegate`, `ocr`, `chat2`, `think2`), and every field is still overridable per-launch by the matching `FORGE_*` env var (`FORGE_DELEGATE_URL`, `FORGE_CHAT2_URL`, `FORGE_THINK2_URL`, `FORGE_EMBEDDINGS_URL`, `FORGE_TRANSCRIPTION_URL`, `FORGE_GLMOCR_URL`, …). `FORGE_DELEGATE_TOOL=on|off` separately forces whether the `forge_delegate` tool is registered, overriding what the active setup implies.
 
-Transcription can also target an OpenAI-compatible ASR server (e.g. a laptop-local mlx-audio server) by setting `connectedServices.transcription.api` to `"openai"` (or `FORGE_TRANSCRIPTION_API=openai`); the default `"sidecar"` speaks the pi-forge async `/transcribe` API. The `distributed` setup sets this for you.
+Transcription can also target an OpenAI-compatible ASR server (e.g. a laptop-local mlx-audio server) by setting `connectedServices.transcription.api` to `"openai"` (or `FORGE_TRANSCRIPTION_API=openai`); the default `"sidecar"` speaks the pi-forge async `/transcribe` API. No shipped setup selects it: all three run embedding and transcription on the llms box, which speaks the sidecar API.
 
 ### Optional Moshi hooks
 

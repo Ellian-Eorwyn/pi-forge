@@ -74,13 +74,18 @@ export const DEFAULT_BACKENDS = Object.freeze({
 			primary: Object.freeze({ host: "http://llms", images: true, contextTokens: "auto" }),
 			delegation: Object.freeze({ enabled: false }),
 			embedding: Object.freeze({ url: "http://llms:8005/v1/embeddings", model: "embed" }),
-			transcription: Object.freeze({ baseUrl: "http://llms:8014", engine: "parakeet-v3" }),
+			// `api` is stated rather than left to the default. Applying a setup merges
+			// its fields onto settings.json, so a machine that had been on a setup
+			// aimed at an OpenAI-ASR server keeps that `"openai"` unless a later setup
+			// names the protocol — and `single` is the one-word revert, so it is
+			// precisely the setup that must be able to undo it.
+			transcription: Object.freeze({ baseUrl: "http://llms:8014", engine: "parakeet-v3", api: "sidecar" }),
 			ocr: Object.freeze({ url: "http://llms:5002/glmocr/parse" }),
 		}),
 		distributed: Object.freeze({
 			description:
-				"Embedding + transcription on this laptop; a vision primary and a vision-free delegation backend " +
-				"split across the two llms GPUs, running in parallel.",
+				"A vision primary and a vision-free delegation backend split across the two llms GPUs, " +
+				"running in parallel; embedding/transcription/OCR on llms.",
 			primary: Object.freeze({ host: "http://llms", images: true, contextTokens: "auto" }),
 			delegation: Object.freeze({
 				enabled: true,
@@ -92,14 +97,8 @@ export const DEFAULT_BACKENDS = Object.freeze({
 				contextTokens: SLOT_CONTEXT_TOKENS,
 				chatTemplateKwargs: Object.freeze({ enable_thinking: false }),
 			}),
-			embedding: Object.freeze({ url: "http://laptop:8005/v1/embeddings", model: "embed" }),
-			transcription: Object.freeze({
-				baseUrl: "http://laptop:8014",
-				engine: "parakeet-v3",
-				// The laptop server is mlx-audio, which speaks the OpenAI ASR API.
-				api: "openai",
-				model: "parakeet-v3-en",
-			}),
+			embedding: Object.freeze({ url: "http://llms:8005/v1/embeddings", model: "embed" }),
+			transcription: Object.freeze({ baseUrl: "http://llms:8014", engine: "parakeet-v3", api: "sidecar" }),
 			ocr: Object.freeze({ url: "http://llms:5002/glmocr/parse" }),
 		}),
 		"distributed-parallel": Object.freeze({
@@ -135,8 +134,8 @@ export const DEFAULT_BACKENDS = Object.freeze({
 			verify: Object.freeze({ service: "think2" }),
 			// Offload interactive-session compaction to the second GPU's non-thinking lane.
 			compaction: Object.freeze({ offload: true, service: "chat2" }),
-			embedding: Object.freeze({ url: "http://laptop:8005/v1/embeddings", model: "embed" }),
-			transcription: Object.freeze({ baseUrl: "http://laptop:8014", engine: "parakeet-v3" }),
+			embedding: Object.freeze({ url: "http://llms:8005/v1/embeddings", model: "embed" }),
+			transcription: Object.freeze({ baseUrl: "http://llms:8014", engine: "parakeet-v3", api: "sidecar" }),
 			ocr: Object.freeze({ url: "http://llms:5002/glmocr/parse" }),
 		}),
 	}),
@@ -489,6 +488,57 @@ function migrateAutoContext(config) {
 	return changed;
 }
 
+/**
+ * Embedding and transcription blocks this repo used to ship pointing at a second
+ * machine, superseded because both services now run on the llms box alongside
+ * everything else. Listed as literals rather than derived, because what matters
+ * is byte-equality with what an installer wrote — see `migrateServiceHosts`.
+ */
+const SUPERSEDED_EMBEDDINGS = Object.freeze([
+	Object.freeze({ url: "http://laptop:8005/v1/embeddings", model: "embed" }),
+]);
+const SUPERSEDED_TRANSCRIPTIONS = Object.freeze([
+	Object.freeze({ baseUrl: "http://laptop:8014", engine: "parakeet-v3" }),
+	// The mlx-audio form the `distributed` setup shipped with.
+	Object.freeze({ baseUrl: "http://laptop:8014", engine: "parakeet-v3", api: "openai", model: "parakeet-v3-en" }),
+]);
+
+/** Same fields, same values — key order and JSON spelling aside. */
+function sameBlock(value, shipped) {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const normalize = (object) => JSON.stringify(Object.entries(object).sort(([a], [b]) => a.localeCompare(b)));
+	return normalize(value) === normalize(shipped);
+}
+
+/**
+ * Move setups still naming the old second machine onto the llms endpoints.
+ *
+ * `seedBackends` only writes when the file is absent, so an install made while the
+ * `distributed*` setups pointed embedding and transcription at a laptop keeps that
+ * host forever: updating the shipped defaults alone reaches a fresh install and
+ * nothing else. Byte-equal to a block this repo shipped means an installer put it
+ * there; any other host was typed by someone aiming a setup at a machine of their
+ * own and is left alone — the same rule, and the same reasoning, as
+ * SUPERSEDED_DESCRIPTIONS above.
+ *
+ * Mutates `config`. Returns true when something changed, so the caller can save.
+ */
+function migrateServiceHosts(config) {
+	let changed = false;
+	for (const profile of Object.values(config.profiles ?? {})) {
+		if (!profile || typeof profile !== "object" || Array.isArray(profile)) continue;
+		if (SUPERSEDED_EMBEDDINGS.some((shipped) => sameBlock(profile.embedding, shipped))) {
+			profile.embedding = { ...DEFAULT_BACKENDS.profiles.single.embedding };
+			changed = true;
+		}
+		if (SUPERSEDED_TRANSCRIPTIONS.some((shipped) => sameBlock(profile.transcription, shipped))) {
+			profile.transcription = { ...DEFAULT_BACKENDS.profiles.single.transcription };
+			changed = true;
+		}
+	}
+	return changed;
+}
+
 /** Does this setup want its window read from the deployment rather than declared? */
 function wantsAutoContext(profile) {
 	return profile?.primary?.contextTokens === "auto";
@@ -511,15 +561,26 @@ async function probePrimaryCapacity(profile, env, connectedServices) {
 /**
  * Replace an `"auto"` window with the one the deployment reports.
  *
- * Left as `"auto"` when nothing was read, which `positiveInt` resolves to
- * SLOT_CONTEXT_TOKENS — the same fallback every install without a stack API
- * takes. Returns a copy: the shipped profiles are frozen.
+ * When the read fails, the window already in settings.json is kept if there is
+ * one, and only a machine that has never had a number falls through to
+ * SLOT_CONTEXT_TOKENS. `"auto"` means "ask the deployment", and an unreachable
+ * state API is a failure to ask — not an answer. Overwriting a window a previous
+ * apply *did* read with a constant half its size is silent and costs half the
+ * context on every later call, and the reasons a probe fails (the API gated
+ * behind a token it was not given, a host that is briefly down, a network it
+ * cannot see) have nothing to do with what the backend serves. Verified the
+ * expensive way 2026-09-01: the state API had been put behind a bearer token,
+ * every apply then quietly rewrote a genuine 262144 down to 131072.
+ *
+ * Returns a copy: the shipped profiles are frozen.
  */
-function resolveAutoContext(profile, capacity) {
+function resolveAutoContext(profile, capacity, known) {
 	if (!wantsAutoContext(profile)) return profile;
 	const served = capacity?.contextTokens;
-	if (!Number.isInteger(served) || served <= 0) return profile;
-	return { ...profile, primary: { ...profile.primary, contextTokens: served } };
+	const resolved =
+		Number.isInteger(served) && served > 0 ? served : Number.isInteger(known) && known > 0 ? known : null;
+	if (resolved === null) return profile;
+	return { ...profile, primary: { ...profile.primary, contextTokens: resolved } };
 }
 
 function readJsonObject(path, label) {
@@ -596,9 +657,11 @@ function taskLocalProvider(spec) {
 export async function applyProfile({ env = process.env, agentDir, name } = {}) {
 	const options = { env, agentDir };
 	const config = loadBackends(options);
-	// Before anything is projected, so an install predating "auto" adopts it here
-	// rather than staying pinned to a number its backend may have outgrown.
-	const migrated = migrateAutoContext(config);
+	// Both run before anything is projected: an install predating "auto" adopts it
+	// here rather than staying pinned to a number its backend may have outgrown, and
+	// one predating the move of embedding/transcription onto llms follows it here
+	// rather than keeping a host that is no longer serving them.
+	const migrated = [migrateAutoContext(config), migrateServiceHosts(config)].some(Boolean);
 	const selected = name ?? activeProfileName(config);
 	const profile = requireProfile(config, selected);
 
@@ -609,7 +672,10 @@ export async function applyProfile({ env = process.env, agentDir, name } = {}) {
 	const models = readJsonObject(modelsPath, "models.json");
 
 	const capacity = await probePrimaryCapacity(profile, env, settings.connectedServices);
-	const patch = projectProfile(resolveAutoContext(profile, capacity));
+	// Read before the merge below writes the resolved window back into this object,
+	// which would otherwise make "was there a previous reading?" always true.
+	const knownContext = settings.connectedServices?.chat?.contextTokens;
+	const patch = projectProfile(resolveAutoContext(profile, capacity, knownContext));
 
 	if (
 		!settings.connectedServices ||
@@ -710,6 +776,15 @@ export async function applyProfile({ env = process.env, agentDir, name } = {}) {
 		// True when the number above was read from the deployment rather than
 		// declared by the setup, so a caller can say which it is.
 		contextProbed: wantsAutoContext(profile) && Number.isInteger(capacity?.contextTokens),
+		// True when the setup asked the deployment, the deployment could not be
+		// reached, and the window already on disk was kept rather than replaced by
+		// the fallback constant. Distinct from `contextProbed` because a caller that
+		// reports "declared by the setup" for this case is telling the user the
+		// number came from a file they can edit, when in fact it is a stale reading
+		// nothing has confirmed since — which is exactly when they want to know the
+		// state API is unreachable.
+		contextKept:
+			wantsAutoContext(profile) && !Number.isInteger(capacity?.contextTokens) && Number.isInteger(knownContext),
 	};
 }
 
